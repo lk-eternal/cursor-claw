@@ -12,25 +12,79 @@ import { pushLog, pushUiLog, broadcastLog, getLogBuffer, clearLogBuffer, logCurs
 import { resolveAgentBinary, applyProxyEnv, quoteArg, getAgentPaths, execAgentSync } from "./agent-cli"
 import {
   launchSessionAgent as _launchSessionAgent, launchAgent as _launchAgent,
-  launchIndependentAgent,
-  stopAgent, stopSessionAgent, stopAllSessionAgents,
-  getSessionAgentList as getRawSessionAgentList,
-  isAgentRunning, isSessionAgentRunning, getRunningSessionCount,
-  getAgentChildPid, getSessionAgentCount, getIndependentTaskStatuses,
-  reapIdleGroupAgents, setChatNameResolver,
+  launchIndependentAgent as _launchIndependentAgentCli,
+  stopAgent as _stopCliAgent, stopSessionAgent as _stopCliSession, stopAllSessionAgents as _stopAllCliSessions,
+  getSessionAgentList as getRawCliSessionList,
+  isAgentRunning as _isCliAgentRunning, isSessionAgentRunning as _isCliSessionRunning, getRunningSessionCount as _getCliRunningCount,
+  getAgentChildPid, getSessionAgentCount as _getCliSessionCount, getIndependentTaskStatuses as _getCliTaskStatuses,
+  reapIdleGroupAgents as _reapCliIdleGroups, setChatNameResolver,
   P2P_SESSION_KEY, makeMainP2pSessionKey, setMainChatId, getMainChatId,
   type ChatType,
 } from "./agent-launcher"
+import {
+  launchSdkAgent, stopSdkSession, stopAllSdkSessions,
+  isSdkSessionRunning, getSdkSessionCount, getSdkSessionList,
+  checkSdkApiKey,
+} from "./agent-sdk"
 
 export { applyProxyEnv, checkCliInstalled, installCli, execAgentSync, execAgentAsync, type ExecAgentOptions as ExecAgentSyncOptions } from "./agent-cli"
 export { checkAgentLoggedIn, loginCli } from "./agent-launcher"
 export { getLogBuffer } from "./ui-logger"
+export { checkSdkApiKey, listSdkModels } from "./agent-sdk"
 
-/** 与 daemon stderr 当前格式一致：`时间戳 [LarkDaemon] 等级 内容` */
-const UNIFIED_LARK_DAEMON_PREFIX = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\.\d{3} \[LarkDaemon\] /
+function useSdkMode(): boolean {
+  return getConfig().agentMode === "sdk"
+}
 
-/** 旧版逗号分隔：`时间戳,LarkDaemon,等级,内容` */
-const LEGACY_COMMA_DAEMON = /^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\.\d{3}),LarkDaemon,(INFO|WARN|ERROR|DEBUG),(.+)$/
+function isAgentRunning(): boolean {
+  return useSdkMode() ? getSdkSessionCount() > 0 : _isCliAgentRunning()
+}
+
+function isSessionAgentRunning(key: string): boolean {
+  return useSdkMode() ? isSdkSessionRunning(key) : _isCliSessionRunning(key)
+}
+
+function getRunningSessionCount(): number {
+  return useSdkMode() ? getSdkSessionCount() : _getCliRunningCount()
+}
+
+function getSessionAgentCount(): number {
+  return useSdkMode() ? getSdkSessionCount() : _getCliSessionCount()
+}
+
+function stopAgent(): void {
+  if (useSdkMode()) stopAllSdkSessions()
+  else _stopCliAgent()
+}
+
+function stopSessionAgent(key: string): void {
+  if (useSdkMode()) stopSdkSession(key)
+  else _stopCliSession(key)
+}
+
+function stopAllSessionAgents(): void {
+  if (useSdkMode()) stopAllSdkSessions()
+  else _stopAllCliSessions()
+}
+
+function getIndependentTaskStatuses(): Record<string, { running: boolean; pid?: number; startedAt?: number }> {
+  if (useSdkMode()) {
+    const out: Record<string, { running: boolean; pid?: number; startedAt?: number }> = {}
+    for (const s of getSdkSessionList()) {
+      if (s.chatType === "task") out[s.sessionKey] = { running: true, startedAt: s.startedAt }
+    }
+    return out
+  }
+  return _getCliTaskStatuses()
+}
+
+function reapIdleGroupAgents(): void {
+  if (!useSdkMode()) _reapCliIdleGroups()
+}
+
+const UNIFIED_DAEMON_PREFIX = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\.\d{3} \[Daemon\] /
+
+const LEGACY_COMMA_DAEMON = /^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\.\d{3}),(?:Lark)?Daemon,(INFO|WARN|ERROR|DEBUG),(.+)$/
 
 function normalizeUnifiedDaemonLine(s: string): string {
   return s.replace(/^(\d{4}-\d{2}-\d{2})T(\d{2}:)/, "$1 $2")
@@ -39,23 +93,23 @@ function normalizeUnifiedDaemonLine(s: string): string {
 function pushDaemonStderrLine(rawLine: string): void {
   const t = rawLine.trim()
   if (!t) return
-  if (UNIFIED_LARK_DAEMON_PREFIX.test(t)) {
+  if (UNIFIED_DAEMON_PREFIX.test(t)) {
     pushLog(normalizeUnifiedDaemonLine(t))
     return
   }
   const legacyComma = t.match(LEGACY_COMMA_DAEMON)
   if (legacyComma) {
     const ts = legacyComma[1].replace("T", " ")
-    pushLog(`${ts} [LarkDaemon] ${legacyComma[2]} ${legacyComma[3]}`)
+    pushLog(`${ts} [Daemon] ${legacyComma[2]} ${legacyComma[3]}`)
     return
   }
-  const legacy = t.match(/^\[LarkDaemon\]\[([^\]]+)\]\[([^\]]+)\]\s*(.*)$/)
+  const legacy = t.match(/^\[(?:Lark)?Daemon\]\[([^\]]+)\]\[([^\]]+)\]\s*(.*)$/)
   if (legacy) {
     const ts = legacy[1].replace("T", " ")
-    pushLog(`${ts} [LarkDaemon] ${legacy[2]} ${escapeLogContentSingleLine(legacy[3])}`)
+    pushLog(`${ts} [Daemon] ${legacy[2]} ${escapeLogContentSingleLine(legacy[3])}`)
     return
   }
-  pushUiLog("LarkDaemon", "WARN", t)
+  pushUiLog("Daemon", "WARN", t)
 }
 
 
@@ -71,10 +125,10 @@ export interface DaemonStatus {
   cliAvailable?: boolean
   error?: string
   model?: string
-  /** 配置中的工作目录与当前仍在运行的 Daemon 实例不一致 */
   workspaceMismatch?: boolean
-  /** 当前 Daemon 实际使用的工作目录（与设置不一致时有值） */
   daemonWorkspaceDir?: string
+  wechatEnabled?: boolean
+  wechatStatus?: string
 }
 
 let daemonProcess: ChildProcess | null = null
@@ -103,7 +157,7 @@ function startTempConnection(appId: string, appSecret: string): Promise<{ openId
       LARK_APP_ID: appId,
       LARK_APP_SECRET: appSecret,
       LARK_TEMP_MODE: "1",
-      LARK_APP_DATA_DIR: path.join(app.getPath("userData"), "apps", appId),
+      APP_DATA_DIR: path.join(app.getPath("userData"), "apps", appId),
     }
     const child = spawn(process.execPath, [entry], { env, stdio: ["ignore", "pipe", "pipe"] })
     tempConnProcess = child
@@ -169,8 +223,8 @@ function getRuleTemplatePath(): string {
 
 function getLockFilePath(): string {
   const config = getConfig()
-  const appId = config.larkAppId || "default"
-  return path.join(app.getPath("userData"), "apps", appId, "daemon.lock.json")
+  const appKey = config.larkAppId || config.wechatAccountId || "default"
+  return path.join(app.getPath("userData"), "apps", appKey, "daemon.lock.json")
 }
 
 function readLockFile(): { pid: number; port: number; version: string } | null {
@@ -279,6 +333,8 @@ export async function getDaemonStatus(): Promise<DaemonStatus> {
       agentPid: getAgentChildPid(),
       sessionAgentCount: getRunningSessionCount(),
       model: cfgModel,
+      wechatEnabled: health.wechatEnabled as boolean | undefined,
+      wechatStatus: health.wechatStatus as string | undefined,
     }
     if (status.autoOpenId && !config.larkReceiveId) {
       saveConfig({ larkReceiveId: status.autoOpenId })
@@ -353,8 +409,10 @@ function ensureCliConfig(): void {
 
 export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
   const config = getConfig()
-  if (!config.larkAppId || !config.larkAppSecret) {
-    return { ok: false, error: "飞书应用凭据未配置" }
+  const feishuReady = !!(config.larkAppId && config.larkAppSecret)
+  const wechatReady = !!(config.wechatEnabled && config.wechatToken)
+  if (!feishuReady && !wechatReady) {
+    return { ok: false, error: "至少需要配置一个消息通道（飞书凭据或微信 Token）" }
   }
   if (!config.workspaceDir) {
     return { ok: false, error: "工作目录未配置" }
@@ -391,7 +449,7 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
       LARK_RECEIVE_ID: config.larkReceiveId,
       LARK_RECEIVE_ID_TYPE: "chat_id",
       LARK_WORKSPACE_DIR: config.workspaceDir,
-      LARK_APP_DATA_DIR: path.join(app.getPath("userData"), "apps", config.larkAppId),
+      APP_DATA_DIR: path.join(app.getPath("userData"), "apps", config.larkAppId || config.wechatAccountId || "default"),
       NODE_USE_ENV_PROXY: "1",
       ...(config.wechatEnabled ? {
         WECHAT_ENABLED: "1",
@@ -454,7 +512,7 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
           BrowserWindow.getAllWindows().forEach((w) => w.webContents.send("wechat:status", status))
           continue
         }
-        pushUiLog("LarkDaemon", "INFO", line)
+        pushUiLog("Daemon", "INFO", line)
       }
     })
 
@@ -642,7 +700,7 @@ function startStatusPolling(): void {
 
       reapIdleGroupAgents()
 
-      const sessions = getRawSessionAgentList()
+      const sessions = getSessionAgentList()
       const uncachedGroups = sessions
         .filter((s) => s.chatType === "group" && !chatNameCache.has(s.sessionKey))
         .map((s) => s.sessionKey)
@@ -817,7 +875,7 @@ export async function getQueueMessages(): Promise<{ index: number; preview: stri
 
 export async function readLogs(lines = 200): Promise<string> {
   const config = getConfig()
-  const logPath = path.join(config.workspaceDir || "", ".cursor", "lark-daemon.log")
+  const logPath = path.join(config.workspaceDir || "", ".cursor", "daemon.log")
   if (!fs.existsSync(logPath)) return ""
   try {
     const content = fs.readFileSync(logPath, "utf-8")
@@ -830,7 +888,7 @@ export async function readLogs(lines = 200): Promise<string> {
 
 export async function clearLogs(): Promise<void> {
   const config = getConfig()
-  const logPath = path.join(config.workspaceDir || "", ".cursor", "lark-daemon.log")
+  const logPath = path.join(config.workspaceDir || "", ".cursor", "daemon.log")
   try {
     if (fs.existsSync(logPath)) {
       fs.writeFileSync(logPath, "", "utf-8")
@@ -980,17 +1038,52 @@ export type AgentLoginStatus = {
 export const launchAgent = () =>
   launchSessionAgent(P2P_SESSION_KEY, "p2p", undefined, undefined, true)
 
-export function launchSessionAgent(
+export async function launchSessionAgent(
   sessionKey: string, chatType: ChatType,
   _injectFn?: (dir: string) => boolean | Promise<boolean>,
   meta?: import("./agent-launcher").LaunchMeta,
   useMainWorkspace?: boolean, senderOpenId?: string,
 ): Promise<{ ok: boolean; error?: string }> {
+  if (useSdkMode()) {
+    const config = getConfig()
+    const isMain = useMainWorkspace ?? false
+    let workDir = config.workspaceDir
+    if (!isMain) {
+      const safeChatId = sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_")
+      const appId = config.larkAppId || "default"
+      workDir = path.join(app.getPath("userData"), "apps", appId, "workspaces", safeChatId)
+      if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true })
+    }
+    await injectWorkspaceToDir(workDir)
+    const lock = readLockFile()
+    return launchSdkAgent({
+      sessionKey, chatType, meta, workspaceDir: workDir,
+      senderOpenId, daemonPort: lock?.port ?? undefined,
+    })
+  }
   return _launchSessionAgent(sessionKey, chatType, injectWorkspaceToDir, meta, useMainWorkspace, senderOpenId)
 }
 
+async function launchIndependentAgent(taskId: string, taskName: string, message: string): Promise<{ ok: boolean; error?: string }> {
+  if (useSdkMode()) {
+    const config = getConfig()
+    await injectWorkspaceToDir(config.workspaceDir)
+    const lock = readLockFile()
+    return launchSdkAgent({
+      sessionKey: taskId, chatType: "task", chatName: taskName,
+      taskMessage: message, workspaceDir: config.workspaceDir,
+      meta: { chatId: taskName, chatType: "task" },
+      daemonPort: lock?.port ?? undefined,
+    })
+  }
+  return _launchIndependentAgentCli(taskId, taskName, message)
+}
+
 export function getSessionAgentList() {
-  return getRawSessionAgentList().map((s) => {
+  const rawList = useSdkMode()
+    ? getSdkSessionList().map((s) => ({ ...s, pid: 0 }))
+    : getRawCliSessionList()
+  return rawList.map((s) => {
     const chatId = s.sessionKey.includes("::") ? s.sessionKey.split("::")[0] : s.sessionKey
     const chatName = s.chatName || chatNameCache.get(chatId) || (s.senderOpenId ? chatNameCache.get(s.senderOpenId) : undefined)
     return { ...s, chatName }
@@ -2364,6 +2457,43 @@ export function initDaemonManager(): void {
   })
   ipcMain.handle("temp-conn:stop", () => { stopTempConnection(); return { ok: true } })
 
+  // ── WeChat QR code login (runs in main process, not daemon) ──
+  let wechatQrAbort: AbortController | null = null
+
+  ipcMain.handle("wechat:qr-login", async () => {
+    if (wechatQrAbort) wechatQrAbort.abort()
+    wechatQrAbort = new AbortController()
+    try {
+      const { ApiClient, loginWithQRCode } = await import("wechat-ilink-client")
+      const QRCode = await import("qrcode")
+      const api = new ApiClient()
+      const result = await loginWithQRCode(api, {
+        signal: wechatQrAbort.signal,
+        async onQRCode(url) {
+          const dataUrl = await QRCode.toDataURL(url, { width: 280, margin: 2 })
+          BrowserWindow.getAllWindows().forEach((w) => w.webContents.send("wechat:setup-qrcode", dataUrl))
+        },
+        onStatus(status) {
+          BrowserWindow.getAllWindows().forEach((w) => w.webContents.send("wechat:setup-status", status))
+        },
+      })
+      wechatQrAbort = null
+      if (result.connected) {
+        return { ok: true, botToken: result.botToken, accountId: result.accountId, baseUrl: result.baseUrl }
+      }
+      return { ok: false, error: result.message }
+    } catch (err: any) {
+      wechatQrAbort = null
+      if (err?.name === "AbortError") return { ok: false, error: "cancelled" }
+      return { ok: false, error: err?.message ?? String(err) }
+    }
+  })
+
+  ipcMain.handle("wechat:qr-login-cancel", () => {
+    if (wechatQrAbort) { wechatQrAbort.abort(); wechatQrAbort = null }
+    return { ok: true }
+  })
+
   ipcMain.handle("scheduled-tasks:get", () => readTasksFromFile())
   ipcMain.handle("scheduled-tasks:save", (_, tasks) => {
     writeTasksToFile(tasks)
@@ -2487,7 +2617,7 @@ function queryToolsViaProtocol(cmd: string, args: string[], envOverride?: Record
 
     child.stdin?.write(JSON.stringify({
       jsonrpc: "2.0", id: 1, method: "initialize",
-      params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "feishu-bridge", version: "1.0.0" } },
+      params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "cursor-claw", version: "1.0.0" } },
     }) + "\n")
   })
 }
@@ -2526,7 +2656,7 @@ async function queryToolsViaHttp(url: string, headers?: Record<string, string>):
   })
 
   try {
-    const initRes = await post(rpc(1, "initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "feishu-bridge", version: "1.0.0" } }))
+    const initRes = await post(rpc(1, "initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "cursor-claw", version: "1.0.0" } }))
     if (!initRes?.result) return { ok: false, tools: [], error: "initialize 失败" }
     const listRes = await post(rpc(2, "tools/list"))
     if (!listRes?.result?.tools) return { ok: false, tools: [], error: "tools/list 无结果" }

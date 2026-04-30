@@ -20,6 +20,7 @@ import {
   ChevronDown,
   ChevronUp,
   LogIn,
+  MessageSquare,
 } from "lucide-react"
 import SearchableSelect from "../components/SearchableSelect"
 import WorkspaceDaemonModal from "../components/WorkspaceDaemonModal"
@@ -52,31 +53,44 @@ const SCOPES_JSON = JSON.stringify(
   2,
 )
 
+const inputCls = "w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm outline-none transition focus:border-blue-500"
+
 export default function Setup({ onComplete, onExit }: Props) {
   const [step, setStep] = useState(0)
   const totalSteps = 4
 
+  // Step 0: channel selection
+  const [enableFeishu, setEnableFeishu] = useState(false)
+  const [enableWechat, setEnableWechat] = useState(false)
+
+  // Feishu
   const [appId, setAppId] = useState("")
   const [appSecret, setAppSecret] = useState("")
   const [showSecret, setShowSecret] = useState(false)
   const [showBotTip, setShowBotTip] = useState(false)
-
-  const [httpProxy, setHttpProxy] = useState("")
-  const [httpsProxy, setHttpsProxy] = useState("")
-  const [noProxy, setNoProxy] = useState("localhost,127.0.0.1,feishu.cn")
-
   const [scopesCopied, setScopesCopied] = useState(false)
-
   const [tempConnecting, setTempConnecting] = useState(false)
   const [tempConnected, setTempConnected] = useState(false)
-  const [tempConnError, setTempConnError] = useState("")
-
   const [bindingStatus, setBindingStatus] = useState<"idle" | "waiting" | "bound" | "error">("idle")
   const [bindMsg, setBindMsg] = useState("")
   const [receiveId, setReceiveId] = useState("")
 
-  const [workspaceDir, setWorkspaceDir] = useState("")
+  // WeChat QR login
+  const [wechatToken, setWechatToken] = useState("")
+  const [wechatAccountId, setWechatAccountId] = useState("")
+  const [wechatQrUrl, setWechatQrUrl] = useState("")
+  const [wechatQrStatus, setWechatQrStatus] = useState<"idle" | "loading" | "wait" | "scaned" | "confirmed" | "expired" | "error">("idle")
+  const [wechatQrMsg, setWechatQrMsg] = useState("")
 
+  // Proxy
+  const [proxy, setProxy] = useState("")
+  const [noProxy, setNoProxy] = useState("localhost,127.0.0.1,feishu.cn")
+
+  // Agent
+  const [workspaceDir, setWorkspaceDir] = useState("")
+  const [agentMode, setAgentMode] = useState<"cli" | "sdk">("cli")
+  const [cursorApiKey, setCursorApiKey] = useState("")
+  const [showApiKey, setShowApiKey] = useState(false)
   const [model, setModel] = useState("auto")
   const [modelOptions, setModelOptions] = useState<{ id: string; label: string }[]>([])
   const [loadingModels, setLoadingModels] = useState(false)
@@ -86,6 +100,7 @@ export default function Setup({ onComplete, onExit }: Props) {
   const [cliLoggingIn, setCliLoggingIn] = useState(false)
   const [cliMsg, setCliMsg] = useState("")
 
+  // Launch
   const [launchSteps, setLaunchSteps] = useState<StepStatus[]>([])
   const [launching, setLaunching] = useState(false)
   const [workspaceDaemonChoice, setWorkspaceDaemonChoice] = useState<{
@@ -97,17 +112,18 @@ export default function Setup({ onComplete, onExit }: Props) {
 
   useEffect(() => {
     window.electronAPI.getConfig().then((cfg) => {
-      if (cfg.larkAppId) setAppId(cfg.larkAppId)
+      if (cfg.larkAppId) { setAppId(cfg.larkAppId); setEnableFeishu(true) }
       if (cfg.larkAppSecret) setAppSecret(cfg.larkAppSecret)
       if (cfg.workspaceDir) setWorkspaceDir(cfg.workspaceDir)
       if (cfg.model) setModel(cfg.model)
-      if (cfg.httpProxy) setHttpProxy(cfg.httpProxy)
-      if (cfg.httpsProxy) setHttpsProxy(cfg.httpsProxy)
+      if (cfg.httpProxy) setProxy(cfg.httpProxy)
       if (cfg.noProxy) setNoProxy(cfg.noProxy)
-      if (cfg.larkReceiveId) {
-        setReceiveId(cfg.larkReceiveId)
-        setBindingStatus("bound")
-      }
+      if (cfg.larkReceiveId) { setReceiveId(cfg.larkReceiveId); setBindingStatus("bound") }
+      if (cfg.wechatEnabled) setEnableWechat(true)
+      if (cfg.wechatToken) setWechatToken(cfg.wechatToken)
+      if (cfg.wechatAccountId) setWechatAccountId(cfg.wechatAccountId)
+      if (cfg.agentMode) setAgentMode(cfg.agentMode)
+      if (cfg.cursorApiKey) setCursorApiKey(cfg.cursorApiKey)
     })
   }, [])
 
@@ -122,16 +138,11 @@ export default function Setup({ onComplete, onExit }: Props) {
 
   const startTempAndBind = useCallback(async () => {
     setTempConnecting(true)
-    setTempConnError("")
     setBindingStatus("waiting")
     setBindMsg("正在启动临时长连接...")
 
     try {
-      await window.electronAPI.saveConfig({
-        larkAppId: appId.trim(),
-        larkAppSecret: appSecret.trim(),
-      })
-
+      await window.electronAPI.saveConfig({ larkAppId: appId.trim(), larkAppSecret: appSecret.trim() })
       setBindMsg("临时长连接已启动，请先确保应用已发布，然后在飞书中向机器人发送任意消息完成绑定...")
       setTempConnected(true)
 
@@ -156,6 +167,35 @@ export default function Setup({ onComplete, onExit }: Props) {
       setBindMsg(e instanceof Error ? e.message : String(e))
     }
   }, [appId, appSecret])
+
+  const startWechatQrLogin = useCallback(async () => {
+    setWechatQrStatus("loading")
+    setWechatQrUrl("")
+    setWechatQrMsg("")
+    const result = await window.electronAPI.wechatQrLogin()
+    if (result.ok && result.botToken) {
+      setWechatToken(result.botToken)
+      if (result.accountId) setWechatAccountId(result.accountId)
+      setWechatQrStatus("confirmed")
+      setWechatQrMsg("")
+    } else if (result.error === "cancelled") {
+      setWechatQrStatus("idle")
+    } else {
+      setWechatQrStatus("error")
+      setWechatQrMsg(result.error ?? "登录失败")
+    }
+  }, [])
+
+  useEffect(() => {
+    const unsub1 = window.electronAPI.onWechatSetupQrCode((url) => {
+      setWechatQrUrl(url)
+      setWechatQrStatus("wait")
+    })
+    const unsub2 = window.electronAPI.onWechatSetupStatus((status) => {
+      if (status === "scaned") setWechatQrStatus("scaned")
+    })
+    return () => { unsub1(); unsub2() }
+  }, [])
 
   const checkAndLoadCli = useCallback(async () => {
     const ok = await window.electronAPI.checkCli()
@@ -183,40 +223,44 @@ export default function Setup({ onComplete, onExit }: Props) {
   const fetchModels = async () => {
     setLoadingModels(true)
     const result = await window.electronAPI.listModels()
-    if (result.ok && result.models.length > 0) {
-      setModelOptions(result.models)
-    } else if (result.ok) {
-      void showAlert("提示", "未解析到任何模型。请确认已登录 Cursor CLI。")
-    } else {
-      void showAlert("错误", result.error || "获取模型列表失败")
-    }
+    if (result.ok && result.models.length > 0) setModelOptions(result.models)
+    else if (result.ok) void showAlert("提示", "未解析到任何模型。请确认已登录 Cursor CLI。")
+    else void showAlert("错误", result.error || "获取模型列表失败")
     setLoadingModels(false)
   }
 
   useEffect(() => {
-    if (step === 1 && bindingStatus === "idle" && !tempConnecting) {
+    if (step === 1 && enableFeishu && bindingStatus === "idle" && !tempConnecting) {
       startTempAndBind()
     }
-  }, [step, bindingStatus])
+    if (step === 1 && enableWechat && wechatQrStatus === "idle") {
+      startWechatQrLogin()
+    }
+  }, [step, bindingStatus, wechatQrStatus])
 
   const canNext = (): boolean => {
-    if (step === 0) return !!(appId.trim() && appSecret.trim())
+    if (step === 0) return enableFeishu || enableWechat
+    if (step === 1) {
+      if (enableFeishu && !appId.trim()) return false
+      if (enableWechat && wechatQrStatus !== "confirmed") return false
+      return true
+    }
     return true
   }
 
   const next = () => {
-    if (step === 1 && tempConnected) {
-      window.electronAPI.stopTempConnection()
-      setTempConnected(false)
+    if (step === 1) {
+      if (tempConnected) { window.electronAPI.stopTempConnection(); setTempConnected(false) }
+      if (wechatQrStatus !== "confirmed") window.electronAPI.wechatQrLoginCancel()
     }
     setStep((s) => Math.min(s + 1, totalSteps - 1))
   }
   const prev = () => {
-    if (step === 1 && tempConnected) {
-      window.electronAPI.stopTempConnection()
-      setTempConnected(false)
-      setBindingStatus("idle")
-      setBindMsg("")
+    if (step === 1) {
+      if (tempConnected) { window.electronAPI.stopTempConnection(); setTempConnected(false); setBindingStatus("idle"); setBindMsg("") }
+      window.electronAPI.wechatQrLoginCancel()
+      setWechatQrStatus("idle")
+      setWechatQrUrl("")
     }
     setStep((s) => Math.max(s - 1, 0))
   }
@@ -269,9 +313,14 @@ export default function Setup({ onComplete, onExit }: Props) {
         larkAppSecret: appSecret.trim(),
         workspaceDir: workspaceDir.trim(),
         model,
-        httpProxy: httpProxy.trim(),
-        httpsProxy: httpsProxy.trim(),
+        httpProxy: proxy.trim(),
+        httpsProxy: proxy.trim(),
         noProxy: noProxy.trim(),
+        wechatEnabled: enableWechat,
+        wechatToken: wechatToken.trim(),
+        wechatAccountId: wechatAccountId.trim(),
+        agentMode,
+        cursorApiKey: cursorApiKey.trim(),
         setupComplete: true,
       })
 
@@ -300,13 +349,13 @@ export default function Setup({ onComplete, onExit }: Props) {
     }
   }
 
-  const stepLabels = ["飞书凭据", "权限 & 绑定", "Cursor CLI", "检查启动"]
-  const stepIcons = [KeyRound, Shield, Cpu, Rocket]
+  const stepLabels = ["选择通道", "通道配置", "Agent 设置", "检查启动"]
+  const stepIcons = [MessageSquare, KeyRound, Cpu, Rocket]
 
   return (
     <div className="flex h-screen flex-col">
       <TitleBar>
-        <h1 className="text-lg font-semibold">初始设置</h1>
+        <h1 className="text-lg font-semibold">Cursor Claw 初始设置</h1>
       </TitleBar>
 
       {/* Progress bar */}
@@ -332,231 +381,255 @@ export default function Setup({ onComplete, onExit }: Props) {
       {/* Content */}
       <div className="flex-1 overflow-y-auto px-8 py-6">
 
-        {/* Step 0: 飞书应用凭据 */}
+        {/* ─── Step 0: 选择通道 ─── */}
         {step === 0 && (
           <div className="mx-auto max-w-lg space-y-5">
-            <div className="flex items-center justify-between">
-              <h2 className="text-xl font-semibold">飞书应用凭据</h2>
-              <a
-                href="https://open.feishu.cn/app?lang=zh-CN"
-                target="_blank"
-                rel="noreferrer"
-                className="flex items-center gap-1 rounded-md border border-gray-700 px-3 py-1.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-blue-400"
-              >
-                <ExternalLink size={12} />前往创建飞书应用
-              </a>
-            </div>
+            <h2 className="text-xl font-semibold">选择消息通道</h2>
             <p className="text-sm text-gray-400">
-              请填写飞书开放平台创建的应用凭据，凭据将加密存储在本地。
+              Cursor Claw 支持通过飞书和/或微信与 AI Agent 协作，请选择至少一个通道。
             </p>
-
-            <div className="space-y-4">
-              <div>
-                <label className="mb-1 block text-sm text-gray-300">App ID</label>
-                <input type="text" value={appId} onChange={(e) => setAppId(e.target.value)} placeholder="cli_xxxxxxxxx" className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm outline-none transition focus:border-blue-500" />
-              </div>
-              <div>
-                <label className="mb-1 block text-sm text-gray-300">App Secret</label>
-                <div className="relative">
-                  <input type={showSecret ? "text" : "password"} value={appSecret} onChange={(e) => setAppSecret(e.target.value)} placeholder="xxxxxxxxxxxxxxxx" className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 pr-10 text-sm outline-none transition focus:border-blue-500" />
-                  <button type="button" onClick={() => setShowSecret(!showSecret)} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
-                    {showSecret ? <EyeOff size={16} /> : <Eye size={16} />}
-                  </button>
-                </div>
-              </div>
+            <div className="space-y-3">
+              {([
+                { key: "feishu" as const, label: "飞书", desc: "通过飞书机器人收发消息，支持私聊和群聊", emoji: "🪶" },
+                { key: "wechat" as const, label: "微信", desc: "通过微信ClawBot接入，支持私聊", emoji: "💬" },
+              ]).map((ch) => {
+                const enabled = ch.key === "feishu" ? enableFeishu : enableWechat
+                const toggle = ch.key === "feishu" ? setEnableFeishu : setEnableWechat
+                return (
+                  <label
+                    key={ch.key}
+                    className={`flex cursor-pointer items-start gap-4 rounded-xl border px-5 py-4 transition ${enabled ? "border-blue-500 bg-blue-500/10" : "border-gray-700 hover:border-gray-600"}`}
+                  >
+                    <input type="checkbox" checked={enabled} onChange={() => toggle(!enabled)} className="mt-1 h-4 w-4 rounded border-gray-600 text-blue-600" />
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-lg">{ch.emoji}</span>
+                        <span className="text-sm font-medium">{ch.label}</span>
+                      </div>
+                      <p className="mt-1 text-xs text-gray-500">{ch.desc}</p>
+                    </div>
+                  </label>
+                )
+              })}
             </div>
+            {!enableFeishu && !enableWechat && (
+              <p className="text-xs text-amber-400">⚠️ 请至少选择一个通道</p>
+            )}
+          </div>
+        )}
 
-            {/* 机器人能力提示 */}
-            <div className="rounded-lg border border-gray-800">
-              <button
-                onClick={() => setShowBotTip(!showBotTip)}
-                className="flex w-full items-center justify-between px-3 py-2.5 text-left text-sm text-gray-400 transition hover:text-gray-200"
-              >
-                <span>💡 还没有添加机器人能力？</span>
-                {showBotTip ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-              </button>
-              {showBotTip && (
-                <div className="border-t border-gray-800 px-3 py-3 text-xs text-gray-400 space-y-2">
-                  <p>创建应用后，需要在应用能力页面添加「机器人」能力，否则无法收发消息。</p>
-                  {appId.trim() ? (
-                    <a
-                      href={`https://open.feishu.cn/app/${appId.trim()}/capability`}
-                      target="_blank" rel="noreferrer"
-                      className="inline-flex items-center gap-1 text-blue-400 hover:underline"
-                    >
-                      <ExternalLink size={12} />前往添加机器人能力
-                    </a>
-                  ) : (
-                    <p className="text-gray-500">请先填写 App ID 以生成跳转链接。</p>
+        {/* ─── Step 1: 通道配置 ─── */}
+        {step === 1 && (
+          <div className="mx-auto max-w-lg space-y-6">
+            <h2 className="text-xl font-semibold">通道配置</h2>
+
+            {/* Feishu config */}
+            {enableFeishu && (
+              <section className="space-y-4 rounded-xl border border-gray-800 p-5">
+                <div className="flex items-center justify-between">
+                  <h3 className="flex items-center gap-2 text-sm font-medium"><span>🪶</span> 飞书</h3>
+                  <a href="https://open.feishu.cn/app?lang=zh-CN" target="_blank" rel="noreferrer" className="flex items-center gap-1 text-xs text-gray-400 hover:text-blue-400">
+                    <ExternalLink size={12} />创建应用
+                  </a>
+                </div>
+
+                <div className="space-y-3">
+                  <div>
+                    <label className="mb-1 block text-xs text-gray-400">App ID</label>
+                    <input type="text" value={appId} onChange={(e) => setAppId(e.target.value)} placeholder="cli_xxxxxxxxx" className={inputCls} />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs text-gray-400">App Secret</label>
+                    <div className="relative">
+                      <input type={showSecret ? "text" : "password"} value={appSecret} onChange={(e) => setAppSecret(e.target.value)} placeholder="xxxxxxxxxxxxxxxx" className={inputCls + " pr-10"} />
+                      <button type="button" onClick={() => setShowSecret(!showSecret)} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
+                        {showSecret ? <EyeOff size={14} /> : <Eye size={14} />}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Bot tip */}
+                <div className="rounded-lg border border-gray-800">
+                  <button onClick={() => setShowBotTip(!showBotTip)} className="flex w-full items-center justify-between px-3 py-2 text-left text-xs text-gray-400 hover:text-gray-200">
+                    <span>💡 还没有添加机器人能力？</span>
+                    {showBotTip ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                  </button>
+                  {showBotTip && (
+                    <div className="border-t border-gray-800 px-3 py-2 text-xs text-gray-400 space-y-1">
+                      <p>创建应用后需添加「机器人」能力。</p>
+                      {appId.trim() && (
+                        <a href={`https://open.feishu.cn/app/${appId.trim()}/capability`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-blue-400 hover:underline">
+                          <ExternalLink size={12} />前往添加
+                        </a>
+                      )}
+                    </div>
                   )}
                 </div>
-              )}
-            </div>
-          </div>
-        )}
 
-        {/* Step 1: 权限配置 & 绑定 */}
-        {step === 1 && (
-          <div className="mx-auto max-w-lg space-y-5">
-            <h2 className="text-xl font-semibold">权限配置 & 绑定</h2>
-            <p className="text-sm text-gray-400">
-              配置飞书权限和事件订阅，然后向机器人发送消息完成绑定。
-            </p>
-
-            {/* 权限表 */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-medium text-gray-300">应用权限</h3>
-                <div className="flex items-center gap-2">
-                  <a
-                    href={`https://open.feishu.cn/app/${appId.trim()}/auth`}
-                    target="_blank" rel="noreferrer"
-                    className="flex items-center gap-1 rounded-md border border-gray-700 px-2.5 py-1 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-blue-400"
-                  >
-                    <ExternalLink size={12} />前往设置权限
-                  </a>
-                  <button
-                    onClick={() => { navigator.clipboard.writeText(SCOPES_JSON); setScopesCopied(true); setTimeout(() => setScopesCopied(false), 2000) }}
-                    className="flex items-center gap-1.5 rounded-md border border-gray-700 px-2.5 py-1 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white"
-                  >
-                    <Copy size={12} />{scopesCopied ? "已复制" : "复制权限 JSON"}
-                  </button>
-                </div>
-              </div>
-              <div className="rounded-lg border border-gray-800 divide-y divide-gray-800">
-                {REQUIRED_SCOPES.map((p) => (
-                  <div key={p.scope} className="flex items-center justify-between px-3 py-2">
-                    <code className="text-xs text-blue-400">{p.scope}</code>
-                    <span className="text-xs text-gray-500">{p.desc}</span>
+                {/* Permission scopes */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-gray-400">应用权限</span>
+                    <div className="flex items-center gap-2">
+                      {appId.trim() && (
+                        <a href={`https://open.feishu.cn/app/${appId.trim()}/auth`} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-xs text-gray-500 hover:text-blue-400">
+                          <ExternalLink size={10} />设置权限
+                        </a>
+                      )}
+                      <button onClick={() => { navigator.clipboard.writeText(SCOPES_JSON); setScopesCopied(true); setTimeout(() => setScopesCopied(false), 2000) }} className="flex items-center gap-1 text-xs text-gray-500 hover:text-white">
+                        <Copy size={10} />{scopesCopied ? "已复制" : "复制 JSON"}
+                      </button>
+                    </div>
                   </div>
-                ))}
-              </div>
-            </div>
-
-            {/* 事件订阅 */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-medium text-gray-300">事件订阅</h3>
-                <a
-                  href={`https://open.feishu.cn/app/${appId.trim()}/event`}
-                  target="_blank" rel="noreferrer"
-                  className="flex items-center gap-1 rounded-md border border-gray-700 px-2.5 py-1 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-blue-400"
-                >
-                  <ExternalLink size={12} />前往设置事件订阅
-                </a>
-              </div>
-              <div className="rounded-lg border border-gray-800 divide-y divide-gray-800">
-                <div className="px-3 py-2 flex items-center justify-between">
-                  <code className="text-xs text-blue-400">im.message.receive_v1</code>
-                  <span className="text-xs text-gray-500">接收消息 v2.0</span>
+                  <div className="rounded-lg border border-gray-800 divide-y divide-gray-800">
+                    {REQUIRED_SCOPES.map((p) => (
+                      <div key={p.scope} className="flex items-center justify-between px-3 py-1.5">
+                        <code className="text-[11px] text-blue-400">{p.scope}</code>
+                        <span className="text-[11px] text-gray-600">{p.desc}</span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-                <div className="px-3 py-2 text-xs text-gray-500 space-y-1">
-                  <div>订阅方式：<span className="text-gray-300">应用身份</span></div>
-                  <div>回调类型：<span className="text-gray-300">长连接（WebSocket）</span></div>
-                </div>
-              </div>
-            </div>
 
-            {/* 发布应用提示 */}
-            <div className="rounded-lg border border-amber-800/50 bg-amber-950/20 p-3">
-              <p className="text-xs text-amber-300">⚠️ 绑定前请确保应用已在飞书后台「版本管理」中创建并发布版本，否则机器人无法收发消息。</p>
-              <a
-                href={`https://open.feishu.cn/app/${appId.trim()}/version`}
-                target="_blank" rel="noreferrer"
-                className="mt-1.5 inline-flex items-center gap-1 text-xs text-blue-400 hover:underline"
-              >
-                <ExternalLink size={12} />前往版本管理
-              </a>
-            </div>
-
-            {/* 绑定状态 */}
-            {(bindingStatus === "idle" || bindingStatus === "waiting") && (
-              <div className="rounded-lg border border-blue-800/50 bg-blue-950/20 p-4 space-y-2">
-                <div className="flex items-center gap-2">
-                  <Loader2 size={18} className="animate-spin text-blue-400" />
-                  <span className="text-sm font-medium text-blue-300">
-                    {tempConnected ? "长连接已启动，等待绑定" : "正在启动长连接..."}
-                  </span>
+                {/* Event subscription */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-gray-400">事件订阅</span>
+                    {appId.trim() && (
+                      <a href={`https://open.feishu.cn/app/${appId.trim()}/event`} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-xs text-gray-500 hover:text-blue-400">
+                        <ExternalLink size={10} />设置事件
+                      </a>
+                    )}
+                  </div>
+                  <div className="rounded-lg border border-gray-800 divide-y divide-gray-800 text-xs">
+                    <div className="flex items-center justify-between px-3 py-1.5">
+                      <code className="text-blue-400">im.message.receive_v1</code>
+                      <span className="text-gray-600">长连接（WebSocket）</span>
+                    </div>
+                  </div>
                 </div>
-                {tempConnected && (
-                  <p className="text-xs text-blue-200/70">请在飞书中向机器人发送任意消息完成绑定。</p>
+
+                {/* Publish reminder */}
+                <div className="rounded-lg border border-amber-800/40 bg-amber-950/20 px-3 py-2">
+                  <p className="text-xs text-amber-300">⚠️ 绑定前请确保已在飞书后台「版本管理」中创建并发布版本。</p>
+                  {appId.trim() && (
+                    <a href={`https://open.feishu.cn/app/${appId.trim()}/version`} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 text-xs text-blue-400 hover:underline">
+                      <ExternalLink size={10} />前往版本管理
+                    </a>
+                  )}
+                </div>
+
+                {/* Bind status */}
+                {appId.trim() && appSecret.trim() && (<>
+                  {(bindingStatus === "idle" || bindingStatus === "waiting") && (
+                    <div className="rounded-lg border border-blue-800/50 bg-blue-950/20 p-3 space-y-1">
+                      <div className="flex items-center gap-2">
+                        <Loader2 size={14} className="animate-spin text-blue-400" />
+                        <span className="text-xs font-medium text-blue-300">{tempConnected ? "等待绑定..." : "正在启动长连接..."}</span>
+                      </div>
+                      {tempConnected && <p className="text-xs text-blue-200/70">请在飞书中向机器人发送任意消息。</p>}
+                    </div>
+                  )}
+                  {bindingStatus === "bound" && (
+                    <div className="flex items-center gap-3 rounded-lg border border-gray-700 px-3 py-2">
+                      <CheckCircle2 size={14} className="text-green-400" />
+                      <span className="flex-1 text-xs text-gray-300">已绑定 <span className="font-mono text-gray-500">{receiveId}</span></span>
+                      <button onClick={() => { setBindingStatus("idle"); setBindMsg(""); setReceiveId(""); setTempConnected(false) }} className="text-xs text-gray-500 hover:text-blue-400">重新绑定</button>
+                      <span className="text-gray-700">|</span>
+                      <button onClick={async () => { const r = await window.electronAPI.testBind(); if (!r.ok) void showAlert("错误", r.error || "测试失败"); else void showAlert("成功", "测试消息已发送") }} className="text-xs text-gray-500 hover:text-green-400">测试</button>
+                    </div>
+                  )}
+                  {bindingStatus === "error" && (
+                    <div className="rounded-lg border border-red-800/50 bg-red-950/20 p-3 space-y-1">
+                      <div className="flex items-center gap-2">
+                        <XCircle size={14} className="text-red-400" />
+                        <span className="text-xs font-medium text-red-300">连接失败</span>
+                      </div>
+                      <p className="text-xs text-red-200/70">{bindMsg}</p>
+                      <button onClick={startTempAndBind} className="text-xs text-blue-400 hover:underline">重试</button>
+                    </div>
+                  )}
+                </>)}
+              </section>
+            )}
+
+            {/* WeChat config - QR code login */}
+            {enableWechat && (
+              <section className="space-y-4 rounded-xl border border-gray-800 p-5">
+                <h3 className="flex items-center gap-2 text-sm font-medium"><span>💬</span> 微信</h3>
+                <p className="text-xs text-gray-400">使用手机微信扫描二维码绑定ClawBot。</p>
+
+                {wechatQrStatus === "loading" && (
+                  <div className="flex flex-col items-center gap-3 py-6">
+                    <Loader2 size={32} className="animate-spin text-blue-400" />
+                    <span className="text-sm text-gray-400">正在生成二维码...</span>
+                  </div>
                 )}
-              </div>
+
+                {(wechatQrStatus === "wait" || wechatQrStatus === "scaned") && wechatQrUrl && (
+                  <div className="flex flex-col items-center gap-3 py-2">
+                    <div className="rounded-xl border border-gray-700 bg-white p-3">
+                      <img src={wechatQrUrl} alt="WeChat QR" className="h-48 w-48" />
+                    </div>
+                    <span className="text-sm text-gray-300">
+                      {wechatQrStatus === "scaned" ? "✅ 已扫码，请在手机上确认登录" : "请使用微信扫描上方二维码"}
+                    </span>
+                  </div>
+                )}
+
+                {wechatQrStatus === "confirmed" && (
+                  <div className="flex items-center gap-3 rounded-lg border border-green-800/50 bg-green-950/20 p-4">
+                    <CheckCircle2 size={20} className="text-green-400" />
+                    <div className="flex-1">
+                      <p className="text-sm font-medium text-green-300">微信登录成功</p>
+                      {wechatAccountId && <p className="text-xs text-gray-500">Account: {wechatAccountId}</p>}
+                    </div>
+                    <button onClick={() => { setWechatQrStatus("idle"); setWechatToken(""); setWechatQrUrl("") }} className="text-xs text-gray-500 hover:text-blue-400">重新扫码</button>
+                  </div>
+                )}
+
+                {wechatQrStatus === "expired" && (
+                  <div className="flex flex-col items-center gap-3 py-4">
+                    <XCircle size={24} className="text-yellow-400" />
+                    <p className="text-sm text-yellow-300">二维码已过期</p>
+                    <button onClick={() => { setWechatQrStatus("idle"); setWechatQrUrl("") }} className="rounded-lg border border-gray-700 px-4 py-2 text-xs text-gray-300 hover:bg-gray-800">
+                      <RefreshCw size={12} className="mr-1 inline" />重新生成
+                    </button>
+                  </div>
+                )}
+
+                {wechatQrStatus === "error" && (
+                  <div className="rounded-lg border border-red-800/50 bg-red-950/20 p-3 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <XCircle size={14} className="text-red-400" />
+                      <span className="text-xs font-medium text-red-300">登录失败</span>
+                    </div>
+                    <p className="text-xs text-red-200/70">{wechatQrMsg}</p>
+                    <button onClick={() => { setWechatQrStatus("idle"); setWechatQrUrl("") }} className="text-xs text-blue-400 hover:underline">重试</button>
+                  </div>
+                )}
+              </section>
             )}
 
-            {bindingStatus === "bound" && (
-              <div className="flex items-center gap-3 rounded-lg border border-gray-700 px-4 py-3">
-                <CheckCircle2 size={16} className="text-green-400" />
-                <span className="flex-1 text-sm text-gray-300">已绑定 <span className="ml-1 font-mono text-xs text-gray-500">{receiveId}</span></span>
-                <button
-                  onClick={() => {
-                    setBindingStatus("idle")
-                    setBindMsg("")
-                    setReceiveId("")
-                    setTempConnected(false)
-                  }}
-                  className="text-xs text-gray-500 transition hover:text-blue-400"
-                >
-                  重新绑定
-                </button>
-                <span className="text-gray-700">|</span>
-                <button
-                  onClick={async () => {
-                    setReceiveId("")
-                    setBindingStatus("idle")
-                    await window.electronAPI.saveConfig({ larkReceiveId: "" })
-                  }}
-                  className="text-xs text-gray-500 transition hover:text-red-400"
-                >
-                  解绑
-                </button>
-                <span className="text-gray-700">|</span>
-                <button
-                  onClick={async () => {
-                    const r = await window.electronAPI.testBind()
-                    if (!r.ok) void showAlert("错误", r.error || "测试失败")
-                    else void showAlert("成功", "测试消息已发送，请到飞书查看")
-                  }}
-                  className="text-xs text-gray-500 transition hover:text-green-400"
-                >
-                  测试
-                </button>
-              </div>
-            )}
-
-            {bindingStatus === "error" && (
-              <div className="space-y-2 rounded-lg border border-red-800/50 bg-red-950/20 p-4">
-                <div className="flex items-center gap-2">
-                  <XCircle size={18} className="text-red-400" />
-                  <span className="text-sm font-medium text-red-300">连接失败</span>
-                </div>
-                <p className="text-xs text-red-200/70">{bindMsg}</p>
-                <button
-                  onClick={startTempAndBind}
-                  className="text-xs text-blue-400 hover:underline"
-                >
-                  重试
-                </button>
+            {!enableFeishu && !enableWechat && (
+              <div className="rounded-lg border border-gray-800 p-8 text-center">
+                <p className="text-sm text-gray-500">请返回上一步选择至少一个通道。</p>
               </div>
             )}
           </div>
         )}
 
-        {/* Step 2: Cursor CLI */}
+        {/* ─── Step 2: Agent 设置 ─── */}
         {step === 2 && (
           <div className="mx-auto max-w-lg space-y-5">
-            <h2 className="text-xl font-semibold">Cursor CLI</h2>
-            <p className="text-sm text-gray-400">
-              配置工作目录、代理设置，检测 CLI 安装与登录状态。
-            </p>
+            <h2 className="text-xl font-semibold">Agent 设置</h2>
+            <p className="text-sm text-gray-400">配置工作目录、Agent 驱动模式和网络代理。</p>
 
             {/* 工作目录 */}
             <div>
               <label className="mb-1 block text-sm text-gray-300">工作目录</label>
-              <div
-                onClick={selectDir}
-                className="flex cursor-pointer items-center gap-3 rounded-lg border border-dashed border-gray-600 p-4 transition hover:border-blue-500 hover:bg-gray-900/50"
-              >
+              <div onClick={selectDir} className="flex cursor-pointer items-center gap-3 rounded-lg border border-dashed border-gray-600 p-4 transition hover:border-blue-500 hover:bg-gray-900/50">
                 <FolderOpen size={24} className="text-blue-400" />
                 {workspaceDir ? (
                   <div className="min-w-0 flex-1">
@@ -569,104 +642,117 @@ export default function Setup({ onComplete, onExit }: Props) {
               </div>
             </div>
 
-            {/* 代理设置 */}
-            <div className="border-t border-gray-800 pt-4">
-              <h3 className="mb-3 text-sm font-medium text-gray-400">代理设置（可选）</h3>
-              <p className="mb-3 text-xs text-gray-500">如需通过代理下载 CLI 或获取模型列表，请在此配置。</p>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="mb-1 block text-xs text-gray-500">HTTP_PROXY</label>
-                  <input type="text" value={httpProxy} onChange={(e) => setHttpProxy(e.target.value)} placeholder="http://127.0.0.1:1080" className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm outline-none transition focus:border-blue-500" />
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs text-gray-500">HTTPS_PROXY</label>
-                  <input type="text" value={httpsProxy} onChange={(e) => setHttpsProxy(e.target.value)} placeholder="http://127.0.0.1:1080" className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm outline-none transition focus:border-blue-500" />
-                </div>
-              </div>
-              <div className="mt-3">
-                <label className="mb-1 block text-xs text-gray-500">NO_PROXY</label>
-                <input type="text" value={noProxy} onChange={(e) => setNoProxy(e.target.value)} placeholder="localhost,127.0.0.1,feishu.cn" className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm outline-none transition focus:border-blue-500" />
+            {/* Agent 驱动模式 */}
+            <div className="border-t border-gray-800 pt-4 space-y-3">
+              <h3 className="text-sm font-medium text-gray-400">Agent 驱动模式</h3>
+              <div className="space-y-2">
+                {([
+                  { v: "cli" as const, t: "Cursor CLI", d: "通过命令行工具驱动 Agent（经典模式）" },
+                  { v: "sdk" as const, t: "Cursor SDK", d: "通过 @cursor/sdk 直接驱动 Agent（实验性）" },
+                ]).map((opt) => (
+                  <label
+                    key={opt.v}
+                    className={`flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 transition ${agentMode === opt.v ? "border-blue-500 bg-blue-500/10" : "border-gray-700 hover:border-gray-600"}`}
+                  >
+                    <input type="radio" name="agentMode" checked={agentMode === opt.v} onChange={() => setAgentMode(opt.v)} className="mt-1" />
+                    <div>
+                      <p className="text-sm font-medium">{opt.t}</p>
+                      <p className="text-xs text-gray-500">{opt.d}</p>
+                    </div>
+                  </label>
+                ))}
               </div>
             </div>
 
-            {/* CLI 检测 */}
-            <div className="border-t border-gray-800 pt-4 space-y-3">
-              <h3 className="text-sm font-medium text-gray-400">CLI 状态</h3>
-
-              {cliReady === null && (
-                <button onClick={checkAndLoadCli} className="flex items-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 transition hover:bg-gray-800">
-                  <RefreshCw size={14} />检测 Cursor CLI
-                </button>
-              )}
-
-              {cliReady === false && (
-                <div className="rounded-lg border border-yellow-800/50 bg-yellow-950/20 p-4 space-y-3">
-                  <p className="text-sm text-yellow-300">Cursor CLI 未安装。</p>
-                  <button
-                    onClick={async () => {
-                      setCliInstalling(true); setCliMsg("")
-                      const r = await window.electronAPI.installCli()
-                      setCliMsg(r.output)
-                      if (r.ok) { setCliReady(true); await checkAndLoadCli() }
-                      setCliInstalling(false)
-                    }}
-                    disabled={cliInstalling}
-                    className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500 disabled:opacity-50"
-                  >
-                    {cliInstalling ? <Loader2 size={14} className="animate-spin" /> : null}
-                    {cliInstalling ? "安装中..." : "一键安装 CLI"}
+            {/* CLI specific */}
+            {agentMode === "cli" && (
+              <div className="border-t border-gray-800 pt-4 space-y-3">
+                <h3 className="text-sm font-medium text-gray-400">CLI 状态</h3>
+                {cliReady === null && (
+                  <button onClick={checkAndLoadCli} className="flex items-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 transition hover:bg-gray-800">
+                    <RefreshCw size={14} />检测 Cursor CLI
                   </button>
-                  {cliMsg && <pre className="text-xs text-gray-400 whitespace-pre-wrap">{cliMsg}</pre>}
-                </div>
-              )}
-
-              {cliReady && cliLoggedIn === false && (
-                <div className="rounded-lg border border-yellow-800/50 bg-yellow-950/20 p-4 space-y-3">
-                  <p className="text-sm text-yellow-300">CLI 已安装但尚未登录。</p>
-                  <div className="flex items-center gap-2">
+                )}
+                {cliReady === false && (
+                  <div className="rounded-lg border border-yellow-800/50 bg-yellow-950/20 p-4 space-y-3">
+                    <p className="text-sm text-yellow-300">Cursor CLI 未安装。</p>
                     <button
-                      onClick={doLoginCli}
-                      disabled={cliLoggingIn}
+                      onClick={async () => { setCliInstalling(true); setCliMsg(""); const r = await window.electronAPI.installCli(); setCliMsg(r.output); if (r.ok) { setCliReady(true); await checkAndLoadCli() } setCliInstalling(false) }}
+                      disabled={cliInstalling}
                       className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500 disabled:opacity-50"
                     >
-                      {cliLoggingIn ? <Loader2 size={14} className="animate-spin" /> : <LogIn size={14} />}
-                      {cliLoggingIn ? "登录中..." : "登录 CLI"}
+                      {cliInstalling ? <Loader2 size={14} className="animate-spin" /> : null}
+                      {cliInstalling ? "安装中..." : "一键安装 CLI"}
                     </button>
-                    <button onClick={checkAndLoadCli} className="flex items-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 transition hover:bg-gray-800">
-                      <RefreshCw size={14} />重新检测
-                    </button>
+                    {cliMsg && <pre className="text-xs text-gray-400 whitespace-pre-wrap">{cliMsg}</pre>}
                   </div>
-                  {cliMsg && <pre className="text-xs text-gray-400 whitespace-pre-wrap">{cliMsg}</pre>}
-                </div>
-              )}
+                )}
+                {cliReady && cliLoggedIn === false && (
+                  <div className="rounded-lg border border-yellow-800/50 bg-yellow-950/20 p-4 space-y-3">
+                    <p className="text-sm text-yellow-300">CLI 已安装但尚未登录。</p>
+                    <div className="flex items-center gap-2">
+                      <button onClick={doLoginCli} disabled={cliLoggingIn} className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500 disabled:opacity-50">
+                        {cliLoggingIn ? <Loader2 size={14} className="animate-spin" /> : <LogIn size={14} />}
+                        {cliLoggingIn ? "登录中..." : "登录 CLI"}
+                      </button>
+                      <button onClick={checkAndLoadCli} className="flex items-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 transition hover:bg-gray-800">
+                        <RefreshCw size={14} />重新检测
+                      </button>
+                    </div>
+                    {cliMsg && <pre className="text-xs text-gray-400 whitespace-pre-wrap">{cliMsg}</pre>}
+                  </div>
+                )}
+                {cliReady && cliLoggedIn && (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-2 text-sm text-green-400"><CheckCircle2 size={16} />CLI 已就绪（已登录）</div>
+                    <button onClick={fetchModels} disabled={loadingModels} className="flex items-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 hover:bg-gray-800 disabled:opacity-50">
+                      {loadingModels ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}刷新模型列表
+                    </button>
+                    {modelOptions.length > 0 ? (
+                      <SearchableSelect value={model} onChange={setModel} options={modelOptions} placeholder="选择模型..." />
+                    ) : (
+                      <input type="text" value={model} onChange={(e) => setModel(e.target.value)} placeholder="auto" className={inputCls} />
+                    )}
+                    <p className="text-xs text-gray-500">也可以直接输入模型名称。</p>
+                  </div>
+                )}
+              </div>
+            )}
 
-              {cliReady && cliLoggedIn && (
-                <div className="space-y-3">
-                  <div className="flex items-center gap-2 text-sm text-green-400">
-                    <CheckCircle2 size={16} />CLI 已就绪（已登录）
-                  </div>
-                  <button
-                    onClick={fetchModels}
-                    disabled={loadingModels}
-                    className="flex items-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 transition hover:bg-gray-800 disabled:opacity-50"
-                  >
-                    {loadingModels ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-                    刷新模型列表
+            {/* SDK specific */}
+            {agentMode === "sdk" && (
+              <div className="border-t border-gray-800 pt-4 space-y-3">
+                <h3 className="text-sm font-medium text-gray-400">Cursor API Key</h3>
+                <div className="relative">
+                  <input type={showApiKey ? "text" : "password"} value={cursorApiKey} onChange={(e) => setCursorApiKey(e.target.value)} placeholder="crsr_..." className={inputCls + " pr-10"} />
+                  <button type="button" onClick={() => setShowApiKey(!showApiKey)} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
+                    {showApiKey ? <EyeOff size={14} /> : <Eye size={14} />}
                   </button>
-
-                  {modelOptions.length > 0 ? (
-                    <SearchableSelect value={model} onChange={setModel} options={modelOptions} placeholder="选择模型..." />
-                  ) : (
-                    <input type="text" value={model} onChange={(e) => setModel(e.target.value)} placeholder="auto" className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm outline-none transition focus:border-blue-500" />
-                  )}
-                  <p className="text-xs text-gray-500">也可以直接输入模型名称。</p>
                 </div>
-              )}
+                <p className="text-xs text-gray-600">
+                  从{" "}
+                  <a href="https://cursor.com/dashboard/integrations" target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">Cursor Dashboard</a>
+                  {" "}获取 API Key。
+                </p>
+              </div>
+            )}
+
+            {/* 代理设置 */}
+            <div className="border-t border-gray-800 pt-4">
+              <h3 className="mb-3 text-sm font-medium text-gray-400">代理设置（可选）</h3>
+              <div>
+                <label className="mb-1 block text-xs text-gray-500">HTTP / HTTPS 代理</label>
+                <input type="text" value={proxy} onChange={(e) => setProxy(e.target.value)} placeholder="http://127.0.0.1:1080" className={inputCls} />
+              </div>
+              <div className="mt-3">
+                <label className="mb-1 block text-xs text-gray-500">NO_PROXY</label>
+                <input type="text" value={noProxy} onChange={(e) => setNoProxy(e.target.value)} placeholder="localhost,127.0.0.1,feishu.cn" className={inputCls} />
+              </div>
             </div>
           </div>
         )}
 
-        {/* Step 3: 检查启动 */}
+        {/* ─── Step 3: 检查启动 ─── */}
         {step === 3 && (
           <div className="mx-auto max-w-lg space-y-5">
             <h2 className="text-xl font-semibold">配置完成</h2>
@@ -739,10 +825,7 @@ export default function Setup({ onComplete, onExit }: Props) {
       <div className="flex items-center justify-between border-t border-gray-800 px-8 py-4">
         <div className="flex items-center gap-2">
           {onExit && (
-            <button
-              onClick={onExit}
-              className="flex items-center gap-1 rounded-lg px-3 py-2 text-sm text-gray-500 transition hover:text-gray-300"
-            >
+            <button onClick={onExit} className="flex items-center gap-1 rounded-lg px-3 py-2 text-sm text-gray-500 transition hover:text-gray-300">
               <LogOut size={14} />退出引导
             </button>
           )}
@@ -755,20 +838,14 @@ export default function Setup({ onComplete, onExit }: Props) {
 
         {step < totalSteps - 1 ? (
           <div className="flex items-center gap-2">
-            {step > 0 && (
-              <button onClick={skip} className="flex items-center gap-1 rounded-lg px-3 py-2 text-sm text-gray-500 transition hover:text-gray-300">
-                <SkipForward size={14} />跳过
-              </button>
-            )}
-            <button
-              onClick={next}
-              disabled={!canNext()}
-              className="flex items-center gap-1 rounded-lg bg-blue-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-blue-500 disabled:opacity-40"
-            >
+            <button onClick={skip} className="flex items-center gap-1 rounded-lg px-3 py-2 text-sm text-gray-500 transition hover:text-gray-300">
+              <SkipForward size={14} />跳过
+            </button>
+            <button onClick={next} disabled={!canNext()} className="flex items-center gap-1 rounded-lg bg-blue-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-blue-500 disabled:opacity-40">
               下一步<ChevronRight size={16} />
             </button>
           </div>
-        ) : !launching && launchSteps.length === 0 && (
+        ) : (
           <button onClick={onComplete} className="flex items-center gap-1 rounded-lg px-3 py-2 text-sm text-gray-500 transition hover:text-gray-300">
             <SkipForward size={14} />跳过
           </button>

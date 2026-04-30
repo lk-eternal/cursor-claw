@@ -37,6 +37,7 @@ import {
   RotateCcw,
   Info,
   Github,
+  MessageSquare,
 } from "lucide-react"
 import SearchableSelect from "../components/SearchableSelect"
 import WorkspaceDaemonModal from "../components/WorkspaceDaemonModal"
@@ -45,7 +46,7 @@ import useInlineModal from "../components/useInlineModal"
 
 interface Props { onBack: () => void; onResetSetup?: () => void; initialTab?: string; onTabConsumed?: () => void }
 
-type Tab = "general" | "proxy" | "agent" | "mcp" | "rules" | "tasks" | "skills" | "setup" | "about"
+type Tab = "general" | "channel" | "proxy" | "agent" | "mcp" | "rules" | "tasks" | "skills" | "setup" | "about"
 type CloseWindowAction = "ask" | "minimize" | "quit"
 
 interface McpEditForm {
@@ -60,6 +61,69 @@ const MCP_TEMPLATE = JSON.stringify({
 }, null, 2)
 const emptyMcpForm: McpEditForm = { json: MCP_TEMPLATE, source: "global" }
 
+function CliStatusPanel() {
+  const [status, setStatus] = useState<{ checking: boolean; cliFound?: boolean; loggedIn?: boolean; identity?: string; error?: string }>({ checking: true })
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const cliOk = await window.electronAPI.checkCli()
+        if (cancelled) return
+        if (!cliOk) { setStatus({ checking: false, cliFound: false }); return }
+        const login = await window.electronAPI.checkCliLogin()
+        if (cancelled) return
+        setStatus({ checking: false, cliFound: login.cliFound, loggedIn: login.loggedIn, identity: login.identityLine, error: login.error })
+      } catch (e) {
+        if (!cancelled) setStatus({ checking: false, error: String(e) })
+      }
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  if (status.checking) return <div className="flex items-center gap-2 text-xs text-gray-500"><Loader2 size={12} className="animate-spin" />检测中...</div>
+  if (!status.cliFound) return (
+    <div className="rounded-lg border border-yellow-800/50 bg-yellow-900/20 px-4 py-3">
+      <div className="flex items-center gap-2 text-sm text-yellow-400"><ShieldAlert size={14} />未检测到 Cursor CLI</div>
+      <p className="mt-1 text-xs text-gray-500">请确认已安装 Cursor 并将 CLI 添加到系统 PATH</p>
+    </div>
+  )
+  return (
+    <div className={`rounded-lg border px-4 py-3 ${status.loggedIn ? "border-green-800/50 bg-green-900/20" : "border-red-800/50 bg-red-900/20"}`}>
+      <div className="flex items-center gap-2 text-sm">
+        {status.loggedIn ? <><ShieldCheck size={14} className="text-green-400" /><span className="text-green-400">已登录</span></> : <><ShieldAlert size={14} className="text-red-400" /><span className="text-red-400">未登录</span></>}
+      </div>
+      {status.identity && <p className="mt-1 text-xs text-gray-400">{status.identity}</p>}
+      {status.error && <p className="mt-1 text-xs text-red-400">{status.error}</p>}
+    </div>
+  )
+}
+
+function SdkKeyStatus({ apiKey }: { apiKey: string }) {
+  const [status, setStatus] = useState<{ checking: boolean; ok?: boolean; email?: string; error?: string }>({ checking: false })
+  const trimmed = apiKey.trim()
+
+  useEffect(() => {
+    if (!trimmed) { setStatus({ checking: false }); return }
+    let cancelled = false
+    const t = setTimeout(async () => {
+      setStatus({ checking: true })
+      try {
+        const r = await window.electronAPI.checkSdkApiKey()
+        if (!cancelled) setStatus({ checking: false, ok: r.ok, email: r.email, error: r.error })
+      } catch (e) {
+        if (!cancelled) setStatus({ checking: false, ok: false, error: String(e) })
+      }
+    }, 800)
+    return () => { cancelled = true; clearTimeout(t) }
+  }, [trimmed])
+
+  if (!trimmed) return null
+  if (status.checking) return <div className="flex items-center gap-2 text-xs text-gray-500"><Loader2 size={12} className="animate-spin" />验证中...</div>
+  if (status.ok) return <div className="flex items-center gap-2 text-xs text-green-400"><ShieldCheck size={14} />已验证{status.email ? ` (${status.email})` : ""}</div>
+  if (status.error) return <div className="flex items-center gap-2 text-xs text-red-400"><ShieldAlert size={14} />{status.error}</div>
+  return null
+}
+
 const REQUIRED_PERMISSIONS: { scope: string; desc: string }[] = [
   { scope: "im:message", desc: "发送消息（create / reply）" },
   { scope: "im:message.p2p_msg:readonly", desc: "接收私聊消息" },
@@ -71,6 +135,7 @@ const REQUIRED_PERMISSIONS: { scope: string; desc: string }[] = [
 
 const TABS: { id: Tab; label: string; icon: typeof SettingsIcon }[] = [
   { id: "general", label: "通用", icon: SettingsIcon },
+  { id: "channel", label: "消息通道", icon: MessageSquare },
   { id: "proxy", label: "网络", icon: Network },
   { id: "agent", label: "Agent", icon: Bot },
   { id: "mcp", label: "MCP", icon: Blocks },
@@ -105,10 +170,18 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
   const [closeWindowAction, setCloseWindowAction] = useState<CloseWindowAction>("ask")
   const [workspaceDaemonChoice, setWorkspaceDaemonChoice] = useState<{ old: string; new: string } | null>(null)
   const [bindWaiting, setBindWaiting] = useState(false)
+  const [feishuEnabled, setFeishuEnabled] = useState(false)
   const [wechatEnabled, setWechatEnabled] = useState(false)
   const [wechatToken, setWechatToken] = useState("")
   const [wechatAccountId, setWechatAccountId] = useState("")
   const [wechatStatus, setWechatStatus] = useState("disconnected")
+  const [wechatQrUrl, setWechatQrUrl] = useState("")
+  const [wechatQrStatus, setWechatQrStatus] = useState<"idle" | "loading" | "wait" | "scaned" | "confirmed" | "expired" | "error">("idle")
+  const [wechatQrMsg, setWechatQrMsg] = useState("")
+  const wechatQrBusy = useRef(false)
+  const [agentMode, setAgentMode] = useState<"cli" | "sdk">("cli")
+  const [cursorApiKey, setCursorApiKey] = useState("")
+  const [showApiKey, setShowApiKey] = useState(false)
   const { showAlert, showConfirm, ModalPortal } = useInlineModal()
 
   const handleBind = async () => {
@@ -127,6 +200,45 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
     const r = await window.electronAPI.startBind()
     if (!r.ok) { setBindWaiting(false); await showAlert("错误", r.error || "绑定启动失败") }
   }
+
+  const startWechatQrLogin = useCallback(async () => {
+    if (wechatQrBusy.current) return
+    wechatQrBusy.current = true
+    setWechatQrUrl("")
+    setWechatQrStatus("loading")
+    setWechatQrMsg("")
+    try {
+      const res = await window.electronAPI.wechatQrLogin()
+      wechatQrBusy.current = false
+      if (res.ok) {
+        setWechatQrStatus("confirmed")
+        setWechatToken(res.botToken ?? "")
+        setWechatAccountId(res.accountId ?? "")
+      } else if (res.error === "cancelled") {
+        setWechatQrStatus("idle")
+      } else {
+        setWechatQrStatus("error")
+        setWechatQrMsg(res.error ?? "登录失败")
+      }
+    } catch (e: any) {
+      wechatQrBusy.current = false
+      setWechatQrStatus("error")
+      setWechatQrMsg(e?.message ?? String(e))
+    }
+  }, [])
+
+  useEffect(() => {
+    const offQr = window.electronAPI.onWechatSetupQrCode?.((url: string) => {
+      setWechatQrUrl(url)
+      setWechatQrStatus("wait")
+    })
+    const offStatus = window.electronAPI.onWechatSetupStatus?.((status: string) => {
+      if (status === "scaned" || status === "confirmed" || status === "expired") {
+        setWechatQrStatus(status as "scaned" | "confirmed" | "expired")
+      }
+    })
+    return () => { offQr?.(); offStatus?.() }
+  }, [])
 
   const [appVersion, setAppVersion] = useState("")
   const [updateBusy, setUpdateBusy] = useState(false)
@@ -257,8 +369,9 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
   }, [])
 
   useEffect(() => {
-    if (tab === "general") window.electronAPI.getConfig().then((config) => {
+    if (tab === "general" || tab === "channel") window.electronAPI.getConfig().then((config) => {
       setAppId(config.larkAppId); setAppSecret(config.larkAppSecret)
+      setFeishuEnabled(!!(config.larkAppId || config.larkAppSecret))
       setReceiveId(config.larkReceiveId)
       setWorkspaceDir(config.workspaceDir); setEnableGroupChat(!!config.enableGroupChat)
       setModel(config.model)
@@ -270,6 +383,8 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
       setWechatEnabled(config.wechatEnabled ?? false)
       setWechatToken(config.wechatToken ?? "")
       setWechatAccountId(config.wechatAccountId ?? "")
+      setAgentMode(config.agentMode ?? "cli")
+      setCursorApiKey(config.cursorApiKey ?? "")
       loaded.current = true
     })
     if (tab === "mcp") refreshMcpServers(true)
@@ -298,6 +413,8 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
         wechatEnabled,
         wechatToken: wechatToken.trim(),
         wechatAccountId: wechatAccountId.trim(),
+        agentMode,
+        cursorApiKey: cursorApiKey.trim(),
       })
       if (r.needWorkspaceDaemonChoice && r.oldWorkspaceDir !== undefined && r.newWorkspaceDir !== undefined) {
         setWorkspaceDaemonChoice({ old: r.oldWorkspaceDir, new: r.newWorkspaceDir })
@@ -311,7 +428,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
       }
       setSaved(true); setTimeout(() => setSaved(false), 1500)
     }, 500)
-  }, [appId, appSecret, receiveId, workspaceDir, enableGroupChat, model, proxy, noProxy, agentNewSession, closeWindowAction, digitalIdentity, wechatEnabled, wechatToken, wechatAccountId, refreshMcpServers])
+  }, [appId, appSecret, receiveId, workspaceDir, enableGroupChat, model, proxy, noProxy, agentNewSession, closeWindowAction, digitalIdentity, wechatEnabled, wechatToken, wechatAccountId, agentMode, cursorApiKey, refreshMcpServers])
 
   useEffect(() => { autoSave() }, [autoSave])
 
@@ -407,7 +524,23 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
       if (r.ok && r.models.length > 0) {
         setModelOptions(r.models)
       } else if (r.ok) {
-        void showAlert("提示", "未解析到任何模型。请确认已在设置中完成 Cursor CLI 登录，或在终端执行 agent --list-models 查看输出格式是否变化。")
+        void showAlert("提示", "未解析到任何模型。请确认已完成 Cursor CLI 登录。")
+      } else {
+        void showAlert("错误", r.error || "获取模型列表失败")
+      }
+    } finally {
+      setLoadingModels(false)
+    }
+  }
+
+  const fetchSdkModels = async () => {
+    setLoadingModels(true)
+    try {
+      const r = await window.electronAPI.listSdkModels()
+      if (r.ok && r.models.length > 0) {
+        setModelOptions(r.models)
+      } else if (r.ok) {
+        void showAlert("提示", "未获取到任何模型，请检查 API Key 是否有效。")
       } else {
         void showAlert("错误", r.error || "获取模型列表失败")
       }
@@ -622,46 +755,6 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
             {/* ═══ General ═══ */}
             {tab === "general" && (<>
               <section className="space-y-4">
-                <h3 className="text-sm font-medium text-gray-300">飞书凭据</h3>
-                <div className="grid grid-cols-2 gap-4">
-                  <div><label className="mb-1 block text-xs text-gray-500">App ID</label><input type="text" value={appId} onChange={(e) => setAppId(e.target.value)} className={inputCls} /></div>
-                  <div><label className="mb-1 block text-xs text-gray-500">App Secret</label>
-                    <div className="relative">
-                      <input type={showSecret ? "text" : "password"} value={appSecret} onChange={(e) => setAppSecret(e.target.value)} className={inputCls + " pr-10"} />
-                      <button type="button" onClick={() => setShowSecret(!showSecret)} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">{showSecret ? <EyeOff size={14} /> : <Eye size={14} />}</button>
-                    </div>
-                  </div>
-                </div>
-              </section>
-              <section className="space-y-4">
-                <div>
-                  <h3 className="text-sm font-medium text-gray-300">主用户</h3>
-                  <p className="mt-0.5 text-xs text-gray-600">绑定宿主用户，用于定时任务回复和主工作目录识别</p>
-                </div>
-                <div className="flex items-center gap-3 rounded-lg border border-gray-700 px-4 py-3">
-                  {receiveId
-                    ? <>
-                        <CheckCircle2 size={16} className="text-green-400" />
-                        <span className="flex-1 text-sm text-gray-300">已绑定 <span className="ml-1 font-mono text-xs text-gray-500">{receiveId}</span></span>
-                        <button type="button" onClick={handleBind} disabled={bindWaiting} className="flex items-center gap-1 text-xs text-gray-500 transition hover:text-blue-400 disabled:opacity-50">
-                          {bindWaiting && <Loader2 size={12} className="animate-spin" />}
-                          重新绑定
-                        </button>
-                        <span className="text-gray-700">|</span>
-                        <button type="button" onClick={() => setReceiveId("")} className="text-xs text-gray-500 transition hover:text-red-400">解绑</button>
-                        <span className="text-gray-700">|</span>
-                        <button type="button" onClick={async () => { const r = await window.electronAPI.testBind(); if (!r.ok) void showAlert("错误", r.error || "测试失败") }} className="text-xs text-gray-500 transition hover:text-green-400">测试</button>
-                      </>
-                    : <>
-                        <ShieldAlert size={16} className="text-yellow-500" />
-                        <span className="flex-1 text-sm text-gray-500">{bindWaiting ? "请在飞书私聊中发送一条消息..." : "未绑定"}</span>
-                        <button type="button" onClick={handleBind} disabled={bindWaiting} className="flex items-center gap-1.5 rounded-md border border-gray-600 px-3 py-1.5 text-xs text-gray-300 transition hover:border-blue-500 hover:text-blue-400 disabled:opacity-50">
-                          {bindWaiting ? <Loader2 size={13} className="animate-spin" /> : null}
-                          绑定
-                        </button>
-                      </>
-                  }
-                </div>
                 <div>
                   <label className="mb-1 block text-xs text-gray-500">主工作目录</label>
                   <div onClick={selectDir} className="flex cursor-pointer items-center gap-3 rounded-lg border border-gray-700 px-4 py-3 transition hover:border-blue-500">
@@ -675,50 +768,6 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                   <p className="mt-1 text-xs text-gray-600">群聊和其他用户会话启动时，会将此内容作为 Agent 规则注入到临时工作目录</p>
                 </div>
               </section>
-              <section className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-sm font-medium text-gray-300">允许群聊</h3>
-                    <p className="text-xs text-gray-500">开启后机器人将响应群聊 @消息，工作目录自动创建</p>
-                  </div>
-                  <button onClick={() => setEnableGroupChat(!enableGroupChat)}
-                    className={`relative h-6 w-11 rounded-full transition ${enableGroupChat ? "bg-blue-600" : "bg-gray-600"}`}>
-                    <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition ${enableGroupChat ? "left-[22px]" : "left-0.5"}`} />
-                  </button>
-                </div>
-              </section>
-              <section className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-sm font-medium text-gray-300">微信接入</h3>
-                    <p className="text-xs text-gray-500">通过 iLink 协议接入微信，需提供 Token 和 Account ID</p>
-                  </div>
-                  <button onClick={() => setWechatEnabled(!wechatEnabled)}
-                    className={`relative h-6 w-11 rounded-full transition ${wechatEnabled ? "bg-blue-600" : "bg-gray-600"}`}>
-                    <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition ${wechatEnabled ? "left-[22px]" : "left-0.5"}`} />
-                  </button>
-                </div>
-                {wechatEnabled && (
-                  <div className="space-y-3 rounded-lg border border-gray-700 p-4">
-                    <div className="flex items-center gap-2">
-                      <span className={`h-2 w-2 rounded-full ${wechatStatus === "connected" ? "bg-green-400" : wechatStatus === "qr_pending" || wechatStatus === "logging_in" ? "bg-yellow-400 animate-pulse" : wechatStatus === "error" ? "bg-red-400" : "bg-gray-500"}`} />
-                      <span className="text-xs text-gray-400">
-                        {wechatStatus === "connected" ? "已连接" : wechatStatus === "qr_pending" ? "等待扫码" : wechatStatus === "logging_in" ? "登录中" : wechatStatus === "error" ? "连接错误" : "未连接"}
-                      </span>
-                    </div>
-                    <div>
-                      <label className="mb-1 block text-xs text-gray-500">Token</label>
-                      <input type="password" value={wechatToken} onChange={(e) => setWechatToken(e.target.value)} className={inputCls} placeholder="iLink Bot Token" />
-                    </div>
-                    <div>
-                      <label className="mb-1 block text-xs text-gray-500">Account ID</label>
-                      <input type="text" value={wechatAccountId} onChange={(e) => setWechatAccountId(e.target.value)} className={inputCls} placeholder="可选，留空自动获取" />
-                    </div>
-                    <p className="text-xs text-gray-600">保存后重启 Daemon 生效。登录时会生成二维码，使用微信扫码完成认证。</p>
-                  </div>
-                )}
-              </section>
-
               <section className="space-y-3">
                 <h3 className="text-sm font-medium text-gray-300">关闭主窗口</h3>
                 <p className="text-xs text-gray-600">点击窗口右上角关闭时的行为（可从系统托盘再次打开窗口）。</p>
@@ -750,6 +799,158 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
               <p className="text-xs text-gray-500">关闭窗口相关选项保存后立即生效。其余设置自动保存，部分项需重启 Daemon 后生效。</p>
             </>)}
 
+            {/* ═══ Channel ═══ */}
+            {tab === "channel" && (<>
+              {/* ── 飞书 ── */}
+              <section className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-medium text-gray-300">飞书</h3>
+                    <p className="text-xs text-gray-500">通过飞书自建应用接入，需提供 App ID 和 App Secret</p>
+                  </div>
+                  <button onClick={() => { const next = !feishuEnabled; setFeishuEnabled(next); if (!next) { setAppId(""); setAppSecret(""); setReceiveId("") } }}
+                    className={`relative h-6 w-11 rounded-full transition ${feishuEnabled ? "bg-blue-600" : "bg-gray-600"}`}>
+                    <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition ${feishuEnabled ? "left-[22px]" : "left-0.5"}`} />
+                  </button>
+                </div>
+                {feishuEnabled ? (
+                  <div className="space-y-4 rounded-lg border border-gray-700 p-4">
+                    <div className="grid grid-cols-2 gap-4">
+                      <div><label className="mb-1 block text-xs text-gray-500">App ID</label><input type="text" value={appId} onChange={(e) => setAppId(e.target.value)} className={inputCls} /></div>
+                      <div><label className="mb-1 block text-xs text-gray-500">App Secret</label>
+                        <div className="relative">
+                          <input type={showSecret ? "text" : "password"} value={appSecret} onChange={(e) => setAppSecret(e.target.value)} className={inputCls + " pr-10"} />
+                          <button type="button" onClick={() => setShowSecret(!showSecret)} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">{showSecret ? <EyeOff size={14} /> : <Eye size={14} />}</button>
+                        </div>
+                      </div>
+                    </div>
+                    <div>
+                      <h4 className="mb-2 text-xs font-medium text-gray-400">主用户绑定</h4>
+                      <div className="flex items-center gap-3 rounded-lg border border-gray-700 px-4 py-3">
+                        {receiveId
+                          ? <>
+                              <CheckCircle2 size={16} className="text-green-400" />
+                              <span className="flex-1 text-sm text-gray-300">已绑定 <span className="ml-1 font-mono text-xs text-gray-500">{receiveId}</span></span>
+                              <button type="button" onClick={handleBind} disabled={bindWaiting} className="flex items-center gap-1 text-xs text-gray-500 transition hover:text-blue-400 disabled:opacity-50">
+                                {bindWaiting && <Loader2 size={12} className="animate-spin" />}
+                                重新绑定
+                              </button>
+                              <span className="text-gray-700">|</span>
+                              <button type="button" onClick={() => setReceiveId("")} className="text-xs text-gray-500 transition hover:text-red-400">解绑</button>
+                              <span className="text-gray-700">|</span>
+                              <button type="button" onClick={async () => { const r = await window.electronAPI.testBind(); if (!r.ok) void showAlert("错误", r.error || "测试失败") }} className="text-xs text-gray-500 transition hover:text-green-400">测试</button>
+                            </>
+                          : <>
+                              <ShieldAlert size={16} className="text-yellow-500" />
+                              <span className="flex-1 text-sm text-gray-500">{bindWaiting ? "请在飞书私聊中发送一条消息..." : "未绑定"}</span>
+                              <button type="button" onClick={handleBind} disabled={bindWaiting} className="flex items-center gap-1.5 rounded-md border border-gray-600 px-3 py-1.5 text-xs text-gray-300 transition hover:border-blue-500 hover:text-blue-400 disabled:opacity-50">
+                                {bindWaiting ? <Loader2 size={13} className="animate-spin" /> : null}
+                                绑定
+                              </button>
+                            </>
+                        }
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h4 className="text-xs font-medium text-gray-400">允许群聊</h4>
+                        <p className="text-xs text-gray-500">开启后机器人将响应群聊 @消息</p>
+                      </div>
+                      <button onClick={() => setEnableGroupChat(!enableGroupChat)}
+                        className={`relative h-6 w-11 rounded-full transition ${enableGroupChat ? "bg-blue-600" : "bg-gray-600"}`}>
+                        <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition ${enableGroupChat ? "left-[22px]" : "left-0.5"}`} />
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-xs text-gray-600">启用后填写飞书自建应用凭据以接入飞书消息通道</p>
+                )}
+              </section>
+
+              {/* ── 微信 ── */}
+              <section className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-medium text-gray-300">微信</h3>
+                    <p className="text-xs text-gray-500">通过 iLink 协议接入微信，扫码登录获取 Token</p>
+                  </div>
+                  <button onClick={() => setWechatEnabled(!wechatEnabled)}
+                    className={`relative h-6 w-11 rounded-full transition ${wechatEnabled ? "bg-blue-600" : "bg-gray-600"}`}>
+                    <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition ${wechatEnabled ? "left-[22px]" : "left-0.5"}`} />
+                  </button>
+                </div>
+                {wechatEnabled && (
+                  <div className="space-y-3 rounded-lg border border-gray-700 p-4">
+                    <div className="flex items-center gap-2">
+                      <span className={`h-2 w-2 rounded-full ${wechatToken ? (wechatStatus === "connected" ? "bg-green-400" : "bg-yellow-400") : "bg-gray-500"}`} />
+                      <span className="text-xs text-gray-400">
+                        {wechatToken ? (wechatStatus === "connected" ? "已连接" : "已认证（重启 Daemon 后生效）") : "未认证"}
+                      </span>
+                    </div>
+
+                    {wechatQrStatus === "loading" && (
+                      <div className="flex items-center gap-2 py-4 text-xs text-gray-400"><Loader2 size={14} className="animate-spin" />正在获取二维码...</div>
+                    )}
+
+                    {(wechatQrStatus === "wait" || wechatQrStatus === "scaned") && wechatQrUrl && (
+                      <div className="flex flex-col items-center gap-3 py-2">
+                        <div className="rounded-lg bg-white p-3">
+                          <img src={wechatQrUrl} alt="微信登录二维码" className="h-48 w-48" />
+                        </div>
+                        <p className="text-xs text-gray-400">
+                          {wechatQrStatus === "scaned" ? "✅ 已扫描，请在手机上确认登录" : "请使用手机微信扫描二维码"}
+                        </p>
+                      </div>
+                    )}
+
+                    {wechatQrStatus === "confirmed" && (
+                      <div className="flex items-center gap-2 py-2 text-xs text-green-400">
+                        <CheckCircle2 size={14} />扫码认证成功
+                      </div>
+                    )}
+
+                    {wechatQrStatus === "expired" && (
+                      <div className="space-y-2 py-2">
+                        <p className="text-xs text-yellow-400">二维码已过期</p>
+                        <button onClick={startWechatQrLogin} className="text-xs text-blue-400 hover:underline">重新获取</button>
+                      </div>
+                    )}
+
+                    {wechatQrStatus === "error" && (
+                      <div className="space-y-2 py-2">
+                        <p className="text-xs text-red-400">登录失败：{wechatQrMsg}</p>
+                        <button onClick={startWechatQrLogin} className="text-xs text-blue-400 hover:underline">重试</button>
+                      </div>
+                    )}
+
+                    {wechatQrStatus === "idle" && !wechatToken && (
+                      <button
+                        onClick={startWechatQrLogin}
+                        className="flex items-center gap-2 rounded-md border border-gray-600 px-3 py-2 text-xs text-gray-300 transition hover:border-blue-500 hover:text-blue-400"
+                      >
+                        <LogIn size={13} />扫码绑定ClawBot
+                      </button>
+                    )}
+
+                    {wechatQrStatus === "idle" && wechatToken && (
+                      <div className="space-y-2">
+                        <p className="text-xs text-gray-500">Token 已配置。</p>
+                        <button
+                          onClick={startWechatQrLogin}
+                          className="flex items-center gap-1.5 text-xs text-gray-400 transition hover:text-blue-400"
+                        >
+                          <RefreshCw size={12} />重新扫码
+                        </button>
+                      </div>
+                    )}
+
+                    <p className="text-xs text-gray-600">扫码成功后自动保存 Token，重启 Daemon 生效。</p>
+                  </div>
+                )}
+              </section>
+              <p className="text-xs text-gray-500">至少启用一个消息通道，设置自动保存，部分项需重启 Daemon 后生效。</p>
+            </>)}
+
             {/* ═══ Proxy ═══ */}
             {tab === "proxy" && (<>
               <section className="space-y-4">
@@ -767,17 +968,61 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
 
             {/* ═══ Agent ═══ */}
             {tab === "agent" && (<>
+              {/* 驱动模式 */}
+              <section className="space-y-3">
+                <h3 className="text-sm font-medium text-gray-300">驱动模式</h3>
+                <div className="space-y-2">
+                  {([
+                    { v: "cli" as const, t: "Cursor CLI", d: "通过命令行工具驱动 Agent（经典模式）" },
+                    { v: "sdk" as const, t: "Cursor SDK", d: "通过 @cursor/sdk 直接驱动 Agent（实验性）" },
+                  ]).map((opt) => (
+                    <label key={opt.v} className={`flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 transition ${agentMode === opt.v ? "border-blue-500 bg-blue-500/10" : "border-gray-700 hover:border-gray-600"}`}>
+                      <input type="radio" name="agentMode" checked={agentMode === opt.v} onChange={() => { setAgentMode(opt.v); setModelOptions([]) }} className="mt-1 rounded-full border-gray-600" />
+                      <div>
+                        <p className="text-sm font-medium">{opt.t}</p>
+                        <p className="text-xs text-gray-500">{opt.d}</p>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              </section>
+              {/* CLI 登录状态 */}
+              {agentMode === "cli" && (
+                <section className="space-y-3">
+                  <h3 className="text-sm font-medium text-gray-300">CLI 状态</h3>
+                  <CliStatusPanel />
+                </section>
+              )}
+              {/* SDK API Key */}
+              {agentMode === "sdk" && (
+                <section className="space-y-3">
+                  <h3 className="text-sm font-medium text-gray-300">Cursor API Key</h3>
+                  <div className="relative">
+                    <input type={showApiKey ? "text" : "password"} value={cursorApiKey} onChange={(e) => setCursorApiKey(e.target.value)} placeholder="crsr_..." className={inputCls + " pr-10"} />
+                    <button type="button" onClick={() => setShowApiKey(!showApiKey)} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
+                      {showApiKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                  </div>
+                  <SdkKeyStatus apiKey={cursorApiKey} />
+                  <p className="text-xs text-gray-600">
+                    从{" "}<a href="https://cursor.com/dashboard/integrations" target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">Cursor Dashboard</a>{" "}获取 API Key。
+                  </p>
+                </section>
+              )}
+              {/* 模型 */}
               <section className="space-y-3">
                 <div className="flex items-center gap-2">
                   <h3 className="text-sm font-medium text-gray-300">模型</h3>
-                  <button onClick={fetchModels} disabled={loadingModels} className="flex items-center gap-1 rounded px-2 py-0.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white disabled:opacity-50">
-                    {loadingModels ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}获取可用模型
+                  <button onClick={agentMode === "sdk" ? fetchSdkModels : fetchModels} disabled={loadingModels} className="flex items-center gap-1 rounded px-2 py-0.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white disabled:opacity-50">
+                    {loadingModels ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                    {agentMode === "sdk" ? "从 SDK 获取" : "从 CLI 获取"}
                   </button>
                 </div>
                 {modelOptions.length > 0
                   ? <SearchableSelect value={model} onChange={setModel} options={modelOptions} placeholder="选择模型..." />
                   : <input type="text" value={model} onChange={(e) => setModel(e.target.value)} placeholder="auto" className={inputCls} />}
               </section>
+              {/* Agent 会话 */}
               <section className="space-y-3">
                 <h3 className="text-sm font-medium text-gray-300">Agent 会话</h3>
                 <div className="flex items-center justify-between rounded-lg border border-gray-700 px-4 py-3">
@@ -785,11 +1030,8 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                     <p className="text-sm font-medium">每次开启新会话</p>
                     <p className="text-xs text-gray-500">开启后 Agent 每次启动都会创建新会话，关闭则延续上一次会话</p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setAgentNewSession(!agentNewSession)}
-                    className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors duration-200 ${agentNewSession ? "bg-green-500" : "bg-gray-600"}`}
-                  >
+                  <button type="button" onClick={() => setAgentNewSession(!agentNewSession)}
+                    className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors duration-200 ${agentNewSession ? "bg-green-500" : "bg-gray-600"}`}>
                     <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform duration-200 ${agentNewSession ? "translate-x-[18px]" : "translate-x-[3px]"}`} />
                   </button>
                 </div>
@@ -799,6 +1041,11 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
 
             {/* ═══ MCP ═══ */}
             {tab === "mcp" && (<>
+              {agentMode === "sdk" && (
+                <div className="rounded-lg border border-blue-800/40 bg-blue-900/20 px-4 py-2.5 text-xs text-blue-300">
+                  当前为 SDK 驱动模式，MCP 配置由 SDK 在运行时自动加载，开关状态仅影响 CLI 模式。
+                </div>
+              )}
               <section className="space-y-3">
                 <div className="flex items-center gap-2">
                   <h3 className="text-sm font-medium text-gray-300">MCP 服务器</h3>
@@ -1028,7 +1275,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
               <section className="space-y-4">
                 <h3 className="text-sm font-medium text-gray-300">引导 & 配置</h3>
                 <div className="rounded-lg border border-gray-700 p-4">
-                  <p className="mb-3 text-sm text-gray-400">重新执行初始化引导流程（可重新配置飞书应用凭据、主用户、工作目录等）。</p>
+                  <p className="mb-3 text-sm text-gray-400">重新执行初始化引导流程（可重新配置消息通道、主用户、工作目录等）。</p>
                   <button
                     onClick={async () => {
                       await window.electronAPI.saveConfig({ setupComplete: false })

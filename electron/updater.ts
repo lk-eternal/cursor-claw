@@ -288,7 +288,7 @@ const BREW_MANUAL_GUIDE = [
   `  brew untap ${HOMEBREW_TAP}`,
   `  brew tap ${HOMEBREW_TAP}`,
   `  brew upgrade --cask ${HOMEBREW_CASK}`,
-  "  xattr -cr /Applications/Feishu\\ Cursor\\ Bridge.app",
+  "  xattr -cr /Applications/Cursor\\ Claw.app",
   "",
   `FAQ: https://github.com/${HOMEBREW_TAP}`,
 ].join("\n")

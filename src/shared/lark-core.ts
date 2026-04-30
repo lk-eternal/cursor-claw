@@ -216,7 +216,7 @@ export class LarkSender {
 
   // ── 图片下载 ───────────────────────────────────────────
 
-  private static readonly IMAGE_DIR = path.join(os.tmpdir(), "lark-bridge-images");
+  private static readonly IMAGE_DIR = path.join(os.tmpdir(), "cursor-claw-images");
 
   async downloadImage(messageId: string, imageKey: string): Promise<string | null> {
     try {

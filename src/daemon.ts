@@ -46,7 +46,7 @@ const savedProxyKeys = stripProxyEnv();
 
 // ── 日志 ─────────────────────────────────────────────────
 
-const LOG_FILE_PATH = path.join(WORKSPACE_DIR, ".cursor", "lark-daemon.log");
+const LOG_FILE_PATH = path.join(WORKSPACE_DIR, ".cursor", "daemon.log");
 const MAX_LOG_SIZE = 2 * 1024 * 1024;
 const LOG_ROTATE_CHECK_INTERVAL = 100;
 let logWriteCount = 0;
@@ -77,7 +77,7 @@ function rotateLogIfNeeded(): void {
 function log(level: string, ...args: unknown[]): void {
   const ts = localTimestamp();
   const msg = args.map(a => typeof a === "string" ? a : JSON.stringify(a)).join(" ");
-  const line = `${ts} [LarkDaemon] ${level} ${escapeLogContentSingleLine(msg)}\n`;
+  const line = `${ts} [Daemon] ${level} ${escapeLogContentSingleLine(msg)}\n`;
   process.stderr.write(line);
   try {
     ensureLogDir();
@@ -399,6 +399,8 @@ function startHttpServer(): Promise<number> {
             hasTarget: !!sender.getTarget(),
             autoOpenId: sender.autoOpenId || null,
             feishuConnected: true,
+            wechatEnabled: WECHAT_ENABLED,
+            wechatStatus: wechatManager?.getStatus() ?? "disconnected",
           });
           return;
         }
@@ -549,7 +551,7 @@ function startHttpServer(): Promise<number> {
 // ── 管理 API 辅助函数 ────────────────────────────────────
 
 const HOME_DIR = os.homedir();
-const APP_DATA_DIR = process.env.LARK_APP_DATA_DIR || "";
+const APP_DATA_DIR = process.env.APP_DATA_DIR || "";
 const GLOBAL_MCP_PATH = path.join(HOME_DIR, ".cursor", "mcp.json");
 const PROJECT_MCP_PATH = path.join(WORKSPACE_DIR, ".cursor", "mcp.json");
 const RULES_DIR = path.join(WORKSPACE_DIR, ".cursor", "rules");
@@ -973,13 +975,15 @@ function removeLockFile(): void {
 // ── 主函数 ───────────────────────────────────────────────
 
 export async function daemonMain(): Promise<void> {
-  if (!APP_ID || !APP_SECRET) {
-    log("ERROR", "LARK_APP_ID / LARK_APP_SECRET 未配置");
+  const feishuEnabled = !!(APP_ID && APP_SECRET);
+  if (!feishuEnabled && !WECHAT_ENABLED) {
+    log("ERROR", "未配置任何消息通道（飞书凭据或微信 Token），至少需要启用一个");
     process.exit(1);
   }
 
   log("INFO", `Daemon v${PKG_VERSION} 启动`);
   log("INFO", `workspace: ${WORKSPACE_DIR}`);
+  log("INFO", `通道: ${[feishuEnabled && "飞书", WECHAT_ENABLED && "微信"].filter(Boolean).join(" + ")}`);
   log("INFO", `日志文件: ${LOG_FILE_PATH}`);
 
   const cleanup = () => {
@@ -993,22 +997,24 @@ export async function daemonMain(): Promise<void> {
 
   initQueue();
 
-  try {
-    const botInfo = await larkClient.request({ method: "GET", url: "/open-apis/bot/v3/info" }) as any;
-    botOpenId = botInfo?.bot?.open_id;
-    if (botOpenId) log("INFO", `机器人 open_id: ${botOpenId}`);
-    else log("WARN", "未能获取机器人 open_id，群消息过滤将使用宽松模式");
-  } catch (e: any) {
-    log("WARN", `获取机器人信息失败: ${e?.message ?? e}`);
-  }
+  if (feishuEnabled) {
+    try {
+      const botInfo = await larkClient.request({ method: "GET", url: "/open-apis/bot/v3/info" }) as any;
+      botOpenId = botInfo?.bot?.open_id;
+      if (botOpenId) log("INFO", `机器人 open_id: ${botOpenId}`);
+      else log("WARN", "未能获取机器人 open_id，群消息过滤将使用宽松模式");
+    } catch (e: any) {
+      log("WARN", `获取机器人信息失败: ${e?.message ?? e}`);
+    }
 
-  await sender.resolveTarget(RECEIVE_ID, RECEIVE_ID_TYPE);
-  startLarkConnection();
+    await sender.resolveTarget(RECEIVE_ID, RECEIVE_ID_TYPE);
+    startLarkConnection();
+  }
 
   if (WECHAT_ENABLED) {
     wechatManager = initWeChatManager();
     wechatManager.start(WECHAT_TOKEN, WECHAT_ACCOUNT_ID).catch((e: any) => {
-      log("WARN", `[WeChat] 启动失败（将以仅飞书模式运行）: ${e?.message ?? e}`);
+      log("WARN", `[WeChat] 启动失败: ${e?.message ?? e}`);
     });
   }
 

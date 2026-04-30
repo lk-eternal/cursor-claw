@@ -6,6 +6,6 @@ console.warn = _noop;
 console.debug = _noop;
 
 import("./server.js").catch((e) => {
-  console.error("[LarkBridge] 启动失败:", e);
+  console.error("[Cursor Claw] 启动失败:", e);
   process.exit(1);
 });

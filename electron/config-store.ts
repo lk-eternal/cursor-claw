@@ -32,6 +32,9 @@ export interface AppConfig {
   wechatEnabled: boolean
   wechatToken: string
   wechatAccountId: string
+  /** Agent 驱动模式: cli = Cursor CLI (默认), sdk = @cursor/sdk */
+  agentMode: "cli" | "sdk"
+  cursorApiKey: string
 }
 
 const defaults: AppConfig = {
@@ -55,11 +58,13 @@ const defaults: AppConfig = {
   wechatEnabled: false,
   wechatToken: "",
   wechatAccountId: "",
+  agentMode: "cli",
+  cursorApiKey: "",
 }
 
 const store = new Store<AppConfig>({
-  name: "lark-bridge-config",
-  encryptionKey: "lark-bridge-desktop-v1",
+  name: "cursor-claw-config",
+  encryptionKey: "cursor-claw-desktop-v1",
   defaults,
 })
 

@@ -336,11 +336,21 @@ export default function Dashboard({ onSettings }: Props) {
           )}
         />
         <StatusCard
-          icon={Wifi}
-          label="飞书连接"
-          value={status.hasTarget ? "已连接" : "等待连接"}
-          color={status.hasTarget ? "green" : "gray"}
-          sub={status.hasTarget ? "发送目标已就绪" : "等待目标"}
+          icon={status.hasTarget || status.wechatStatus === "connected" ? Wifi : WifiOff}
+          label="消息通道"
+          value={
+            status.hasTarget && status.wechatStatus === "connected" ? "飞书 + 微信"
+            : status.hasTarget ? "飞书已连接"
+            : status.wechatStatus === "connected" ? "微信已连接"
+            : "等待连接"
+          }
+          color={status.hasTarget || status.wechatStatus === "connected" ? "green" : "gray"}
+          sub={
+            status.hasTarget && status.wechatStatus === "connected" ? "双通道就绪"
+            : status.hasTarget ? "飞书目标已就绪"
+            : status.wechatStatus === "connected" ? "微信已连接"
+            : "等待目标"
+          }
         />
         <div onClick={() => { if (sessionList.length > 0 || status.agentRunning) setShowSessions((v) => !v) }} className={sessionList.length > 0 || status.agentRunning ? "cursor-pointer" : ""}>
           <StatusCard

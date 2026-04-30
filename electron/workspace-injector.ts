@@ -8,9 +8,9 @@ export interface InjectResult {
   message: string
 }
 
-const ADMIN_SKILL_CONTENT = `# 飞书 Cursor Bridge — 自管理 Skill
+const ADMIN_SKILL_CONTENT = `# Cursor Claw — 自管理 Skill
 
-你可以通过以下 MCP 工具管理飞书 Cursor Bridge 应用自身的运行状态、配置和环境。
+你可以通过以下 MCP 工具管理 Cursor Claw 应用自身的运行状态、配置和环境。
 
 ## 可用 MCP 工具
 
@@ -39,7 +39,7 @@ const ADMIN_SKILL_CONTENT = `# 飞书 Cursor Bridge — 自管理 Skill
 ### manage_workspace
 管理工作目录（get / set）。set 后自动重启 Daemon。
 
-## 飞书指令
+## 消息指令
 /status /stop /restart /reset /list /clean /task /model /mcp /workspace /help
 `
 
@@ -73,7 +73,7 @@ export async function injectWorkspace(): Promise<{ results: InjectResult[] }> {
 
   results.push(
     injectFile(
-      path.join(wsDir, ".cursor", "skills", "feishu-bridge-admin", "SKILL.md"),
+      path.join(wsDir, ".cursor", "skills", "cursor-claw-admin", "SKILL.md"),
       ADMIN_SKILL_CONTENT,
       true,
     ),

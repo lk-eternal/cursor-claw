@@ -7,8 +7,8 @@ const STALE_MESSAGE_MS = 5 * 60 * 1000;
 let queueDir = "";
 
 export function initFileQueue(): string {
-  const appDataDir = process.env.LARK_APP_DATA_DIR;
-  if (!appDataDir) throw new Error("LARK_APP_DATA_DIR 环境变量未设置");
+  const appDataDir = process.env.APP_DATA_DIR;
+  if (!appDataDir) throw new Error("APP_DATA_DIR 环境变量未设置");
   queueDir = path.join(appDataDir, "file-queue");
   if (!fs.existsSync(queueDir)) fs.mkdirSync(queueDir, { recursive: true });
   return queueDir;

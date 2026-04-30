@@ -73,6 +73,8 @@ interface DaemonStatus {
   model?: string
   workspaceMismatch?: boolean
   daemonWorkspaceDir?: string
+  wechatEnabled?: boolean
+  wechatStatus?: string
 }
 
 interface AppModalRequestPayload {
@@ -140,6 +142,8 @@ interface ElectronAPI {
   installCli(): Promise<{ ok: boolean; output: string }>
   loginCli(): Promise<{ ok: boolean; output: string }>
   listModels(): Promise<{ ok: boolean; models: { id: string; label: string; current: boolean }[]; error?: string }>
+  checkSdkApiKey(): Promise<{ ok: boolean; email?: string; error?: string }>
+  listSdkModels(): Promise<{ ok: boolean; models: { id: string; label: string; current: boolean }[]; error?: string }>
   getScheduledTasks(): Promise<ScheduledTask[]>
   saveScheduledTasks(tasks: ScheduledTask[]): Promise<{ ok: boolean }>
   validateCron(expression: string): Promise<boolean>

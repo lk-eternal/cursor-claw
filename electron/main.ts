@@ -30,6 +30,8 @@ import {
   saveAppConfigFromRenderer,
   getMcpServerTools,
   getMcpStatusMap,
+  checkSdkApiKey,
+  listSdkModels,
 } from "./daemon-manager"
 import { injectWorkspace } from "./workspace-injector"
 import { initTray, destroyTray } from "./tray"
@@ -338,6 +340,9 @@ function registerIpcHandlers(): void {
     }
     return { ok: true, models: parseListModelsStdout(run.stdout) }
   })
+
+  ipcMain.handle("sdk:check-api-key", () => checkSdkApiKey())
+  ipcMain.handle("sdk:list-models", () => listSdkModels())
 }
 
 let isQuitting = false

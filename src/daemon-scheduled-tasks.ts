@@ -2,7 +2,7 @@ import { CronExpressionParser } from "cron-parser";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-const APP_DATA_DIR = process.env.LARK_APP_DATA_DIR || "";
+const APP_DATA_DIR = process.env.APP_DATA_DIR || "";
 const TASKS_FILE = path.join(APP_DATA_DIR, "scheduled-tasks.json");
 /** 轮询间隔：不依赖单次 setTimeout 链，避免锁屏/会话节流导致整点永不触发 */
 const WATCHDOG_MS = 5_000;

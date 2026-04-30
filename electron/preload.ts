@@ -174,6 +174,8 @@ const api = {
   installCli: (): Promise<{ ok: boolean; output: string }> => ipcRenderer.invoke("cli:install"),
   loginCli: (): Promise<{ ok: boolean; output: string }> => ipcRenderer.invoke("cli:login"),
   listModels: (): Promise<{ ok: boolean; models: { id: string; label: string; current: boolean }[]; error?: string }> => ipcRenderer.invoke("models:list"),
+  checkSdkApiKey: (): Promise<{ ok: boolean; email?: string; error?: string }> => ipcRenderer.invoke("sdk:check-api-key"),
+  listSdkModels: (): Promise<{ ok: boolean; models: { id: string; label: string; current: boolean }[]; error?: string }> => ipcRenderer.invoke("sdk:list-models"),
   getScheduledTasks: (): Promise<ScheduledTask[]> => ipcRenderer.invoke("scheduled-tasks:get"),
   saveScheduledTasks: (tasks: ScheduledTask[]): Promise<{ ok: boolean }> => ipcRenderer.invoke("scheduled-tasks:save", tasks),
   validateCron: (expression: string): Promise<boolean> => ipcRenderer.invoke("scheduled-tasks:validate-cron", expression),
@@ -233,6 +235,19 @@ const api = {
     const handler = (_: unknown, line: string) => cb(line)
     ipcRenderer.on("daemon:log", handler)
     return () => ipcRenderer.removeListener("daemon:log", handler)
+  },
+  wechatQrLogin: (): Promise<{ ok: boolean; botToken?: string; accountId?: string; baseUrl?: string; error?: string }> =>
+    ipcRenderer.invoke("wechat:qr-login"),
+  wechatQrLoginCancel: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("wechat:qr-login-cancel"),
+  onWechatSetupQrCode: (cb: (url: string) => void) => {
+    const handler = (_: unknown, url: string) => cb(url)
+    ipcRenderer.on("wechat:setup-qrcode", handler)
+    return () => ipcRenderer.removeListener("wechat:setup-qrcode", handler)
+  },
+  onWechatSetupStatus: (cb: (status: string) => void) => {
+    const handler = (_: unknown, status: string) => cb(status)
+    ipcRenderer.on("wechat:setup-status", handler)
+    return () => ipcRenderer.removeListener("wechat:setup-status", handler)
   },
   onWechatStatus: (cb: (status: string) => void) => {
     const handler = (_: unknown, status: string) => cb(status)

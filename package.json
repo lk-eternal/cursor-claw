@@ -44,6 +44,7 @@
     "electron-updater": "^6.8.3",
     "lucide-react": "^0.577.0",
     "node-cron": "^4.2.1",
+    "qrcode": "^1.5.4",
     "semver": "^7.7.4",
     "wechat-ilink-client": "^0.1.0",
     "zod": "^3.24.0"
@@ -52,6 +53,7 @@
     "@tailwindcss/vite": "^4.2.2",
     "@types/node": "^22.0.0",
     "@types/node-cron": "^3.0.11",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@types/semver": "^7.7.1",

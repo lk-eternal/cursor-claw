@@ -114,10 +114,10 @@ function buildPrompt(meta?: LaunchMeta, taskMessage?: string): string {
 
   if(meta?.chatType === "p2p" || meta?.chatType === "group"){
     prompts.push("如果你当前正在执行任务（上下文中已有进行中的工作），请直接继续，不要重复处理已完成的内容。")
-    prompts.push("否则，请立即通过 sync_message 工具获取待处理的飞书消息并开始工作。")
+    prompts.push("否则，请立即通过 sync_message 工具获取待处理的消息并开始工作。")
   }
   if(meta?.chatType === "temp_chat"){
-    prompts.push("请立即通过 sync_message 工具获取待处理的飞书消息并开始工作。")
+    prompts.push("请立即通过 sync_message 工具获取待处理的消息并开始工作。")
   }
   if(meta?.chatType === "task" && taskMessage){
     prompts.push("[定时任务]")

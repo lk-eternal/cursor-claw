@@ -10,7 +10,7 @@ export interface WeChatIncomingMessage {
   text: string;
   messageId: string;
   chatId: string;
-  chatType: "wechat_p2p" | "wechat_group";
+  chatType: "p2p" | "group";
   senderOpenId: string;
   senderName?: string;
 }
@@ -79,38 +79,42 @@ export class WeChatManager extends EventEmitter {
       this.setStatus("disconnected");
     });
 
-    this.setStatus("qr_pending");
-    this.opts.log("INFO", "[WeChat] 开始登录...");
+    const loadSyncBuf = (): string | undefined => {
+      try {
+        if (fs.existsSync(this.syncBufPath)) return fs.readFileSync(this.syncBufPath, "utf-8");
+      } catch { /* ignore */ }
+      return undefined;
+    };
+    const saveSyncBuf = (buf: string): void => {
+      try { fs.writeFileSync(this.syncBufPath, buf, "utf-8"); } catch { /* ignore */ }
+    };
+
+    const needQrLogin = !resolvedAccountId;
 
     try {
-      const loginResult = await this.client.login({
-        onQRCode: (qrcodeUrl: string) => {
-          this.opts.log("INFO", "[WeChat] 二维码已生成，等待扫码...");
-          this.opts.onQrCode?.(qrcodeUrl);
-          this.setStatus("qr_pending");
-        },
-      });
+      if (needQrLogin) {
+        this.setStatus("qr_pending");
+        this.opts.log("INFO", "[WeChat] Token 模式需要扫码补全 accountId...");
+        const loginResult = await this.client.login({
+          onQRCode: (qrcodeUrl: string) => {
+            this.opts.log("INFO", "[WeChat] 二维码已生成，等待扫码...");
+            this.opts.onQrCode?.(qrcodeUrl);
+            this.setStatus("qr_pending");
+          },
+        });
+        this.selfAccountId = loginResult.accountId || "";
+        this.opts.log("INFO", `[WeChat] 登录成功, accountId=${this.selfAccountId}`);
+      } else {
+        this.selfAccountId = resolvedAccountId;
+        this.opts.log("INFO", `[WeChat] Token 直连模式, accountId=${this.selfAccountId}`);
+      }
 
-      this.selfAccountId = loginResult.accountId || "";
-      this.opts.log("INFO", `[WeChat] 登录成功, accountId=${this.selfAccountId}`);
       this.setStatus("logging_in");
-
-      const loadSyncBuf = (): string | undefined => {
-        try {
-          if (fs.existsSync(this.syncBufPath)) return fs.readFileSync(this.syncBufPath, "utf-8");
-        } catch { /* ignore */ }
-        return undefined;
-      };
-
-      const saveSyncBuf = (buf: string): void => {
-        try { fs.writeFileSync(this.syncBufPath, buf, "utf-8"); } catch { /* ignore */ }
-      };
-
       await this.client.start({ loadSyncBuf, saveSyncBuf });
       this.setStatus("connected");
       this.opts.log("INFO", "[WeChat] 消息轮询已启动");
     } catch (err: any) {
-      this.opts.log("ERROR", `[WeChat] 登录失败: ${err?.message ?? err}`);
+      this.opts.log("ERROR", `[WeChat] 启动失败: ${err?.message ?? err}`);
       this.setStatus("error");
       throw err;
     }
@@ -168,7 +172,7 @@ export class WeChatManager extends EventEmitter {
       text: content.trim(),
       messageId,
       chatId,
-      chatType: isGroup ? "wechat_group" : "wechat_p2p",
+      chatType: isGroup ? "group" : "p2p",
       senderOpenId: fromUser,
     };
 
