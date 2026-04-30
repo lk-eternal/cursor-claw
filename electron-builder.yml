@@ -1,0 +1,72 @@
+appId: com.cursor-claw.desktop
+productName: Cursor Claw
+copyright: Copyright © 2026
+
+publish:
+  provider: github
+  owner: lk-eternal
+  repo: cursor-claw
+  vPrefixedTagName: true
+
+afterPack: scripts/after-pack.cjs
+
+directories:
+  buildResources: resources
+  output: release
+
+files:
+  - out/**/*
+  - "!node_modules/**/*"
+
+extraResources:
+  - from: dist-bundle/
+    to: daemon/
+    filter:
+      - "*.mjs"
+      - "*.map"
+  - from: node_modules/node-cron
+    to: daemon/node_modules/node-cron
+  - from: resources/icon.png
+    to: icon.png
+  - from: resources/icon.ico
+    to: icon.ico
+  - from: resources/cursor-claw.mdc
+    to: cursor-claw.mdc
+
+win:
+  icon: resources/icon.ico
+  artifactName: cursor-claw-setup-${version}.${ext}
+  target:
+    - target: nsis
+      arch:
+        - x64
+  signAndEditExecutable: true
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  shortcutName: Cursor Claw
+
+mac:
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  icon: resources/icon.png
+  category: public.app-category.developer-tools
+
+dmg:
+  title: Cursor Claw
+
+linux:
+  icon: resources/icon.png
+  maintainer: lk-eternal
+  target:
+    - target: AppImage
+      arch:
+        - x64
+    - target: deb
+      arch:
+        - x64
+  category: Development

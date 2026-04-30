@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+dist-bundle/
+out/
+release/
+npm/dist/
+npm/README.md
+
+# Package archives
+*.tgz
+
+# Environment & secrets
+.env
+.env.*
+
+# Runtime files
+.cursor
+.fastRequest
+.idea/*
+
+# Temporary
+tmp_exec/
+*.tmp
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Editor
+*.swp
+*.swo
