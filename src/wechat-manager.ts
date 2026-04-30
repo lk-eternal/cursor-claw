@@ -32,6 +32,8 @@ export class WeChatManager extends EventEmitter {
   private syncBufPath: string;
   private opts: WeChatManagerOptions;
   private selfAccountId = "";
+  private recentMsgHashes = new Set<string>();
+  private static readonly DEDUP_WINDOW = 60_000;
 
   constructor(opts: WeChatManagerOptions) {
     super();
@@ -45,6 +47,7 @@ export class WeChatManager extends EventEmitter {
   }
 
   private setStatus(s: WeChatStatus): void {
+    this.opts.log("INFO", `[WeChat] status: ${this.status} -> ${s}`);
     this.status = s;
     this.opts.onStatusChange?.(s);
   }
@@ -110,7 +113,17 @@ export class WeChatManager extends EventEmitter {
       }
 
       this.setStatus("logging_in");
-      await this.client.start({ loadSyncBuf, saveSyncBuf });
+
+      const onFirstPoll = new Promise<void>((resolve) => {
+        this.client!.once("poll", () => resolve());
+      });
+
+      this.client.start({ loadSyncBuf, saveSyncBuf }).catch((err: Error) => {
+        this.opts.log("ERROR", `[WeChat] 轮询异常退出: ${err?.message ?? err}`);
+        if (this.status !== "disconnected") this.setStatus("error");
+      });
+
+      await onFirstPoll;
       this.setStatus("connected");
       this.opts.log("INFO", "[WeChat] 消息轮询已启动");
     } catch (err: any) {
@@ -166,7 +179,19 @@ export class WeChatManager extends EventEmitter {
     if (!content.trim()) return;
 
     const chatId = isGroup ? (msg.group_id || fromUser) : fromUser;
-    const messageId = `wx_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const messageId = msg.message_id != null
+      ? `wx_${msg.message_id}`
+      : `wx_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+
+    const dedupKey = msg.message_id != null
+      ? `id:${msg.message_id}`
+      : `hash:${chatId}:${content.trim().slice(0, 200)}`;
+    if (this.recentMsgHashes.has(dedupKey)) {
+      this.opts.log("INFO", `[WeChat] 去重跳过 (key=${dedupKey})`);
+      return;
+    }
+    this.recentMsgHashes.add(dedupKey);
+    setTimeout(() => this.recentMsgHashes.delete(dedupKey), WeChatManager.DEDUP_WINDOW);
 
     const incoming: WeChatIncomingMessage = {
       text: content.trim(),

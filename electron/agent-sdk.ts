@@ -80,7 +80,7 @@ function getAdminMcpPath(): string {
 }
 
 function buildInlineMcpServers(daemonPort: number): Record<string, unknown> {
-  return {
+  const result: Record<string, unknown> = {
     "cursor-claw": {
       type: "stdio",
       command: "node",
@@ -94,6 +94,24 @@ function buildInlineMcpServers(daemonPort: number): Record<string, unknown> {
       env: { LARK_DAEMON_PORT: String(daemonPort) },
     },
   }
+
+  const { getMcpServerList } = require("./daemon-manager") as typeof import("./daemon-manager")
+  try {
+    const servers = getMcpServerList()
+    for (const s of servers) {
+      if (result[s.name]) continue
+      if (s.rawConfig && (s.rawConfig as Record<string, unknown>).disabled === true) continue
+      if (s.type === "command" && s.command) {
+        result[s.name] = { command: s.command, args: s.args, env: s.env }
+      } else if (s.type === "url" && s.url) {
+        const entry: Record<string, unknown> = { url: s.url }
+        if (s.rawConfig?.headers) entry.headers = s.rawConfig.headers
+        result[s.name] = entry
+      }
+    }
+  } catch { /* mcp list unavailable, use built-in only */ }
+
+  return result
 }
 
 function readDaemonPort(): number | null {
@@ -101,8 +119,8 @@ function readDaemonPort(): number | null {
   const path = require("node:path")
   const fs = require("node:fs")
   const config = getConfig()
-  const appId = config.larkAppId || "default"
-  const lockPath = path.join(app.getPath("userData"), "apps", appId, "daemon.lock.json")
+  const appKey = config.larkAppId || config.wechatAccountId || "default"
+  const lockPath = path.join(app.getPath("userData"), "apps", appKey, "daemon.lock.json")
   try {
     if (!fs.existsSync(lockPath)) return null
     const lock = JSON.parse(fs.readFileSync(lockPath, "utf-8"))
@@ -213,7 +231,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
 
     const agent = await Agent.create({
       apiKey,
-      model: { id: config.model && config.model !== "auto" ? config.model : "composer-2" },
+      model: { id: config.model && config.model !== "auto" ? config.model : "claude-4.6-opus-max" },
       local: {
         cwd: workspaceDir,
         settingSources: ["project", "user"],

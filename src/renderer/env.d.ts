@@ -73,8 +73,11 @@ interface DaemonStatus {
   model?: string
   workspaceMismatch?: boolean
   daemonWorkspaceDir?: string
+  feishuEnabled?: boolean
+  feishuConnected?: boolean
   wechatEnabled?: boolean
   wechatStatus?: string
+  wechatReady?: boolean
 }
 
 interface AppModalRequestPayload {
@@ -180,6 +183,8 @@ interface ElectronAPI {
   onWindowCloseConfirm(cb: () => void): () => void
   onAppModalRequest(cb: (payload: AppModalRequestPayload) => void): () => void
   respondAppModal(requestId: string, response: number): Promise<void>
+  testBind(): Promise<{ ok: boolean; error?: string }>
+  testWechat(): Promise<{ ok: boolean; error?: string }>
 }
 
 declare global {

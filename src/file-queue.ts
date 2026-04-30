@@ -29,7 +29,10 @@ export function pushToFileQueue(text: string, messageId?: string, source?: strin
   if (messageId) {
     try {
       const existing = fs.readdirSync(queueDir);
-      if (existing.some((f) => f.endsWith(`_${safeId}.qmsg`) || f.endsWith(`_${safeId}.claimed`))) {
+      if (existing.some((f) => {
+        const base = f.replace(/\.\w+$/, "");
+        return base.endsWith(`_${safeId}`);
+      })) {
         return false;
       }
     } catch { /* ignore */ }
@@ -89,7 +92,8 @@ export function claimNextMessage(filterChatId?: string): QueueMessage | null {
     }
     try {
       const raw = fs.readFileSync(claimedPath, "utf-8");
-      fs.unlinkSync(claimedPath);
+      const donePath = claimedPath.replace(/\.claimed$/, ".done");
+      try { fs.renameSync(claimedPath, donePath); } catch { try { fs.unlinkSync(claimedPath); } catch { /* ignore */ } }
       const parsed = JSON.parse(raw);
       return {
         text: typeof parsed.text === "string" ? parsed.text : raw,
@@ -193,7 +197,7 @@ export function cleanupStaleMessages(): void {
   const now = Date.now();
   try {
     for (const f of fs.readdirSync(queueDir)) {
-      if (!f.endsWith(".claimed") && !f.endsWith(".tmp")) continue;
+      if (!f.endsWith(".claimed") && !f.endsWith(".tmp") && !f.endsWith(".done")) continue;
       const filePath = path.join(queueDir, f);
       try {
         const stat = fs.statSync(filePath);

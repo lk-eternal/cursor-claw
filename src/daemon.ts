@@ -41,6 +41,7 @@ const TEMP_MODE = process.env.LARK_TEMP_MODE === "1";
 const WECHAT_TOKEN = process.env.WECHAT_TOKEN ?? "";
 const WECHAT_ACCOUNT_ID = process.env.WECHAT_ACCOUNT_ID ?? "";
 const WECHAT_ENABLED = process.env.WECHAT_ENABLED === "1";
+const FEISHU_ENABLED = process.env.FEISHU_ENABLED === "1";
 
 const savedProxyKeys = stripProxyEnv();
 
@@ -88,13 +89,41 @@ function log(level: string, ...args: unknown[]): void {
 
 // ── Lark ─────────────────────────────────────────────────
 
-const larkClient = createLarkClient(APP_ID, APP_SECRET);
-const sender = new LarkSender({ client: larkClient, receiveId: RECEIVE_ID, receiveIdType: RECEIVE_ID_TYPE, messagePrefix: MESSAGE_PREFIX, log });
+const larkClient = FEISHU_ENABLED ? createLarkClient(APP_ID, APP_SECRET) : null;
+const sender = larkClient ? new LarkSender({ client: larkClient, receiveId: RECEIVE_ID, receiveIdType: RECEIVE_ID_TYPE, messagePrefix: MESSAGE_PREFIX, log }) : null;
 let botOpenId: string | undefined;
 
 // ── WeChat ───────────────────────────────────────────────
 
 let wechatManager: WeChatManager | null = null;
+let lastWechatChatId: string | null = null;
+
+function isWechatChatId(chatId?: string): boolean {
+  if (!chatId) return false;
+  return chatId.startsWith("wxid_") || chatId.startsWith("wx_") || chatId.includes("@chatroom") || chatId.endsWith("@im.wechat");
+}
+
+const WECHAT_STATE_FILE = path.join(WORKSPACE_DIR, ".cursor", "wechat-data", "state.json");
+
+function loadWechatState(): void {
+  try {
+    if (fs.existsSync(WECHAT_STATE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(WECHAT_STATE_FILE, "utf-8"));
+      if (data.lastChatId) {
+        lastWechatChatId = data.lastChatId;
+        log("INFO", `[WeChat] 已恢复 context 绑定: chatId=${lastWechatChatId}`);
+      }
+    }
+  } catch { /* ignore */ }
+}
+
+function saveWechatState(): void {
+  try {
+    const dir = path.dirname(WECHAT_STATE_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(WECHAT_STATE_FILE, JSON.stringify({ lastChatId: lastWechatChatId }));
+  } catch { /* ignore */ }
+}
 
 function initWeChatManager(): WeChatManager {
   const dataDir = path.join(WORKSPACE_DIR, ".cursor", "wechat-data");
@@ -102,6 +131,21 @@ function initWeChatManager(): WeChatManager {
     dataDir,
     log,
     onMessage: (msg) => {
+      const firstMessage = !lastWechatChatId;
+      if (msg.chatType === "p2p" && msg.chatId) {
+        lastWechatChatId = msg.chatId;
+        saveWechatState();
+      }
+      if (firstMessage) {
+        log(`[WeChat] 首条消息已收到，context_token 已绑定（chatId=${msg.chatId}），不入队`);
+        return;
+      }
+      if (isCommand(msg.text)) {
+        handleCommand(msg.text, msg.messageId, msg.chatId, msg.chatType).catch((e: any) =>
+          log("ERROR", `[WeChat] 指令处理失败: ${e?.message ?? e}`),
+        );
+        return;
+      }
       pushMessage(msg.text, msg.messageId, msg.chatId, msg.chatType, msg.senderOpenId);
     },
     onQrCode: (dataUrl) => {
@@ -189,13 +233,13 @@ function stripMentionTags(text: string): string {
 }
 
 function startLarkConnection(): void {
-  if (!APP_ID || !APP_SECRET) { log("ERROR", "LARK_APP_ID / LARK_APP_SECRET 未配置"); return; }
+  if (!sender || !APP_ID || !APP_SECRET) { log("ERROR", "飞书未启用或凭据未配置"); return; }
 
   sender.startConnection(APP_ID, APP_SECRET, ENCRYPT_KEY, (ev) => {
     const { text, messageId, chatId, chatType, messageType, rawContent, senderOpenId, mentions } = ev;
 
-    if (chatType === "p2p" && senderOpenId && !sender.resolvedTarget) {
-      sender.autoOpenId = senderOpenId;
+    if (chatType === "p2p" && senderOpenId && !sender!.resolvedTarget) {
+      sender!.autoOpenId = senderOpenId;
       log("INFO", `自动识别用户 open_id: ${senderOpenId}`);
     }
 
@@ -216,7 +260,7 @@ function startLarkConnection(): void {
     }
 
     if (messageType === "image" || messageType === "post") {
-      sender.processIncomingMessage(messageId, messageType, rawContent)
+      sender!.processIncomingMessage(messageId, messageType, rawContent)
         .then((result) => pushMessage(result, messageId, chatId, chatType, senderOpenId))
         .catch(() => pushMessage(cleanText, messageId, chatId, chatType, senderOpenId));
     } else {
@@ -247,7 +291,13 @@ function isCommand(text: string): boolean {
   return Object.keys(COMMANDS).some((cmd) => trimmed === cmd || trimmed.startsWith(cmd + " "));
 }
 
-async function replyToMessage(messageId: string, text: string): Promise<void> {
+async function replyToMessage(messageId: string, text: string, chatId?: string): Promise<void> {
+  if (chatId && isWechatChatId(chatId)) {
+    if (!wechatManager) { log("WARN", "微信未启用，跳过回复"); return; }
+    try { await wechatManager.sendText(chatId, text); } catch (e: any) { log("WARN", `微信回复失败: ${e?.message}`); }
+    return;
+  }
+  if (!larkClient || !sender) { log("WARN", "飞书未启用，跳过回复"); return; }
   try {
     await larkClient.im.message.reply({
       path: { message_id: messageId },
@@ -396,11 +446,13 @@ function startHttpServer(): Promise<number> {
             version: PKG_VERSION,
             uptime: Math.floor(process.uptime()),
             queueLength: getFileQueueLength(),
-            hasTarget: !!sender.getTarget(),
-            autoOpenId: sender.autoOpenId || null,
-            feishuConnected: true,
+            hasTarget: !!sender?.getTarget(),
+            autoOpenId: sender?.autoOpenId || null,
+            feishuEnabled: FEISHU_ENABLED,
+            feishuConnected: FEISHU_ENABLED && !!sender?.getTarget(),
             wechatEnabled: WECHAT_ENABLED,
             wechatStatus: wechatManager?.getStatus() ?? "disconnected",
+            lastWechatChatId: lastWechatChatId || null,
           });
           return;
         }
@@ -422,6 +474,7 @@ function startHttpServer(): Promise<number> {
         }
 
         if (method === "POST" && pathname === "/send") {
+          if (!sender) { json(res, { ok: false, error: "飞书未启用" }, 400); return; }
           const body = JSON.parse(await readBody(req));
           await sender.sendMessage(body.text);
           json(res, { ok: true });
@@ -429,6 +482,7 @@ function startHttpServer(): Promise<number> {
         }
 
         if (method === "POST" && pathname === "/send-image") {
+          if (!sender) { json(res, { ok: false, error: "飞书未启用" }, 400); return; }
           const body = JSON.parse(await readBody(req));
           await sender.sendImage(body.image_path);
           json(res, { ok: true });
@@ -436,6 +490,7 @@ function startHttpServer(): Promise<number> {
         }
 
         if (method === "POST" && pathname === "/send-file") {
+          if (!sender) { json(res, { ok: false, error: "飞书未启用" }, 400); return; }
           const body = JSON.parse(await readBody(req));
           await sender.sendFile(body.file_path);
           json(res, { ok: true });
@@ -443,18 +498,34 @@ function startHttpServer(): Promise<number> {
         }
 
         if (method === "POST" && pathname === "/start-bind") {
+          if (!sender) { json(res, { ok: false, error: "飞书未启用" }, 400); return; }
           startBind();
           json(res, { ok: true });
           return;
         }
 
         if (method === "POST" && pathname === "/test-bind") {
+          if (!sender) { json(res, { ok: false, error: "飞书未启用" }, 400); return; }
           const body = JSON.parse(await readBody(req));
           const chatId = typeof body.chatId === "string" ? body.chatId : "";
           if (!chatId) { json(res, { error: "chatId is required" }, 400); return; }
           try {
             await sender.sendMessageToChat(chatId, "🔗 绑定测试成功！连接正常。");
             json(res, { ok: true });
+          } catch (e: any) {
+            json(res, { ok: false, error: e?.message ?? "发送失败" }, 500);
+          }
+          return;
+        }
+
+        if (method === "POST" && pathname === "/wechat-test") {
+          if (!wechatManager) { json(res, { ok: false, error: "微信未启用" }, 400); return; }
+          if (!wechatManager.isConnected()) { json(res, { ok: false, error: "微信未连接" }, 400); return; }
+          const chatId = lastWechatChatId;
+          if (!chatId) { json(res, { ok: false, error: "暂无微信交互记录，请先给机器人发一条消息" }, 400); return; }
+          try {
+            const ok = await wechatManager.sendText(chatId, "🔗 微信测试成功！连接正常。");
+            json(res, { ok });
           } catch (e: any) {
             json(res, { ok: false, error: e?.message ?? "发送失败" }, 500);
           }
@@ -509,9 +580,9 @@ function startHttpServer(): Promise<number> {
         }
 
         if (method === "POST" && pathname === "/cmd/result") {
-          const body = JSON.parse(await readBody(req)) as { messageId: string; ok: boolean; message: string };
-          log("INFO", `指令执行完成: ok=${body.ok}, msgId=${body.messageId}`);
-          if (body.messageId) await replyToMessage(body.messageId, body.message);
+          const body = JSON.parse(await readBody(req)) as { messageId: string; ok: boolean; message: string; chatId?: string };
+          log("INFO", `指令执行完成: ok=${body.ok}, msgId=${body.messageId}, chatId=${body.chatId ?? "N/A"}`);
+          if (body.messageId) await replyToMessage(body.messageId, body.message, body.chatId);
           json(res, { ok: true });
           return;
         }
@@ -593,7 +664,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       daemon: { running: true, version: PKG_VERSION, uptime: Math.floor(process.uptime()), port: daemonPort },
       queue: { length: getFileQueueLength() },
       tasks: { total: tasks.length, enabled: tasks.filter((t) => t.enabled).length },
-      feishu: { connected: true, hasTarget: !!sender.getTarget() },
+      feishu: { connected: FEISHU_ENABLED, hasTarget: !!sender?.getTarget() },
       wechat: { enabled: WECHAT_ENABLED, status: wechatManager?.getStatus() ?? "disconnected" },
     });
     return true;
@@ -793,15 +864,16 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const { text, message_id, chat_id } = body as { text: string; message_id?: string; chat_id?: string };
     if (!text) { json(res, { ok: false, error: "text is required" }, 400); return true; }
 
-    const isWechatTarget = chat_id?.startsWith("wx_") || chat_id?.includes("@chatroom");
-    if (isWechatTarget && wechatManager?.isConnected()) {
+    if (isWechatChatId(chat_id) && wechatManager?.isConnected()) {
       const ok = await wechatManager.sendText(chat_id!, text);
       json(res, { ok });
-    } else {
+    } else if (sender) {
       if (message_id) await sender.sendMessage(text, message_id);
       else if (chat_id) await sender.sendMessageToChat(chat_id, text);
       else await sender.sendMessage(text);
       json(res, { ok: true });
+    } else {
+      json(res, { ok: false, error: "飞书未启用" }, 400);
     }
     return true;
   }
@@ -810,11 +882,12 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const body = JSON.parse(await readBody(req));
     const { image_path, message_id, chat_id } = body as { image_path: string; message_id?: string; chat_id?: string };
     if (!image_path) { json(res, { ok: false, error: "image_path is required" }, 400); return true; }
-    const isWx = chat_id?.startsWith("wx_") || chat_id?.includes("@chatroom");
-    if (isWx && wechatManager?.isConnected()) {
+    if (isWechatChatId(chat_id) && wechatManager?.isConnected()) {
       await wechatManager.sendMedia(chat_id!, image_path);
-    } else {
+    } else if (sender) {
       await sender.sendImage(image_path, message_id, chat_id);
+    } else {
+      json(res, { ok: false, error: "飞书未启用" }, 400); return true;
     }
     json(res, { ok: true });
     return true;
@@ -824,11 +897,12 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const body = JSON.parse(await readBody(req));
     const { file_path, message_id, chat_id } = body as { file_path: string; message_id?: string; chat_id?: string };
     if (!file_path) { json(res, { ok: false, error: "file_path is required" }, 400); return true; }
-    const isWx = chat_id?.startsWith("wx_") || chat_id?.includes("@chatroom");
-    if (isWx && wechatManager?.isConnected()) {
+    if (isWechatChatId(chat_id) && wechatManager?.isConnected()) {
       await wechatManager.sendMedia(chat_id!, file_path);
-    } else {
+    } else if (sender) {
       await sender.sendFile(file_path, message_id, chat_id);
+    } else {
+      json(res, { ok: false, error: "飞书未启用" }, 400); return true;
     }
     json(res, { ok: true });
     return true;
@@ -866,6 +940,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
 
   // ── Chat 名称查询 ──
   if (pathname === "/api/chat-names" && method === "POST") {
+    if (!larkClient) { json(res, { ok: false, error: "飞书未启用" }, 400); return true; }
     const body = JSON.parse(await readBody(req));
     const chatIds = Array.isArray(body.chatIds) ? body.chatIds as string[] : [];
     const names: Record<string, string> = {};
@@ -882,6 +957,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
 
   // ── 用户名查询（通过 open_id 获取用户名）──
   if (pathname === "/api/user-names" && method === "POST") {
+    if (!larkClient) { json(res, { ok: false, error: "飞书未启用" }, 400); return true; }
     const body = JSON.parse(await readBody(req));
     const openIds = Array.isArray(body.openIds) ? body.openIds as string[] : [];
     const names: Record<string, string> = {};
@@ -975,15 +1051,14 @@ function removeLockFile(): void {
 // ── 主函数 ───────────────────────────────────────────────
 
 export async function daemonMain(): Promise<void> {
-  const feishuEnabled = !!(APP_ID && APP_SECRET);
-  if (!feishuEnabled && !WECHAT_ENABLED) {
+  if (!FEISHU_ENABLED && !WECHAT_ENABLED) {
     log("ERROR", "未配置任何消息通道（飞书凭据或微信 Token），至少需要启用一个");
     process.exit(1);
   }
 
   log("INFO", `Daemon v${PKG_VERSION} 启动`);
   log("INFO", `workspace: ${WORKSPACE_DIR}`);
-  log("INFO", `通道: ${[feishuEnabled && "飞书", WECHAT_ENABLED && "微信"].filter(Boolean).join(" + ")}`);
+  log("INFO", `通道: ${[FEISHU_ENABLED && "飞书", WECHAT_ENABLED && "微信"].filter(Boolean).join(" + ")}`);
   log("INFO", `日志文件: ${LOG_FILE_PATH}`);
 
   const cleanup = () => {
@@ -997,7 +1072,7 @@ export async function daemonMain(): Promise<void> {
 
   initQueue();
 
-  if (feishuEnabled) {
+  if (FEISHU_ENABLED && larkClient && sender) {
     try {
       const botInfo = await larkClient.request({ method: "GET", url: "/open-apis/bot/v3/info" }) as any;
       botOpenId = botInfo?.bot?.open_id;
@@ -1012,6 +1087,7 @@ export async function daemonMain(): Promise<void> {
   }
 
   if (WECHAT_ENABLED) {
+    loadWechatState();
     wechatManager = initWeChatManager();
     wechatManager.start(WECHAT_TOKEN, WECHAT_ACCOUNT_ID).catch((e: any) => {
       log("WARN", `[WeChat] 启动失败: ${e?.message ?? e}`);
@@ -1034,8 +1110,8 @@ export async function daemonMain(): Promise<void> {
 }
 
 async function tempMain(): Promise<void> {
-  if (!APP_ID || !APP_SECRET) {
-    log("ERROR", "LARK_APP_ID / LARK_APP_SECRET 未配置");
+  if (!FEISHU_ENABLED || !sender || !APP_ID || !APP_SECRET) {
+    log("ERROR", "飞书未启用或凭据未配置，无法进入绑定模式");
     process.exit(1);
   }
 

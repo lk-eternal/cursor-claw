@@ -1,7 +1,31 @@
-import { BrowserWindow } from "electron"
+import { BrowserWindow, app } from "electron"
+import * as fs from "node:fs"
+import * as path from "node:path"
 
 const LOG_BUFFER_MAX = 300
 const logBuffer: string[] = []
+let logFilePath: string | null = null
+
+export function setLogFilePath(p: string): void {
+  logFilePath = p
+}
+
+export function getOrCreateLogFilePath(): string {
+  if (logFilePath) return logFilePath
+  const { getConfig } = require("./config-store") as typeof import("./config-store")
+  const config = getConfig()
+  const dir = config.workspaceDir ? path.join(config.workspaceDir, ".cursor") : path.join(app.getPath("userData"), "logs")
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+  logFilePath = path.join(dir, "daemon.log")
+  return logFilePath
+}
+
+function appendToLogFile(line: string): void {
+  try {
+    const p = getOrCreateLogFilePath()
+    fs.appendFileSync(p, line + "\n", "utf-8")
+  } catch { /* ignore */ }
+}
 
 function uiTimestamp(): string {
   const d = new Date()
@@ -21,6 +45,7 @@ function formatUnifiedUiLog(processName: string, level: string, content: string)
 export function pushLog(line: string): void {
   logBuffer.push(line)
   if (logBuffer.length > LOG_BUFFER_MAX) logBuffer.splice(0, logBuffer.length - LOG_BUFFER_MAX)
+  appendToLogFile(line)
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send("daemon:log", line)
   }

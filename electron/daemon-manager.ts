@@ -11,7 +11,7 @@ import { validateCron, readTasksFromFile, writeTasksToFile, previewCronNextRuns,
 import { pushLog, pushUiLog, broadcastLog, getLogBuffer, clearLogBuffer, logCursorAgentInvocation, escapeLogContentSingleLine } from "./ui-logger"
 import { resolveAgentBinary, applyProxyEnv, quoteArg, getAgentPaths, execAgentSync } from "./agent-cli"
 import {
-  launchSessionAgent as _launchSessionAgent, launchAgent as _launchAgent,
+  launchSessionAgent as _launchSessionAgent,
   launchIndependentAgent as _launchIndependentAgentCli,
   stopAgent as _stopCliAgent, stopSessionAgent as _stopCliSession, stopAllSessionAgents as _stopAllCliSessions,
   getSessionAgentList as getRawCliSessionList,
@@ -24,7 +24,7 @@ import {
 import {
   launchSdkAgent, stopSdkSession, stopAllSdkSessions,
   isSdkSessionRunning, getSdkSessionCount, getSdkSessionList,
-  checkSdkApiKey,
+  checkSdkApiKey, listSdkModels,
 } from "./agent-sdk"
 
 export { applyProxyEnv, checkCliInstalled, installCli, execAgentSync, execAgentAsync, type ExecAgentOptions as ExecAgentSyncOptions } from "./agent-cli"
@@ -122,13 +122,17 @@ export interface DaemonStatus {
   autoOpenId?: string | null
   agentRunning?: boolean
   agentPid?: number | null
+  sessionAgentCount?: number
   cliAvailable?: boolean
   error?: string
   model?: string
   workspaceMismatch?: boolean
   daemonWorkspaceDir?: string
+  feishuEnabled?: boolean
+  feishuConnected?: boolean
   wechatEnabled?: boolean
   wechatStatus?: string
+  wechatReady?: boolean
 }
 
 let daemonProcess: ChildProcess | null = null
@@ -333,8 +337,11 @@ export async function getDaemonStatus(): Promise<DaemonStatus> {
       agentPid: getAgentChildPid(),
       sessionAgentCount: getRunningSessionCount(),
       model: cfgModel,
+      feishuEnabled: health.feishuEnabled as boolean | undefined,
+      feishuConnected: health.feishuConnected as boolean | undefined,
       wechatEnabled: health.wechatEnabled as boolean | undefined,
       wechatStatus: health.wechatStatus as string | undefined,
+      wechatReady: !!(health.wechatStatus === "connected" && health.lastWechatChatId),
     }
     if (status.autoOpenId && !config.larkReceiveId) {
       saveConfig({ larkReceiveId: status.autoOpenId })
@@ -409,7 +416,7 @@ function ensureCliConfig(): void {
 
 export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
   const config = getConfig()
-  const feishuReady = !!(config.larkAppId && config.larkAppSecret)
+  const feishuReady = !!(config.feishuEnabled && config.larkAppId && config.larkAppSecret)
   const wechatReady = !!(config.wechatEnabled && config.wechatToken)
   if (!feishuReady && !wechatReady) {
     return { ok: false, error: "至少需要配置一个消息通道（飞书凭据或微信 Token）" }
@@ -442,16 +449,20 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
   }
 
   try {
+    const appKey = config.larkAppId || config.wechatAccountId || "default"
     const env: Record<string, string> = {
       ...process.env as Record<string, string>,
-      LARK_APP_ID: config.larkAppId,
-      LARK_APP_SECRET: config.larkAppSecret,
-      LARK_RECEIVE_ID: config.larkReceiveId,
-      LARK_RECEIVE_ID_TYPE: "chat_id",
       LARK_WORKSPACE_DIR: config.workspaceDir,
-      APP_DATA_DIR: path.join(app.getPath("userData"), "apps", config.larkAppId || config.wechatAccountId || "default"),
+      APP_DATA_DIR: path.join(app.getPath("userData"), "apps", appKey),
       NODE_USE_ENV_PROXY: "1",
-      ...(config.wechatEnabled ? {
+      ...(feishuReady ? {
+        FEISHU_ENABLED: "1",
+        LARK_APP_ID: config.larkAppId,
+        LARK_APP_SECRET: config.larkAppSecret,
+        LARK_RECEIVE_ID: config.larkReceiveId,
+        LARK_RECEIVE_ID_TYPE: "chat_id",
+      } : {}),
+      ...(wechatReady ? {
         WECHAT_ENABLED: "1",
         WECHAT_TOKEN: config.wechatToken,
         WECHAT_ACCOUNT_ID: config.wechatAccountId,
@@ -482,11 +493,7 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
         if (line.startsWith("__IND_LAUNCH__:")) {
           try {
             const payload = JSON.parse(line.slice("__IND_LAUNCH__:".length))
-            void _launchAgent({
-              sessionKey: payload.taskId, chatType: "task",
-              chatName: payload.taskName, taskMessage: payload.content,
-              meta: { chatId: payload.taskName, chatType: "task" },
-            })
+            void launchIndependentAgent(payload.taskId, payload.taskName, payload.content)
           } catch { /* ignore malformed */ }
           continue
         }
@@ -701,15 +708,17 @@ function startStatusPolling(): void {
       reapIdleGroupAgents()
 
       const sessions = getSessionAgentList()
-      const uncachedGroups = sessions
-        .filter((s) => s.chatType === "group" && !chatNameCache.has(s.sessionKey))
-        .map((s) => s.sessionKey)
-      if (uncachedGroups.length > 0) await fetchChatNames(uncachedGroups)
+      if (getConfig().feishuEnabled) {
+        const uncachedGroups = sessions
+          .filter((s) => s.chatType === "group" && !chatNameCache.has(s.sessionKey))
+          .map((s) => s.sessionKey)
+        if (uncachedGroups.length > 0) await fetchChatNames(uncachedGroups)
 
-      const uncachedP2pOpenIds = sessions
-        .filter((s) => s.chatType === "p2p" && s.senderOpenId && !chatNameCache.has(s.senderOpenId))
-        .map((s) => s.senderOpenId!)
-      if (uncachedP2pOpenIds.length > 0) await fetchUserNames(uncachedP2pOpenIds)
+        const uncachedP2pOpenIds = sessions
+          .filter((s) => s.chatType === "p2p" && s.senderOpenId && !chatNameCache.has(s.senderOpenId))
+          .map((s) => s.senderOpenId!)
+        if (uncachedP2pOpenIds.length > 0) await fetchUserNames(uncachedP2pOpenIds)
+      }
 
       if (status.running) {
         await checkAndExecutePendingCommands()
@@ -811,16 +820,20 @@ async function getQueueChats(): Promise<{ chatId: string; chatType: string; send
 
 function isMainUser(chatId?: string, chatType?: string): boolean {
   if (chatType !== "p2p") return false
-  const rid = getConfig().larkReceiveId?.trim()
-  return !!rid && chatId === rid
+  const cfg = getConfig()
+  if (cfg.larkReceiveId?.trim() && chatId === cfg.larkReceiveId.trim()) return true
+  if (cfg.wechatEnabled && !cfg.feishuEnabled) return true
+  if (cfg.wechatEnabled && cfg.wechatAccountId && chatId && !chatId.startsWith("ou_")) return true
+  return false
 }
 
 async function dispatchSessionAgents(): Promise<void> {
   const config = getConfig()
   const chats = await getQueueChats()
 
+  const feishuOn = !!config.feishuEnabled
   const groupChatIds = chats.filter((c) => c.chatType === "group").map((c) => c.chatId)
-  if (groupChatIds.length > 0) await fetchChatNames(groupChatIds)
+  if (groupChatIds.length > 0 && feishuOn) await fetchChatNames(groupChatIds)
 
   for (const { chatId, chatType, senderOpenId } of chats) {
     const mainUser = isMainUser(chatId, chatType)
@@ -830,7 +843,7 @@ async function dispatchSessionAgents(): Promise<void> {
 
     if (isSessionAgentRunning(sessionKey)) continue
 
-    if (chatType === "p2p" && senderOpenId && !chatNameCache.has(senderOpenId)) {
+    if (feishuOn && chatType === "p2p" && senderOpenId && !chatNameCache.has(senderOpenId)) {
       await fetchUserNames([senderOpenId])
     }
 
@@ -945,6 +958,13 @@ async function injectMcpToDir(wsDir: string): Promise<boolean> {
 }
 
 async function enableMcpServers(wsDir: string, serverNames: string[]): Promise<void> {
+  if (useSdkMode()) {
+    for (const name of serverNames) {
+      toggleMcpServerViaJson(name, true)
+    }
+    return
+  }
+
   const config = getConfig()
   const env: Record<string, string> = { ...process.env as Record<string, string> }
   applyProxyEnv(env, config)
@@ -1050,8 +1070,8 @@ export async function launchSessionAgent(
     let workDir = config.workspaceDir
     if (!isMain) {
       const safeChatId = sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_")
-      const appId = config.larkAppId || "default"
-      workDir = path.join(app.getPath("userData"), "apps", appId, "workspaces", safeChatId)
+      const appKey = config.larkAppId || config.wechatAccountId || "default"
+      workDir = path.join(app.getPath("userData"), "apps", appKey, "workspaces", safeChatId)
       if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true })
     }
     await injectWorkspaceToDir(workDir)
@@ -1094,9 +1114,9 @@ export function getSessionAgentList() {
 
 interface FileCommand { id: string; command: string; messageId: string; chatId?: string; chatType?: string }
 
-async function reportCommandResult(port: number, messageId: string, ok: boolean, message: string): Promise<void> {
+async function reportCommandResult(port: number, messageId: string, ok: boolean, message: string, chatId?: string): Promise<void> {
   try {
-    await httpPost(`http://127.0.0.1:${port}/cmd/result`, { messageId, ok, message })
+    await httpPost(`http://127.0.0.1:${port}/cmd/result`, { messageId, ok, message, chatId })
   } catch (e: unknown) {
     broadcastLog(`指令结果回报失败: ${e instanceof Error ? e.message : e}`, "WARN")
   }
@@ -1126,7 +1146,12 @@ export function parseListModelsStdout(out: string): ListedModel[] {
   return models
 }
 
-function listCursorModelsForCommands(): { ok: true; models: ListedModel[] } | { ok: false; error: string } {
+async function listCursorModelsForCommands(): Promise<{ ok: true; models: ListedModel[] } | { ok: false; error: string }> {
+  if (useSdkMode()) {
+    const r = await listSdkModels()
+    if (!r.ok) return { ok: false, error: r.error || "SDK 获取模型列表失败" }
+    return { ok: true, models: r.models }
+  }
   const config = getConfig()
   const env: Record<string, string> = { ...process.env as Record<string, string>, NODE_USE_ENV_PROXY: "1" }
   applyProxyEnv(env, config)
@@ -1142,7 +1167,7 @@ function listCursorModelsForCommands(): { ok: true; models: ListedModel[] } | { 
   return { ok: true, models }
 }
 
-async function handleFeishuModelCommand(port: number, messageId: string, raw: string): Promise<void> {
+async function handleFeishuModelCommand(port: number, messageId: string, raw: string, chatId?: string): Promise<void> {
   const parts = raw.trim().split(/\s+/).filter((p) => p.length > 0)
   const low = (s: string) => s.toLowerCase()
 
@@ -1163,28 +1188,28 @@ async function handleFeishuModelCommand(port: number, messageId: string, raw: st
     if (cfgModel === "auto") {
       lines.push("（auto：启动 Agent 时不传 --model，由 CLI 默认策略选择）")
     }
-    const lr = listCursorModelsForCommands()
+    const lr = await listCursorModelsForCommands()
     if (lr.ok) {
       const hit = lr.models.findIndex((m) => m.id === cfgModel)
       if (hit >= 0) {
         lines.push(`对应列表序号: #${hit + 1}`)
         lines.push(`   ${lr.models[hit].id} — ${lr.models[hit].label}`)
       } else if (cfgModel !== "auto") {
-        lines.push("（当前配置 id 不在本次 CLI 列表中，若刚换模型列表可再执行 /model ls）")
+        lines.push("（当前配置 id 不在本次列表中，若刚换模型列表可再执行 /model ls）")
       }
       const cliCur = lr.models.filter((m) => m.current)
       if (cliCur.length > 0) {
-        lines.push(`CLI --list-models 标注 (current): ${cliCur.map((m) => m.id).join(", ")}`)
+        lines.push(`标注 (current): ${cliCur.map((m) => m.id).join(", ")}`)
       }
     } else {
-      lines.push(`⚠️ 无法拉取 CLI 模型列表: ${lr.error}`)
+      lines.push(`⚠️ 无法拉取模型列表: ${lr.error}`)
     }
     await reportCommandResult(port, messageId, true, lines.join("\n"))
     return
   }
 
   if (sub === "ls") {
-    const lr = listCursorModelsForCommands()
+    const lr = await listCursorModelsForCommands()
     if (!lr.ok) {
       await reportCommandResult(port, messageId, false, `❌ ${lr.error}`)
       return
@@ -1200,7 +1225,7 @@ async function handleFeishuModelCommand(port: number, messageId: string, raw: st
   }
 
   if (sub === "set") {
-    const lr = listCursorModelsForCommands()
+    const lr = await listCursorModelsForCommands()
     if (!lr.ok) {
       await reportCommandResult(port, messageId, false, `❌ ${lr.error}`)
       return
@@ -1350,7 +1375,7 @@ function formatTaskStatusLine(enabled: boolean): string {
   return enabled ? "✅ 运行中" : "⏸️ 已停止"
 }
 
-async function handleFeishuTaskCommand(port: number, messageId: string, raw: string): Promise<void> {
+async function handleFeishuTaskCommand(port: number, messageId: string, raw: string, chatId?: string): Promise<void> {
   const parts = raw.trim().split(/\s+/).filter((p) => p.length > 0)
   const low = (s: string) => s.toLowerCase()
 
@@ -1613,7 +1638,7 @@ function resolveMcpTarget(list: McpServerEntry[], token: string): McpServerEntry
   return list.find((s) => s.name.toLowerCase() === token.toLowerCase()) ?? null
 }
 
-async function handleFeishuMcpCommand(port: number, messageId: string, raw: string): Promise<void> {
+async function handleFeishuMcpCommand(port: number, messageId: string, raw: string, chatId?: string): Promise<void> {
   const parts = raw.trim().split(/\s+/).filter((p) => p.length > 0)
 
   if (parts.length <= 1) {
@@ -1738,7 +1763,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
     const cmdTokens = rawCmd.split(/\s+/).filter((t) => t.length > 0)
     const head = (cmdTokens[0] ?? "").toLowerCase()
     const isAdmin = isMainUser(claimed.chatId, claimed.chatType)
-    const reply = (ok: boolean, msg: string) => reportCommandResult(lock.port, claimed!.messageId, ok, msg)
+    const reply = (ok: boolean, msg: string) => reportCommandResult(lock.port, claimed!.messageId, ok, msg, claimed!.chatId)
     const denyNonAdmin = () => reply(false, "🔒 该指令仅管理员可用")
 
     broadcastLog(`[指令] 执行 ${rawCmd} (msgId=${claimed.messageId} admin=${isAdmin})`)
@@ -1789,7 +1814,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
 
         case "/task": {
           if (!isAdmin) { await denyNonAdmin(); break }
-          await handleFeishuTaskCommand(lock.port, claimed.messageId, rawCmd)
+          await handleFeishuTaskCommand(lock.port, claimed.messageId, rawCmd, claimed.chatId)
           break
         }
 
@@ -1801,12 +1826,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
             break
           }
           const taskId = `temp_${Date.now()}`
-          const config = getConfig()
-          const result = await _launchAgent({
-            sessionKey: taskId, chatType: "temp_chat",
-            chatName: "临时会话", taskMessage: runMsg,
-            meta: { chatId: config.larkReceiveId, chatType: "temp_chat" },
-          })
+          const result = await launchIndependentAgent(taskId, "临时会话", runMsg)
           await reply(result.ok, result.ok
             ? `🚀 临时 Agent 已启动 (id=${taskId})`
             : `❌ 启动失败: ${result.error ?? "未知错误"}`)
@@ -1815,13 +1835,13 @@ async function checkAndExecutePendingCommands(): Promise<void> {
 
         case "/model": {
           if (!isAdmin) { await denyNonAdmin(); break }
-          await handleFeishuModelCommand(lock.port, claimed.messageId, rawCmd)
+          await handleFeishuModelCommand(lock.port, claimed.messageId, rawCmd, claimed.chatId)
           break
         }
 
         case "/mcp": {
           if (!isAdmin) { await denyNonAdmin(); break }
-          await handleFeishuMcpCommand(lock.port, claimed.messageId, rawCmd)
+          await handleFeishuMcpCommand(lock.port, claimed.messageId, rawCmd, claimed.chatId)
           break
         }
 
@@ -2041,8 +2061,14 @@ async function fetchMcpList(force = false): Promise<McpListCache> {
   const config = getConfig()
   const ws = (config.workspaceDir || "").trim()
   const empty: McpListCache = { enabled: {}, status: {}, ts: 0, ws }
-  if (!ws || !resolveAgentBinary()) return empty
+  if (!ws) return empty
   if (!force && mcpListCache && mcpListCache.ws === ws && Date.now() - mcpListCache.ts < MCP_ENABLED_CACHE_TTL_MS) return mcpListCache
+
+  if (useSdkMode()) {
+    return fetchMcpListFromJson(ws)
+  }
+
+  if (!resolveAgentBinary()) return empty
   if (mcpListInflight) return mcpListInflight
 
   const p = (async (): Promise<McpListCache> => {
@@ -2074,6 +2100,20 @@ async function fetchMcpList(force = false): Promise<McpListCache> {
   return p
 }
 
+function fetchMcpListFromJson(ws: string): McpListCache {
+  const enabled: Record<string, boolean> = {}
+  const status: Record<string, string> = {}
+  const servers = getMcpServerList()
+  for (const s of servers) {
+    const disabled = s.rawConfig && (s.rawConfig as Record<string, unknown>).disabled === true
+    enabled[s.name] = !disabled
+    status[s.name] = disabled ? "disabled" : "enabled"
+  }
+  const result: McpListCache = { enabled, status, ts: Date.now(), ws }
+  mcpListCache = result
+  return result
+}
+
 export async function getMcpEnabledMap(force = false): Promise<Record<string, boolean>> {
   return (await fetchMcpList(force)).enabled
 }
@@ -2089,6 +2129,11 @@ export function invalidateMcpEnabledCache(): void {
 export async function toggleMcpServer(serverName: string, enabled: boolean): Promise<{ ok: boolean; output: string }> {
   const config = getConfig()
   if (!config.workspaceDir) return { ok: false, output: "工作目录未配置" }
+
+  if (useSdkMode()) {
+    return toggleMcpServerViaJson(serverName, enabled)
+  }
+
   if (!resolveAgentBinary()) return { ok: false, output: "Cursor CLI 未安装" }
 
   const env: Record<string, string> = { ...process.env as Record<string, string> }
@@ -2104,6 +2149,28 @@ export async function toggleMcpServer(serverName: string, enabled: boolean): Pro
   } catch (e: unknown) {
     return { ok: false, output: e instanceof Error ? e.message : String(e) }
   }
+}
+
+function toggleMcpServerViaJson(serverName: string, enabled: boolean): { ok: boolean; output: string } {
+  for (const source of ["project", "global"] as const) {
+    const filePath = getMcpJsonPath(source)
+    const cfg = readMcpJson(filePath)
+    const servers = (cfg.mcpServers ?? {}) as Record<string, Record<string, unknown>>
+    if (!(serverName in servers)) continue
+
+    if (enabled) {
+      delete servers[serverName].disabled
+    } else {
+      servers[serverName].disabled = true
+    }
+    cfg.mcpServers = servers
+    writeMcpJson(filePath, cfg)
+    invalidateMcpEnabledCache()
+    const action = enabled ? "已启用" : "已禁用"
+    broadcastLog(`[MCP] ${serverName}: ${action} (mcp.json)`, "INFO")
+    return { ok: true, output: action }
+  }
+  return { ok: false, output: `MCP 服务器 "${serverName}" 未在配置中找到` }
 }
 
 export function getMcpServerList(): McpServerEntry[] {
@@ -2210,6 +2277,11 @@ let mcpLoginChild: ChildProcess | null = null
 let mcpLoginGeneration = 0
 
 export function loginMcpServer(serverName: string): Promise<{ ok: boolean; output: string }> {
+  if (useSdkMode()) {
+    broadcastLog(`[MCP Login] SDK 模式暂不支持 OAuth 认证，请在 Cursor IDE 中完成 "${serverName}" 的登录认证`, "WARN")
+    return Promise.resolve({ ok: false, output: `SDK 模式暂不支持 MCP OAuth 认证。请打开 Cursor IDE，在 MCP 设置中完成 "${serverName}" 的认证，认证后本应用会自动读取凭据。` })
+  }
+
   const gen = ++mcpLoginGeneration
 
   return new Promise<{ ok: boolean; output: string }>(async (resolve) => {
@@ -2440,6 +2512,16 @@ export function initDaemonManager(): void {
     try {
       await larkSendTestMessage(chatId)
       return { ok: true }
+    } catch (e: any) {
+      return { ok: false, error: e?.message ?? "发送失败" }
+    }
+  })
+  ipcMain.handle("bind:test-wechat", async () => {
+    const lock = readLockFile()
+    if (!lock?.port) return { ok: false, error: "Daemon 未运行" }
+    try {
+      const res = await httpPost(`http://127.0.0.1:${lock.port}/wechat-test`, {}) as { ok?: boolean; error?: string }
+      return res
     } catch (e: any) {
       return { ok: false, error: e?.message ?? "发送失败" }
     }

@@ -175,6 +175,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
   const [wechatToken, setWechatToken] = useState("")
   const [wechatAccountId, setWechatAccountId] = useState("")
   const [wechatStatus, setWechatStatus] = useState("disconnected")
+  const [wechatReady, setWechatReady] = useState(false)
   const [wechatQrUrl, setWechatQrUrl] = useState("")
   const [wechatQrStatus, setWechatQrStatus] = useState<"idle" | "loading" | "wait" | "scaned" | "confirmed" | "expired" | "error">("idle")
   const [wechatQrMsg, setWechatQrMsg] = useState("")
@@ -212,8 +213,13 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
       wechatQrBusy.current = false
       if (res.ok) {
         setWechatQrStatus("confirmed")
-        setWechatToken(res.botToken ?? "")
-        setWechatAccountId(res.accountId ?? "")
+        const newToken = res.botToken ?? ""
+        const newAccountId = res.accountId ?? ""
+        setWechatToken(newToken)
+        setWechatAccountId(newAccountId)
+        window.electronAPI.saveConfig({ wechatToken: newToken, wechatAccountId: newAccountId }).then(() => {
+          window.electronAPI.stopDaemon().then(() => window.electronAPI.startDaemon())
+        })
       } else if (res.error === "cancelled") {
         setWechatQrStatus("idle")
       } else {
@@ -365,13 +371,17 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
     })
     const unsub2 = window.electronAPI.onScheduledTaskStatus(setTaskStatuses)
     const unsub3 = window.electronAPI.onWechatStatus?.((s: string) => setWechatStatus(s))
-    return () => { unsub1(); unsub2(); unsub3?.() }
+    const unsub4 = window.electronAPI.onDaemonStatus?.((s: Record<string, unknown>) => {
+      if (typeof s.wechatStatus === "string") setWechatStatus(s.wechatStatus)
+      if (typeof s.wechatReady === "boolean") setWechatReady(s.wechatReady)
+    })
+    return () => { unsub1(); unsub2(); unsub3?.(); unsub4?.() }
   }, [])
 
   useEffect(() => {
     if (tab === "general" || tab === "channel") window.electronAPI.getConfig().then((config) => {
       setAppId(config.larkAppId); setAppSecret(config.larkAppSecret)
-      setFeishuEnabled(!!(config.larkAppId || config.larkAppSecret))
+      setFeishuEnabled(config.feishuEnabled ?? false)
       setReceiveId(config.larkReceiveId)
       setWorkspaceDir(config.workspaceDir); setEnableGroupChat(!!config.enableGroupChat)
       setModel(config.model)
@@ -410,6 +420,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
         agentNewSession,
         closeWindowAction,
         digitalIdentity: digitalIdentity.trim(),
+        feishuEnabled,
         wechatEnabled,
         wechatToken: wechatToken.trim(),
         wechatAccountId: wechatAccountId.trim(),
@@ -428,7 +439,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
       }
       setSaved(true); setTimeout(() => setSaved(false), 1500)
     }, 500)
-  }, [appId, appSecret, receiveId, workspaceDir, enableGroupChat, model, proxy, noProxy, agentNewSession, closeWindowAction, digitalIdentity, wechatEnabled, wechatToken, wechatAccountId, agentMode, cursorApiKey, refreshMcpServers])
+  }, [appId, appSecret, receiveId, workspaceDir, enableGroupChat, model, proxy, noProxy, agentNewSession, closeWindowAction, digitalIdentity, feishuEnabled, wechatEnabled, wechatToken, wechatAccountId, agentMode, cursorApiKey, refreshMcpServers])
 
   useEffect(() => { autoSave() }, [autoSave])
 
@@ -882,9 +893,9 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                 {wechatEnabled && (
                   <div className="space-y-3 rounded-lg border border-gray-700 p-4">
                     <div className="flex items-center gap-2">
-                      <span className={`h-2 w-2 rounded-full ${wechatToken ? (wechatStatus === "connected" ? "bg-green-400" : "bg-yellow-400") : "bg-gray-500"}`} />
+                      <span className={`h-2 w-2 rounded-full ${wechatReady ? "bg-green-400" : wechatToken ? (wechatStatus === "connected" ? "bg-yellow-400" : "bg-yellow-400") : "bg-gray-500"}`} />
                       <span className="text-xs text-gray-400">
-                        {wechatToken ? (wechatStatus === "connected" ? "已连接" : "已认证（重启 Daemon 后生效）") : "未认证"}
+                        {wechatReady ? "已连接" : wechatToken ? (wechatStatus === "connected" ? "等待首条消息" : "已认证（重启 Daemon 后生效）") : "未认证"}
                       </span>
                     </div>
 
@@ -904,8 +915,21 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                     )}
 
                     {wechatQrStatus === "confirmed" && (
-                      <div className="flex items-center gap-2 py-2 text-xs text-green-400">
-                        <CheckCircle2 size={14} />扫码认证成功
+                      <div className="py-2 space-y-2">
+                        <div className="flex items-center gap-2 text-xs text-green-400">
+                          <CheckCircle2 size={14} />扫码成功
+                        </div>
+                        {!wechatReady && (
+                          <div className="flex items-center gap-2 rounded-md border border-yellow-700 bg-yellow-900/20 px-3 py-2 text-xs text-yellow-400">
+                            <Loader2 size={12} className="animate-spin" />
+                            请在微信中给机器人发送一条消息以完成认证
+                          </div>
+                        )}
+                        {wechatReady && (
+                          <div className="flex items-center gap-2 text-xs text-green-400">
+                            <CheckCircle2 size={14} />认证完成，微信通道已就绪
+                          </div>
+                        )}
                       </div>
                     )}
 
@@ -932,15 +956,33 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                       </button>
                     )}
 
-                    {wechatQrStatus === "idle" && wechatToken && (
+                    {(wechatQrStatus === "idle" || wechatQrStatus === "confirmed") && wechatToken && (
                       <div className="space-y-2">
-                        <p className="text-xs text-gray-500">Token 已配置。</p>
-                        <button
-                          onClick={startWechatQrLogin}
-                          className="flex items-center gap-1.5 text-xs text-gray-400 transition hover:text-blue-400"
-                        >
-                          <RefreshCw size={12} />重新扫码
-                        </button>
+                        <div className="flex items-center gap-3">
+                          <button
+                            onClick={startWechatQrLogin}
+                            className="flex items-center gap-1.5 text-xs text-gray-400 transition hover:text-blue-400"
+                          >
+                            <RefreshCw size={12} />重新扫码
+                          </button>
+                          {wechatReady && (
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                try {
+                                  const r = await window.electronAPI.testWechat()
+                                  if (!r.ok) void showAlert("提示", r.error || "测试失败")
+                                  else void showAlert("成功", "微信测试消息已发送")
+                                } catch {
+                                  void showAlert("提示", "Daemon 未运行，请先启动 Daemon")
+                                }
+                              }}
+                              className="flex items-center gap-1.5 text-xs text-gray-400 transition hover:text-green-400"
+                            >
+                              测试消息
+                            </button>
+                          )}
+                        </div>
                       </div>
                     )}
 
@@ -1041,11 +1083,6 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
 
             {/* ═══ MCP ═══ */}
             {tab === "mcp" && (<>
-              {agentMode === "sdk" && (
-                <div className="rounded-lg border border-blue-800/40 bg-blue-900/20 px-4 py-2.5 text-xs text-blue-300">
-                  当前为 SDK 驱动模式，MCP 配置由 SDK 在运行时自动加载，开关状态仅影响 CLI 模式。
-                </div>
-              )}
               <section className="space-y-3">
                 <div className="flex items-center gap-2">
                   <h3 className="text-sm font-medium text-gray-300">MCP 服务器</h3>

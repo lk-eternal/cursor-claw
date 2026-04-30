@@ -336,19 +336,21 @@ export default function Dashboard({ onSettings }: Props) {
           )}
         />
         <StatusCard
-          icon={status.hasTarget || status.wechatStatus === "connected" ? Wifi : WifiOff}
+          icon={status.feishuConnected || status.wechatReady ? Wifi : WifiOff}
           label="消息通道"
           value={
-            status.hasTarget && status.wechatStatus === "connected" ? "飞书 + 微信"
-            : status.hasTarget ? "飞书已连接"
-            : status.wechatStatus === "connected" ? "微信已连接"
+            status.feishuConnected && status.wechatReady ? "飞书 + 微信"
+            : status.feishuConnected ? "飞书已连接"
+            : status.wechatReady ? "微信已连接"
+            : status.wechatStatus === "connected" ? "微信等待首条消息"
             : "等待连接"
           }
-          color={status.hasTarget || status.wechatStatus === "connected" ? "green" : "gray"}
+          color={status.feishuConnected || status.wechatReady ? "green" : status.wechatStatus === "connected" ? "yellow" : "gray"}
           sub={
-            status.hasTarget && status.wechatStatus === "connected" ? "双通道就绪"
-            : status.hasTarget ? "飞书目标已就绪"
-            : status.wechatStatus === "connected" ? "微信已连接"
+            status.feishuConnected && status.wechatReady ? "双通道就绪"
+            : status.feishuConnected ? "飞书目标已就绪"
+            : status.wechatReady ? "微信已就绪"
+            : status.wechatStatus === "connected" ? "请给机器人发一条消息"
             : "等待目标"
           }
         />

@@ -221,6 +221,7 @@ const api = {
   stopTempConnection: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("temp-conn:stop"),
   startBind: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("bind:start"),
   testBind: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("bind:test"),
+  testWechat: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("bind:test-wechat"),
   onBindResult: (cb: (data: { ok: boolean; value: string }) => void) => {
     const handler = (_: unknown, data: { ok: boolean; value: string }) => cb(data)
     ipcRenderer.on("bind:result", handler)
