@@ -9,6 +9,7 @@ import {
   setDaemonSchedulerLogger,
 } from "./daemon-scheduled-tasks.js";
 import { stripProxyEnv, localTimestamp, createLarkClient, LarkSender, LarkMessageEvent } from "./shared/lark-core.js";
+import { WeChatManager } from "./wechat-manager.js";
 import {
   initFileQueue,
   getQueueDir,
@@ -36,6 +37,10 @@ const CONFIGURED_PORT = process.env.LARK_DAEMON_PORT ? Number(process.env.LARK_D
 const WORKSPACE_DIR = process.env.LARK_WORKSPACE_DIR ?? process.cwd();
 const MESSAGE_PREFIX = process.env.LARK_MESSAGE_PREFIX ?? "";
 const TEMP_MODE = process.env.LARK_TEMP_MODE === "1";
+
+const WECHAT_TOKEN = process.env.WECHAT_TOKEN ?? "";
+const WECHAT_ACCOUNT_ID = process.env.WECHAT_ACCOUNT_ID ?? "";
+const WECHAT_ENABLED = process.env.WECHAT_ENABLED === "1";
 
 const savedProxyKeys = stripProxyEnv();
 
@@ -86,6 +91,27 @@ function log(level: string, ...args: unknown[]): void {
 const larkClient = createLarkClient(APP_ID, APP_SECRET);
 const sender = new LarkSender({ client: larkClient, receiveId: RECEIVE_ID, receiveIdType: RECEIVE_ID_TYPE, messagePrefix: MESSAGE_PREFIX, log });
 let botOpenId: string | undefined;
+
+// ── WeChat ───────────────────────────────────────────────
+
+let wechatManager: WeChatManager | null = null;
+
+function initWeChatManager(): WeChatManager {
+  const dataDir = path.join(WORKSPACE_DIR, ".cursor", "wechat-data");
+  return new WeChatManager({
+    dataDir,
+    log,
+    onMessage: (msg) => {
+      pushMessage(msg.text, msg.messageId, msg.chatId, msg.chatType, msg.senderOpenId);
+    },
+    onQrCode: (dataUrl) => {
+      process.stdout.write(`__WECHAT_QR__:${dataUrl}\n`);
+    },
+    onStatusChange: (status) => {
+      process.stdout.write(`__WECHAT_STATUS__:${status}\n`);
+    },
+  });
+}
 
 // ── SSE 客户端管理 ───────────────────────────────────────
 
@@ -566,6 +592,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       queue: { length: getFileQueueLength() },
       tasks: { total: tasks.length, enabled: tasks.filter((t) => t.enabled).length },
       feishu: { connected: true, hasTarget: !!sender.getTarget() },
+      wechat: { enabled: WECHAT_ENABLED, status: wechatManager?.getStatus() ?? "disconnected" },
     });
     return true;
   }
@@ -763,10 +790,17 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const body = JSON.parse(await readBody(req));
     const { text, message_id, chat_id } = body as { text: string; message_id?: string; chat_id?: string };
     if (!text) { json(res, { ok: false, error: "text is required" }, 400); return true; }
-    if (message_id) await sender.sendMessage(text, message_id);
-    else if (chat_id) await sender.sendMessageToChat(chat_id, text);
-    else await sender.sendMessage(text);
-    json(res, { ok: true });
+
+    const isWechatTarget = chat_id?.startsWith("wx_") || chat_id?.includes("@chatroom");
+    if (isWechatTarget && wechatManager?.isConnected()) {
+      const ok = await wechatManager.sendText(chat_id!, text);
+      json(res, { ok });
+    } else {
+      if (message_id) await sender.sendMessage(text, message_id);
+      else if (chat_id) await sender.sendMessageToChat(chat_id, text);
+      else await sender.sendMessage(text);
+      json(res, { ok: true });
+    }
     return true;
   }
 
@@ -774,7 +808,12 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const body = JSON.parse(await readBody(req));
     const { image_path, message_id, chat_id } = body as { image_path: string; message_id?: string; chat_id?: string };
     if (!image_path) { json(res, { ok: false, error: "image_path is required" }, 400); return true; }
-    await sender.sendImage(image_path, message_id, chat_id);
+    const isWx = chat_id?.startsWith("wx_") || chat_id?.includes("@chatroom");
+    if (isWx && wechatManager?.isConnected()) {
+      await wechatManager.sendMedia(chat_id!, image_path);
+    } else {
+      await sender.sendImage(image_path, message_id, chat_id);
+    }
     json(res, { ok: true });
     return true;
   }
@@ -783,7 +822,12 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const body = JSON.parse(await readBody(req));
     const { file_path, message_id, chat_id } = body as { file_path: string; message_id?: string; chat_id?: string };
     if (!file_path) { json(res, { ok: false, error: "file_path is required" }, 400); return true; }
-    await sender.sendFile(file_path, message_id, chat_id);
+    const isWx = chat_id?.startsWith("wx_") || chat_id?.includes("@chatroom");
+    if (isWx && wechatManager?.isConnected()) {
+      await wechatManager.sendMedia(chat_id!, file_path);
+    } else {
+      await sender.sendFile(file_path, message_id, chat_id);
+    }
     json(res, { ok: true });
     return true;
   }
@@ -960,6 +1004,13 @@ export async function daemonMain(): Promise<void> {
 
   await sender.resolveTarget(RECEIVE_ID, RECEIVE_ID_TYPE);
   startLarkConnection();
+
+  if (WECHAT_ENABLED) {
+    wechatManager = initWeChatManager();
+    wechatManager.start(WECHAT_TOKEN, WECHAT_ACCOUNT_ID).catch((e: any) => {
+      log("WARN", `[WeChat] 启动失败（将以仅飞书模式运行）: ${e?.message ?? e}`);
+    });
+  }
 
   daemonPort = await startHttpServer();
   writeLockFile(daemonPort);

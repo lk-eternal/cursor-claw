@@ -234,6 +234,16 @@ const api = {
     ipcRenderer.on("daemon:log", handler)
     return () => ipcRenderer.removeListener("daemon:log", handler)
   },
+  onWechatStatus: (cb: (status: string) => void) => {
+    const handler = (_: unknown, status: string) => cb(status)
+    ipcRenderer.on("wechat:status", handler)
+    return () => ipcRenderer.removeListener("wechat:status", handler)
+  },
+  onWechatQrCode: (cb: (dataUrl: string) => void) => {
+    const handler = (_: unknown, dataUrl: string) => cb(dataUrl)
+    ipcRenderer.on("wechat:qrcode", handler)
+    return () => ipcRenderer.removeListener("wechat:qrcode", handler)
+  },
   onWindowCloseConfirm: (cb: () => void) => {
     const handler = () => cb()
     ipcRenderer.on("window:close-confirm", handler)

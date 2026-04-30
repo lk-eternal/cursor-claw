@@ -29,6 +29,9 @@ export interface AppConfig {
   mainChatIds: Record<string, string>
   enableGroupChat: boolean
   digitalIdentity: string
+  wechatEnabled: boolean
+  wechatToken: string
+  wechatAccountId: string
 }
 
 const defaults: AppConfig = {
@@ -49,6 +52,9 @@ const defaults: AppConfig = {
   mainChatIds: {},
   enableGroupChat: false,
   digitalIdentity: "",
+  wechatEnabled: false,
+  wechatToken: "",
+  wechatAccountId: "",
 }
 
 const store = new Store<AppConfig>({

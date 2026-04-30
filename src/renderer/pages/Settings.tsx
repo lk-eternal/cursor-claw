@@ -105,6 +105,10 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
   const [closeWindowAction, setCloseWindowAction] = useState<CloseWindowAction>("ask")
   const [workspaceDaemonChoice, setWorkspaceDaemonChoice] = useState<{ old: string; new: string } | null>(null)
   const [bindWaiting, setBindWaiting] = useState(false)
+  const [wechatEnabled, setWechatEnabled] = useState(false)
+  const [wechatToken, setWechatToken] = useState("")
+  const [wechatAccountId, setWechatAccountId] = useState("")
+  const [wechatStatus, setWechatStatus] = useState("disconnected")
   const { showAlert, showConfirm, ModalPortal } = useInlineModal()
 
   const handleBind = async () => {
@@ -248,7 +252,8 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
       if (ok) setMcpServers((prev) => prev.map((s) => s.name === serverName ? { ...s, authenticated: true } : s))
     })
     const unsub2 = window.electronAPI.onScheduledTaskStatus(setTaskStatuses)
-    return () => { unsub1(); unsub2() }
+    const unsub3 = window.electronAPI.onWechatStatus?.((s: string) => setWechatStatus(s))
+    return () => { unsub1(); unsub2(); unsub3?.() }
   }, [])
 
   useEffect(() => {
@@ -262,6 +267,9 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
       setAgentNewSession(config.agentNewSession ?? false)
       setCloseWindowAction(config.closeWindowAction ?? "ask")
       setDigitalIdentity(config.digitalIdentity ?? "")
+      setWechatEnabled(config.wechatEnabled ?? false)
+      setWechatToken(config.wechatToken ?? "")
+      setWechatAccountId(config.wechatAccountId ?? "")
       loaded.current = true
     })
     if (tab === "mcp") refreshMcpServers(true)
@@ -287,6 +295,9 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
         agentNewSession,
         closeWindowAction,
         digitalIdentity: digitalIdentity.trim(),
+        wechatEnabled,
+        wechatToken: wechatToken.trim(),
+        wechatAccountId: wechatAccountId.trim(),
       })
       if (r.needWorkspaceDaemonChoice && r.oldWorkspaceDir !== undefined && r.newWorkspaceDir !== undefined) {
         setWorkspaceDaemonChoice({ old: r.oldWorkspaceDir, new: r.newWorkspaceDir })
@@ -300,7 +311,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
       }
       setSaved(true); setTimeout(() => setSaved(false), 1500)
     }, 500)
-  }, [appId, appSecret, receiveId, workspaceDir, enableGroupChat, model, proxy, noProxy, agentNewSession, closeWindowAction, digitalIdentity, refreshMcpServers])
+  }, [appId, appSecret, receiveId, workspaceDir, enableGroupChat, model, proxy, noProxy, agentNewSession, closeWindowAction, digitalIdentity, wechatEnabled, wechatToken, wechatAccountId, refreshMcpServers])
 
   useEffect(() => { autoSave() }, [autoSave])
 
@@ -676,6 +687,38 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                   </button>
                 </div>
               </section>
+              <section className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-medium text-gray-300">微信接入</h3>
+                    <p className="text-xs text-gray-500">通过 iLink 协议接入微信，需提供 Token 和 Account ID</p>
+                  </div>
+                  <button onClick={() => setWechatEnabled(!wechatEnabled)}
+                    className={`relative h-6 w-11 rounded-full transition ${wechatEnabled ? "bg-blue-600" : "bg-gray-600"}`}>
+                    <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition ${wechatEnabled ? "left-[22px]" : "left-0.5"}`} />
+                  </button>
+                </div>
+                {wechatEnabled && (
+                  <div className="space-y-3 rounded-lg border border-gray-700 p-4">
+                    <div className="flex items-center gap-2">
+                      <span className={`h-2 w-2 rounded-full ${wechatStatus === "connected" ? "bg-green-400" : wechatStatus === "qr_pending" || wechatStatus === "logging_in" ? "bg-yellow-400 animate-pulse" : wechatStatus === "error" ? "bg-red-400" : "bg-gray-500"}`} />
+                      <span className="text-xs text-gray-400">
+                        {wechatStatus === "connected" ? "已连接" : wechatStatus === "qr_pending" ? "等待扫码" : wechatStatus === "logging_in" ? "登录中" : wechatStatus === "error" ? "连接错误" : "未连接"}
+                      </span>
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-xs text-gray-500">Token</label>
+                      <input type="password" value={wechatToken} onChange={(e) => setWechatToken(e.target.value)} className={inputCls} placeholder="iLink Bot Token" />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-xs text-gray-500">Account ID</label>
+                      <input type="text" value={wechatAccountId} onChange={(e) => setWechatAccountId(e.target.value)} className={inputCls} placeholder="可选，留空自动获取" />
+                    </div>
+                    <p className="text-xs text-gray-600">保存后重启 Daemon 生效。登录时会生成二维码，使用微信扫码完成认证。</p>
+                  </div>
+                )}
+              </section>
+
               <section className="space-y-3">
                 <h3 className="text-sm font-medium text-gray-300">关闭主窗口</h3>
                 <p className="text-xs text-gray-600">点击窗口右上角关闭时的行为（可从系统托盘再次打开窗口）。</p>

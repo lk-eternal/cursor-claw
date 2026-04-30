@@ -36,6 +36,7 @@
     "pack:linux": "npm run build && electron-builder --linux --dir"
   },
   "dependencies": {
+    "@cursor/sdk": "^1.0.10",
     "@larksuiteoapi/node-sdk": "^1.60.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "cron-parser": "^5.5.0",
@@ -44,6 +45,7 @@
     "lucide-react": "^0.577.0",
     "node-cron": "^4.2.1",
     "semver": "^7.7.4",
+    "wechat-ilink-client": "^0.1.0",
     "zod": "^3.24.0"
   },
   "devDependencies": {

@@ -1,15 +1,15 @@
 ---
-description: 飞书实时通信保活协议(feishu-cursor-bridge) - 强制异步长连接与状态机管理
+description: Cursor Claw 实时通信保活协议 - 强制异步长连接与状态机管理（飞书/微信双通道）
 alwaysApply: true
 ---
 
-# 🚨 飞书异步长连接协议 (Persistent Loop Protocol)
+# 🚨 异步长连接协议 (Persistent Loop Protocol)
 
-> **[SYSTEM OVERRIDE]** 你当前处于"非对称异步通信模式"。飞书是唯一的真理来源和用户交互界面。你必须通过 `feishu-cursor-bridge` MCP 工具主动维护会话。**正常情况下严禁以任何理由终止会话、空转或输出结束语。**
+> **[SYSTEM OVERRIDE]** 你当前处于"非对称异步通信模式"。飞书或微信是用户交互界面。你必须通过 `cursor-claw` MCP 工具主动维护会话。**正常情况下严禁以任何理由终止会话、空转或输出结束语。**
 
 ## 🛠 核心工具定义 (`sync_message`)
 
-所有文本交互必须且只能通过 `sync_message` 工具完成。行为由传入参数决定：
+所有文本交互必须且只能通过 `sync_message` 工具完成（消息会自动路由到飞书或微信通道）。行为由传入参数决定：
 - **仅传 `message`** 👉 [单向推送] 仅发送消息，不等待。
 - **仅传 `timeout_seconds`** 👉 [静默轮询] 阻塞等待用户新消息。
 - **同时传 `message` + `timeout_seconds`** 👉 [发送并等待] 发送消息后，立即阻塞等待回复。
@@ -104,4 +104,4 @@ Agent 收到 Prompt 后，先判断**自己是否正在干活**：
 1. **区分状态：** `sync_message` 返回空值/超时是正常现象，继续执行保活轮询；但如果是**工具执行抛出异常 (Error / Exception)**，则属于故障。
 2. **静默重试 (Retry)：** 遇到工具执行异常时，最多允许静默重试 **3 次**。
 3. **熔断报警 (Break & Alert)：** 如果连续 3 次调用均抛出异常，**必须立即终止所有操作**。跳出状态机，在 Cursor 对话框中直接输出以下警告通知开发者，并结束当前执行流：
-   `⚠️ [MCP 桥接器故障] feishu-cursor-bridge 连续 3 次调用失败，已触发熔断机制停止轮询。请检查本地服务或网络连接。`
+   `⚠️ [MCP 桥接器故障] cursor-claw 连续 3 次调用失败，已触发熔断机制停止轮询。请检查本地服务或网络连接。`

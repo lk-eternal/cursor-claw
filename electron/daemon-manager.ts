@@ -393,6 +393,11 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
       LARK_WORKSPACE_DIR: config.workspaceDir,
       LARK_APP_DATA_DIR: path.join(app.getPath("userData"), "apps", config.larkAppId),
       NODE_USE_ENV_PROXY: "1",
+      ...(config.wechatEnabled ? {
+        WECHAT_ENABLED: "1",
+        WECHAT_TOKEN: config.wechatToken,
+        WECHAT_ACCOUNT_ID: config.wechatAccountId,
+      } : {}),
     }
     applyProxyEnv(env, config)
 
@@ -437,6 +442,16 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
               BrowserWindow.getAllWindows().forEach((w) => w.webContents.send("bind:result", { ok: true, value: chatId }))
             }
           } catch { /* ignore */ }
+          continue
+        }
+        if (line.startsWith("__WECHAT_QR__:")) {
+          const dataUrl = line.slice("__WECHAT_QR__:".length)
+          BrowserWindow.getAllWindows().forEach((w) => w.webContents.send("wechat:qrcode", dataUrl))
+          continue
+        }
+        if (line.startsWith("__WECHAT_STATUS__:")) {
+          const status = line.slice("__WECHAT_STATUS__:".length)
+          BrowserWindow.getAllWindows().forEach((w) => w.webContents.send("wechat:status", status))
           continue
         }
         pushUiLog("LarkDaemon", "INFO", line)

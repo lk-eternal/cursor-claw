@@ -18,6 +18,9 @@ interface AppConfig {
   closeWindowAction: "ask" | "minimize" | "quit"
   enableGroupChat: boolean
   digitalIdentity: string
+  wechatEnabled: boolean
+  wechatToken: string
+  wechatAccountId: string
 }
 
 interface ScheduledTask {
@@ -168,6 +171,8 @@ interface ElectronAPI {
   onMcpLoginComplete(cb: (data: { serverName: string; ok: boolean }) => void): () => void
   onDaemonStatus(cb: (status: DaemonStatus) => void): () => void
   onDaemonLog(cb: (line: string) => void): () => void
+  onWechatStatus?(cb: (status: string) => void): () => void
+  onWechatQrCode?(cb: (dataUrl: string) => void): () => void
   onWindowCloseConfirm(cb: () => void): () => void
   onAppModalRequest(cb: (payload: AppModalRequestPayload) => void): () => void
   respondAppModal(requestId: string, response: number): Promise<void>

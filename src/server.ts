@@ -99,7 +99,7 @@ const mcpServer = new McpServer({ name: "cursor-claw", version: PKG_VERSION, des
 
 mcpServer.tool(
   "sync_message",
-  "飞书消息同步工具。传 message 则发送消息；传 timeout_seconds 则等待用户回复；两者同时传则先发送再等待。均不传时仅检查待处理消息。",
+  "消息同步工具（飞书/微信）。传 message 则发送消息；传 timeout_seconds 则等待用户回复；两者同时传则先发送再等待。均不传时仅检查待处理消息。",
   {
     message: z.string().optional().describe("要发送给用户的消息内容。不传则不发送"),
     timeout_seconds: z.number().optional().describe("等待用户回复的超时秒数。不传则不等待，立即返回"),
@@ -132,7 +132,7 @@ mcpServer.tool(
 
 mcpServer.tool(
   "send_image",
-  "发送本地图片到飞书。image_path 为本地文件绝对路径。",
+  "发送本地图片到飞书/微信。image_path 为本地文件绝对路径。",
   {
     image_path: z.string().describe("图片绝对路径"),
     message_id: z.string().optional().describe("要回复的消息ID，传入后以回复模式发送"),
@@ -146,7 +146,7 @@ mcpServer.tool(
 
 mcpServer.tool(
   "send_file",
-  "发送本地文件到飞书。file_path 为本地文件绝对路径。",
+  "发送本地文件到飞书/微信。file_path 为本地文件绝对路径。",
   {
     file_path: z.string().describe("文件绝对路径"),
     message_id: z.string().optional().describe("要回复的消息ID，传入后以回复模式发送"),
