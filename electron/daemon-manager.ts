@@ -2534,10 +2534,10 @@ export function initDaemonManager(): void {
     if (wechatQrAbort) wechatQrAbort.abort()
     wechatQrAbort = new AbortController()
     try {
-      const { ApiClient, loginWithQRCode } = await import("wechat-ilink-client")
+      const { WeChatClient } = await import("../src/wechat/index.js")
       const QRCode = await import("qrcode")
-      const api = new ApiClient()
-      const result = await loginWithQRCode(api, {
+      const tmpClient = new WeChatClient()
+      const result = await tmpClient.login({
         signal: wechatQrAbort.signal,
         async onQRCode(url) {
           const dataUrl = await QRCode.toDataURL(url, { width: 280, margin: 2 })

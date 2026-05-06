@@ -2,11 +2,8 @@ import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-
-type WeChatClientClass = typeof import("wechat-ilink-client").WeChatClient;
-type WeChatClientType = import("wechat-ilink-client").WeChatClient;
-type WeixinMessageType = import("wechat-ilink-client").WeixinMessage;
-type MessageItemType = import("wechat-ilink-client").MessageItem;
+import { WeChatClient, normalizeAccountId } from "./wechat/index.js";
+import type { WeixinMessage, MessageItem } from "./wechat/index.js";
 
 export interface WeChatIncomingMessage {
   text: string;
@@ -28,8 +25,7 @@ export interface WeChatManagerOptions {
 export type WeChatStatus = "disconnected" | "qr_pending" | "logging_in" | "connected" | "error";
 
 export class WeChatManager extends EventEmitter {
-  private client: WeChatClientType | null = null;
-  private ClientCtor: WeChatClientClass | null = null;
+  private client: WeChatClient | null = null;
   private status: WeChatStatus = "disconnected";
   private syncBufPath: string;
   private opts: WeChatManagerOptions;
@@ -58,10 +54,6 @@ export class WeChatManager extends EventEmitter {
   async start(token?: string, accountId?: string): Promise<void> {
     if (this.client) await this.stop();
 
-    const mod = await import("wechat-ilink-client");
-    const { WeChatClient, normalizeAccountId } = mod;
-    this.ClientCtor = WeChatClient;
-
     if (!token) {
       this.opts.log("ERROR", "[WeChat] token 未提供，无法启动");
       this.setStatus("error");
@@ -75,7 +67,7 @@ export class WeChatManager extends EventEmitter {
       accountId: resolvedAccountId,
     });
 
-    this.client.on("message", (msg: WeixinMessageType) => this.handleMessage(msg));
+    this.client.on("message", (msg: WeixinMessage) => this.handleMessage(msg));
     this.client.on("error", (err: Error) => {
       this.opts.log("ERROR", `[WeChat] 错误: ${err.message}`);
       this.setStatus("error");
@@ -85,13 +77,13 @@ export class WeChatManager extends EventEmitter {
       this.setStatus("disconnected");
     });
 
-    const loadSyncBuf = (): string | undefined => {
+    const loadSyncBuf = async (): Promise<string | undefined> => {
       try {
         if (fs.existsSync(this.syncBufPath)) return fs.readFileSync(this.syncBufPath, "utf-8");
       } catch { /* ignore */ }
       return undefined;
     };
-    const saveSyncBuf = (buf: string): void => {
+    const saveSyncBuf = async (buf: string): Promise<void> => {
       try { fs.writeFileSync(this.syncBufPath, buf, "utf-8"); } catch { /* ignore */ }
     };
 
@@ -222,7 +214,7 @@ export class WeChatManager extends EventEmitter {
 
   private static readonly MEDIA_DIR = path.join(os.tmpdir(), "cursor-claw-images");
 
-  private handleMessage(msg: WeixinMessageType): void {
+  private handleMessage(msg: WeixinMessage): void {
     this.opts.log("DEBUG", `[WeChat] RAW msg: mid=${msg.message_id} type=${msg.message_type} state=${msg.message_state} from=${msg.from_user_id} to=${msg.to_user_id} client_id=${msg.client_id}`);
 
     if (msg.message_type === 2) return;
@@ -267,14 +259,14 @@ export class WeChatManager extends EventEmitter {
     });
   }
 
-  private async processMessageContent(msg: WeixinMessageType): Promise<string> {
-    const textContent = this.ClientCtor ? this.ClientCtor.extractText(msg) : "";
+  private async processMessageContent(msg: WeixinMessage): Promise<string> {
+    const textContent = WeChatClient.extractText(msg);
     const parts: string[] = [];
     if (textContent.trim()) parts.push(textContent.trim());
 
     const items = msg.item_list ?? [];
     for (const item of items) {
-      if (!this.ClientCtor?.isMediaItem(item)) continue;
+      if (!WeChatClient.isMediaItem(item)) continue;
       const result = await this.downloadMediaItem(item);
       if (result) {
         const label = { image: "图片", voice: "语音", file: "文件", video: "视频" }[result.kind] ?? "文件";
@@ -287,7 +279,7 @@ export class WeChatManager extends EventEmitter {
     return parts.join("\n");
   }
 
-  private async downloadMediaItem(item: MessageItemType): Promise<{ path: string; kind: string } | null> {
+  private async downloadMediaItem(item: MessageItem): Promise<{ path: string; kind: string } | null> {
     if (!this.client) return null;
     try {
       const media = await this.client.downloadMedia(item);

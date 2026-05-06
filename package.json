@@ -46,7 +46,6 @@
     "node-cron": "^4.2.1",
     "qrcode": "^1.5.4",
     "semver": "^7.7.4",
-    "wechat-ilink-client": "^0.1.0",
     "zod": "^3.24.0"
   },
   "devDependencies": {
