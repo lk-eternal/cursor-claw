@@ -893,9 +893,19 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                 {wechatEnabled && (
                   <div className="space-y-3 rounded-lg border border-gray-700 p-4">
                     <div className="flex items-center gap-2">
-                      <span className={`h-2 w-2 rounded-full ${wechatReady ? "bg-green-400" : wechatToken ? (wechatStatus === "connected" ? "bg-yellow-400" : "bg-yellow-400") : "bg-gray-500"}`} />
+                      <span className={`h-2 w-2 rounded-full ${
+                        wechatReady ? "bg-green-400"
+                        : wechatStatus === "logging_in" || wechatStatus === "qr_pending" || wechatStatus === "connected" ? "bg-yellow-400"
+                        : wechatToken ? "bg-yellow-400"
+                        : "bg-gray-500"
+                      }`} />
                       <span className="text-xs text-gray-400">
-                        {wechatReady ? "已连接" : wechatToken ? (wechatStatus === "connected" ? "等待首条消息" : "已认证（重启 Daemon 后生效）") : "未认证"}
+                        {wechatReady ? "已连接"
+                        : wechatStatus === "logging_in" ? "连接中..."
+                        : wechatStatus === "qr_pending" ? "等待扫码..."
+                        : wechatStatus === "connected" ? "等待首条消息"
+                        : wechatToken ? "已认证（重启 Daemon 后生效）"
+                        : "未认证"}
                       </span>
                     </div>
 

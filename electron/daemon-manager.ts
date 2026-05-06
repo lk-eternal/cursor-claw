@@ -225,6 +225,11 @@ function getRuleTemplatePath(): string {
   return path.join(app.getAppPath(), "resources", "cursor-claw.mdc")
 }
 
+function getSkillsTemplateDir(): string {
+  if (app.isPackaged) return path.join(process.resourcesPath, "skills")
+  return path.join(app.getAppPath(), "resources", "skills")
+}
+
 function getLockFilePath(): string {
   const config = getConfig()
   const appKey = config.larkAppId || config.wechatAccountId || "default"
@@ -1033,16 +1038,43 @@ function injectRulesToDir(wsDir: string): boolean {
   }
 }
 
-export async function injectWorkspaceMcpAndRules(): Promise<{ mcpOk: boolean; ruleOk: boolean }> {
+function injectSkillsToDir(wsDir: string): boolean {
+  try {
+    const srcDir = getSkillsTemplateDir()
+    if (!fs.existsSync(srcDir)) return false
+    const destBase = path.join(wsDir, ".cursor", "skills")
+    const entries = fs.readdirSync(srcDir, { withFileTypes: true })
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const skillSrc = path.join(srcDir, entry.name)
+      const skillDest = path.join(destBase, entry.name)
+      if (!fs.existsSync(skillDest)) fs.mkdirSync(skillDest, { recursive: true })
+      for (const file of fs.readdirSync(skillSrc)) {
+        const s = path.join(skillSrc, file)
+        const d = path.join(skillDest, file)
+        if (fs.statSync(s).isFile()) fs.copyFileSync(s, d)
+      }
+    }
+    broadcastLog(`Skills 已注入: ${destBase}`)
+    return true
+  } catch (e: unknown) {
+    broadcastLog(`Skills 注入失败: ${e instanceof Error ? e.message : e}`, "ERROR")
+    return false
+  }
+}
+
+export async function injectWorkspaceMcpAndRules(): Promise<{ mcpOk: boolean; ruleOk: boolean; skillOk: boolean }> {
   const config = getConfig()
-  if (!config.workspaceDir) return { mcpOk: false, ruleOk: false }
+  if (!config.workspaceDir) return { mcpOk: false, ruleOk: false, skillOk: false }
   const mcpOk = await injectMcpToDir(config.workspaceDir)
   const ruleOk = injectRulesToDir(config.workspaceDir)
-  return { mcpOk, ruleOk }
+  const skillOk = injectSkillsToDir(config.workspaceDir)
+  return { mcpOk, ruleOk, skillOk }
 }
 
 async function injectWorkspaceToDir(dir: string): Promise<boolean> {
   await injectMcpToDir(dir)
+  injectSkillsToDir(dir)
   return injectRulesToDir(dir)
 }
 

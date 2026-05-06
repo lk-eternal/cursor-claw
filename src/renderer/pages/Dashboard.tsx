@@ -343,14 +343,23 @@ export default function Dashboard({ onSettings }: Props) {
             : status.feishuConnected ? "飞书已连接"
             : status.wechatReady ? "微信已连接"
             : status.wechatStatus === "connected" ? "微信等待首条消息"
+            : status.wechatStatus === "logging_in" || status.wechatStatus === "qr_pending" ? "微信连接中"
+            : status.wechatEnabled && status.running ? "微信连接中"
             : "等待连接"
           }
-          color={status.feishuConnected || status.wechatReady ? "green" : status.wechatStatus === "connected" ? "yellow" : "gray"}
+          color={
+            status.feishuConnected || status.wechatReady ? "green"
+            : status.wechatStatus === "connected" ? "yellow"
+            : status.wechatStatus === "logging_in" || status.wechatStatus === "qr_pending" || (status.wechatEnabled && status.running) ? "yellow"
+            : "gray"
+          }
           sub={
             status.feishuConnected && status.wechatReady ? "双通道就绪"
             : status.feishuConnected ? "飞书目标已就绪"
             : status.wechatReady ? "微信已就绪"
             : status.wechatStatus === "connected" ? "请给机器人发一条消息"
+            : status.wechatStatus === "logging_in" || status.wechatStatus === "qr_pending" ? "正在建立微信连接..."
+            : status.wechatEnabled && status.running ? "正在初始化微信通道..."
             : "等待目标"
           }
         />
