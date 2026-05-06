@@ -773,10 +773,6 @@ async function fetchUserNames(openIds: string[]): Promise<void> {
   } catch { /* ignore */ }
 }
 
-export function getChatName(chatId: string): string | undefined {
-  return chatNameCache.get(chatId)
-}
-
 interface DequeuedMessage { text: string; messageId: string; chatId: string; chatType: string; senderOpenId?: string }
 
 interface MergedMessages { text: string; count: number; chatType?: string; messageIds: string[]; chatId?: string; senderOpenId?: string }
@@ -889,29 +885,6 @@ export async function getQueueMessages(): Promise<{ index: number; preview: stri
   } catch {
     return []
   }
-}
-
-export async function readLogs(lines = 200): Promise<string> {
-  const config = getConfig()
-  const logPath = path.join(config.workspaceDir || "", ".cursor", "daemon.log")
-  if (!fs.existsSync(logPath)) return ""
-  try {
-    const content = fs.readFileSync(logPath, "utf-8")
-    const allLines = content.split("\n")
-    return allLines.slice(-lines).join("\n")
-  } catch {
-    return ""
-  }
-}
-
-export async function clearLogs(): Promise<void> {
-  const config = getConfig()
-  const logPath = path.join(config.workspaceDir || "", ".cursor", "daemon.log")
-  try {
-    if (fs.existsSync(logPath)) {
-      fs.writeFileSync(logPath, "", "utf-8")
-    }
-  } catch { /* ignore */ }
 }
 
 // ── CLI 检测与安装 ──────────────────────────────────────────
@@ -1086,9 +1059,6 @@ export type AgentLoginStatus = {
   identityLine?: string
   error?: string
 }
-
-export const launchAgent = () =>
-  launchSessionAgent(P2P_SESSION_KEY, "p2p", undefined, undefined, true)
 
 export async function launchSessionAgent(
   sessionKey: string, chatType: ChatType,
@@ -1974,12 +1944,6 @@ async function checkAndExecutePendingCommands(): Promise<void> {
 
 // ── MCP OAuth 认证管理 ────────────────────────────────────
 
-export interface McpAuthInfo {
-  name: string
-  url: string
-  authenticated: boolean
-}
-
 function findProjectDir(workspaceDir: string): string | null {
   const projectsBase = path.join(os.homedir(), ".cursor", "projects")
   if (!fs.existsSync(projectsBase)) return null
@@ -2298,13 +2262,6 @@ export function deleteMcpServer(name: string): void {
   }
 }
 
-export function getOAuthMcpList(): McpAuthInfo[] {
-  const list = getMcpServerList()
-  return list
-    .filter((s) => s.type === "url")
-    .map((s) => ({ name: s.name, url: s.url!, authenticated: s.authenticated ?? false }))
-}
-
 let mcpLoginChild: ChildProcess | null = null
 let mcpLoginGeneration = 0
 
@@ -2525,7 +2482,6 @@ export function initDaemonManager(): void {
   setChatNameResolver((chatId) => chatNameCache.get(chatId))
   ipcMain.handle("config:apply-workspace-restart", (_, workspaceDir: string) => applyWorkspaceDirRestart(workspaceDir))
   ipcMain.handle("daemon:get-log-buffer", () => getLogBuffer())
-  ipcMain.handle("agent:launch", () => launchAgent())
   ipcMain.handle("agent:stop", () => { stopAgent(); return { ok: true } })
   ipcMain.handle("agent:sessions", () => getSessionAgentList())
   ipcMain.handle("bind:start", async () => {

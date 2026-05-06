@@ -7,14 +7,11 @@ import {
   startDaemon,
   stopDaemon,
   getDaemonStatus,
-  readLogs,
-  clearLogs,
   getQueueMessages,
   checkCliInstalled,
   checkAgentLoggedIn,
   installCli,
   loginCli,
-  getOAuthMcpList,
   getMcpServerList,
   saveMcpServer,
   deleteMcpServer,
@@ -172,15 +169,12 @@ function registerIpcHandlers(): void {
   ipcMain.handle("daemon:start", () => startDaemon())
   ipcMain.handle("daemon:stop", () => stopDaemon())
   ipcMain.handle("daemon:status", () => getDaemonStatus())
-  ipcMain.handle("logs:read", (_, lines) => readLogs(lines))
-  ipcMain.handle("logs:clear", () => clearLogs())
   ipcMain.handle("daemon:queue", () => getQueueMessages())
   ipcMain.handle("daemon:queue-clear", () => clearMessageQueue())
   ipcMain.handle("cli:check", () => checkCliInstalled())
   ipcMain.handle("cli:login-status", () => checkAgentLoggedIn())
   ipcMain.handle("cli:install", () => installCli())
   ipcMain.handle("cli:login", () => loginCli())
-  ipcMain.handle("mcp:list-oauth", () => getOAuthMcpList())
   ipcMain.handle("mcp:list-all", () => getMcpServerList())
   ipcMain.handle("mcp:save", (_, name: string, entry: Record<string, unknown>, source: "global" | "project") => {
     saveMcpServer(name, entry, source)

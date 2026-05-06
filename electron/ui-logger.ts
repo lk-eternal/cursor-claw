@@ -6,11 +6,7 @@ const LOG_BUFFER_MAX = 300
 const logBuffer: string[] = []
 let logFilePath: string | null = null
 
-export function setLogFilePath(p: string): void {
-  logFilePath = p
-}
-
-export function getOrCreateLogFilePath(): string {
+function getOrCreateLogFilePath(): string {
   if (logFilePath) return logFilePath
   const { getConfig } = require("./config-store") as typeof import("./config-store")
   const config = getConfig()

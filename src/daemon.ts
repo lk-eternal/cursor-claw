@@ -36,7 +36,6 @@ const RECEIVE_ID_TYPE = process.env.LARK_RECEIVE_ID_TYPE ?? "";
 const CONFIGURED_PORT = process.env.LARK_DAEMON_PORT ? Number(process.env.LARK_DAEMON_PORT) : 0;
 const WORKSPACE_DIR = process.env.LARK_WORKSPACE_DIR ?? process.cwd();
 const MESSAGE_PREFIX = process.env.LARK_MESSAGE_PREFIX ?? "";
-const TEMP_MODE = process.env.LARK_TEMP_MODE === "1";
 
 const WECHAT_TOKEN = process.env.WECHAT_TOKEN ?? "";
 const WECHAT_ACCOUNT_ID = process.env.WECHAT_ACCOUNT_ID ?? "";
@@ -1109,7 +1108,7 @@ export async function daemonMain(): Promise<void> {
   log("INFO", `Daemon 就绪 ✓ port=${daemonPort}`);
 }
 
-async function tempMain(): Promise<void> {
+export async function tempMain(): Promise<void> {
   if (!FEISHU_ENABLED || !sender || !APP_ID || !APP_SECRET) {
     log("ERROR", "飞书未启用或凭据未配置，无法进入绑定模式");
     process.exit(1);
@@ -1127,8 +1126,3 @@ async function tempMain(): Promise<void> {
   });
 }
 
-if (TEMP_MODE) {
-  tempMain().catch((e) => { console.error(e); process.exit(1); });
-} else {
-  daemonMain().catch((e) => { console.error(e); process.exit(1); });
-}

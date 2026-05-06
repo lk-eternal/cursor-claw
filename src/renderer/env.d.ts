@@ -128,16 +128,13 @@ interface ElectronAPI {
   injectWorkspace(): Promise<{ results: { file: string; action: string; message: string }[] }>
   startDaemon(): Promise<{ ok: boolean; error?: string }>
   stopDaemon(): Promise<void>
-  launchAgent(): Promise<{ ok: boolean; error?: string }>
   stopAgent(): Promise<{ ok: boolean }>
   getSessionAgents(): Promise<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string }[]>
   stopSessionAgent(sessionKey: string): Promise<{ ok: boolean }>
   stopAllSessionAgents(): Promise<{ ok: boolean }>
   onSessionAgents(cb: (list: { sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string }[]) => void): () => void
   getDaemonStatus(): Promise<DaemonStatus>
-  readLogs(lines?: number): Promise<string>
   getLogBuffer(): Promise<string[]>
-  clearLogs(): Promise<void>
   getQueueMessages(): Promise<{ index: number; preview: string }[]>
   clearQueueMessages(): Promise<number>
   checkCli(): Promise<boolean>
@@ -154,7 +151,6 @@ interface ElectronAPI {
   triggerScheduledTask(taskId: string): Promise<{ ok: boolean; error?: string }>
   getScheduledTaskStatus(): Promise<Record<string, { running: boolean; pid?: number; startedAt?: number }>>
   onScheduledTaskStatus(cb: (statuses: Record<string, { running: boolean; pid?: number; startedAt?: number }>) => void): () => void
-  getOAuthMcps(): Promise<{ name: string; url: string; authenticated: boolean }[]>
   getMcpServers(): Promise<McpServerEntry[]>
   saveMcpServer(name: string, entry: Record<string, unknown>, source: "global" | "project"): Promise<{ ok: boolean }>
   deleteMcpServer(name: string): Promise<{ ok: boolean }>

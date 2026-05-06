@@ -23,7 +23,7 @@ export function quoteArg(a: string): string {
 
 // ── PATH 刷新 ────────────────────────────────────────────
 
-export function refreshPath(): void {
+function refreshPath(): void {
   if (os.platform() === "win32") {
     try {
       const freshPath = execSync(
@@ -94,7 +94,7 @@ export async function ensureAgentBinary(): Promise<boolean> {
   return resolveAgentBinary()
 }
 
-export function ensureAgentBinarySync(): boolean {
+function ensureAgentBinarySync(): boolean {
   if (resolveAgentBinary()) return true
   refreshPath()
   return resolveAgentBinary()

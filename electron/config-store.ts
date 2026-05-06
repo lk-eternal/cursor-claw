@@ -83,6 +83,3 @@ export function saveConfig(partial: Partial<AppConfig>): void {
   }
 }
 
-export function resetConfig(): void {
-  store.clear()
-}

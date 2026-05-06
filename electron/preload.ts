@@ -58,12 +58,6 @@ export interface InjectResult {
   message: string
 }
 
-export interface McpAuthInfo {
-  name: string
-  url: string
-  authenticated: boolean
-}
-
 export interface CliLoginStatus {
   cliFound: boolean
   loggedIn: boolean
@@ -151,7 +145,6 @@ const api = {
   selectDirectory: (): Promise<string | null> => ipcRenderer.invoke("dialog:selectDirectory"),
   injectWorkspace: (): Promise<{ results: InjectResult[] }> => ipcRenderer.invoke("workspace:inject"),
   startDaemon: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("daemon:start"),
-  launchAgent: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("agent:launch"),
   stopAgent: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("agent:stop"),
   getSessionAgents: (): Promise<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string }[]> =>
     ipcRenderer.invoke("agent:sessions"),
@@ -164,9 +157,7 @@ const api = {
   },
   stopDaemon: (): Promise<void> => ipcRenderer.invoke("daemon:stop"),
   getDaemonStatus: (): Promise<DaemonStatus> => ipcRenderer.invoke("daemon:status"),
-  readLogs: (lines?: number): Promise<string> => ipcRenderer.invoke("logs:read", lines),
   getLogBuffer: (): Promise<string[]> => ipcRenderer.invoke("daemon:get-log-buffer"),
-  clearLogs: (): Promise<void> => ipcRenderer.invoke("logs:clear"),
   getQueueMessages: (): Promise<{ index: number; preview: string }[]> => ipcRenderer.invoke("daemon:queue"),
   clearQueueMessages: (): Promise<number> => ipcRenderer.invoke("daemon:queue-clear"),
   checkCli: (): Promise<boolean> => ipcRenderer.invoke("cli:check"),
@@ -190,7 +181,6 @@ const api = {
     ipcRenderer.on("scheduled-tasks:status", handler)
     return () => ipcRenderer.removeListener("scheduled-tasks:status", handler)
   },
-  getOAuthMcps: (): Promise<McpAuthInfo[]> => ipcRenderer.invoke("mcp:list-oauth"),
   getMcpServers: (): Promise<McpServerEntry[]> => ipcRenderer.invoke("mcp:list-all"),
   saveMcpServer: (name: string, entry: Record<string, unknown>, source: "global" | "project"): Promise<{ ok: boolean }> => ipcRenderer.invoke("mcp:save", name, entry, source),
   deleteMcpServer: (name: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("mcp:delete", name),

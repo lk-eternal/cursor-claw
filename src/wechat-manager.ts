@@ -1,10 +1,12 @@
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 type WeChatClientClass = typeof import("wechat-ilink-client").WeChatClient;
 type WeChatClientType = import("wechat-ilink-client").WeChatClient;
 type WeixinMessageType = import("wechat-ilink-client").WeixinMessage;
+type MessageItemType = import("wechat-ilink-client").MessageItem;
 
 export interface WeChatIncomingMessage {
   text: string;
@@ -33,6 +35,7 @@ export class WeChatManager extends EventEmitter {
   private opts: WeChatManagerOptions;
   private selfAccountId = "";
   private recentMsgHashes = new Set<string>();
+  private typingTickets = new Map<string, string>();
   private static readonly DEDUP_WINDOW = 60_000;
 
   constructor(opts: WeChatManagerOptions) {
@@ -148,7 +151,9 @@ export class WeChatManager extends EventEmitter {
       return false;
     }
     try {
+      await this.ensureTyping(toUserName);
       await this.client.sendText(toUserName, text);
+      await this.cancelTyping(toUserName);
       return true;
     } catch (err: any) {
       this.opts.log("ERROR", `[WeChat] 发送文本失败: ${err?.message ?? err}`);
@@ -162,7 +167,9 @@ export class WeChatManager extends EventEmitter {
       return false;
     }
     try {
+      await this.ensureTyping(toUserName);
       await this.client.sendMedia(toUserName, filePath);
+      await this.cancelTyping(toUserName);
       return true;
     } catch (err: any) {
       this.opts.log("ERROR", `[WeChat] 发送媒体失败: ${err?.message ?? err}`);
@@ -170,39 +177,137 @@ export class WeChatManager extends EventEmitter {
     }
   }
 
+  /** 确保发送前有 typing 状态：有缓存 ticket 直接用，没有则重新获取并 typing */
+  private async ensureTyping(userId: string): Promise<void> {
+    if (!this.client) return;
+    const cached = this.typingTickets.get(userId);
+    if (cached) return; // 收到消息时已经 typing 过了
+    try {
+      const ticket = await this.client.getTypingTicket(userId);
+      if (ticket) {
+        this.typingTickets.set(userId, ticket);
+        await this.client.sendTyping(userId, ticket, "typing");
+      }
+    } catch (err: any) {
+      this.opts.log("WARN", `[WeChat] ensureTyping 失败: ${err?.message ?? err}`);
+    }
+  }
+
+  /** 取消 typing 状态并清除缓存 */
+  private async cancelTyping(userId: string): Promise<void> {
+    if (!this.client) return;
+    const ticket = this.typingTickets.get(userId);
+    if (!ticket) return;
+    this.typingTickets.delete(userId);
+    try {
+      await this.client.sendTyping(userId, ticket, "cancel");
+    } catch (err: any) {
+      this.opts.log("WARN", `[WeChat] cancelTyping 失败: ${err?.message ?? err}`);
+    }
+  }
+
+  /** 收到消息时立即获取 ticket 并开始 typing */
+  private async startTypingForUser(userId: string): Promise<void> {
+    if (!this.client) return;
+    try {
+      const ticket = await this.client.getTypingTicket(userId);
+      if (ticket) {
+        this.typingTickets.set(userId, ticket);
+        await this.client.sendTyping(userId, ticket, "typing");
+      }
+    } catch (err: any) {
+      this.opts.log("WARN", `[WeChat] startTyping 失败: ${err?.message ?? err}`);
+    }
+  }
+
+  private static readonly MEDIA_DIR = path.join(os.tmpdir(), "cursor-claw-images");
+
   private handleMessage(msg: WeixinMessageType): void {
+    this.opts.log("DEBUG", `[WeChat] RAW msg: mid=${msg.message_id} type=${msg.message_type} state=${msg.message_state} from=${msg.from_user_id} to=${msg.to_user_id} client_id=${msg.client_id}`);
+
+    if (msg.message_type === 2) return;
+    if (msg.message_state !== undefined && msg.message_state !== 2) return;
+
     const fromUser = msg.from_user_id || "";
     if (fromUser === this.selfAccountId) return;
 
     const isGroup = (msg.group_id?.length ?? 0) > 0;
-    const content = this.ClientCtor ? this.ClientCtor.extractText(msg) : "";
-    if (!content.trim()) return;
+
+    if (msg.message_id != null && this.recentMsgHashes.has(String(msg.message_id))) {
+      this.opts.log("INFO", `[WeChat] 去重跳过 (mid=${msg.message_id})`);
+      return;
+    }
+    if (msg.message_id != null) {
+      const mid = String(msg.message_id);
+      this.recentMsgHashes.add(mid);
+      setTimeout(() => this.recentMsgHashes.delete(mid), WeChatManager.DEDUP_WINDOW);
+    }
 
     const chatId = isGroup ? (msg.group_id || fromUser) : fromUser;
     const messageId = msg.message_id != null
       ? `wx_${msg.message_id}`
       : `wx_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
 
-    const dedupKey = msg.message_id != null
-      ? `id:${msg.message_id}`
-      : `hash:${chatId}:${content.trim().slice(0, 200)}`;
-    if (this.recentMsgHashes.has(dedupKey)) {
-      this.opts.log("INFO", `[WeChat] 去重跳过 (key=${dedupKey})`);
-      return;
+    this.processMessageContent(msg).then((content) => {
+      if (!content.trim()) return;
+
+      const incoming: WeChatIncomingMessage = {
+        text: content.trim(),
+        messageId,
+        chatId,
+        chatType: isGroup ? "group" : "p2p",
+        senderOpenId: fromUser,
+      };
+
+      this.opts.log("INFO", `[WeChat] 收到消息 [${incoming.chatType}] chat=${chatId}: ${content.slice(0, 100)}`);
+      this.startTypingForUser(chatId).catch(() => {});
+      this.opts.onMessage(incoming);
+    }).catch((err) => {
+      this.opts.log("ERROR", `[WeChat] 处理消息内容失败: ${err?.message ?? err}`);
+    });
+  }
+
+  private async processMessageContent(msg: WeixinMessageType): Promise<string> {
+    const textContent = this.ClientCtor ? this.ClientCtor.extractText(msg) : "";
+    const parts: string[] = [];
+    if (textContent.trim()) parts.push(textContent.trim());
+
+    const items = msg.item_list ?? [];
+    for (const item of items) {
+      if (!this.ClientCtor?.isMediaItem(item)) continue;
+      const result = await this.downloadMediaItem(item);
+      if (result) {
+        const label = { image: "图片", voice: "语音", file: "文件", video: "视频" }[result.kind] ?? "文件";
+        parts.push(`[${label}已保存: ${result.path}]`);
+      } else {
+        parts.push("[媒体下载失败]");
+      }
     }
-    this.recentMsgHashes.add(dedupKey);
-    setTimeout(() => this.recentMsgHashes.delete(dedupKey), WeChatManager.DEDUP_WINDOW);
 
-    const incoming: WeChatIncomingMessage = {
-      text: content.trim(),
-      messageId,
-      chatId,
-      chatType: isGroup ? "group" : "p2p",
-      senderOpenId: fromUser,
-    };
+    return parts.join("\n");
+  }
 
-    this.opts.log("INFO", `[WeChat] 收到消息 [${incoming.chatType}] chat=${chatId}: ${content.slice(0, 100)}`);
-    this.opts.onMessage(incoming);
+  private async downloadMediaItem(item: MessageItemType): Promise<{ path: string; kind: string } | null> {
+    if (!this.client) return null;
+    try {
+      const media = await this.client.downloadMedia(item);
+      if (!media) return null;
+
+      if (!fs.existsSync(WeChatManager.MEDIA_DIR)) {
+        fs.mkdirSync(WeChatManager.MEDIA_DIR, { recursive: true });
+      }
+      const extMap: Record<string, string> = { image: ".png", voice: ".mp3", video: ".mp4", file: "" };
+      const ext = media.fileName
+        ? path.extname(media.fileName)
+        : (extMap[media.kind] ?? "");
+      const fileName = `wx_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
+      const filePath = path.join(WeChatManager.MEDIA_DIR, fileName);
+      fs.writeFileSync(filePath, media.data);
+      return { path: filePath, kind: media.kind };
+    } catch (err: any) {
+      this.opts.log("WARN", `[WeChat] 下载媒体失败: ${err?.message ?? err}`);
+      return null;
+    }
   }
 
   isConnected(): boolean {

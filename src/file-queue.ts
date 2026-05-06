@@ -143,10 +143,6 @@ export async function pollFileQueueBatch(timeoutMs: number, intervalMs = POLL_IN
   return { text: parts.join("\n"), messageId: first.messageId, chatId: first.chatId, chatType: first.chatType, senderOpenId: first.senderOpenId };
 }
 
-export function pollFileQueueBatchText(timeoutMs: number, intervalMs = POLL_INTERVAL_MS, filterChatId?: string): Promise<string | null> {
-  return pollFileQueueBatch(timeoutMs, intervalMs, filterChatId).then((m) => m?.text ?? null);
-}
-
 export function getQueueLength(): number {
   if (!queueDir) return 0;
   try {
