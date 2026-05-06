@@ -248,7 +248,38 @@ export default function Setup({ onComplete, onExit }: Props) {
     return true
   }
 
-  const next = () => {
+  const saveStepConfig = async (currentStep: number) => {
+    if (currentStep === 0) {
+      await window.electronAPI.saveConfig({
+        wechatEnabled: enableWechat,
+      })
+    } else if (currentStep === 1) {
+      const partial: Record<string, unknown> = {}
+      if (enableFeishu) {
+        partial.larkAppId = appId.trim()
+        partial.larkAppSecret = appSecret.trim()
+        if (receiveId) partial.larkReceiveId = receiveId
+      }
+      if (enableWechat && wechatToken) {
+        partial.wechatToken = wechatToken.trim()
+        partial.wechatAccountId = wechatAccountId.trim()
+      }
+      await window.electronAPI.saveConfig(partial)
+    } else if (currentStep === 2) {
+      await window.electronAPI.saveConfig({
+        workspaceDir: workspaceDir.trim(),
+        agentMode,
+        cursorApiKey: cursorApiKey.trim(),
+        httpProxy: proxy.trim(),
+        httpsProxy: proxy.trim(),
+        noProxy: noProxy.trim(),
+        model,
+      })
+    }
+  }
+
+  const next = async () => {
+    await saveStepConfig(step)
     if (step === 1) {
       if (tempConnected) { window.electronAPI.stopTempConnection(); setTempConnected(false) }
       if (wechatQrStatus !== "confirmed") window.electronAPI.wechatQrLoginCancel()
@@ -846,7 +877,7 @@ export default function Setup({ onComplete, onExit }: Props) {
             </button>
           </div>
         ) : (
-          <button onClick={onComplete} className="flex items-center gap-1 rounded-lg px-3 py-2 text-sm text-gray-500 transition hover:text-gray-300">
+          <button onClick={async () => { await window.electronAPI.saveConfig({ setupComplete: true }); onComplete() }} className="flex items-center gap-1 rounded-lg px-3 py-2 text-sm text-gray-500 transition hover:text-gray-300">
             <SkipForward size={14} />跳过
           </button>
         )}

@@ -163,6 +163,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
   const [enableGroupChat, setEnableGroupChat] = useState(false)
   const [digitalIdentity, setDigitalIdentity] = useState("")
   const [model, setModel] = useState("auto")
+  const [modelParams, setModelParams] = useState("")
   const [showSecret, setShowSecret] = useState(false)
   const [proxy, setProxy] = useState("")
   const [noProxy, setNoProxy] = useState("localhost,127.0.0.1,feishu.cn")
@@ -253,7 +254,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
   const [updateDownloadPct, setUpdateDownloadPct] = useState<number | null>(null)
 
   const [saved, setSaved] = useState(false)
-  const [modelOptions, setModelOptions] = useState<{ id: string; label: string }[]>([])
+  const [modelOptions, setModelOptions] = useState<{ id: string; label: string; params: string }[]>([])
   const [loadingModels, setLoadingModels] = useState(false)
 
   const [mcpServers, setMcpServers] = useState<McpServerEntry[]>([])
@@ -385,6 +386,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
       setReceiveId(config.larkReceiveId)
       setWorkspaceDir(config.workspaceDir); setEnableGroupChat(!!config.enableGroupChat)
       setModel(config.model)
+      setModelParams(config.modelParams ?? "")
       setProxy(config.httpProxy || config.httpsProxy || "")
       setNoProxy(config.noProxy || "localhost,127.0.0.1,feishu.cn")
       setAgentNewSession(config.agentNewSession ?? false)
@@ -415,7 +417,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
         larkAppId: appId.trim(), larkAppSecret: appSecret.trim(),
         larkReceiveId: receiveId.trim(),
         workspaceDir: workspaceDir.trim(), enableGroupChat,
-        model,
+        model, modelParams,
         httpProxy: proxy.trim(), httpsProxy: proxy.trim(), noProxy: noProxy.trim(),
         agentNewSession,
         closeWindowAction,
@@ -439,7 +441,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
       }
       setSaved(true); setTimeout(() => setSaved(false), 1500)
     }, 500)
-  }, [appId, appSecret, receiveId, workspaceDir, enableGroupChat, model, proxy, noProxy, agentNewSession, closeWindowAction, digitalIdentity, feishuEnabled, wechatEnabled, wechatToken, wechatAccountId, agentMode, cursorApiKey, refreshMcpServers])
+  }, [appId, appSecret, receiveId, workspaceDir, enableGroupChat, model, modelParams, proxy, noProxy, agentNewSession, closeWindowAction, digitalIdentity, feishuEnabled, wechatEnabled, wechatToken, wechatAccountId, agentMode, cursorApiKey, refreshMcpServers])
 
   useEffect(() => { autoSave() }, [autoSave])
 
@@ -533,7 +535,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
     try {
       const r = await window.electronAPI.listModels()
       if (r.ok && r.models.length > 0) {
-        setModelOptions(r.models)
+        setModelOptions(r.models.map((m) => ({ ...m, params: "" })))
       } else if (r.ok) {
         void showAlert("提示", "未解析到任何模型。请确认已完成 Cursor CLI 登录。")
       } else {
@@ -910,7 +912,10 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                     </div>
 
                     {wechatQrStatus === "loading" && (
-                      <div className="flex items-center gap-2 py-4 text-xs text-gray-400"><Loader2 size={14} className="animate-spin" />正在获取二维码...</div>
+                      <div className="flex items-center gap-2 py-4 text-xs text-gray-400">
+                        <Loader2 size={14} className="animate-spin" />正在获取二维码...
+                        <button onClick={async () => { await window.electronAPI.wechatQrLoginCancel(); wechatQrBusy.current = false; setWechatQrStatus("idle") }} className="ml-2 text-xs text-gray-500 hover:text-red-400">取消</button>
+                      </div>
                     )}
 
                     {(wechatQrStatus === "wait" || wechatQrStatus === "scaned") && wechatQrUrl && (
@@ -921,6 +926,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                         <p className="text-xs text-gray-400">
                           {wechatQrStatus === "scaned" ? "✅ 已扫描，请在手机上确认登录" : "请使用手机微信扫描二维码"}
                         </p>
+                        <button onClick={async () => { await window.electronAPI.wechatQrLoginCancel(); wechatQrBusy.current = false; setWechatQrStatus("idle") }} className="text-xs text-gray-500 transition hover:text-red-400">取消扫码</button>
                       </div>
                     )}
 
@@ -1071,8 +1077,17 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                   </button>
                 </div>
                 {modelOptions.length > 0
-                  ? <SearchableSelect value={model} onChange={setModel} options={modelOptions} placeholder="选择模型..." />
-                  : <input type="text" value={model} onChange={(e) => setModel(e.target.value)} placeholder="auto" className={inputCls} />}
+                  ? <SearchableSelect
+                      value={model + (modelParams ? "\0" + modelParams : "")}
+                      onChange={(key) => {
+                        const sep = key.indexOf("\0")
+                        if (sep >= 0) { setModel(key.slice(0, sep)); setModelParams(key.slice(sep + 1)) }
+                        else { setModel(key); setModelParams("") }
+                      }}
+                      options={modelOptions.map((o) => ({ id: o.id + (o.params ? "\0" + o.params : ""), label: o.label }))}
+                      placeholder="选择模型..."
+                    />
+                  : <input type="text" value={model} onChange={(e) => { setModel(e.target.value); setModelParams("") }} placeholder="auto" className={inputCls} />}
               </section>
               {/* Agent 会话 */}
               <section className="space-y-3">
@@ -1105,8 +1120,9 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                     const expanded = mcpExpanded === s.name
                     const toolState = mcpTools[s.name]
                     const rawStatus = mcpStatus[s.name]
-                    const statusColor = !rawStatus ? "text-gray-600" : rawStatus === "ready" ? "text-green-400" : rawStatus === "disabled" || rawStatus.includes("not loaded") ? "text-gray-500" : "text-red-400"
-                    const statusLabel = !rawStatus ? "—" : rawStatus === "ready" ? "ready" : rawStatus === "disabled" ? "disabled" : rawStatus.includes("not loaded") ? "not loaded" : rawStatus
+                    const isReady = rawStatus === "ready" || rawStatus === "enabled"
+                    const statusColor = !rawStatus ? "text-gray-600" : isReady ? "text-green-400" : rawStatus === "disabled" || rawStatus.includes("not loaded") ? "text-gray-500" : "text-red-400"
+                    const statusLabel = !rawStatus ? "—" : isReady ? "ready" : rawStatus === "disabled" ? "disabled" : rawStatus.includes("not loaded") ? "not loaded" : rawStatus
                     return (
                     <div key={s.name} className="rounded-lg border border-gray-700 overflow-hidden">
                       <div className="flex items-center justify-between px-4 py-3">

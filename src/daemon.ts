@@ -863,7 +863,8 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const { text, message_id, chat_id } = body as { text: string; message_id?: string; chat_id?: string };
     if (!text) { json(res, { ok: false, error: "text is required" }, 400); return true; }
 
-    if (isWechatChatId(chat_id) && wechatManager?.isConnected()) {
+    if (isWechatChatId(chat_id)) {
+      if (!wechatManager?.isConnected()) { json(res, { ok: false, error: "微信未连接，无法发送到微信会话" }, 400); return true; }
       const ok = await wechatManager.sendText(chat_id!, text);
       json(res, { ok });
     } else if (sender) {
@@ -881,7 +882,8 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const body = JSON.parse(await readBody(req));
     const { image_path, message_id, chat_id } = body as { image_path: string; message_id?: string; chat_id?: string };
     if (!image_path) { json(res, { ok: false, error: "image_path is required" }, 400); return true; }
-    if (isWechatChatId(chat_id) && wechatManager?.isConnected()) {
+    if (isWechatChatId(chat_id)) {
+      if (!wechatManager?.isConnected()) { json(res, { ok: false, error: "微信未连接，无法发送图片到微信会话" }, 400); return true; }
       await wechatManager.sendMedia(chat_id!, image_path);
     } else if (sender) {
       await sender.sendImage(image_path, message_id, chat_id);
@@ -896,7 +898,8 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const body = JSON.parse(await readBody(req));
     const { file_path, message_id, chat_id } = body as { file_path: string; message_id?: string; chat_id?: string };
     if (!file_path) { json(res, { ok: false, error: "file_path is required" }, 400); return true; }
-    if (isWechatChatId(chat_id) && wechatManager?.isConnected()) {
+    if (isWechatChatId(chat_id)) {
+      if (!wechatManager?.isConnected()) { json(res, { ok: false, error: "微信未连接，无法发送文件到微信会话" }, 400); return true; }
       await wechatManager.sendMedia(chat_id!, file_path);
     } else if (sender) {
       await sender.sendFile(file_path, message_id, chat_id);

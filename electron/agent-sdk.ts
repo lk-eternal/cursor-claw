@@ -1,7 +1,6 @@
 import { Agent, type SDKAgent, type Run, type SDKMessage } from "@cursor/sdk"
 import { getConfig } from "./config-store"
 import { pushUiLog, broadcastLog, broadcastSessionStatus } from "./ui-logger"
-import { applyProxyEnv } from "./agent-cli"
 import type { ChatType, LaunchMeta } from "./agent-launcher"
 
 interface SdkSessionAgent {
@@ -55,80 +54,7 @@ function buildSdkPrompt(meta?: LaunchMeta, taskMessage?: string): string {
   return parts.join("\n")
 }
 
-function getMcpServerPath(): string {
-  const { app } = require("electron")
-  const path = require("node:path")
-  const fs = require("node:fs")
-  if (app.isPackaged) {
-    return path.join(process.resourcesPath, "daemon", "mcp-server.mjs")
-  }
-  const bundled = path.join(app.getAppPath(), "dist-bundle", "mcp-server.mjs")
-  if (fs.existsSync(bundled)) return bundled
-  return path.join(app.getAppPath(), "dist", "index.js")
-}
-
-function getAdminMcpPath(): string {
-  const { app } = require("electron")
-  const path = require("node:path")
-  const fs = require("node:fs")
-  if (app.isPackaged) {
-    return path.join(process.resourcesPath, "daemon", "mcp-admin.mjs")
-  }
-  const bundled = path.join(app.getAppPath(), "dist-bundle", "mcp-admin.mjs")
-  if (fs.existsSync(bundled)) return bundled
-  return path.join(app.getAppPath(), "dist", "server-admin-entry.js")
-}
-
-function buildInlineMcpServers(daemonPort: number): Record<string, unknown> {
-  const result: Record<string, unknown> = {
-    "cursor-claw": {
-      type: "stdio",
-      command: "node",
-      args: [getMcpServerPath()],
-      env: { LARK_DAEMON_PORT: String(daemonPort) },
-    },
-    "cursor-claw-admin": {
-      type: "stdio",
-      command: "node",
-      args: [getAdminMcpPath()],
-      env: { LARK_DAEMON_PORT: String(daemonPort) },
-    },
-  }
-
-  const { getMcpServerList } = require("./daemon-manager") as typeof import("./daemon-manager")
-  try {
-    const servers = getMcpServerList()
-    for (const s of servers) {
-      if (result[s.name]) continue
-      if (s.rawConfig && (s.rawConfig as Record<string, unknown>).disabled === true) continue
-      if (s.type === "command" && s.command) {
-        result[s.name] = { command: s.command, args: s.args, env: s.env }
-      } else if (s.type === "url" && s.url) {
-        const entry: Record<string, unknown> = { url: s.url }
-        if (s.rawConfig?.headers) entry.headers = s.rawConfig.headers
-        result[s.name] = entry
-      }
-    }
-  } catch { /* mcp list unavailable, use built-in only */ }
-
-  return result
-}
-
-function readDaemonPort(): number | null {
-  const { app } = require("electron")
-  const path = require("node:path")
-  const fs = require("node:fs")
-  const config = getConfig()
-  const appKey = config.larkAppId || config.wechatAccountId || "default"
-  const lockPath = path.join(app.getPath("userData"), "apps", appKey, "daemon.lock.json")
-  try {
-    if (!fs.existsSync(lockPath)) return null
-    const lock = JSON.parse(fs.readFileSync(lockPath, "utf-8"))
-    return lock?.port ?? null
-  } catch {
-    return null
-  }
-}
+// daemon port / inline MCP 不再需要——mcp.json 由 injectMcpToDir 在启动前写入正确端口
 
 async function streamRunEvents(session: SdkSessionAgent, run: Run): Promise<void> {
   try {
@@ -139,8 +65,10 @@ async function streamRunEvents(session: SdkSessionAgent, run: Run): Promise<void
     }
   } catch (e: unknown) {
     if (!session.abortController.signal.aborted) {
-      const msg = e instanceof Error ? e.message : String(e)
-      pushUiLog("SDK", "ERROR", `[${session.sessionKey}] 流处理异常: ${msg}`)
+      const msg = e instanceof Error ? `[${e.constructor.name}] ${e.message}` : String(e)
+      const stack = e instanceof Error ? e.stack?.split("\n").slice(0, 3).join(" | ") : ""
+      const cause = (e as any)?.cause ? JSON.stringify((e as any).cause) : ""
+      pushUiLog("SDK", "ERROR", `[${session.sessionKey}] 流处理异常: ${msg}${stack ? ` stack=${stack}` : ""}${cause ? ` cause=${cause}` : ""}`)
     }
   }
 }
@@ -162,8 +90,10 @@ function handleSdkEvent(sessionKey: string, event: SDKMessage): void {
     case "tool_call":
       pushUiLog("SDK", "INFO", `[${sessionKey}] [tool] ${event.name}: ${event.status}`)
       break
-    case "status":
-      pushUiLog("SDK", "INFO", `[${sessionKey}] [status] ${event.status}${event.message ? ` - ${event.message}` : ""}`)
+    case "status": {
+      const lvl = event.status === "ERROR" ? "ERROR" as const : "INFO" as const
+      pushUiLog("SDK", lvl, `[${sessionKey}] [status] ${event.status}${event.message ? ` - ${event.message}` : ""} raw=${JSON.stringify(event)}`)
+    }
       break
   }
 }
@@ -204,7 +134,6 @@ export interface SdkLaunchOptions {
   senderOpenId?: string
   chatName?: string
   taskMessage?: string
-  daemonPort?: number
 }
 
 export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: boolean; error?: string }> {
@@ -221,22 +150,25 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     return { ok: false, error: "Cursor API Key 未配置（设置 → Agent 驱动模式）" }
   }
 
-  const daemonPort = opts.daemonPort ?? readDaemonPort()
-  const mcpServers = daemonPort ? buildInlineMcpServers(daemonPort) : undefined
-
   const prompt = buildSdkPrompt(meta, taskMessage)
 
   try {
-    pushUiLog("SDK", "INFO", `[${sessionKey}] 正在创建 SDK Agent (cwd=${workspaceDir})`)
+    const modelId = config.model?.trim() || "composer-2"
+    const modelSelection: { id: string; params?: { id: string; value: string }[] } = { id: modelId }
+    if (config.modelParams?.trim()) {
+      try {
+        modelSelection.params = JSON.parse(config.modelParams)
+      } catch { /* ignore bad JSON */ }
+    }
+    pushUiLog("SDK", "INFO", `[${sessionKey}] 正在创建 SDK Agent (cwd=${workspaceDir}, model=${JSON.stringify(modelSelection)})`)
 
     const agent = await Agent.create({
       apiKey,
-      model: { id: config.model && config.model !== "auto" ? config.model : "claude-4.6-opus-max" },
+      model: modelSelection,
       local: {
         cwd: workspaceDir,
         settingSources: ["project", "user"],
       },
-      ...(mcpServers ? { mcpServers: mcpServers as any } : {}),
     })
 
     const abortController = new AbortController()
@@ -261,8 +193,46 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     const run = await agent.send(prompt)
     session.run = run
 
-    streamRunEvents(session, run).then(() => {
-      pushUiLog("SDK", "INFO", `[${sessionKey}] Agent 运行结束 (status=${run.status})`)
+    streamRunEvents(session, run).then(async () => {
+      const level = run.status === "error" ? "ERROR" : "INFO"
+      const parts: string[] = []
+      if (run.result) parts.push(`result=${run.result}`)
+      if (run.durationMs != null) parts.push(`duration=${run.durationMs}ms`)
+      if (run.model) parts.push(`model=${JSON.stringify(run.model)}`)
+      try {
+        const wr = await run.wait().catch((e: unknown) => e)
+        if (wr instanceof Error) {
+          const errObj = wr as any
+          parts.push(`waitError=[${wr.constructor.name}] ${wr.message}`)
+          for (const k of ["code", "status", "endpoint", "requestId", "operation", "isRetryable"]) {
+            if (errObj[k] !== undefined) parts.push(`${k}=${errObj[k]}`)
+          }
+          if (errObj.cause) parts.push(`cause=${JSON.stringify(errObj.cause)}`)
+        } else if (typeof wr === "object" && wr) {
+          const r = wr as Record<string, unknown>
+          if (r.status) parts.push(`waitStatus=${r.status}`)
+          parts.push(`waitRaw=${JSON.stringify(wr)}`)
+        }
+      } catch (we: unknown) {
+        const errObj = we as any
+        const wm = we instanceof Error ? `[${we.constructor.name}] ${we.message}` : String(we)
+        parts.push(`waitCatchError=${wm}`)
+        for (const k of ["code", "status", "endpoint", "requestId", "operation"]) {
+          if (errObj?.[k] !== undefined) parts.push(`${k}=${errObj[k]}`)
+        }
+      }
+      if (run.status === "error") {
+        try {
+          if (run.supports("conversation")) {
+            const turns = await run.conversation()
+            if (turns.length > 0) {
+              const last = turns[turns.length - 1]
+              parts.push(`lastTurn=${JSON.stringify(last).slice(0, 500)}`)
+            }
+          }
+        } catch { /* ignore */ }
+      }
+      pushUiLog("SDK", level, `[${sessionKey}] Agent 运行结束 (status=${run.status}) ${parts.join(", ")}`)
       sdkSessions.delete(sessionKey)
       broadcastSdkSessionStatus()
     })
@@ -310,7 +280,14 @@ export async function checkSdkApiKey(): Promise<{ ok: boolean; email?: string; e
   }
 }
 
-export async function listSdkModels(): Promise<{ ok: boolean; models: { id: string; label: string; current: boolean }[]; error?: string }> {
+export interface SdkModelOption {
+  id: string
+  label: string
+  params: string
+  current: boolean
+}
+
+export async function listSdkModels(): Promise<{ ok: boolean; models: SdkModelOption[]; error?: string }> {
   const config = getConfig()
   const apiKey = config.cursorApiKey?.trim()
   if (!apiKey) return { ok: false, models: [], error: "API Key 未配置" }
@@ -319,11 +296,34 @@ export async function listSdkModels(): Promise<{ ok: boolean; models: { id: stri
     const { Cursor } = await import("@cursor/sdk")
     const sdkModels = await Cursor.models.list({ apiKey })
     const currentModel = config.model?.trim() || ""
-    const models = sdkModels.map((m) => ({
-      id: m.id,
-      label: m.displayName || m.id,
-      current: m.id === currentModel,
-    }))
+    const currentParams = config.modelParams?.trim() || ""
+
+    const models: SdkModelOption[] = []
+    for (const m of sdkModels) {
+      if (m.variants && m.variants.length > 0) {
+        const nameCount = new Map<string, number>()
+        for (const v of m.variants) nameCount.set(v.displayName, (nameCount.get(v.displayName) || 0) + 1)
+
+        for (const v of m.variants) {
+          const ps = JSON.stringify(v.params)
+          const hasDup = (nameCount.get(v.displayName) || 0) > 1
+          const suffix = hasDup ? ` (${v.params.map((p) => `${p.id}=${p.value}`).join(", ")})` : ""
+          models.push({
+            id: m.id,
+            label: (v.displayName || m.displayName) + suffix,
+            params: ps,
+            current: m.id === currentModel && ps === currentParams,
+          })
+        }
+      } else {
+        models.push({
+          id: m.id,
+          label: m.displayName || m.id,
+          params: "",
+          current: m.id === currentModel && !currentParams,
+        })
+      }
+    }
     return { ok: true, models }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e)

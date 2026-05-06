@@ -1077,10 +1077,8 @@ export async function launchSessionAgent(
       if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true })
     }
     await injectWorkspaceToDir(workDir)
-    const lock = readLockFile()
     return launchSdkAgent({
-      sessionKey, chatType, meta, workspaceDir: workDir,
-      senderOpenId, daemonPort: lock?.port ?? undefined,
+      sessionKey, chatType, meta, workspaceDir: workDir, senderOpenId,
     })
   }
   return _launchSessionAgent(sessionKey, chatType, injectWorkspaceToDir, meta, useMainWorkspace, senderOpenId)
@@ -1090,12 +1088,10 @@ async function launchIndependentAgent(taskId: string, taskName: string, message:
   if (useSdkMode()) {
     const config = getConfig()
     await injectWorkspaceToDir(config.workspaceDir)
-    const lock = readLockFile()
     return launchSdkAgent({
       sessionKey: taskId, chatType: "task", chatName: taskName,
       taskMessage: message, workspaceDir: config.workspaceDir,
       meta: { chatId: taskName, chatType: "task" },
-      daemonPort: lock?.port ?? undefined,
     })
   }
   return _launchIndependentAgentCli(taskId, taskName, message)

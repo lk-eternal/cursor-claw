@@ -28,6 +28,7 @@ export class WeChatManager extends EventEmitter {
   private client: WeChatClient | null = null;
   private status: WeChatStatus = "disconnected";
   private syncBufPath: string;
+  private ctxTokensPath: string;
   private opts: WeChatManagerOptions;
   private selfAccountId = "";
   private recentMsgHashes = new Set<string>();
@@ -38,6 +39,7 @@ export class WeChatManager extends EventEmitter {
     super();
     this.opts = opts;
     this.syncBufPath = path.join(opts.dataDir, "wechat-sync.txt");
+    this.ctxTokensPath = path.join(opts.dataDir, "wechat-ctx-tokens.json");
     if (!fs.existsSync(opts.dataDir)) fs.mkdirSync(opts.dataDir, { recursive: true });
   }
 
@@ -86,6 +88,15 @@ export class WeChatManager extends EventEmitter {
     const saveSyncBuf = async (buf: string): Promise<void> => {
       try { fs.writeFileSync(this.syncBufPath, buf, "utf-8"); } catch { /* ignore */ }
     };
+    const loadContextTokens = async (): Promise<Record<string, string> | undefined> => {
+      try {
+        if (fs.existsSync(this.ctxTokensPath)) return JSON.parse(fs.readFileSync(this.ctxTokensPath, "utf-8"));
+      } catch { /* ignore */ }
+      return undefined;
+    };
+    const saveContextTokens = async (tokens: Record<string, string>): Promise<void> => {
+      try { fs.writeFileSync(this.ctxTokensPath, JSON.stringify(tokens), "utf-8"); } catch { /* ignore */ }
+    };
 
     const needQrLogin = !resolvedAccountId;
 
@@ -113,7 +124,7 @@ export class WeChatManager extends EventEmitter {
         this.client!.once("poll", () => resolve());
       });
 
-      this.client.start({ loadSyncBuf, saveSyncBuf }).catch((err: Error) => {
+      this.client.start({ loadSyncBuf, saveSyncBuf, loadContextTokens, saveContextTokens }).catch((err: Error) => {
         this.opts.log("ERROR", `[WeChat] 轮询异常退出: ${err?.message ?? err}`);
         if (this.status !== "disconnected") this.setStatus("error");
       });

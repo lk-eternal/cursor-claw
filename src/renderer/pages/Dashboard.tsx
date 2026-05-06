@@ -37,12 +37,16 @@ export default function Dashboard({ onSettings }: Props) {
   const [stoppingAgent, setStoppingAgent] = useState(false)
   const [clearingQueue, setClearingQueue] = useState(false)
   const [configModel, setConfigModel] = useState("")
+  const [agentMode, setAgentMode] = useState<"cli" | "sdk">("cli")
   const [showSessions, setShowSessions] = useState(false)
   const [sessionList, setSessionList] = useState<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string; workspaceDir?: string }[]>([])
   const logRef = useRef<HTMLPreElement>(null)
 
   useEffect(() => {
-    window.electronAPI.getConfig().then((cfg) => setConfigModel(cfg.model?.trim() || "auto"))
+    window.electronAPI.getConfig().then((cfg) => {
+      setConfigModel(cfg.model?.trim() || "auto")
+      setAgentMode(cfg.agentMode ?? "cli")
+    })
 
     const refresh = async () => {
       const s = await window.electronAPI.getDaemonStatus()
@@ -88,30 +92,31 @@ export default function Dashboard({ onSettings }: Props) {
       })
     })
 
-    const runCliChecks = () => {
-      void (async () => {
-        const installed = await window.electronAPI.checkCli()
-        if (!installed) {
-          setCliStatus("missing")
-          return
-        }
-        const st = await window.electronAPI.checkCliLogin()
-        if (st.loggedIn) {
-          setCliStatus("installed")
-        } else {
-          setCliStatus("need-login")
-        }
-      })()
-    }
-
     let cancelCliSchedule: (() => void) | undefined
-    if (typeof requestIdleCallback === "function") {
-      const id = requestIdleCallback(runCliChecks, { timeout: 2500 })
-      cancelCliSchedule = () => cancelIdleCallback(id)
-    } else {
-      const cliTimer = window.setTimeout(runCliChecks, 0)
-      cancelCliSchedule = () => clearTimeout(cliTimer)
-    }
+    window.electronAPI.getConfig().then((cfg) => {
+      if (cfg.agentMode === "sdk") {
+        setCliStatus("installed")
+        return
+      }
+      const runCliChecks = () => {
+        void (async () => {
+          const installed = await window.electronAPI.checkCli()
+          if (!installed) {
+            setCliStatus("missing")
+            return
+          }
+          const st = await window.electronAPI.checkCliLogin()
+          setCliStatus(st.loggedIn ? "installed" : "need-login")
+        })()
+      }
+      if (typeof requestIdleCallback === "function") {
+        const id = requestIdleCallback(runCliChecks, { timeout: 2500 })
+        cancelCliSchedule = () => cancelIdleCallback(id)
+      } else {
+        const cliTimer = window.setTimeout(runCliChecks, 0)
+        cancelCliSchedule = () => clearTimeout(cliTimer)
+      }
+    })
 
     window.electronAPI.getSessionAgents().then(setSessionList).catch(() => {})
     const unsubSessions = window.electronAPI.onSessionAgents?.((list: typeof sessionList) => setSessionList(list))

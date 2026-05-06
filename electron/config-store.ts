@@ -15,6 +15,8 @@ export interface AppConfig {
   larkReceiveId: string
   workspaceDir: string
   model: string
+  /** SDK 模型变体参数 (如 max mode), JSON 序列化的 {id,value}[] */
+  modelParams: string
   autoStart: boolean
   setupComplete: boolean
   httpProxy: string
@@ -44,6 +46,7 @@ const defaults: AppConfig = {
   larkReceiveId: "",
   workspaceDir: "",
   model: "auto",
+  modelParams: "",
   autoStart: false,
   setupComplete: false,
   httpProxy: "",
@@ -64,14 +67,21 @@ const defaults: AppConfig = {
   cursorApiKey: "",
 }
 
-const store = new Store<AppConfig>({
-  name: "cursor-claw-config",
-  encryptionKey: "cursor-claw-desktop-v1",
-  defaults,
-})
+let _store: Store<AppConfig> | null = null
+
+function getStore(): Store<AppConfig> {
+  if (!_store) {
+    _store = new Store<AppConfig>({
+      name: "cursor-claw-config",
+      encryptionKey: "cursor-claw-desktop-v1",
+      defaults,
+    })
+  }
+  return _store
+}
 
 export function getConfig(): AppConfig {
-  return { ...defaults, ...store.store }
+  return { ...defaults, ...getStore().store }
 }
 
 export function saveConfig(partial: Partial<AppConfig>): void {
@@ -79,7 +89,7 @@ export function saveConfig(partial: Partial<AppConfig>): void {
     Object.entries(partial).filter(([, v]) => v !== undefined),
   )
   if (Object.keys(cleaned).length > 0) {
-    store.set(cleaned as Partial<AppConfig>)
+    getStore().set(cleaned as Partial<AppConfig>)
   }
 }
 

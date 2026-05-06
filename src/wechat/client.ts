@@ -52,6 +52,8 @@ export class WeChatClient extends EventEmitter {
 
   getAccountId(): string | undefined { return this.accountId; }
   getContextToken(userId: string): string | undefined { return this.contextTokens.get(userId); }
+  getAllContextTokens(): Record<string, string> { return Object.fromEntries(this.contextTokens); }
+  setContextTokens(tokens: Record<string, string>): void { for (const [k, v] of Object.entries(tokens)) this.contextTokens.set(k, v); }
 
   // ─── Login ───
 
@@ -107,6 +109,8 @@ export class WeChatClient extends EventEmitter {
   async start(opts: {
     loadSyncBuf?: () => Promise<string | undefined>;
     saveSyncBuf?: (buf: string) => Promise<void>;
+    loadContextTokens?: () => Promise<Record<string, string> | undefined>;
+    saveContextTokens?: (tokens: Record<string, string>) => Promise<void>;
     longPollTimeoutMs?: number;
   } = {}): Promise<void> {
     if (!this.accountId) throw new Error("No accountId. Call login() first or pass it in constructor.");
@@ -114,6 +118,8 @@ export class WeChatClient extends EventEmitter {
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
     let buf = (await opts.loadSyncBuf?.()) ?? "";
+    const savedTokens = await opts.loadContextTokens?.();
+    if (savedTokens) this.setContextTokens(savedTokens);
     let nextTimeout = opts.longPollTimeoutMs ?? 35_000;
     let fails = 0;
 
@@ -139,10 +145,12 @@ export class WeChatClient extends EventEmitter {
           buf = resp.get_updates_buf;
           await opts.saveSyncBuf?.(buf);
         }
+        let tokensUpdated = false;
         for (const msg of resp.msgs ?? []) {
-          if (msg.context_token && msg.from_user_id) this.contextTokens.set(msg.from_user_id, msg.context_token);
+          if (msg.context_token && msg.from_user_id) { this.contextTokens.set(msg.from_user_id, msg.context_token); tokensUpdated = true; }
           this.emit("message", msg);
         }
+        if (tokensUpdated) await opts.saveContextTokens?.(this.getAllContextTokens());
       } catch (err) {
         if (signal.aborted) return;
         fails++;

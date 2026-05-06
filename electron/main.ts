@@ -34,6 +34,13 @@ import { injectWorkspace } from "./workspace-injector"
 import { initTray, destroyTray } from "./tray"
 import { initAppUpdater } from "./updater"
 
+const profileArg = process.argv.find((a) => a.startsWith("--profile="))
+const profileName = profileArg?.split("=")[1] || ""
+if (profileName) {
+  const baseDir = path.dirname(app.getPath("userData"))
+  app.setPath("userData", path.join(baseDir, `cursor-claw-${profileName}`))
+}
+
 let mainWindow: BrowserWindow | null = null
 let closeConfirmDialogOpen = false
 
@@ -82,7 +89,7 @@ function createWindow(): void {
     height: 680,
     minWidth: 780,
     minHeight: 560,
-    title: "Cursor Claw",
+    title: profileName ? `Cursor Claw [${profileName}]` : "Cursor Claw",
     icon: iconPath,
     autoHideMenuBar: true,
     frame: false,

@@ -32,11 +32,7 @@ export default function SearchableSelect({ value, onChange, options, placeholder
   }, [open])
 
   const filtered = query
-    ? options.filter(
-        (o) =>
-          o.id.toLowerCase().includes(query.toLowerCase()) ||
-          o.label.toLowerCase().includes(query.toLowerCase()),
-      )
+    ? options.filter((o) => o.label.toLowerCase().includes(query.toLowerCase()))
     : options
 
   const selected = options.find((o) => o.id === value)
@@ -49,7 +45,7 @@ export default function SearchableSelect({ value, onChange, options, placeholder
         className="flex w-full items-center justify-between rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-left text-sm outline-none transition hover:border-gray-600 focus:border-blue-500"
       >
         <span className={selected ? "text-gray-100" : "text-gray-500"}>
-          {selected ? `${selected.id} — ${selected.label}` : placeholder || "选择..."}
+          {selected?.label || placeholder || "选择..."}
         </span>
         <ChevronDown size={14} className={`text-gray-500 transition ${open ? "rotate-180" : ""}`} />
       </button>
@@ -80,8 +76,6 @@ export default function SearchableSelect({ value, onChange, options, placeholder
                     o.id === value ? "bg-blue-600/20 text-blue-400" : "text-gray-300"
                   }`}
                 >
-                  <span className="font-mono text-xs">{o.id}</span>
-                  <span className="text-gray-500">—</span>
                   <span className="truncate">{o.label}</span>
                 </button>
               ))

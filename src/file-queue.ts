@@ -135,14 +135,20 @@ export async function pollFileQueueBatch(timeoutMs: number, intervalMs = POLL_IN
   const first = await pollFileQueue(timeoutMs, intervalMs, filterChatId);
   if (first === null) return null;
 
-  await new Promise((r) => setTimeout(r, BATCH_WAIT_MS));
-
   const parts = [first.text];
   let extra = claimNextMessage(filterChatId);
-  while (extra !== null) {
-    parts.push(extra.text);
+
+  while (extra !== null){
+    while (extra !== null) {
+      parts.push(extra.text);
+      extra = claimNextMessage(filterChatId);
+    }
+
+    await new Promise((r) => setTimeout(r, BATCH_WAIT_MS));
+
     extra = claimNextMessage(filterChatId);
   }
+
   return { text: parts.join("\n"), messageId: first.messageId, chatId: first.chatId, chatType: first.chatType, senderOpenId: first.senderOpenId };
 }
 

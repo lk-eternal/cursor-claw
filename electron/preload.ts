@@ -7,6 +7,7 @@ export interface AppConfig {
   workspaceDir: string
   enableGroupChat: boolean
   model: string
+  modelParams: string
   autoStart: boolean
   setupComplete: boolean
   httpProxy: string
@@ -166,7 +167,7 @@ const api = {
   loginCli: (): Promise<{ ok: boolean; output: string }> => ipcRenderer.invoke("cli:login"),
   listModels: (): Promise<{ ok: boolean; models: { id: string; label: string; current: boolean }[]; error?: string }> => ipcRenderer.invoke("models:list"),
   checkSdkApiKey: (): Promise<{ ok: boolean; email?: string; error?: string }> => ipcRenderer.invoke("sdk:check-api-key"),
-  listSdkModels: (): Promise<{ ok: boolean; models: { id: string; label: string; current: boolean }[]; error?: string }> => ipcRenderer.invoke("sdk:list-models"),
+  listSdkModels: (): Promise<{ ok: boolean; models: { id: string; label: string; params: string; current: boolean }[]; error?: string }> => ipcRenderer.invoke("sdk:list-models"),
   getScheduledTasks: (): Promise<ScheduledTask[]> => ipcRenderer.invoke("scheduled-tasks:get"),
   saveScheduledTasks: (tasks: ScheduledTask[]): Promise<{ ok: boolean }> => ipcRenderer.invoke("scheduled-tasks:save", tasks),
   validateCron: (expression: string): Promise<boolean> => ipcRenderer.invoke("scheduled-tasks:validate-cron", expression),

@@ -9,6 +9,7 @@ interface AppConfig {
   larkReceiveId: string
   workspaceDir: string
   model: string
+  modelParams: string
   autoStart: boolean
   setupComplete: boolean
   httpProxy: string
@@ -143,7 +144,7 @@ interface ElectronAPI {
   loginCli(): Promise<{ ok: boolean; output: string }>
   listModels(): Promise<{ ok: boolean; models: { id: string; label: string; current: boolean }[]; error?: string }>
   checkSdkApiKey(): Promise<{ ok: boolean; email?: string; error?: string }>
-  listSdkModels(): Promise<{ ok: boolean; models: { id: string; label: string; current: boolean }[]; error?: string }>
+  listSdkModels(): Promise<{ ok: boolean; models: { id: string; label: string; params: string; current: boolean }[]; error?: string }>
   getScheduledTasks(): Promise<ScheduledTask[]>
   saveScheduledTasks(tasks: ScheduledTask[]): Promise<{ ok: boolean }>
   validateCron(expression: string): Promise<boolean>
