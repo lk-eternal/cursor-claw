@@ -3,6 +3,7 @@ import * as path from "node:path";
 
 const POLL_INTERVAL_MS = 400;
 const STALE_MESSAGE_MS = 5 * 60 * 1000;
+const BATCH_WAIT_MS = 800;
 
 let queueDir = "";
 
@@ -133,6 +134,8 @@ export function pollFileQueue(timeoutMs: number, intervalMs = POLL_INTERVAL_MS, 
 export async function pollFileQueueBatch(timeoutMs: number, intervalMs = POLL_INTERVAL_MS, filterChatId?: string): Promise<QueueMessage | null> {
   const first = await pollFileQueue(timeoutMs, intervalMs, filterChatId);
   if (first === null) return null;
+
+  await new Promise((r) => setTimeout(r, BATCH_WAIT_MS));
 
   const parts = [first.text];
   let extra = claimNextMessage(filterChatId);
