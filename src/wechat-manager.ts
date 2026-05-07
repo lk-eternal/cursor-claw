@@ -154,8 +154,9 @@ export class WeChatManager extends EventEmitter {
       return false;
     }
     try {
+      const normalized = text.replace(/\r\n/g, "\n").replace(/\n/g, "\r\n");
       await this.ensureTyping(toUserName);
-      await this.client.sendText(toUserName, text);
+      await this.client.sendText(toUserName, normalized);
       await this.cancelTyping(toUserName);
       return true;
     } catch (err: any) {

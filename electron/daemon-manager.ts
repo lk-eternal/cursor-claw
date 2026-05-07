@@ -301,6 +301,12 @@ function httpPost(url: string, body: object, timeoutMs = 3000): Promise<unknown>
   })
 }
 
+async function syncActiveSession(port: number, chatId: string, sessionKey: string): Promise<void> {
+  try {
+    await httpPost(`http://127.0.0.1:${port}/api/active-session`, { chatId, sessionKey })
+  } catch {}
+}
+
 export async function getDaemonStatus(): Promise<DaemonStatus> {
   const config = getConfig()
   const cfgWs = (config.workspaceDir || "").trim()
@@ -841,6 +847,10 @@ async function dispatchSessionAgents(): Promise<void> {
 
     const meta: import("./agent-launcher").LaunchMeta = { chatId, chatType: chatType as "p2p" | "group" }
     const result = await launchSessionAgent(sessionKey, chatType as "p2p" | "group", undefined, meta, mainUser, senderOpenId)
+    if (result.ok && chatId !== sessionKey) {
+      const lock = readLockFile()
+      if (lock?.port) await syncActiveSession(lock.port, chatId, sessionKey)
+    }
     if (!result.ok) broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${result.error}`)
   }
 }
@@ -1619,8 +1629,13 @@ async function handleChatCommand(tokens: string[], port: number, messageId: stri
     const s = sessions[idx - 1]
     const now = Date.now()
     const type = s.chatType === "p2p" ? "私聊" : s.chatType === "group" ? "群聊" : s.chatType === "task" ? "定时任务" : s.chatType === "temp" ? "临时任务" : s.chatType
+
+    if (chatId) {
+      await syncActiveSession(port, chatId, s.sessionKey)
+    }
+
     const lines = [
-      `📌 会话 #${idx} 详情:`,
+      `🔀 已切换到会话 #${idx}:`,
       `  类型: ${type}`,
       `  名称: ${s.chatName || "-"}`,
       `  SessionKey: ${s.sessionKey}`,
@@ -1628,7 +1643,7 @@ async function handleChatCommand(tokens: string[], port: number, messageId: stri
       `  PID: ${s.pid || "-"}`,
       `  启动时间: ${s.startedAt ? new Date(s.startedAt).toLocaleString("zh-CN", { hour12: false }) : "-"}`,
       `  运行时长: ${s.startedAt ? formatDuration(now - s.startedAt) : "-"}`,
-      `\n💡 /chat stop ${idx} 可停止此会话`,
+      `\n💡 后续消息将路由到此会话`,
     ]
     await reply(true, lines.join("\n"))
     return
@@ -1726,8 +1741,11 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           }
           const taskId = `temp_${Date.now()}`
           const result = await launchIndependentAgent(taskId, "临时会话", runMsg, "temp", claimed.chatId)
+          if (result.ok && claimed.chatId) {
+            await syncActiveSession(lock.port, claimed.chatId, taskId)
+          }
           await reply(result.ok, result.ok
-            ? `🚀 临时 Agent 已启动 (id=${taskId})`
+            ? `🚀 临时 Agent 已启动 (id=${taskId})，已切换到此会话`
             : `❌ 启动失败: ${result.error ?? "未知错误"}`)
           break
         }

@@ -135,7 +135,7 @@ export class LarkSender {
     } catch (e) { this.log("ERROR", "手机号解析失败:", e); return null; }
   }
 
-  async replyMessage(messageId: string, text: string): Promise<void> {
+  async replyMessage(messageId: string, text: string): Promise<string | undefined> {
     try {
       const res = await this.client.im.message.reply({
         path: { message_id: messageId },
@@ -143,13 +143,14 @@ export class LarkSender {
       });
       if ((res as any).code === 0 || (res as any).code === undefined) this.log("INFO", `飞书回复已发送(${text.length}字)`);
       else this.log("ERROR", `飞书回复失败: code=${(res as any).code}, msg=${(res as any).msg}`);
-    } catch (e: any) { this.log("ERROR", `飞书回复异常: ${e?.message ?? e}`); }
+      return (res as any)?.data?.message_id;
+    } catch (e: any) { this.log("ERROR", `飞书回复异常: ${e?.message ?? e}`); return undefined; }
   }
 
-  async sendMessage(text: string, replyMessageId?: string): Promise<void> {
-    if (replyMessageId) { await this.replyMessage(replyMessageId, text); return; }
+  async sendMessage(text: string, replyMessageId?: string): Promise<string | undefined> {
+    if (replyMessageId) { return this.replyMessage(replyMessageId, text); }
     const target = this.getTarget();
-    if (!target) { this.log("WARN", "无发送目标"); return; }
+    if (!target) { this.log("WARN", "无发送目标"); return undefined; }
     try {
       const res = await this.client.im.message.create({
         params: { receive_id_type: target.receiveIdType as any },
@@ -157,10 +158,11 @@ export class LarkSender {
       });
       if ((res as any).code === 0 || (res as any).code === undefined) this.log("INFO", `飞书消息已发送(${text.length}字)`);
       else this.log("ERROR", `飞书发送失败: code=${(res as any).code}, msg=${(res as any).msg}`);
-    } catch (e: any) { this.log("ERROR", `飞书发送异常: ${e?.message ?? e}`); }
+      return (res as any)?.data?.message_id;
+    } catch (e: any) { this.log("ERROR", `飞书发送异常: ${e?.message ?? e}`); return undefined; }
   }
 
-  async sendMessageToChat(chatId: string, text: string): Promise<void> {
+  async sendMessageToChat(chatId: string, text: string): Promise<string | undefined> {
     try {
       const res = await this.client.im.message.create({
         params: { receive_id_type: "chat_id" as any },
@@ -168,7 +170,8 @@ export class LarkSender {
       });
       if ((res as any).code === 0 || (res as any).code === undefined) this.log("INFO", `飞书消息已发送到会话 ${chatId}(${text.length}字)`);
       else this.log("ERROR", `飞书发送失败: code=${(res as any).code}, msg=${(res as any).msg}`);
-    } catch (e: any) { this.log("ERROR", `飞书发送异常: ${e?.message ?? e}`); }
+      return (res as any)?.data?.message_id;
+    } catch (e: any) { this.log("ERROR", `飞书发送异常: ${e?.message ?? e}`); return undefined; }
   }
 
   async sendImage(imagePath: string, replyMessageId?: string, chatId?: string): Promise<void> {
@@ -296,8 +299,9 @@ export class LarkSender {
           let text = rawContent;
           try { text = JSON.parse(rawContent)?.text ?? rawContent; } catch { /* use raw */ }
           const senderOpenId = senderObj?.sender_id?.open_id;
+          const parentId: string = msg?.parent_id ?? "";
           const mentions: LarkMention[] = (msg?.mentions ?? []).map((m: any) => ({ key: m.key ?? "", id: m.id?.open_id ?? "", name: m.name ?? "" }));
-          onMessage({ text, messageId, chatId, chatType, messageType, rawContent, senderOpenId, mentions });
+          onMessage({ text, messageId, chatId, chatType, messageType, rawContent, senderOpenId, parentId: parentId || undefined, mentions });
         } catch (e: any) {
           this.log("ERROR", `事件处理异常: ${e?.message ?? e}`);
         }
@@ -331,5 +335,6 @@ export interface LarkMessageEvent {
   messageType: string;
   rawContent: string;
   senderOpenId?: string;
+  parentId?: string;
   mentions: LarkMention[];
 }

@@ -108,7 +108,7 @@ export function getIndependentTaskStatuses(): Record<string, { running: boolean;
 
 export interface LaunchMeta { messageIds?: string[]; chatId?: string; chatType?: string }
 
-export function buildPrompt(meta?: LaunchMeta, taskMessage?: string): string {
+export function buildPrompt(meta?: LaunchMeta, taskMessage?: string, sessionKey?: string): string {
   const prompts: string[] = []
   prompts.push("请按照digital-identity数字身份定义并遵守工作流规则cursor-claw开始工作")
 
@@ -126,7 +126,10 @@ export function buildPrompt(meta?: LaunchMeta, taskMessage?: string): string {
   }
 
   prompts.push("\n\n---\n会话元数据:\n")
-  prompts.push(`[chat_id=${meta?.chatId}]`)
+  const pollId = sessionKey ?? meta?.chatId
+  if (pollId) {
+    prompts.push(`[chat_id=${pollId}]`)
+  }
   prompts.push(`[chat_type=${meta?.chatType}]`)
 
   return prompts.join("\n")
@@ -264,7 +267,7 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
   if (!workDir) return { ok: false, error: "工作目录未配置" }
   if (!resolveAgentBinary()) return { ok: false, error: "Cursor CLI 未安装" }
 
-  const prompt = buildPrompt(meta, taskMessage)
+  const prompt = buildPrompt(meta, taskMessage, sessionKey)
   const spawnEnv = makeSpawnEnv(config, { LARK_WORKSPACE_DIR: workDir })
   const overrideConfig = { ...config, workspaceDir: workDir }
 

@@ -99,7 +99,7 @@ let lastWechatChatId: string | null = null;
 
 function isWechatChatId(chatId?: string): boolean {
   if (!chatId) return false;
-  return chatId.startsWith("wxid_") || chatId.startsWith("wx_") || chatId.includes("@chatroom") || chatId.endsWith("@im.wechat");
+  return chatId.startsWith("wxid_") || chatId.startsWith("wx_") || chatId.includes("@chatroom") || chatId.includes("@im.wechat");
 }
 
 const WECHAT_STATE_FILE = path.join(WORKSPACE_DIR, ".cursor", "wechat-data", "state.json");
@@ -167,6 +167,38 @@ function broadcastQueueEvent(chatId?: string): void {
   }
 }
 
+// ── 会话路由映射 ─────────────────────────────────────────
+
+const activeSessionMap = new Map<string, string>();
+const messageSessionMap = new Map<string, string>();
+const MSG_SESSION_MAP_MAX = 5000;
+
+function setActiveSession(chatId: string, sessionKey: string): void {
+  activeSessionMap.set(chatId, sessionKey);
+  log("INFO", `会话路由更新: ${chatId} → ${sessionKey}`);
+}
+
+function trackMessageSession(messageId: string, sessionKey: string): void {
+  if (!messageId || !sessionKey) return;
+  if (messageSessionMap.size >= MSG_SESSION_MAP_MAX) {
+    const oldest = messageSessionMap.keys().next().value;
+    if (oldest) messageSessionMap.delete(oldest);
+  }
+  messageSessionMap.set(messageId, sessionKey);
+}
+
+function resolveRoutingKey(chatId?: string, replyMessageId?: string): string | undefined {
+  if (replyMessageId) {
+    const sk = messageSessionMap.get(replyMessageId);
+    if (sk) {
+      log("INFO", `路由命中 messageId 映射: ${replyMessageId} → ${sk}`);
+      return sk;
+    }
+  }
+  if (!chatId) return undefined;
+  return activeSessionMap.get(chatId) ?? chatId;
+}
+
 // ── 文件队列 ─────────────────────────────────────────────
 
 function initQueue(): void {
@@ -175,15 +207,16 @@ function initQueue(): void {
   cleanupStaleMessages();
 }
 
-function pushMessage(content: string, messageId?: string, chatId?: string, chatType?: string, senderOpenId?: string): void {
+function pushMessage(content: string, messageId?: string, chatId?: string, chatType?: string, senderOpenId?: string, replyMessageId?: string): void {
   if (!content?.trim()) {
     log("WARN", `丢弃空消息 (messageId=${messageId})`);
     return;
   }
-  const written = pushToFileQueue(content, messageId, `daemon-${process.pid}`, chatId, chatType, senderOpenId);
+  const routedId = resolveRoutingKey(chatId, replyMessageId);
+  const written = pushToFileQueue(content, messageId, `daemon-${process.pid}`, routedId, chatType, senderOpenId);
   if (written) {
-    log("INFO", `消息已写入共享队列: ${JSON.stringify(content)} (id=${messageId ?? "none"}, chat=${chatId ?? "none"})`);
-    broadcastQueueEvent(chatId);
+    log("INFO", `消息已写入共享队列: ${JSON.stringify(content)} (id=${messageId ?? "none"}, chat=${chatId ?? "none"}${routedId !== chatId ? ` → routed=${routedId}` : ""}${replyMessageId ? `, reply=${replyMessageId}` : ""})`);
+    broadcastQueueEvent(routedId);
   } else {
     log("INFO", `消息已跳过（重复或写入失败）: id=${messageId ?? "none"}`);
   }
@@ -235,7 +268,7 @@ function startLarkConnection(): void {
   if (!sender || !APP_ID || !APP_SECRET) { log("ERROR", "飞书未启用或凭据未配置"); return; }
 
   sender.startConnection(APP_ID, APP_SECRET, ENCRYPT_KEY, (ev) => {
-    const { text, messageId, chatId, chatType, messageType, rawContent, senderOpenId, mentions } = ev;
+    const { text, messageId, chatId, chatType, messageType, rawContent, senderOpenId, parentId, mentions } = ev;
 
     if (chatType === "p2p" && senderOpenId && !sender!.resolvedTarget) {
       sender!.autoOpenId = senderOpenId;
@@ -249,7 +282,7 @@ function startLarkConnection(): void {
     if (tryCaptureBind(chatType, chatId, senderOpenId)) return;
 
     const cleanText = chatType === "group" ? stripMentionTags(text) : text;
-    log("INFO", `收到消息 [${chatType}] chat=${chatId} sender=${senderOpenId ?? "?"}: ${cleanText.slice(0, 100)}`);
+    log("INFO", `收到消息 [${chatType}] chat=${chatId} sender=${senderOpenId ?? "?"}${parentId ? ` reply=${parentId}` : ""}: ${cleanText.slice(0, 100)}`);
 
     if (messageType === "text" && isCommand(cleanText)) {
       handleCommand(cleanText, messageId, chatId, chatType).catch((e: any) =>
@@ -260,10 +293,10 @@ function startLarkConnection(): void {
 
     if (messageType === "image" || messageType === "post") {
       sender!.processIncomingMessage(messageId, messageType, rawContent)
-        .then((result) => pushMessage(result, messageId, chatId, chatType, senderOpenId))
-        .catch(() => pushMessage(cleanText, messageId, chatId, chatType, senderOpenId));
+        .then((result) => pushMessage(result, messageId, chatId, chatType, senderOpenId, parentId))
+        .catch(() => pushMessage(cleanText, messageId, chatId, chatType, senderOpenId, parentId));
     } else {
-      pushMessage(cleanText, messageId, chatId, chatType, senderOpenId);
+      pushMessage(cleanText, messageId, chatId, chatType, senderOpenId, parentId);
     }
   });
 }
@@ -548,7 +581,9 @@ function startHttpServer(): Promise<number> {
 
         if (method === "GET" && pathname === "/dequeue") {
           const chatIdFilter = reqUrl.searchParams.get("chatId") || undefined;
-          json(res, { message: claimNextMessageText(chatIdFilter), queueLength: getFileQueueLength() });
+          const claimed = claimNextMessage(chatIdFilter);
+          if (claimed?.messageId && chatIdFilter) trackMessageSession(claimed.messageId, chatIdFilter);
+          json(res, { message: claimed?.text ?? null, queueLength: getFileQueueLength() });
           return;
         }
 
@@ -557,7 +592,10 @@ function startHttpServer(): Promise<number> {
           const { chatId: filterChat } = JSON.parse(body || "{}") as { chatId?: string };
           const messages: { text: string; messageId: string; chatId: string; chatType: string; senderOpenId: string }[] = [];
           let m: ReturnType<typeof claimNextMessage>;
-          while ((m = claimNextMessage(filterChat)) !== null) messages.push(m);
+          while ((m = claimNextMessage(filterChat)) !== null) {
+            if (m.messageId && filterChat) trackMessageSession(m.messageId, filterChat);
+            messages.push(m);
+          }
           json(res, { ok: true, messages, queueLength: getFileQueueLength() });
           return;
         }
@@ -869,10 +907,12 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       const ok = await wechatManager.sendText(chat_id!, text);
       json(res, { ok });
     } else if (sender) {
-      if (message_id) await sender.sendMessage(text, message_id);
-      else if (chat_id) await sender.sendMessageToChat(chat_id, text);
-      else await sender.sendMessage(text);
-      json(res, { ok: true });
+      let sentMsgId: string | undefined;
+      if (message_id) sentMsgId = await sender.sendMessage(text, message_id);
+      else if (chat_id) sentMsgId = await sender.sendMessageToChat(chat_id, text);
+      else sentMsgId = await sender.sendMessage(text);
+      if (sentMsgId && chat_id) trackMessageSession(sentMsgId, chat_id);
+      json(res, { ok: true, message_id: sentMsgId });
     } else {
       json(res, { ok: false, error: "飞书未启用" }, 400);
     }
@@ -911,6 +951,33 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     return true;
   }
 
+  if (method === "POST" && pathname === "/api/active-session") {
+    const body = await readBody(req);
+    const { chatId, sessionKey } = JSON.parse(body);
+    if (chatId && sessionKey) {
+      setActiveSession(chatId, sessionKey);
+      json(res, { ok: true });
+    } else {
+      json(res, { ok: false, error: "chatId and sessionKey required" }, 400);
+    }
+    return true;
+  }
+
+  if (method === "GET" && pathname === "/api/active-sessions") {
+    const entries: Record<string, string> = {};
+    for (const [k, v] of activeSessionMap) entries[k] = v;
+    json(res, { sessions: entries });
+    return true;
+  }
+
+  if (method === "DELETE" && pathname === "/api/active-session") {
+    const qs = new URL(req.url ?? "", "http://localhost").searchParams;
+    const chatId = qs.get("chatId");
+    if (chatId) activeSessionMap.delete(chatId);
+    json(res, { ok: true });
+    return true;
+  }
+
   if (method === "GET" && pathname === "/api/poll-message") {
     const qs = new URL(req.url ?? "", "http://localhost").searchParams;
     const timeout = Number(qs.get("timeout") ?? "30000");
@@ -923,6 +990,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       json(res, { message: null });
       return true;
     }
+    if (msg?.messageId && chatIdFilter) trackMessageSession(msg.messageId, chatIdFilter);
     json(res, { message: msg });
     return true;
   }

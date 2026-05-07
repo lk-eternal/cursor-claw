@@ -1088,6 +1088,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                       placeholder="选择模型..."
                     />
                   : <input type="text" value={model} onChange={(e) => { setModel(e.target.value); setModelParams("") }} placeholder="auto" className={inputCls} />}
+                {agentMode === "sdk" && <p className="text-xs text-amber-500/80">⚠ SDK 目前不支持单独设置代理，请根据自身网络环境合理选择模型，或使用 TUN 模式。</p>}
               </section>
               {/* Agent 会话 */}
               <section className="space-y-3">

@@ -2,10 +2,6 @@ import { Agent, type SDKAgent, type Run, type SDKMessage } from "@cursor/sdk"
 import { resolve, join, dirname } from "node:path"
 import { existsSync } from "node:fs"
 import { createRequire } from "node:module"
-import http2 from "node:http2"
-import net from "node:net"
-import tls from "node:tls"
-import { EventEmitter } from "node:events"
 import { getConfig } from "./config-store"
 import { pushUiLog, broadcastLog, broadcastSessionStatus } from "./ui-logger"
 import { type ChatType, type LaunchMeta, buildPrompt } from "./agent-launcher"
@@ -59,144 +55,6 @@ function ensureSdkBinaryPaths(): void {
   pushUiLog("SDK", "WARN", `未找到 ${binaryName}，SDK 可能报错 (searched: ${candidates.join(", ")})`)
 }
 
-// ── HTTP/2 代理 (monkey-patch http2.connect) ─────────────────────────
-
-let h2ProxyInstalled = false
-const origH2Connect = http2.connect
-
-function buildTunnel(proxyHost: string, proxyPort: number, targetHost: string, targetPort: number): Promise<net.Socket> {
-  return new Promise((resolve, reject) => {
-    const sock = net.connect(proxyPort, proxyHost, () => {
-      sock.write(`CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\nHost: ${targetHost}:${targetPort}\r\n\r\n`)
-    })
-    let buf = Buffer.alloc(0)
-    const onData = (chunk: Buffer) => {
-      buf = Buffer.concat([buf, chunk])
-      const idx = buf.indexOf("\r\n\r\n")
-      if (idx === -1) return
-      sock.removeListener("data", onData)
-      const line = buf.subarray(0, idx).toString().split("\r\n")[0]
-      const code = parseInt(line.split(" ")[1], 10)
-      if (code !== 200) { sock.destroy(); return reject(new Error(`CONNECT ${code}: ${line}`)) }
-      const leftover = buf.subarray(idx + 4)
-      if (leftover.length) sock.unshift(leftover)
-      resolve(sock)
-    }
-    sock.on("data", onData)
-    sock.on("error", reject)
-  })
-}
-
-function upgradeTls(rawSock: net.Socket, host: string): Promise<tls.TLSSocket> {
-  return new Promise((resolve, reject) => {
-    const tlsSock = tls.connect({ socket: rawSock, servername: host, ALPNProtocols: ["h2"] })
-    tlsSock.on("secureConnect", () => resolve(tlsSock))
-    tlsSock.on("error", reject)
-  })
-}
-
-class LazyH2Session extends EventEmitter {
-  _real: http2.ClientHttp2Session | null = null
-  _err: Error | null = null
-  _closed = false
-  _pending: { args: unknown[]; resolve: (s: http2.ClientHttp2Stream) => void }[] = []
-
-  constructor(authority: string | URL, options: http2.ClientSessionOptions | undefined, listener: (() => void) | undefined) {
-    super()
-    this._bootstrap(authority, options, listener)
-  }
-
-  private async _bootstrap(authority: string | URL, options: http2.ClientSessionOptions | undefined, listener: (() => void) | undefined) {
-    const proxyEnv = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || ""
-    const target = new URL(String(authority))
-    const targetHost = target.hostname
-    const targetPort = parseInt(target.port, 10) || 443
-    const proxy = new URL(proxyEnv.startsWith("http") ? proxyEnv : `http://${proxyEnv}`)
-    const proxyHost = proxy.hostname
-    const proxyPort = parseInt(proxy.port, 10) || 1080
-
-    try {
-      pushUiLog("SDK", "DEBUG", `[h2-proxy] ${targetHost}:${targetPort} via ${proxyHost}:${proxyPort}`)
-      const rawSock = await buildTunnel(proxyHost, proxyPort, targetHost, targetPort)
-      const tlsSock = await upgradeTls(rawSock, targetHost)
-      pushUiLog("SDK", "DEBUG", `[h2-proxy] tunnel+TLS OK, ALPN=${tlsSock.alpnProtocol}`)
-
-      if (this._closed) { tlsSock.destroy(); return }
-
-      const opts = Object.assign({}, options ?? {})
-      ;(opts as any).createConnection = () => tlsSock
-
-      const real = origH2Connect.call(http2, authority, opts, listener)
-      this._real = real
-
-      for (const ev of ["connect", "error", "close", "goaway", "ping", "stream", "timeout", "frameError"] as const) {
-        real.on(ev, (...args: unknown[]) => this.emit(ev, ...args))
-      }
-
-      for (const { args, resolve: res } of this._pending) {
-        res((real.request as (...a: unknown[]) => http2.ClientHttp2Stream)(...args))
-      }
-      this._pending = []
-    } catch (err: unknown) {
-      const e = err instanceof Error ? err : new Error(String(err))
-      pushUiLog("SDK", "ERROR", `[h2-proxy] failed: ${e.message}`)
-      this._err = e
-      this.emit("error", e)
-    }
-  }
-
-  request(...args: unknown[]): http2.ClientHttp2Stream | EventEmitter {
-    if (this._real) return (this._real.request as (...a: unknown[]) => http2.ClientHttp2Stream)(...args)
-    if (this._err) throw this._err
-
-    let res!: (s: http2.ClientHttp2Stream) => void
-    const p = new Promise<http2.ClientHttp2Stream>((r) => { res = r })
-    this._pending.push({ args, resolve: res })
-
-    const ph = new EventEmitter() as EventEmitter & Record<string, (...a: unknown[]) => void>
-    ph.end = () => {}; ph.write = () => {}; ph.close = () => {}
-    ph.destroy = () => {}; ph.setTimeout = () => {}
-
-    p.then((real) => {
-      for (const ev of ["response", "data", "end", "error", "trailers", "close"] as const) {
-        real.on(ev, (...a: unknown[]) => ph.emit(ev, ...a))
-      }
-    })
-    return ph
-  }
-
-  close(...args: unknown[]) { this._closed = true; if (this._real) (this._real.close as Function)(...args) }
-  destroy(...args: unknown[]) { this._closed = true; if (this._real) (this._real.destroy as Function)(...args) }
-  get closed() { return this._real ? this._real.closed : this._closed }
-  get destroyed() { return this._real ? this._real.destroyed : this._closed }
-  get encrypted() { return true }
-  get alpnProtocol() { return "h2" }
-  get socket() { return this._real?.socket ?? null }
-  ping(...a: unknown[]) { if (this._real) (this._real.ping as Function)(...a) }
-  settings(...a: unknown[]) { if (this._real) (this._real.settings as Function)(...a) }
-  setTimeout(...a: unknown[]) { if (this._real) (this._real.setTimeout as Function)(...a); return this }
-  ref() { this._real?.ref(); return this }
-  unref() { this._real?.unref(); return this }
-}
-
-function installH2Proxy(): void {
-  if (h2ProxyInstalled) return
-  h2ProxyInstalled = true
-
-  ;(http2 as any).connect = function proxiedH2Connect(
-    authority: string | URL,
-    options?: http2.ClientSessionOptions | http2.SecureClientSessionOptions,
-    listener?: () => void,
-  ) {
-    const proxyEnv = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || ""
-    const s = String(authority)
-    pushUiLog("SDK", "DEBUG", `[h2-proxy] connect called: authority=${s} proxyEnv=${proxyEnv ? "set" : "empty"}`)
-    if (!proxyEnv) return origH2Connect.call(http2, authority, options as any, listener)
-    return new LazyH2Session(authority, options as http2.ClientSessionOptions, listener) as unknown as http2.ClientHttp2Session
-  }
-
-  pushUiLog("SDK", "INFO", "HTTP/2 代理 patch 已安装")
-}
 
 function broadcastSdkSessionStatus(): void {
   const list = [...sdkSessions.values()].map((s) => ({
@@ -321,15 +179,6 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
   try {
     ensureSdkBinaryPaths()
 
-    const proxyUrl = config.httpProxy?.trim() || config.httpsProxy?.trim()
-    if (proxyUrl) {
-      process.env.HTTP_PROXY = proxyUrl
-      process.env.HTTPS_PROXY = proxyUrl
-      if (config.noProxy?.trim()) process.env.NO_PROXY = config.noProxy.trim()
-    }
-    const effectiveProxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || ""
-    if (effectiveProxy) installH2Proxy()
-
     const modelId = config.model?.trim() || "composer-2"
     const modelSelection: { id: string; params?: { id: string; value: string }[] } = { id: modelId }
     if (config.modelParams?.trim()) {
@@ -337,7 +186,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
         modelSelection.params = JSON.parse(config.modelParams)
       } catch { /* ignore bad JSON */ }
     }
-    pushUiLog("SDK", "INFO", `[${sessionKey}] 正在创建 SDK Agent (cwd=${workspaceDir}, model=${JSON.stringify(modelSelection)}${proxyUrl ? `, proxy=${proxyUrl}` : ""})`)
+    pushUiLog("SDK", "INFO", `[${sessionKey}] 正在创建 SDK Agent (cwd=${workspaceDir}, model=${JSON.stringify(modelSelection)})`)
 
     const agent = await Agent.create({
       apiKey,
