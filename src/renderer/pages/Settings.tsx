@@ -135,8 +135,8 @@ const REQUIRED_PERMISSIONS: { scope: string; desc: string }[] = [
 
 const TABS: { id: Tab; label: string; icon: typeof SettingsIcon }[] = [
   { id: "general", label: "通用", icon: SettingsIcon },
-  { id: "channel", label: "消息通道", icon: MessageSquare },
   { id: "proxy", label: "网络", icon: Network },
+  { id: "channel", label: "消息通道", icon: MessageSquare },
   { id: "agent", label: "Agent", icon: Bot },
   { id: "mcp", label: "MCP", icon: Blocks },
   { id: "rules", label: "Rules", icon: FileCode2 },

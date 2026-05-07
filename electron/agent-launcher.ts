@@ -22,7 +22,7 @@ const AGENT_NO_PREVIOUS_CHATS = /no previous chats found/i
 
 // ── 会话 Agent ──────────────────────────────────────────
 
-export type ChatType = "p2p" | "group" | "task" | "temp_chat"
+export type ChatType = "p2p" | "group" | "task" | "temp"
 
 interface SessionAgent {
   sessionKey: string
@@ -97,7 +97,7 @@ export function getSessionAgentCount(): number {
 export function getIndependentTaskStatuses(): Record<string, { running: boolean; pid?: number; startedAt?: number }> {
   const statuses: Record<string, { running: boolean; pid?: number; startedAt?: number }> = {}
   for (const [key, agent] of sessionAgents) {
-    if (agent.chatType === "task") {
+    if (agent.chatType === "task" || agent.chatType === "temp") {
       statuses[key] = { running: true, pid: agent.pid, startedAt: agent.startedAt }
     }
   }
@@ -108,7 +108,7 @@ export function getIndependentTaskStatuses(): Record<string, { running: boolean;
 
 export interface LaunchMeta { messageIds?: string[]; chatId?: string; chatType?: string }
 
-function buildPrompt(meta?: LaunchMeta, taskMessage?: string): string {
+export function buildPrompt(meta?: LaunchMeta, taskMessage?: string): string {
   const prompts: string[] = []
   prompts.push("请按照digital-identity数字身份定义并遵守工作流规则cursor-claw开始工作")
 
@@ -116,8 +116,9 @@ function buildPrompt(meta?: LaunchMeta, taskMessage?: string): string {
     prompts.push("如果你当前正在执行任务（上下文中已有进行中的工作），请直接继续，不要重复处理已完成的内容。")
     prompts.push("否则，请立即通过 sync_message 工具获取待处理的消息并开始工作。")
   }
-  if(meta?.chatType === "temp_chat"){
-    prompts.push("请立即通过 sync_message 工具获取待处理的消息并开始工作。")
+  if(meta?.chatType === "temp" && taskMessage){
+    prompts.push("[临时任务]")
+    prompts.push(taskMessage)
   }
   if(meta?.chatType === "task" && taskMessage){
     prompts.push("[定时任务]")
@@ -239,7 +240,7 @@ export async function launchSessionAgent(
 export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boolean; error?: string }> {
   const { sessionKey, chatType, injectWorkspaceFn, meta, senderOpenId, chatName, taskMessage } = opts
   const needResume = chatType === "p2p" || chatType === "group"
-  const useMainWorkspace = opts.useMainWorkspace ?? (chatType === "task" || chatType === "temp_chat")
+  const useMainWorkspace = opts.useMainWorkspace ?? (chatType === "task" || chatType === "temp")
 
   if (isSessionAgentRunning(sessionKey)) {
     sessionAgents.get(sessionKey)!.lastActivityAt = Date.now()
@@ -252,8 +253,7 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
   if (!useMainWorkspace) {
     if (chatType === "group" && !config.enableGroupChat) return { ok: false, error: "群聊未启用" }
     const safeChatId = sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_")
-    const appId = config.larkAppId || "default"
-    workDir = path.join(app.getPath("userData"), "apps", appId, "workspaces", safeChatId)
+    workDir = path.join(app.getPath("userData"), "workspaces", safeChatId)
     if (!fs.existsSync(workDir)) {
       fs.mkdirSync(workDir, { recursive: true })
       broadcastLog(`[Agent] 创建临时工作目录: ${workDir}`)
@@ -337,13 +337,13 @@ export function reapIdleGroupAgents(): void {
   }
 }
 
-export async function launchIndependentAgent(taskId: string, taskName: string, message: string): Promise<{ ok: boolean; error?: string }> {
+export async function launchIndependentAgent(taskId: string, taskName: string, message: string, type: ChatType = "task"): Promise<{ ok: boolean; error?: string }> {
   return launchAgent({
     sessionKey: taskId,
-    chatType: "task",
+    chatType: type,
     chatName: taskName,
     taskMessage: message,
-    meta: { chatId: taskName, chatType: "task" },
+    meta: { chatId: taskName, chatType: type },
   })
 }
 

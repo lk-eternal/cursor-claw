@@ -26,11 +26,17 @@ import {
   isSdkSessionRunning, getSdkSessionCount, getSdkSessionList,
   checkSdkApiKey, listSdkModels,
 } from "./agent-sdk"
+import {
+  setDaemonPort, registerEnableMcpFn, getMcpServerPath, getAdminMcpPath,
+  injectMcpToDir, injectRulesToDir, injectSkillsToDir,
+  injectWorkspaceToDir, injectWorkspaceMcpAndRules,
+} from "./workspace-injector"
 
 export { applyProxyEnv, checkCliInstalled, installCli, execAgentSync, execAgentAsync, type ExecAgentOptions as ExecAgentSyncOptions } from "./agent-cli"
 export { checkAgentLoggedIn, loginCli } from "./agent-launcher"
 export { getLogBuffer } from "./ui-logger"
 export { checkSdkApiKey, listSdkModels } from "./agent-sdk"
+export { injectWorkspaceMcpAndRules, injectWorkspaceToDir, getMcpServerPath, getAdminMcpPath } from "./workspace-injector"
 
 function useSdkMode(): boolean {
   return getConfig().agentMode === "sdk"
@@ -161,7 +167,7 @@ function startTempConnection(appId: string, appSecret: string): Promise<{ openId
       LARK_APP_ID: appId,
       LARK_APP_SECRET: appSecret,
       LARK_TEMP_MODE: "1",
-      APP_DATA_DIR: path.join(app.getPath("userData"), "apps", appId),
+      APP_DATA_DIR: app.getPath("userData"),
     }
     const child = spawn(process.execPath, [entry], { env, stdio: ["ignore", "pipe", "pipe"] })
     tempConnProcess = child
@@ -202,38 +208,9 @@ function stopTempConnection(): void {
   }
 }
 
-function getMcpServerPath(): string {
-  if (app.isPackaged) {
-    return path.join(process.resourcesPath, "daemon", "mcp-server.mjs")
-  }
-  const bundled = path.join(app.getAppPath(), "dist-bundle", "mcp-server.mjs")
-  if (fs.existsSync(bundled)) return bundled
-  return path.join(app.getAppPath(), "dist", "index.js")
-}
-
-function getAdminMcpPath(): string {
-  if (app.isPackaged) {
-    return path.join(process.resourcesPath, "daemon", "mcp-admin.mjs")
-  }
-  const bundled = path.join(app.getAppPath(), "dist-bundle", "mcp-admin.mjs")
-  if (fs.existsSync(bundled)) return bundled
-  return path.join(app.getAppPath(), "dist", "server-admin-entry.js")
-}
-
-function getRuleTemplatePath(): string {
-  if (app.isPackaged) return path.join(process.resourcesPath, "cursor-claw.mdc")
-  return path.join(app.getAppPath(), "resources", "cursor-claw.mdc")
-}
-
-function getSkillsTemplateDir(): string {
-  if (app.isPackaged) return path.join(process.resourcesPath, "skills")
-  return path.join(app.getAppPath(), "resources", "skills")
-}
 
 function getLockFilePath(): string {
-  const config = getConfig()
-  const appKey = config.larkAppId || config.wechatAccountId || "default"
-  return path.join(app.getPath("userData"), "apps", appKey, "daemon.lock.json")
+  return path.join(app.getPath("userData"), "daemon.lock.json")
 }
 
 function readLockFile(): { pid: number; port: number; version: string } | null {
@@ -330,6 +307,7 @@ export async function getDaemonStatus(): Promise<DaemonStatus> {
 
   const statusFromHealth = (port: number, health: Record<string, unknown>): DaemonStatus => {
     cachedPort = port
+    setDaemonPort(port)
     const cfgModel = config.model?.trim() || "auto"
     const status: DaemonStatus = {
       running: true,
@@ -454,11 +432,10 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
   }
 
   try {
-    const appKey = config.larkAppId || config.wechatAccountId || "default"
     const env: Record<string, string> = {
       ...process.env as Record<string, string>,
       LARK_WORKSPACE_DIR: config.workspaceDir,
-      APP_DATA_DIR: path.join(app.getPath("userData"), "apps", appKey),
+      APP_DATA_DIR: app.getPath("userData"),
       NODE_USE_ENV_PROXY: "1",
       ...(feishuReady ? {
         FEISHU_ENABLED: "1",
@@ -543,6 +520,7 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
       earlyExit = code
       daemonProcess = null
       cachedPort = null
+      setDaemonPort(null)
       activeDaemonWorkspaceDir = null
       broadcastStatus({ running: false, error: `Daemon 退出 (code=${code})` })
     })
@@ -556,6 +534,7 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
     }
 
     cachedPort = lock.port
+    setDaemonPort(lock.port)
     activeDaemonWorkspaceDir = config.workspaceDir.trim() || null
     startStatusPolling()
     await injectWorkspaceMcpAndRules()
@@ -588,6 +567,7 @@ export async function stopDaemon(): Promise<void> {
   }
   daemonProcess = null
   cachedPort = null
+  setDaemonPort(null)
   activeDaemonWorkspaceDir = null
   broadcastStatus({
     running: false,
@@ -889,167 +869,8 @@ export async function getQueueMessages(): Promise<{ index: number; preview: stri
 
 // ── CLI 检测与安装 ──────────────────────────────────────────
 
-// ── MCP 配置 + 规则注入 ────────────────────────────────────
 
-/**
- * 按优先级检查全局和项目 mcp.json 中是否已存在指定 serverKey。
- * 存在则返回该文件路径（原地更新），都不存在返回 null（将注入项目目录）。
- */
-const injectedMcpHashes = new Map<string, string>()
 
-function buildMcpServers(): Record<string, unknown> {
-  if (!cachedPort) return {}
-  const env: Record<string, string> = { LARK_DAEMON_PORT: String(cachedPort) }
-  return {
-    "cursor-claw": { command: "node", args: [getMcpServerPath()], env },
-    "cursor-claw-admin": { command: "node", args: [getAdminMcpPath()], env },
-  }
-}
-
-async function injectMcpToDir(wsDir: string): Promise<boolean> {
-  try {
-    const newServers = buildMcpServers()
-    const hash = JSON.stringify(newServers)
-    if (injectedMcpHashes.get(wsDir) === hash) return true
-
-    const mcpPath = path.join(wsDir, ".cursor", "mcp.json")
-    let mcpConfig: Record<string, unknown> = {}
-    if (fs.existsSync(mcpPath)) {
-      try { mcpConfig = JSON.parse(fs.readFileSync(mcpPath, "utf-8")) } catch { mcpConfig = {} }
-    }
-    const existing = (mcpConfig.mcpServers ?? {}) as Record<string, unknown>
-    Object.assign(existing, newServers)
-    mcpConfig.mcpServers = existing
-
-    const dir = path.dirname(mcpPath)
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(mcpPath, JSON.stringify(mcpConfig, null, 2), "utf-8")
-    injectedMcpHashes.set(wsDir, hash)
-    broadcastLog(`MCP 已注入: ${mcpPath}`)
-
-    await enableMcpServers(wsDir, Object.keys(newServers))
-    return true
-  } catch (e: unknown) {
-    broadcastLog(`MCP 注入失败: ${e instanceof Error ? e.message : e}`, "ERROR")
-    return false
-  }
-}
-
-async function enableMcpServers(wsDir: string, serverNames: string[]): Promise<void> {
-  if (useSdkMode()) {
-    for (const name of serverNames) {
-      toggleMcpServerViaJson(name, true)
-    }
-    return
-  }
-
-  const config = getConfig()
-  const env: Record<string, string> = { ...process.env as Record<string, string> }
-  applyProxyEnv(env, config)
-
-  let needEnable: string[]
-  try {
-    const r = await spawnAsync(["mcp", "list"], wsDir, env)
-    const clean = r.stdout.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/\r/g, "")
-    const enabledSet = new Set<string>()
-    for (const line of clean.split("\n")) {
-      const m = line.match(/^(.+?):\s+(.+)$/)
-      if (m && isEnabledStatus(m[2].trim())) enabledSet.add(m[1].trim())
-    }
-    needEnable = serverNames.filter((n) => !enabledSet.has(n))
-    if (needEnable.length === 0) return
-  } catch {
-    needEnable = serverNames
-  }
-  for (const name of needEnable) {
-    try {
-      const r = await spawnAsync(["mcp", "enable", name], wsDir, env)
-      const out = (r.stdout + r.stderr).replace(/\x1b\[[0-9;]*m/g, "").trim()
-      broadcastLog(`[MCP Auto-Enable] "${name}": ${out || "已启用"}`, r.code === 0 ? "INFO" : "WARN")
-    } catch (e: unknown) {
-      broadcastLog(`[MCP Auto-Enable] "${name}" 失败: ${e instanceof Error ? e.message : e}`, "WARN")
-    }
-  }
-}
-
-function injectRulesToDir(wsDir: string): boolean {
-  try {
-    const rulesDir = path.join(wsDir, ".cursor", "rules")
-    if (!fs.existsSync(rulesDir)) fs.mkdirSync(rulesDir, { recursive: true })
-    const rulePath = path.join(rulesDir, "cursor-claw.mdc")
-    const tplPath = getRuleTemplatePath()
-    const ruleContent = fs.existsSync(tplPath)
-      ? fs.readFileSync(tplPath, "utf-8")
-      : ""
-    if (!ruleContent) {
-      broadcastLog(`规则模板文件不存在: ${tplPath}`, "WARN")
-      return false
-    }
-    fs.writeFileSync(rulePath, ruleContent, "utf-8")
-    broadcastLog(`规则已注入: ${rulePath}`)
-
-    const identity = getConfig().digitalIdentity?.trim()
-    const identityPath = path.join(rulesDir, "digital-identity.mdc")
-    if (identity) {
-      const identityMdc = [
-        "---",
-        "description: 数字身份规则 - 定义 Agent 的角色、职责和行为边界",
-        "alwaysApply: true",
-        "---",
-        "",
-        identity,
-      ].join("\r\n")
-      fs.writeFileSync(identityPath, identityMdc, "utf-8")
-    } else if (fs.existsSync(identityPath)) {
-      fs.unlinkSync(identityPath)
-    }
-
-    return true
-  } catch (e: unknown) {
-    broadcastLog(`规则注入失败: ${e instanceof Error ? e.message : e}`, "ERROR")
-    return false
-  }
-}
-
-function injectSkillsToDir(wsDir: string): boolean {
-  try {
-    const srcDir = getSkillsTemplateDir()
-    if (!fs.existsSync(srcDir)) return false
-    const destBase = path.join(wsDir, ".cursor", "skills")
-    const entries = fs.readdirSync(srcDir, { withFileTypes: true })
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue
-      const skillSrc = path.join(srcDir, entry.name)
-      const skillDest = path.join(destBase, entry.name)
-      if (!fs.existsSync(skillDest)) fs.mkdirSync(skillDest, { recursive: true })
-      for (const file of fs.readdirSync(skillSrc)) {
-        const s = path.join(skillSrc, file)
-        const d = path.join(skillDest, file)
-        if (fs.statSync(s).isFile()) fs.copyFileSync(s, d)
-      }
-    }
-    broadcastLog(`Skills 已注入: ${destBase}`)
-    return true
-  } catch (e: unknown) {
-    broadcastLog(`Skills 注入失败: ${e instanceof Error ? e.message : e}`, "ERROR")
-    return false
-  }
-}
-
-export async function injectWorkspaceMcpAndRules(): Promise<{ mcpOk: boolean; ruleOk: boolean; skillOk: boolean }> {
-  const config = getConfig()
-  if (!config.workspaceDir) return { mcpOk: false, ruleOk: false, skillOk: false }
-  const mcpOk = await injectMcpToDir(config.workspaceDir)
-  const ruleOk = injectRulesToDir(config.workspaceDir)
-  const skillOk = injectSkillsToDir(config.workspaceDir)
-  return { mcpOk, ruleOk, skillOk }
-}
-
-async function injectWorkspaceToDir(dir: string): Promise<boolean> {
-  await injectMcpToDir(dir)
-  injectSkillsToDir(dir)
-  return injectRulesToDir(dir)
-}
 
 // ── Agent 状态与会话管理（委托 agent-launcher） ─────────────
 
@@ -1060,41 +881,51 @@ export type AgentLoginStatus = {
   error?: string
 }
 
+interface LaunchAgentParams {
+  sessionKey: string
+  chatType: ChatType
+  meta?: import("./agent-launcher").LaunchMeta
+  useMainWorkspace?: boolean
+  senderOpenId?: string
+  chatName?: string
+  taskMessage?: string
+}
+
+async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?: string }> {
+  const { sessionKey, chatType, meta, senderOpenId, chatName, taskMessage } = p
+  const useMain = p.useMainWorkspace ?? (chatType === "p2p" || chatType === "task" || chatType === "temp")
+  const config = getConfig()
+
+  let workDir = config.workspaceDir
+  if (!useMain) {
+    const safeChatId = sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_")
+    workDir = path.join(app.getPath("userData"), "workspaces", safeChatId)
+    if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true })
+  }
+
+  await injectWorkspaceToDir(workDir)
+
+  if (useSdkMode()) {
+    return launchSdkAgent({ sessionKey, chatType, meta, workspaceDir: workDir, senderOpenId, chatName, taskMessage })
+  }
+
+  if (chatType === "task" || chatType === "temp") {
+    return _launchIndependentAgentCli(sessionKey, chatName ?? sessionKey, taskMessage ?? "", chatType)
+  }
+  return _launchSessionAgent(sessionKey, chatType, injectWorkspaceToDir, meta, useMain, senderOpenId)
+}
+
 export async function launchSessionAgent(
   sessionKey: string, chatType: ChatType,
   _injectFn?: (dir: string) => boolean | Promise<boolean>,
   meta?: import("./agent-launcher").LaunchMeta,
   useMainWorkspace?: boolean, senderOpenId?: string,
 ): Promise<{ ok: boolean; error?: string }> {
-  if (useSdkMode()) {
-    const config = getConfig()
-    const isMain = useMainWorkspace ?? false
-    let workDir = config.workspaceDir
-    if (!isMain) {
-      const safeChatId = sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_")
-      const appKey = config.larkAppId || config.wechatAccountId || "default"
-      workDir = path.join(app.getPath("userData"), "apps", appKey, "workspaces", safeChatId)
-      if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true })
-    }
-    await injectWorkspaceToDir(workDir)
-    return launchSdkAgent({
-      sessionKey, chatType, meta, workspaceDir: workDir, senderOpenId,
-    })
-  }
-  return _launchSessionAgent(sessionKey, chatType, injectWorkspaceToDir, meta, useMainWorkspace, senderOpenId)
+  return launchAgent({ sessionKey, chatType, meta, useMainWorkspace, senderOpenId })
 }
 
-async function launchIndependentAgent(taskId: string, taskName: string, message: string): Promise<{ ok: boolean; error?: string }> {
-  if (useSdkMode()) {
-    const config = getConfig()
-    await injectWorkspaceToDir(config.workspaceDir)
-    return launchSdkAgent({
-      sessionKey: taskId, chatType: "task", chatName: taskName,
-      taskMessage: message, workspaceDir: config.workspaceDir,
-      meta: { chatId: taskName, chatType: "task" },
-    })
-  }
-  return _launchIndependentAgentCli(taskId, taskName, message)
+async function launchIndependentAgent(taskId: string, taskName: string, message: string, type: ChatType = "task", chatId?: string): Promise<{ ok: boolean; error?: string }> {
+  return launchAgent({ sessionKey: taskId, chatType: type, chatName: taskName, taskMessage: message, meta: { chatId: chatId ?? taskName, chatType: type } })
 }
 
 export function getSessionAgentList() {
@@ -1736,6 +1567,76 @@ async function handleFeishuMcpCommand(port: number, messageId: string, raw: stri
   await reportCommandResult(port, messageId, false, `😅 未知子命令: ${sub}\n\n${MCP_SUBCMD_HELP}`)
 }
 
+function formatDuration(ms: number): string {
+  const s = Math.floor(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m${s % 60}s`
+  return `${Math.floor(m / 60)}h${m % 60}m`
+}
+
+async function handleChatCommand(tokens: string[], port: number, messageId: string, chatId?: string): Promise<void> {
+  const reply = (ok: boolean, msg: string) => reportCommandResult(port, messageId, ok, msg, chatId)
+  const sub = tokens[1]?.toLowerCase()
+
+  const sessions = getSessionAgentList().sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0))
+
+  if (!sub || sub === "ls" || sub === "list") {
+    if (sessions.length === 0) { await reply(true, "📭 当前没有活跃会话"); return }
+    const now = Date.now()
+    const lines = sessions.map((s, i) => {
+      const idx = `#${i + 1}`
+      const type = s.chatType === "p2p" ? "私聊" : s.chatType === "group" ? "群聊" : s.chatType === "task" ? "定时" : s.chatType === "temp" ? "临时" : s.chatType
+      const name = s.chatName || "-"
+      const dir = s.workspaceDir ? path.basename(s.workspaceDir) : "-"
+      const pid = s.pid || "-"
+      const started = s.startedAt ? new Date(s.startedAt).toLocaleTimeString("zh-CN", { hour12: false }) : "-"
+      const dur = s.startedAt ? formatDuration(now - s.startedAt) : "-"
+      return `${idx} [${type}] ${name} | 启动:${started} | 时长:${dur} | dir:${dir} | pid:${pid}`
+    })
+    await reply(true, `📋 活跃会话 (${sessions.length}):\n${lines.join("\n")}`)
+    return
+  }
+
+  if (sub === "stop") {
+    const idx = parseInt(tokens[2], 10)
+    if (isNaN(idx) || idx < 1 || idx > sessions.length) {
+      await reply(false, `❌ 无效序号，范围 1-${sessions.length}`)
+      return
+    }
+    const target = sessions[idx - 1]
+    stopSessionAgent(target.sessionKey)
+    await reply(true, `✅ 已停止会话 #${idx}: ${target.chatName || target.sessionKey}`)
+    return
+  }
+
+  const idx = parseInt(sub, 10)
+  if (!isNaN(idx)) {
+    if (idx < 1 || idx > sessions.length) {
+      await reply(false, `❌ 无效序号，范围 1-${sessions.length}`)
+      return
+    }
+    const s = sessions[idx - 1]
+    const now = Date.now()
+    const type = s.chatType === "p2p" ? "私聊" : s.chatType === "group" ? "群聊" : s.chatType === "task" ? "定时任务" : s.chatType === "temp" ? "临时任务" : s.chatType
+    const lines = [
+      `📌 会话 #${idx} 详情:`,
+      `  类型: ${type}`,
+      `  名称: ${s.chatName || "-"}`,
+      `  SessionKey: ${s.sessionKey}`,
+      `  工作目录: ${s.workspaceDir || "-"}`,
+      `  PID: ${s.pid || "-"}`,
+      `  启动时间: ${s.startedAt ? new Date(s.startedAt).toLocaleString("zh-CN", { hour12: false }) : "-"}`,
+      `  运行时长: ${s.startedAt ? formatDuration(now - s.startedAt) : "-"}`,
+      `\n💡 /chat stop ${idx} 可停止此会话`,
+    ]
+    await reply(true, lines.join("\n"))
+    return
+  }
+
+  await reply(false, "💡 /chat 用法:\n  /chat ls — 列出所有活跃会话\n  /chat <序号> — 查看会话详情\n  /chat stop <序号> — 停止指定会话")
+}
+
 async function checkAndExecutePendingCommands(): Promise<void> {
   const lock = readLockFile()
   if (!lock?.port) return
@@ -1824,7 +1725,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
             break
           }
           const taskId = `temp_${Date.now()}`
-          const result = await launchIndependentAgent(taskId, "临时会话", runMsg)
+          const result = await launchIndependentAgent(taskId, "临时会话", runMsg, "temp", claimed.chatId)
           await reply(result.ok, result.ok
             ? `🚀 临时 Agent 已启动 (id=${taskId})`
             : `❌ 启动失败: ${result.error ?? "未知错误"}`)
@@ -1904,6 +1805,12 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           break
         }
 
+        case "/chat": {
+          if (!isAdmin) { await denyNonAdmin(); break }
+          await handleChatCommand(cmdTokens, lock.port, claimed!.messageId, claimed!.chatId)
+          break
+        }
+
         case "/help": {
           const common = [
             "🔹 /status 运行状态",
@@ -1920,6 +1827,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
             "🔹 /model 模型设置",
             "🔹 /mcp MCP服务器管理",
             "🔹 /workspace 切换工作目录",
+            "🔹 /chat 会话管理",
           ]
           const lines = isAdmin
             ? ["💡 可用指令（管理员）：", ...common, ...adminOnly]
@@ -2476,6 +2384,9 @@ export async function saveAppConfigFromRenderer(partial: Partial<AppConfig>): Pr
 
 export function initDaemonManager(): void {
   setChatNameResolver((chatId) => chatNameCache.get(chatId))
+  registerEnableMcpFn(async (_wsDir, serverNames) => {
+    for (const name of serverNames) await toggleMcpServer(name, true)
+  })
   ipcMain.handle("config:apply-workspace-restart", (_, workspaceDir: string) => applyWorkspaceDirRestart(workspaceDir))
   ipcMain.handle("daemon:get-log-buffer", () => getLogBuffer())
   ipcMain.handle("agent:stop", () => { stopAgent(); return { ok: true } })
@@ -2609,6 +2520,7 @@ export function cleanupDaemonManager(): void {
     daemonProcess = null
   }
   cachedPort = null
+  setDaemonPort(null)
   activeDaemonWorkspaceDir = null
 }
 

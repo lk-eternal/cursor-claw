@@ -6,8 +6,7 @@ import { app } from "electron"
 import { getConfig, type ScheduledTask } from "./config-store"
 
 function resolveTasksFile(): string {
-  const appId = getConfig().larkAppId || "default"
-  return path.join(app.getPath("userData"), "apps", appId, "scheduled-tasks.json")
+  return path.join(app.getPath("userData"), "scheduled-tasks.json")
 }
 
 export function getTasksFilePath(): string {
