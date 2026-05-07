@@ -179,7 +179,13 @@ export function getQueueMessages(): { index: number; preview: string; chatId?: s
   }
 }
 
-export function getDistinctChatIds(): { chatId: string; chatType: string; senderOpenId?: string }[] {
+export interface QueueSessionInfo {
+  sessionKey: string;
+  chatType: string;
+  senderOpenId?: string;
+}
+
+export function getDistinctSessions(): QueueSessionInfo[] {
   if (!queueDir) return [];
   const map = new Map<string, { chatType: string; senderOpenId?: string }>();
   try {
@@ -188,13 +194,18 @@ export function getDistinctChatIds(): { chatId: string; chatType: string; sender
       try {
         const raw = fs.readFileSync(path.join(queueDir, f), "utf-8");
         const parsed = JSON.parse(raw);
-        if (parsed.chatId && !map.has(parsed.chatId)) {
-          map.set(parsed.chatId, { chatType: parsed.chatType || "p2p", senderOpenId: parsed.senderOpenId || undefined });
+        const key = parsed.chatId || "";
+        if (key && !map.has(key)) {
+          map.set(key, { chatType: parsed.chatType || "p2p", senderOpenId: parsed.senderOpenId || undefined });
         }
       } catch { /* ignore */ }
     }
   } catch { /* ignore */ }
-  return [...map.entries()].map(([chatId, v]) => ({ chatId, chatType: v.chatType, senderOpenId: v.senderOpenId }));
+  return [...map.entries()].map(([key, v]) => ({
+    sessionKey: key,
+    chatType: v.chatType,
+    senderOpenId: v.senderOpenId,
+  }));
 }
 
 export function cleanupStaleMessages(): void {

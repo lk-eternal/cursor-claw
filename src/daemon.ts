@@ -19,7 +19,7 @@ import {
   pollFileQueueBatch,
   getQueueLength as getFileQueueLength,
   getQueueMessages as getFileQueueMessages,
-  getDistinctChatIds,
+  getDistinctSessions,
   cleanupStaleMessages,
 } from "./file-queue.js";
 
@@ -97,9 +97,16 @@ let botOpenId: string | undefined;
 let wechatManager: WeChatManager | null = null;
 let lastWechatChatId: string | null = null;
 
+function extractRawChatId(sessionKey?: string): string | undefined {
+  if (!sessionKey) return undefined;
+  const idx = sessionKey.indexOf("::");
+  return idx > 0 ? sessionKey.slice(0, idx) : sessionKey;
+}
+
 function isWechatChatId(chatId?: string): boolean {
-  if (!chatId) return false;
-  return chatId.startsWith("wxid_") || chatId.startsWith("wx_") || chatId.includes("@chatroom") || chatId.includes("@im.wechat");
+  const raw = extractRawChatId(chatId);
+  if (!raw) return false;
+  return raw.startsWith("wxid_") || raw.startsWith("wx_") || raw.includes("@chatroom") || raw.includes("@im.wechat");
 }
 
 const WECHAT_STATE_FILE = path.join(WORKSPACE_DIR, ".cursor", "wechat-data", "state.json");
@@ -212,7 +219,12 @@ function pushMessage(content: string, messageId?: string, chatId?: string, chatT
     log("WARN", `丢弃空消息 (messageId=${messageId})`);
     return;
   }
-  const routedId = resolveRoutingKey(chatId, replyMessageId);
+  let routedId = resolveRoutingKey(chatId, replyMessageId);
+  if (routedId && routedId === chatId && chatType === "p2p" && WORKSPACE_DIR && !routedId.includes("::")) {
+    const defaultSessionKey = `${chatId}::${WORKSPACE_DIR}`;
+    setActiveSession(chatId, defaultSessionKey);
+    routedId = defaultSessionKey;
+  }
   const written = pushToFileQueue(content, messageId, `daemon-${process.pid}`, routedId, chatType, senderOpenId);
   if (written) {
     log("INFO", `消息已写入共享队列: ${JSON.stringify(content)} (id=${messageId ?? "none"}, chat=${chatId ?? "none"}${routedId !== chatId ? ` → routed=${routedId}` : ""}${replyMessageId ? `, reply=${replyMessageId}` : ""})`);
@@ -308,11 +320,10 @@ const COMMANDS: Record<string, string> = {
   "/status": "查看 Agent / Daemon 状态",
   "/list": "查看消息队列列表（不消费）",
   "/task": "定时任务（/task 查看子命令说明；如 /task ls）",
-  "/run": "启动临时独立 Agent（/run <任务描述>）",
   "/model": "Cursor CLI 模型（/model ls | info | set <序号>）",
   "/mcp": "MCP 服务器管理（/mcp ls | info | enable | disable | delete | add）",
   "/workspace": "切换工作目录（/workspace 查看当前 | /workspace set <路径>）",
-  "/chat": "会话管理（/chat ls 列出 | /chat <序号> 详情 | /chat stop <序号> 停止）",
+  "/chat": "会话管理（/chat ls | /chat <序号> | /chat stop <序号> | /chat new <描述>）",
   "/clean": "清空消息队列",
   "/reset": "下次拉起 Agent 时不使用 --continue（新 CLI 会话），不删除本地文件",
   "/restart": "停止 Agent + 清空队列 + 重启 Daemon",
@@ -327,7 +338,7 @@ function isCommand(text: string): boolean {
 async function replyToMessage(messageId: string, text: string, chatId?: string): Promise<void> {
   if (chatId && isWechatChatId(chatId)) {
     if (!wechatManager) { log("WARN", "微信未启用，跳过回复"); return; }
-    try { await wechatManager.sendText(chatId, text); } catch (e: any) { log("WARN", `微信回复失败: ${e?.message}`); }
+    try { await wechatManager.sendText(extractRawChatId(chatId)!, text); } catch (e: any) { log("WARN", `微信回复失败: ${e?.message}`); }
     return;
   }
   if (!larkClient || !sender) { log("WARN", "飞书未启用，跳过回复"); return; }
@@ -601,7 +612,7 @@ function startHttpServer(): Promise<number> {
         }
 
         if (method === "GET" && pathname === "/queue-chat-ids") {
-          json(res, { chats: getDistinctChatIds() });
+          json(res, { chats: getDistinctSessions() });
           return;
         }
 
@@ -904,7 +915,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
 
     if (isWechatChatId(chat_id)) {
       if (!wechatManager?.isConnected()) { json(res, { ok: false, error: "微信未连接，无法发送到微信会话" }, 400); return true; }
-      const ok = await wechatManager.sendText(chat_id!, text);
+      const ok = await wechatManager.sendText(extractRawChatId(chat_id)!, text);
       json(res, { ok });
     } else if (sender) {
       let sentMsgId: string | undefined;
@@ -925,7 +936,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     if (!image_path) { json(res, { ok: false, error: "image_path is required" }, 400); return true; }
     if (isWechatChatId(chat_id)) {
       if (!wechatManager?.isConnected()) { json(res, { ok: false, error: "微信未连接，无法发送图片到微信会话" }, 400); return true; }
-      await wechatManager.sendMedia(chat_id!, image_path);
+      await wechatManager.sendMedia(extractRawChatId(chat_id)!, image_path);
     } else if (sender) {
       await sender.sendImage(image_path, message_id, chat_id);
     } else {
@@ -941,7 +952,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     if (!file_path) { json(res, { ok: false, error: "file_path is required" }, 400); return true; }
     if (isWechatChatId(chat_id)) {
       if (!wechatManager?.isConnected()) { json(res, { ok: false, error: "微信未连接，无法发送文件到微信会话" }, 400); return true; }
-      await wechatManager.sendMedia(chat_id!, file_path);
+      await wechatManager.sendMedia(extractRawChatId(chat_id)!, file_path);
     } else if (sender) {
       await sender.sendFile(file_path, message_id, chat_id);
     } else {

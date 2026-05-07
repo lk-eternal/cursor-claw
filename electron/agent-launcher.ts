@@ -37,11 +37,17 @@ interface SessionAgent {
 }
 
 const sessionAgents = new Map<string, SessionAgent>()
+const pendingLaunches = new Set<string>()
 
 let chatNameResolver: ((chatId: string) => string | undefined) | null = null
+let sessionCloseHandler: ((sessionKey: string, chatType: ChatType) => void | Promise<void>) | null = null
 
 export function setChatNameResolver(fn: (chatId: string) => string | undefined): void {
   chatNameResolver = fn
+}
+
+export function setSessionCloseHandler(fn: (sessionKey: string, chatType: ChatType) => void | Promise<void>): void {
+  sessionCloseHandler = fn
 }
 
 function broadcastSessionStatus(): void {
@@ -64,6 +70,7 @@ export function isAgentRunning(): boolean {
 }
 
 export function isSessionAgentRunning(sessionKey: string): boolean {
+  if (pendingLaunches.has(sessionKey)) return true
   const sa = sessionAgents.get(sessionKey)
   return sa !== null && sa !== undefined && !sa.child.killed && sa.child.exitCode === null
 }
@@ -126,9 +133,8 @@ export function buildPrompt(meta?: LaunchMeta, taskMessage?: string, sessionKey?
   }
 
   prompts.push("\n\n---\n会话元数据:\n")
-  const pollId = sessionKey ?? meta?.chatId
-  if (pollId) {
-    prompts.push(`[chat_id=${pollId}]`)
+  if (sessionKey) {
+    prompts.push(`[chat_id=${sessionKey}]`)
   }
   prompts.push(`[chat_type=${meta?.chatType}]`)
 
@@ -246,15 +252,18 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
   const useMainWorkspace = opts.useMainWorkspace ?? (chatType === "task" || chatType === "temp")
 
   if (isSessionAgentRunning(sessionKey)) {
-    sessionAgents.get(sessionKey)!.lastActivityAt = Date.now()
+    const sa = sessionAgents.get(sessionKey)
+    if (sa) sa.lastActivityAt = Date.now()
     return { ok: true }
   }
+
+  pendingLaunches.add(sessionKey)
 
   const config = getConfig()
   let workDir = config.workspaceDir
 
   if (!useMainWorkspace) {
-    if (chatType === "group" && !config.enableGroupChat) return { ok: false, error: "群聊未启用" }
+    if (chatType === "group" && !config.enableGroupChat) { pendingLaunches.delete(sessionKey); return { ok: false, error: "群聊未启用" } }
     const safeChatId = sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_")
     workDir = path.join(app.getPath("userData"), "workspaces", safeChatId)
     if (!fs.existsSync(workDir)) {
@@ -264,8 +273,8 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
     if (injectWorkspaceFn) await injectWorkspaceFn(workDir)
   }
 
-  if (!workDir) return { ok: false, error: "工作目录未配置" }
-  if (!resolveAgentBinary()) return { ok: false, error: "Cursor CLI 未安装" }
+  if (!workDir) { pendingLaunches.delete(sessionKey); return { ok: false, error: "工作目录未配置" } }
+  if (!resolveAgentBinary()) { pendingLaunches.delete(sessionKey); return { ok: false, error: "Cursor CLI 未安装" } }
 
   const prompt = buildPrompt(meta, taskMessage, sessionKey)
   const spawnEnv = makeSpawnEnv(config, { LARK_WORKSPACE_DIR: workDir })
@@ -292,6 +301,7 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
       pushUiLog("Agent", "INFO", `[${sessionKey}] 退出 code=${code}${signal ? ` signal=${signal}` : ""}`)
       sessionAgents.delete(sessionKey)
       broadcastSessionStatus()
+      if (sessionCloseHandler) sessionCloseHandler(sessionKey, chatType)
     })
     child.on("error", (e) => {
       pushUiLog("Agent", "ERROR", `[${sessionKey}] 进程错误: ${e.message}`)
@@ -303,10 +313,12 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
       sessionKey, child, pid: child.pid!, startedAt: Date.now(), lastActivityAt: Date.now(),
       chatType, workspaceDir: workDir, senderOpenId, chatName,
     })
+    pendingLaunches.delete(sessionKey)
     broadcastLog(`[Agent] 会话 ${sessionKey} (${chatType}) 已启动, pid=${child.pid}`)
     broadcastSessionStatus()
     return { ok: true }
   } catch (e: unknown) {
+    pendingLaunches.delete(sessionKey)
     const msg = e instanceof Error ? e.message : String(e)
     broadcastLog(`[Agent] 启动失败 ${sessionKey}: ${msg}`, "ERROR")
     return { ok: false, error: msg }

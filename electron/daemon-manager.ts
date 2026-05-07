@@ -17,8 +17,8 @@ import {
   getSessionAgentList as getRawCliSessionList,
   isAgentRunning as _isCliAgentRunning, isSessionAgentRunning as _isCliSessionRunning, getRunningSessionCount as _getCliRunningCount,
   getAgentChildPid, getSessionAgentCount as _getCliSessionCount, getIndependentTaskStatuses as _getCliTaskStatuses,
-  reapIdleGroupAgents as _reapCliIdleGroups, setChatNameResolver,
-  P2P_SESSION_KEY, makeMainP2pSessionKey, setMainChatId, getMainChatId,
+  reapIdleGroupAgents as _reapCliIdleGroups, setChatNameResolver, setSessionCloseHandler,
+  P2P_SESSION_KEY, setMainChatId, getMainChatId,
   type ChatType,
 } from "./agent-launcher"
 import {
@@ -305,6 +305,13 @@ async function syncActiveSession(port: number, chatId: string, sessionKey: strin
   try {
     await httpPost(`http://127.0.0.1:${port}/api/active-session`, { chatId, sessionKey })
   } catch {}
+}
+
+async function getCurrentActiveSession(port: number, chatId: string): Promise<string | undefined> {
+  try {
+    const res = await httpGet(`http://127.0.0.1:${port}/api/active-sessions`) as { sessions?: Record<string, string> }
+    return res?.sessions?.[chatId]
+  } catch { return undefined }
 }
 
 export async function getDaemonStatus(): Promise<DaemonStatus> {
@@ -732,6 +739,26 @@ function stopStatusPolling(): void {
 // ── Chat 名称缓存 ──────────────────────────────────────────
 
 const chatNameCache = new Map<string, string>()
+const previousActiveSessionMap = new Map<string, string>()
+
+async function handleSessionClosed(sessionKey: string, _chatType: ChatType): Promise<void> {
+  const previous = previousActiveSessionMap.get(sessionKey)
+  previousActiveSessionMap.delete(sessionKey)
+  if (!previous) return
+
+  const chatId = extractChatId(sessionKey)
+  const lock = readLockFile()
+  if (!lock) return
+
+  const currentActive = await getCurrentActiveSession(lock.port, chatId)
+  if (currentActive !== sessionKey) return
+
+  const fallbackKey = isSessionAgentRunning(previous) ? previous : undefined
+  if (fallbackKey) {
+    await syncActiveSession(lock.port, chatId, fallbackKey)
+    broadcastLog("info", `[System] 临时会话已结束，活跃会话自动回退至: ${fallbackKey}`)
+  }
+}
 
 async function fetchChatNames(chatIds: string[]): Promise<void> {
   const missing = chatIds.filter((id) => id && !chatNameCache.has(id))
@@ -793,11 +820,13 @@ async function pullMergedMessagesFromQueue(chatId?: string): Promise<MergedMessa
   }
 }
 
-async function getQueueChats(): Promise<{ chatId: string; chatType: string; senderOpenId?: string }[]> {
+interface QueueSession { sessionKey: string; chatType: string; senderOpenId?: string }
+
+async function getQueueSessions(): Promise<QueueSession[]> {
   const lock = readLockFile()
   if (!lock?.port) return []
   try {
-    const res = (await httpGet(`http://127.0.0.1:${lock.port}/queue-chat-ids`)) as { chats?: { chatId: string; chatType: string; senderOpenId?: string }[] } | null
+    const res = (await httpGet(`http://127.0.0.1:${lock.port}/queue-chat-ids`)) as { chats?: QueueSession[] } | null
     return res?.chats ?? []
   } catch {
     return []
@@ -814,21 +843,24 @@ function isMainUser(chatId?: string, chatType?: string): boolean {
   return false
 }
 
+function extractChatId(sessionKey: string): string {
+  const idx = sessionKey.indexOf("::")
+  return idx > 0 ? sessionKey.slice(0, idx) : sessionKey
+}
+
 async function dispatchSessionAgents(): Promise<void> {
   const config = getConfig()
-  const chats = await getQueueChats()
+  const sessions = await getQueueSessions()
 
   const feishuOn = !!config.feishuEnabled
-  const groupChatIds = chats.filter((c) => c.chatType === "group").map((c) => c.chatId)
-  if (groupChatIds.length > 0 && feishuOn) await fetchChatNames(groupChatIds)
+  const groupKeys = sessions.filter((s) => s.chatType === "group").map((s) => extractChatId(s.sessionKey))
+  if (groupKeys.length > 0 && feishuOn) await fetchChatNames(groupKeys)
 
-  for (const { chatId, chatType, senderOpenId } of chats) {
-    const mainUser = isMainUser(chatId, chatType)
-    const sessionKey = mainUser
-      ? makeMainP2pSessionKey(chatId, config.workspaceDir)
-      : chatId
-
+  for (const { sessionKey, chatType, senderOpenId } of sessions) {
     if (isSessionAgentRunning(sessionKey)) continue
+
+    const chatId = extractChatId(sessionKey)
+    const mainUser = isMainUser(chatId, chatType)
 
     if (feishuOn && chatType === "p2p" && senderOpenId && !chatNameCache.has(senderOpenId)) {
       await fetchUserNames([senderOpenId])
@@ -1608,6 +1640,34 @@ async function handleChatCommand(tokens: string[], port: number, messageId: stri
     return
   }
 
+  if (sub === "new") {
+    const taskMsg = tokens.slice(2).join(" ").trim()
+    if (!taskMsg) { await reply(false, "💡 用法：/chat new <任务描述>\n例如：/chat new 帮我检查一下服务器状态"); return }
+    const taskId = `temp_${Date.now()}`
+    const result = await launchIndependentAgent(taskId, "临时会话", taskMsg, "temp", chatId)
+    if (result.ok && chatId) {
+      const currentActive = await getCurrentActiveSession(port, chatId)
+      if (currentActive && currentActive !== taskId) previousActiveSessionMap.set(taskId, currentActive)
+      await syncActiveSession(port, chatId, taskId)
+    }
+    if (result.ok) {
+      const newSession = getSessionAgentList().find((s) => s.sessionKey === taskId)
+      const lines = [
+        `🚀 新会话已创建:`,
+        `  SessionKey: ${taskId}`,
+        `  类型: 临时`,
+        `  工作目录: ${newSession?.workspaceDir ? path.basename(newSession.workspaceDir) : "-"}`,
+        `  PID: ${newSession?.pid || "-"}`,
+        `  启动时间: ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`,
+        `\n🔀 已切换到此会话，临时会话结束后将自动回退`,
+      ]
+      await reply(true, lines.join("\n"))
+    } else {
+      await reply(false, `❌ 启动失败: ${result.error ?? "未知错误"}`)
+    }
+    return
+  }
+
   if (sub === "stop") {
     const idx = parseInt(tokens[2], 10)
     if (isNaN(idx) || idx < 1 || idx > sessions.length) {
@@ -1649,7 +1709,7 @@ async function handleChatCommand(tokens: string[], port: number, messageId: stri
     return
   }
 
-  await reply(false, "💡 /chat 用法:\n  /chat ls — 列出所有活跃会话\n  /chat <序号> — 查看会话详情\n  /chat stop <序号> — 停止指定会话")
+  await reply(false, "💡 /chat 用法:\n  /chat ls — 列出所有活跃会话\n  /chat <序号> — 切换到指定会话\n  /chat stop <序号> — 停止指定会话\n  /chat new <描述> — 创建新临时会话")
 }
 
 async function checkAndExecutePendingCommands(): Promise<void> {
@@ -1729,24 +1789,6 @@ async function checkAndExecutePendingCommands(): Promise<void> {
         case "/task": {
           if (!isAdmin) { await denyNonAdmin(); break }
           await handleFeishuTaskCommand(lock.port, claimed.messageId, rawCmd, claimed.chatId)
-          break
-        }
-
-        case "/run": {
-          if (!isAdmin) { await denyNonAdmin(); break }
-          const runMsg = cmdTokens.slice(1).join(" ").trim()
-          if (!runMsg) {
-            await reply(false, "💡 用法：/run <任务描述>\n例如：/run 帮我检查一下服务器状态")
-            break
-          }
-          const taskId = `temp_${Date.now()}`
-          const result = await launchIndependentAgent(taskId, "临时会话", runMsg, "temp", claimed.chatId)
-          if (result.ok && claimed.chatId) {
-            await syncActiveSession(lock.port, claimed.chatId, taskId)
-          }
-          await reply(result.ok, result.ok
-            ? `🚀 临时 Agent 已启动 (id=${taskId})，已切换到此会话`
-            : `❌ 启动失败: ${result.error ?? "未知错误"}`)
           break
         }
 
@@ -1841,7 +1883,6 @@ async function checkAndExecutePendingCommands(): Promise<void> {
             "🔹 /list 消息队列",
             "🔹 /clean 清空队列",
             "🔹 /task 定时任务",
-            "🔹 /run 临时独立会话",
             "🔹 /model 模型设置",
             "🔹 /mcp MCP服务器管理",
             "🔹 /workspace 切换工作目录",
@@ -2402,6 +2443,7 @@ export async function saveAppConfigFromRenderer(partial: Partial<AppConfig>): Pr
 
 export function initDaemonManager(): void {
   setChatNameResolver((chatId) => chatNameCache.get(chatId))
+  setSessionCloseHandler(handleSessionClosed)
   registerEnableMcpFn(async (_wsDir, serverNames) => {
     for (const name of serverNames) await toggleMcpServer(name, true)
   })
