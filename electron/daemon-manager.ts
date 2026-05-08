@@ -7,6 +7,7 @@ import * as fs from "node:fs"
 import * as os from "node:os"
 import { app, BrowserWindow, ipcMain, powerSaveBlocker } from "electron"
 import { getConfig, saveConfig, type AppConfig, type ScheduledTask } from "./config-store"
+import { LOCK_FILE_NAME } from "../src/shared/constants"
 import { validateCron, readTasksFromFile, writeTasksToFile, previewCronNextRuns, getNextCronFireLabel } from "./cron-scheduler"
 import { pushLog, pushUiLog, broadcastLog, getLogBuffer, clearLogBuffer, logCursorAgentInvocation, escapeLogContentSingleLine } from "./ui-logger"
 import { resolveAgentBinary, applyProxyEnv, quoteArg, getAgentPaths, execAgentSync } from "./agent-cli"
@@ -210,7 +211,7 @@ function stopTempConnection(): void {
 
 
 function getLockFilePath(): string {
-  return path.join(app.getPath("userData"), "daemon.lock.json")
+  return path.join(app.getPath("userData"), LOCK_FILE_NAME)
 }
 
 function readLockFile(): { pid: number; port: number; version: string } | null {

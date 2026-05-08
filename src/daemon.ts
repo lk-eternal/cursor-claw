@@ -23,6 +23,7 @@ import {
   cleanupStaleMessages,
   type QueueMessage,
 } from "./file-queue.js";
+import { LOCK_FILE_NAME } from "./shared/constants.js";
 
 const _require = createRequire(import.meta.url);
 const PKG_VERSION: string = (_require("../package.json") as { version: string }).version;
@@ -35,8 +36,9 @@ const ENCRYPT_KEY = process.env.LARK_ENCRYPT_KEY ?? "";
 const RECEIVE_ID = process.env.LARK_RECEIVE_ID ?? "";
 const RECEIVE_ID_TYPE = process.env.LARK_RECEIVE_ID_TYPE ?? "";
 const CONFIGURED_PORT = process.env.LARK_DAEMON_PORT ? Number(process.env.LARK_DAEMON_PORT) : 0;
-const WORKSPACE_DIR = process.env.LARK_WORKSPACE_DIR ?? process.cwd();
+let WORKSPACE_DIR = process.env.LARK_WORKSPACE_DIR ?? process.cwd();
 const MESSAGE_PREFIX = process.env.LARK_MESSAGE_PREFIX ?? "";
+const APP_DATA_DIR = process.env.APP_DATA_DIR || "";
 
 const WECHAT_TOKEN = process.env.WECHAT_TOKEN ?? "";
 const WECHAT_ACCOUNT_ID = process.env.WECHAT_ACCOUNT_ID ?? "";
@@ -47,7 +49,7 @@ const savedProxyKeys = stripProxyEnv();
 
 // ── 日志 ─────────────────────────────────────────────────
 
-const LOG_FILE_PATH = path.join(WORKSPACE_DIR, ".cursor", "daemon.log");
+const LOG_FILE_PATH = path.join(APP_DATA_DIR, "daemon.log");
 const MAX_LOG_SIZE = 2 * 1024 * 1024;
 const LOG_ROTATE_CHECK_INTERVAL = 100;
 let logWriteCount = 0;
@@ -108,7 +110,7 @@ function isFeishuChatId(rawChatId?: string): rawChatId is string {
   return rawChatId.startsWith("oc_");
 }
 
-const WECHAT_STATE_FILE = path.join(WORKSPACE_DIR, ".cursor", "wechat-data", "state.json");
+const WECHAT_STATE_FILE = path.join(APP_DATA_DIR, "wechat-data", "state.json");
 
 function loadWechatState(): void {
   try {
@@ -131,7 +133,7 @@ function saveWechatState(): void {
 }
 
 function initWeChatManager(): WeChatManager {
-  const dataDir = path.join(WORKSPACE_DIR, ".cursor", "wechat-data");
+  const dataDir = path.join(APP_DATA_DIR, "wechat-data");
   return new WeChatManager({
     dataDir,
     log,
@@ -677,12 +679,16 @@ function startHttpServer(): Promise<number> {
 // ── 管理 API 辅助函数 ────────────────────────────────────
 
 const HOME_DIR = os.homedir();
-const APP_DATA_DIR = process.env.APP_DATA_DIR || "";
 const GLOBAL_MCP_PATH = path.join(HOME_DIR, ".cursor", "mcp.json");
-const PROJECT_MCP_PATH = path.join(WORKSPACE_DIR, ".cursor", "mcp.json");
-const RULES_DIR = path.join(WORKSPACE_DIR, ".cursor", "rules");
 const SKILLS_DIR = path.join(HOME_DIR, ".cursor", "skills");
 const TASKS_FILE = path.join(APP_DATA_DIR, "scheduled-tasks.json");
+
+function getProjectMcpPath(): string {
+  return path.join(WORKSPACE_DIR, ".cursor", "mcp.json");
+}
+function getRulesDir(): string {
+  return path.join(WORKSPACE_DIR, ".cursor", "rules");
+}
 
 function readJsonSafe(filePath: string): any {
   try {
@@ -729,7 +735,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
   if (pathname === "/api/mcp") {
     if (method === "GET") {
       const globalCfg = readJsonSafe(GLOBAL_MCP_PATH);
-      const projectCfg = readJsonSafe(PROJECT_MCP_PATH);
+      const projectCfg = readJsonSafe(getProjectMcpPath());
       const servers: Record<string, { config: unknown; scope: string }> = {};
       if (globalCfg?.mcpServers) {
         for (const [k, v] of Object.entries(globalCfg.mcpServers)) servers[k] = { config: v, scope: "global" };
@@ -743,7 +749,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     if (method === "POST") {
       const body = JSON.parse(await readBody(req));
       const { action, name, config, scope } = body as { action: string; name?: string; config?: string; scope?: string };
-      const targetPath = (scope ?? "global") === "project" ? PROJECT_MCP_PATH : GLOBAL_MCP_PATH;
+      const targetPath = (scope ?? "global") === "project" ? getProjectMcpPath() : GLOBAL_MCP_PATH;
 
       if (action === "add") {
         if (!name || !config) { json(res, { ok: false, error: "name and config required" }, 400); return true; }
@@ -758,7 +764,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       }
       if (action === "delete") {
         if (!name) { json(res, { ok: false, error: "name required" }, 400); return true; }
-        for (const p of [GLOBAL_MCP_PATH, PROJECT_MCP_PATH]) {
+        for (const p of [GLOBAL_MCP_PATH, getProjectMcpPath()]) {
           const mcpJson = readJsonSafe(p);
           if (mcpJson?.mcpServers?.[name]) {
             delete mcpJson.mcpServers[name];
@@ -778,8 +784,8 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
   // ── Rules 管理 ──
   if (pathname === "/api/rules") {
     if (method === "GET") {
-      if (!fs.existsSync(RULES_DIR)) { json(res, { ok: true, rules: [] }); return true; }
-      const files = fs.readdirSync(RULES_DIR).filter((f) => f.endsWith(".mdc") || f.endsWith(".md"));
+      if (!fs.existsSync(getRulesDir())) { json(res, { ok: true, rules: [] }); return true; }
+      const files = fs.readdirSync(getRulesDir()).filter((f) => f.endsWith(".mdc") || f.endsWith(".md"));
       json(res, { ok: true, rules: files });
       return true;
     }
@@ -789,7 +795,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
 
       if (action === "read") {
         if (!name) { json(res, { ok: false, error: "name required" }, 400); return true; }
-        const fp = path.join(RULES_DIR, name);
+        const fp = path.join(getRulesDir(), name);
         if (!fs.existsSync(fp)) { json(res, { ok: false, error: "not found" }, 404); return true; }
         json(res, { ok: true, content: fs.readFileSync(fp, "utf-8") });
         return true;
@@ -798,14 +804,14 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
         if (!name || content === undefined) { json(res, { ok: false, error: "name and content required" }, 400); return true; }
         let fileName = name.trim();
         if (!fileName.endsWith(".mdc") && !fileName.endsWith(".md")) fileName += ".mdc";
-        if (!fs.existsSync(RULES_DIR)) fs.mkdirSync(RULES_DIR, { recursive: true });
-        fs.writeFileSync(path.join(RULES_DIR, fileName), content, "utf-8");
+        if (!fs.existsSync(getRulesDir())) fs.mkdirSync(getRulesDir(), { recursive: true });
+        fs.writeFileSync(path.join(getRulesDir(), fileName), content, "utf-8");
         json(res, { ok: true, message: `${fileName} saved` });
         return true;
       }
       if (action === "delete") {
         if (!name) { json(res, { ok: false, error: "name required" }, 400); return true; }
-        const fp = path.join(RULES_DIR, name);
+        const fp = path.join(getRulesDir(), name);
         if (!fs.existsSync(fp)) { json(res, { ok: false, error: "not found" }, 404); return true; }
         fs.unlinkSync(fp);
         json(res, { ok: true, message: `${name} deleted` });
@@ -1088,13 +1094,16 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       json(res, { ok: true, workspaceDir: WORKSPACE_DIR });
       return true;
     }
-    if (method === "POST") {
+    if (method === "PUT") {
       const body = JSON.parse(await readBody(req));
       const { dir } = body as { dir?: string };
       if (!dir?.trim()) { json(res, { ok: false, error: "dir is required" }, 400); return true; }
-      const msgId = `api-ws-${Date.now()}`;
-      pushCommandToQueue(`/workspace set ${dir.trim()}`, msgId, "mcp-api");
-      json(res, { ok: true, message: "workspace change accepted", dir: dir.trim() });
+      const newDir = dir.trim();
+      if (!fs.existsSync(newDir)) { json(res, { ok: false, error: "directory does not exist" }, 400); return true; }
+      const oldDir = WORKSPACE_DIR;
+      WORKSPACE_DIR = newDir;
+      log("INFO", `[Workspace] hot-updated: ${oldDir} -> ${newDir}`);
+      json(res, { ok: true, oldDir, newDir });
       return true;
     }
   }
@@ -1135,7 +1144,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
 // ── Lock 文件 ────────────────────────────────────────────
 
 function getLockFilePath(): string {
-  return path.join(APP_DATA_DIR, "daemon.lock.json");
+  return path.join(APP_DATA_DIR, LOCK_FILE_NAME);
 }
 
 function writeLockFile(port: number): void {
