@@ -36,11 +36,11 @@ export interface DaemonStatus {
 
 export interface ConfigSaveResult {
   ok: boolean
-  needWorkspaceDaemonChoice?: boolean
+  needWorkspaceConfirm?: boolean
   oldWorkspaceDir?: string
   newWorkspaceDir?: string
+  existingSessions?: { sessionKey: string; chatName?: string }[]
   deferredSetupComplete?: boolean
-  restartFailed?: string
   workspaceDirChanged?: boolean
 }
 
@@ -139,8 +139,8 @@ const api = {
   },
   getConfig: (): Promise<AppConfig> => ipcRenderer.invoke("config:get"),
   saveConfig: (config: Partial<AppConfig>): Promise<ConfigSaveResult> => ipcRenderer.invoke("config:save", config),
-  applyWorkspaceDaemonRestart: (workspaceDir: string): Promise<{ ok: boolean; error?: string }> =>
-    ipcRenderer.invoke("config:apply-workspace-restart", workspaceDir),
+  applyWorkspaceSwitch: (workspaceDir: string, stopOldSessions: boolean): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("config:apply-workspace-switch", workspaceDir, stopOldSessions),
   respondWindowClose: (payload: { action: "minimize" | "quit" | "cancel"; remember: boolean }): Promise<void> =>
     ipcRenderer.invoke("window:close-confirm-result", payload),
   selectDirectory: (): Promise<string | null> => ipcRenderer.invoke("dialog:selectDirectory"),

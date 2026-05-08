@@ -1853,7 +1853,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
               await reply(true, `📂 工作目录未变化: ${newDir}`)
             } else {
               await reply(true, `📂 正在切换工作目录到: ${newDir}\n⏳ 切换中...`)
-              const wsResult = await applyWorkspaceDirChange(newDir)
+              const wsResult = await applyWorkspaceSwitch(newDir, false)
               if (wsResult.ok) {
                 broadcastLog(`[指令 /workspace] 已切换到 ${newDir}`, "INFO")
               } else {
@@ -2354,26 +2354,34 @@ export function loginMcpServer(serverName: string): Promise<{ ok: boolean; outpu
   })
 }
 
+export interface WorkspaceSessionInfo {
+  sessionKey: string
+  chatName?: string
+}
+
 export interface ConfigSaveResult {
   ok: boolean
-  /** 需在渲染进程展示自定义弹窗后，由用户选择「重启」或「保持」 */
-  needWorkspaceDaemonChoice?: boolean
+  /** 工作目录变更：旧目录下存在活跃会话，需用户选择保留或结束 */
+  needWorkspaceConfirm?: boolean
   oldWorkspaceDir?: string
   newWorkspaceDir?: string
-  /** 因目录冲突未写入 store，完成向导需在重启成功后补写 */
+  existingSessions?: WorkspaceSessionInfo[]
+  /** 因目录冲突未写入 store，完成向导需在切换成功后补写 */
   deferredSetupComplete?: boolean
-  restartFailed?: string
-  /** 本次已将工作目录写入配置（非「待确认重启」分支）；渲染进程应刷新依赖工作区的数据（如 MCP 列表与启用状态） */
+  /** 本次已将工作目录写入配置；渲染进程应刷新依赖工作区的数据（如 MCP 列表与启用状态） */
   workspaceDirChanged?: boolean
 }
 
 /**
- * 切换工作目录：不终止任何 session，旧会话保留供用户切回。
- * 新消息会通过复合 sessionKey (chatId::workspaceDir) 路由到当前活跃目录。
+ * 切换工作目录：可选地停止旧会话，然后热更新到新目录。
  */
-export async function applyWorkspaceDirChange(workspaceDir: string): Promise<{ ok: boolean; error?: string }> {
+export async function applyWorkspaceSwitch(workspaceDir: string, stopOldSessions: boolean): Promise<{ ok: boolean; error?: string }> {
   const w = workspaceDir.trim()
   if (!w) return { ok: false, error: "工作目录为空" }
+
+  if (stopOldSessions) {
+    stopAllSessionAgents()
+  }
 
   saveConfig({ workspaceDir: w })
   invalidateMcpEnabledCache()
@@ -2383,21 +2391,7 @@ export async function applyWorkspaceDirChange(workspaceDir: string): Promise<{ o
 }
 
 /**
- * 在新工作目录下保存并重启 Daemon（由渲染进程在确认后调用）。
- */
-export async function applyWorkspaceDirRestart(workspaceDir: string): Promise<{ ok: boolean; error?: string }> {
-  const w = workspaceDir.trim()
-  if (!w) return { ok: false, error: "工作目录为空" }
-  saveConfig({ workspaceDir: w })
-  await stopDaemon()
-  const started = await startDaemon()
-  broadcastStatus(await getDaemonStatus())
-  if (!started.ok) return { ok: false, error: started.error ?? "Daemon 启动失败" }
-  return { ok: true }
-}
-
-/**
- * 保存配置；若正在修改工作目录且 Daemon 在运行，交由渲染进程展示与主页风格一致的确认弹窗。
+ * 保存配置；若工作目录变更且旧目录有活跃会话，返回会话列表供渲染进程展示确认弹窗。
  */
 export async function saveAppConfigFromRenderer(partial: Partial<AppConfig>): Promise<ConfigSaveResult> {
   const current = getConfig()
@@ -2408,36 +2402,29 @@ export async function saveAppConfigFromRenderer(partial: Partial<AppConfig>): Pr
   if (workspaceChanging) {
     const st = await getDaemonStatus()
     if (st.running) {
+      const sessions = getSessionAgentList()
       const deferredSc = partial.setupComplete === true
       const rest: Partial<AppConfig> = { ...partial }
       delete (rest as Record<string, unknown>).workspaceDir
-      if (deferredSc) {
-        delete (rest as Record<string, unknown>).setupComplete
-      }
+      if (deferredSc) delete (rest as Record<string, unknown>).setupComplete
       saveConfig({ ...rest, workspaceDir: oldW })
       broadcastStatus(await getDaemonStatus())
       return {
         ok: true,
-        needWorkspaceDaemonChoice: true,
+        needWorkspaceConfirm: true,
         oldWorkspaceDir: oldW,
         newWorkspaceDir: nextW,
+        existingSessions: sessions.map((s) => ({ sessionKey: s.sessionKey, chatName: s.chatName })),
         deferredSetupComplete: deferredSc,
       }
     }
   }
 
-  const workspaceDirChanged =
-    partial.workspaceDir !== undefined && nextW !== oldW
-
-  if (workspaceDirChanged) {
-    invalidateMcpEnabledCache()
-  }
+  const workspaceDirChanged = partial.workspaceDir !== undefined && nextW !== oldW
+  if (workspaceDirChanged) invalidateMcpEnabledCache()
 
   saveConfig(partial)
-  return {
-    ok: true,
-    ...(workspaceDirChanged ? { workspaceDirChanged: true } : {}),
-  }
+  return { ok: true, ...(workspaceDirChanged ? { workspaceDirChanged: true } : {}) }
 }
 
 // ── 初始化 ───────────────────────────────────────────────
@@ -2448,7 +2435,7 @@ export function initDaemonManager(): void {
   registerEnableMcpFn(async (_wsDir, serverNames) => {
     for (const name of serverNames) await toggleMcpServer(name, true)
   })
-  ipcMain.handle("config:apply-workspace-restart", (_, workspaceDir: string) => applyWorkspaceDirRestart(workspaceDir))
+  ipcMain.handle("config:apply-workspace-switch", (_, workspaceDir: string, stopOldSessions: boolean) => applyWorkspaceSwitch(workspaceDir, stopOldSessions))
   ipcMain.handle("daemon:get-log-buffer", () => getLogBuffer())
   ipcMain.handle("agent:stop", () => { stopAgent(); return { ok: true } })
   ipcMain.handle("agent:sessions", () => getSessionAgentList())

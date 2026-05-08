@@ -23,7 +23,6 @@ import {
   MessageSquare,
 } from "lucide-react"
 import SearchableSelect from "../components/SearchableSelect"
-import WorkspaceDaemonModal from "../components/WorkspaceDaemonModal"
 import TitleBar from "../components/TitleBar"
 import useInlineModal from "../components/useInlineModal"
 
@@ -103,9 +102,6 @@ export default function Setup({ onComplete, onExit }: Props) {
   // Launch
   const [launchSteps, setLaunchSteps] = useState<StepStatus[]>([])
   const [launching, setLaunching] = useState(false)
-  const [workspaceDaemonChoice, setWorkspaceDaemonChoice] = useState<{
-    old: string; new: string; deferred: boolean
-  } | null>(null)
 
   const { showAlert, ModalPortal } = useInlineModal()
   const tempConnCleanupRef = useRef(false)
@@ -355,11 +351,11 @@ export default function Setup({ onComplete, onExit }: Props) {
         setupComplete: true,
       })
 
-      if (saveR.needWorkspaceDaemonChoice && saveR.newWorkspaceDir) {
-        updateLaunchStep(0, { status: "running", message: "正在切换工作目录并重启 Daemon…" })
-        const r = await window.electronAPI.applyWorkspaceDaemonRestart(saveR.newWorkspaceDir.trim())
+      if (saveR.needWorkspaceConfirm && saveR.newWorkspaceDir) {
+        updateLaunchStep(0, { status: "running", message: "正在切换工作目录…" })
+        const r = await window.electronAPI.applyWorkspaceSwitch(saveR.newWorkspaceDir.trim(), false)
         if (!r.ok) {
-          updateLaunchStep(0, { status: "error", message: r.error ?? "Daemon 重启失败" })
+          updateLaunchStep(0, { status: "error", message: r.error ?? "切换目录失败" })
           setLaunching(false)
           return
         }
@@ -818,39 +814,6 @@ export default function Setup({ onComplete, onExit }: Props) {
           </div>
         )}
       </div>
-
-      <WorkspaceDaemonModal
-        open={workspaceDaemonChoice !== null}
-        oldPath={workspaceDaemonChoice?.old ?? ""}
-        newPath={workspaceDaemonChoice?.new ?? ""}
-        onKeep={() => setWorkspaceDaemonChoice(null)}
-        onRestarted={(ok, err) => {
-          const ctx = workspaceDaemonChoice
-          setWorkspaceDaemonChoice(null)
-          if (!ok) {
-            if (err) void showAlert("错误", `重启 Daemon 失败：\n${err}`)
-            return
-          }
-          if (!ctx) return
-          void (async () => {
-            try {
-              if (ctx.deferred) await window.electronAPI.saveConfig({ setupComplete: true })
-              setWorkspaceDir(ctx.new)
-              updateLaunchStep(0, { status: "done", message: "配置已加密保存" })
-              setLaunching(true)
-              await runInjectAndFinish()
-            } catch (e: unknown) {
-              const msg = e instanceof Error ? e.message : String(e)
-              setLaunchSteps((prev) => {
-                const idx = prev.findIndex((s) => s.status === "running")
-                if (idx >= 0) return prev.map((s, i) => (i === idx ? { ...s, status: "error" as const, message: msg } : s))
-                return prev
-              })
-              setLaunching(false)
-            }
-          })()
-        }}
-      />
 
       {/* Navigation */}
       <div className="flex items-center justify-between border-t border-gray-800 px-8 py-4">

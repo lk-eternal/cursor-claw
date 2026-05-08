@@ -40,7 +40,7 @@ import {
   MessageSquare,
 } from "lucide-react"
 import SearchableSelect from "../components/SearchableSelect"
-import WorkspaceDaemonModal from "../components/WorkspaceDaemonModal"
+import WorkspaceSessionModal, { type SessionEntry } from "../components/WorkspaceSessionModal"
 import TitleBar from "../components/TitleBar"
 import useInlineModal from "../components/useInlineModal"
 
@@ -169,7 +169,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
   const [noProxy, setNoProxy] = useState("localhost,127.0.0.1,feishu.cn")
   const [agentNewSession, setAgentNewSession] = useState(false)
   const [closeWindowAction, setCloseWindowAction] = useState<CloseWindowAction>("ask")
-  const [workspaceDaemonChoice, setWorkspaceDaemonChoice] = useState<{ old: string; new: string } | null>(null)
+  const [wsSwitch, setWsSwitch] = useState<{ old: string; new: string; sessions: SessionEntry[] } | null>(null)
   const [bindWaiting, setBindWaiting] = useState(false)
   const [feishuEnabled, setFeishuEnabled] = useState(false)
   const [wechatEnabled, setWechatEnabled] = useState(false)
@@ -429,8 +429,8 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
         agentMode,
         cursorApiKey: cursorApiKey.trim(),
       })
-      if (r.needWorkspaceDaemonChoice && r.oldWorkspaceDir !== undefined && r.newWorkspaceDir !== undefined) {
-        setWorkspaceDaemonChoice({ old: r.oldWorkspaceDir, new: r.newWorkspaceDir })
+      if (r.needWorkspaceConfirm && r.oldWorkspaceDir !== undefined && r.newWorkspaceDir !== undefined) {
+        setWsSwitch({ old: r.oldWorkspaceDir, new: r.newWorkspaceDir, sessions: r.existingSessions ?? [] })
         setWorkspaceDir(r.oldWorkspaceDir)
       }
       if (r.workspaceDirChanged) {
@@ -1691,19 +1691,21 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
         </div>
       )}
 
-      <WorkspaceDaemonModal
-        open={workspaceDaemonChoice !== null}
-        oldPath={workspaceDaemonChoice?.old ?? ""}
-        newPath={workspaceDaemonChoice?.new ?? ""}
-        onKeep={() => setWorkspaceDaemonChoice(null)}
-        onRestarted={(ok, err) => {
-          const chosenNew = workspaceDaemonChoice?.new ?? ""
-          setWorkspaceDaemonChoice(null)
-          if (!ok) {
-            void showAlert("错误", err ? `重启 Daemon 失败：\n${err}` : "重启 Daemon 失败")
+      <WorkspaceSessionModal
+        open={wsSwitch !== null}
+        oldPath={wsSwitch?.old ?? ""}
+        newPath={wsSwitch?.new ?? ""}
+        sessions={wsSwitch?.sessions ?? []}
+        onCancel={() => setWsSwitch(null)}
+        onSwitch={async (stopOld) => {
+          const dir = wsSwitch?.new ?? ""
+          setWsSwitch(null)
+          const res = await window.electronAPI.applyWorkspaceSwitch(dir, stopOld)
+          if (!res.ok) {
+            void showAlert("错误", res.error ?? "切换工作目录失败")
             return
           }
-          setWorkspaceDir(chosenNew)
+          setWorkspaceDir(dir)
           void refreshMcpServers(true)
         }}
       />
