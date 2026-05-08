@@ -21,6 +21,7 @@ import {
   getQueueMessages as getFileQueueMessages,
   getDistinctSessions,
   cleanupStaleMessages,
+  type QueueMessage,
 } from "./file-queue.js";
 
 const _require = createRequire(import.meta.url);
@@ -97,16 +98,14 @@ let botOpenId: string | undefined;
 let wechatManager: WeChatManager | null = null;
 let lastWechatChatId: string | null = null;
 
-function extractRawChatId(sessionKey?: string): string | undefined {
-  if (!sessionKey) return undefined;
-  const idx = sessionKey.indexOf("::");
-  return idx > 0 ? sessionKey.slice(0, idx) : sessionKey;
+function isWechatChatId(rawChatId?: string): rawChatId is string {
+  if (!rawChatId) return false;
+  return rawChatId.startsWith("wxid_") || rawChatId.startsWith("wx_") || rawChatId.includes("@chatroom") || rawChatId.includes("@im.wechat");
 }
 
-function isWechatChatId(chatId?: string): boolean {
-  const raw = extractRawChatId(chatId);
-  if (!raw) return false;
-  return raw.startsWith("wxid_") || raw.startsWith("wx_") || raw.includes("@chatroom") || raw.includes("@im.wechat");
+function isFeishuChatId(rawChatId?: string): rawChatId is string {
+  if (!rawChatId) return false;
+  return rawChatId.startsWith("oc_");
 }
 
 const WECHAT_STATE_FILE = path.join(WORKSPACE_DIR, ".cursor", "wechat-data", "state.json");
@@ -178,11 +177,18 @@ function broadcastQueueEvent(chatId?: string): void {
 
 const activeSessionMap = new Map<string, string>();
 const messageSessionMap = new Map<string, string>();
+const sessionToChatMap = new Map<string, string>();
 const MSG_SESSION_MAP_MAX = 5000;
 
 function setActiveSession(chatId: string, sessionKey: string): void {
   activeSessionMap.set(chatId, sessionKey);
+  sessionToChatMap.set(sessionKey, chatId);
   log("INFO", `会话路由更新: ${chatId} → ${sessionKey}`);
+}
+
+function resolveRawChatId(sessionKey?: string): string | undefined {
+  if (!sessionKey) return undefined;
+  return sessionToChatMap.get(sessionKey);
 }
 
 function trackMessageSession(messageId: string, sessionKey: string): void {
@@ -338,7 +344,7 @@ function isCommand(text: string): boolean {
 async function replyToMessage(messageId: string, text: string, chatId?: string): Promise<void> {
   if (chatId && isWechatChatId(chatId)) {
     if (!wechatManager) { log("WARN", "微信未启用，跳过回复"); return; }
-    try { await wechatManager.sendText(extractRawChatId(chatId)!, text); } catch (e: any) { log("WARN", `微信回复失败: ${e?.message}`); }
+    try { await wechatManager.sendText(chatId, text); } catch (e: any) { log("WARN", `微信回复失败: ${e?.message}`); }
     return;
   }
   if (!larkClient || !sender) { log("WARN", "飞书未启用，跳过回复"); return; }
@@ -600,11 +606,11 @@ function startHttpServer(): Promise<number> {
 
         if (method === "POST" && pathname === "/dequeue-all") {
           const body = await readBody(req).catch(() => "{}");
-          const { chatId: filterChat } = JSON.parse(body || "{}") as { chatId?: string };
-          const messages: { text: string; messageId: string; chatId: string; chatType: string; senderOpenId: string }[] = [];
+          const { sessionKey: filterSession } = JSON.parse(body || "{}") as { sessionKey?: string };
+          const messages: QueueMessage[] = [];
           let m: ReturnType<typeof claimNextMessage>;
-          while ((m = claimNextMessage(filterChat)) !== null) {
-            if (m.messageId && filterChat) trackMessageSession(m.messageId, filterChat);
+          while ((m = claimNextMessage(filterSession)) !== null) {
+            if (m.messageId && filterSession) trackMessageSession(m.messageId, filterSession);
             messages.push(m);
           }
           json(res, { ok: true, messages, queueLength: getFileQueueLength() });
@@ -638,12 +644,12 @@ function startHttpServer(): Promise<number> {
 
         if (method === "GET" && pathname === "/poll") {
           const timeout = Number(reqUrl.searchParams.get("timeout") ?? "20000");
-          const chatIdFilter = reqUrl.searchParams.get("chatId") || undefined;
+          const sessionKeyFilter = reqUrl.searchParams.get("sessionKey") || reqUrl.searchParams.get("chatId") || undefined;
           let disconnected = false;
           req.on("close", () => { disconnected = true; });
-          const msg = await pollFileQueueBatch(timeout, undefined, chatIdFilter);
+          const msg = await pollFileQueueBatch(timeout, undefined, sessionKeyFilter);
           if (disconnected && msg !== null) {
-            pushToFileQueue(msg.text, msg.messageId, `requeue-poll`, msg.chatId, msg.chatType, msg.senderOpenId);
+            pushToFileQueue(msg.text, msg.messageId, `requeue-poll`, msg.sessionKey, msg.chatType, msg.senderOpenId);
             log("WARN", `/poll 连接断开，消息放回队列`);
             return;
           }
@@ -910,37 +916,51 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
   // ── MCP Server 代理 API ──
   if (method === "POST" && pathname === "/api/send-text") {
     const body = JSON.parse(await readBody(req));
-    const { text, message_id, chat_id } = body as { text: string; message_id?: string; chat_id?: string };
+    const { text, message_id, session_key } = body as { text: string; message_id?: string; session_key?: string };
     if (!text) { json(res, { ok: false, error: "text is required" }, 400); return true; }
 
-    if (isWechatChatId(chat_id)) {
+    const rawChatId = resolveRawChatId(session_key);
+    if (isWechatChatId(rawChatId)) {
       if (!wechatManager?.isConnected()) { json(res, { ok: false, error: "微信未连接，无法发送到微信会话" }, 400); return true; }
-      const ok = await wechatManager.sendText(extractRawChatId(chat_id)!, text);
+      const ok = await wechatManager.sendText(rawChatId, text);
+      json(res, { ok });
+    } else if (isFeishuChatId(rawChatId) && sender) {
+      let sentMsgId: string | undefined;
+      if (message_id) sentMsgId = await sender.sendMessage(text, message_id);
+      else sentMsgId = await sender.sendMessageToChat(rawChatId, text);
+      if (sentMsgId && session_key) trackMessageSession(sentMsgId, session_key);
+      json(res, { ok: true, message_id: sentMsgId });
+    } else if (wechatManager?.isConnected() && lastWechatChatId) {
+      const ok = await wechatManager.sendText(lastWechatChatId, text);
       json(res, { ok });
     } else if (sender) {
       let sentMsgId: string | undefined;
       if (message_id) sentMsgId = await sender.sendMessage(text, message_id);
-      else if (chat_id) sentMsgId = await sender.sendMessageToChat(chat_id, text);
       else sentMsgId = await sender.sendMessage(text);
-      if (sentMsgId && chat_id) trackMessageSession(sentMsgId, chat_id);
+      if (sentMsgId && session_key) trackMessageSession(sentMsgId, session_key);
       json(res, { ok: true, message_id: sentMsgId });
     } else {
-      json(res, { ok: false, error: "飞书未启用" }, 400);
+      json(res, { ok: false, error: "无可用消息通道" }, 400);
     }
     return true;
   }
 
   if (method === "POST" && pathname === "/api/send-image") {
     const body = JSON.parse(await readBody(req));
-    const { image_path, message_id, chat_id } = body as { image_path: string; message_id?: string; chat_id?: string };
+    const { image_path, message_id, session_key } = body as { image_path: string; message_id?: string; session_key?: string };
     if (!image_path) { json(res, { ok: false, error: "image_path is required" }, 400); return true; }
-    if (isWechatChatId(chat_id)) {
+    const rawChatId = resolveRawChatId(session_key);
+    if (isWechatChatId(rawChatId)) {
       if (!wechatManager?.isConnected()) { json(res, { ok: false, error: "微信未连接，无法发送图片到微信会话" }, 400); return true; }
-      await wechatManager.sendMedia(extractRawChatId(chat_id)!, image_path);
+      await wechatManager.sendMedia(rawChatId, image_path);
+    } else if (isFeishuChatId(rawChatId) && sender) {
+      await sender.sendImage(image_path, message_id, rawChatId);
+    } else if (wechatManager?.isConnected() && lastWechatChatId) {
+      await wechatManager.sendMedia(lastWechatChatId, image_path);
     } else if (sender) {
-      await sender.sendImage(image_path, message_id, chat_id);
+      await sender.sendImage(image_path, message_id);
     } else {
-      json(res, { ok: false, error: "飞书未启用" }, 400); return true;
+      json(res, { ok: false, error: "无可用消息通道" }, 400); return true;
     }
     json(res, { ok: true });
     return true;
@@ -948,15 +968,20 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
 
   if (method === "POST" && pathname === "/api/send-file") {
     const body = JSON.parse(await readBody(req));
-    const { file_path, message_id, chat_id } = body as { file_path: string; message_id?: string; chat_id?: string };
+    const { file_path, message_id, session_key } = body as { file_path: string; message_id?: string; session_key?: string };
     if (!file_path) { json(res, { ok: false, error: "file_path is required" }, 400); return true; }
-    if (isWechatChatId(chat_id)) {
+    const rawChatId = resolveRawChatId(session_key);
+    if (isWechatChatId(rawChatId)) {
       if (!wechatManager?.isConnected()) { json(res, { ok: false, error: "微信未连接，无法发送文件到微信会话" }, 400); return true; }
-      await wechatManager.sendMedia(extractRawChatId(chat_id)!, file_path);
+      await wechatManager.sendMedia(rawChatId, file_path);
+    } else if (isFeishuChatId(rawChatId) && sender) {
+      await sender.sendFile(file_path, message_id, rawChatId);
+    } else if (wechatManager?.isConnected() && lastWechatChatId) {
+      await wechatManager.sendMedia(lastWechatChatId, file_path);
     } else if (sender) {
-      await sender.sendFile(file_path, message_id, chat_id);
+      await sender.sendFile(file_path, message_id);
     } else {
-      json(res, { ok: false, error: "飞书未启用" }, 400); return true;
+      json(res, { ok: false, error: "无可用消息通道" }, 400); return true;
     }
     json(res, { ok: true });
     return true;
@@ -992,16 +1017,16 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
   if (method === "GET" && pathname === "/api/poll-message") {
     const qs = new URL(req.url ?? "", "http://localhost").searchParams;
     const timeout = Number(qs.get("timeout") ?? "30000");
-    const chatIdFilter = qs.get("chatId") || undefined;
+    const sessionKeyFilter = qs.get("sessionKey") || qs.get("chatId") || undefined;
     let disconnected = false;
     req.on("close", () => { disconnected = true; });
-    const msg = await pollFileQueueBatch(timeout, undefined, chatIdFilter);
+    const msg = await pollFileQueueBatch(timeout, undefined, sessionKeyFilter);
     if (disconnected && msg !== null) {
-      pushToFileQueue(msg.text, msg.messageId, `requeue-poll-message`, msg.chatId, msg.chatType, msg.senderOpenId);
+      pushToFileQueue(msg.text, msg.messageId, `requeue-poll-message`, msg.sessionKey, msg.chatType, msg.senderOpenId);
       json(res, { message: null });
       return true;
     }
-    if (msg?.messageId && chatIdFilter) trackMessageSession(msg.messageId, chatIdFilter);
+    if (msg?.messageId && sessionKeyFilter) trackMessageSession(msg.messageId, sessionKeyFilter);
     json(res, { message: msg });
     return true;
   }

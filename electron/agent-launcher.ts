@@ -134,7 +134,7 @@ export function buildPrompt(meta?: LaunchMeta, taskMessage?: string, sessionKey?
 
   prompts.push("\n\n---\n会话元数据:\n")
   if (sessionKey) {
-    prompts.push(`[chat_id=${sessionKey}]`)
+    prompts.push(`[session_key=${sessionKey}]`)
   }
   prompts.push(`[chat_type=${meta?.chatType}]`)
 

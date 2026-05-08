@@ -75,9 +75,9 @@ function httpJson<T = any>(url: string, body?: unknown): Promise<T> {
   });
 }
 
-async function pollDaemon(timeoutMs: number, chatId?: string): Promise<{ text: string; messageId: string; chatId: string; chatType: string; senderOpenId: string } | null> {
+async function pollDaemon(timeoutMs: number, sessionKey?: string): Promise<{ text: string; messageId: string; sessionKey: string; chatType: string; senderOpenId: string } | null> {
   const params = new URLSearchParams({ timeout: String(timeoutMs) });
-  if (chatId) params.set("chatId", chatId);
+  if (sessionKey) params.set("sessionKey", sessionKey);
   const res = await httpJson<{ message: any }>(daemonUrl(`/api/poll-message?${params}`));
   return res.message ?? null;
 }
@@ -104,21 +104,21 @@ mcpServer.tool(
     message: z.string().optional().describe("要发送给用户的消息内容。不传则不发送"),
     timeout_seconds: z.number().optional().describe("等待用户回复的超时秒数。不传则不等待，立即返回"),
     message_id: z.string().optional().describe("要回复的消息ID，传入后以回复模式发送"),
-    chat_id: z.string().optional().describe("目标会话ID，用于精确投递到对应的群或私聊"),
+    session_key: z.string().optional().describe("目标会话的 sessionKey，用于精确投递和拉取消息"),
   },
-  async ({ message, timeout_seconds, message_id, chat_id }) => {
+  async ({ message, timeout_seconds, message_id, session_key }) => {
     try {
       if (message) {
-        await httpJson(daemonUrl("/api/send-text"), { text: message, message_id, chat_id });
+        await httpJson(daemonUrl("/api/send-text"), { text: message, message_id, session_key });
       }
       const MAX_POLL_MS = 25_000;
       const timeoutMs = Math.min((timeout_seconds && timeout_seconds > 0) ? timeout_seconds * 1000 : 0, MAX_POLL_MS);
       if (timeoutMs > 0) {
-        const reply = await pollDaemon(timeoutMs, chat_id);
+        const reply = await pollDaemon(timeoutMs, session_key);
         if (reply === null) return { content: [{ type: "text" as const, text: "[waiting]" }] };
         const meta = [reply.text];
         if (reply.messageId) meta.push(`[message_id=${reply.messageId}]`);
-        if (reply.chatId) meta.push(`[chat_id=${reply.chatId}]`);
+        if (reply.sessionKey) meta.push(`[session_key=${reply.sessionKey}]`);
         if (reply.chatType) meta.push(`[chat_type=${reply.chatType}]`);
         return { content: [{ type: "text" as const, text: meta.join("\n") }] };
       }
@@ -136,10 +136,10 @@ mcpServer.tool(
   {
     image_path: z.string().describe("图片绝对路径"),
     message_id: z.string().optional().describe("要回复的消息ID，传入后以回复模式发送"),
-    chat_id: z.string().optional().describe("目标会话ID，用于精确投递到对应的群或私聊"),
+    session_key: z.string().optional().describe("目标会话的 sessionKey，用于精确投递"),
   },
-  async ({ image_path, message_id, chat_id }) => {
-    await httpJson(daemonUrl("/api/send-image"), { image_path, message_id, chat_id });
+  async ({ image_path, message_id, session_key }) => {
+    await httpJson(daemonUrl("/api/send-image"), { image_path, message_id, session_key });
     return { content: [{ type: "text" as const, text: "图片已发送" }] };
   },
 );
@@ -150,10 +150,10 @@ mcpServer.tool(
   {
     file_path: z.string().describe("文件绝对路径"),
     message_id: z.string().optional().describe("要回复的消息ID，传入后以回复模式发送"),
-    chat_id: z.string().optional().describe("目标会话ID，用于精确投递到对应的群或私聊"),
+    session_key: z.string().optional().describe("目标会话的 sessionKey，用于精确投递"),
   },
-  async ({ file_path, message_id, chat_id }) => {
-    await httpJson(daemonUrl("/api/send-file"), { file_path, message_id, chat_id });
+  async ({ file_path, message_id, session_key }) => {
+    await httpJson(daemonUrl("/api/send-file"), { file_path, message_id, session_key });
     return { content: [{ type: "text" as const, text: "文件已发送" }] };
   },
 );

@@ -19,7 +19,7 @@ export function getQueueDir(): string {
   return queueDir;
 }
 
-export function pushToFileQueue(text: string, messageId?: string, source?: string, chatId?: string, chatType?: string, senderOpenId?: string): boolean {
+export function pushToFileQueue(text: string, messageId?: string, source?: string, sessionKey?: string, chatType?: string, senderOpenId?: string): boolean {
   if (!queueDir || !text?.trim()) return false;
 
   const ts = Date.now();
@@ -43,7 +43,7 @@ export function pushToFileQueue(text: string, messageId?: string, source?: strin
     const data = JSON.stringify({
       text, messageId: id, timestamp: ts,
       source: source || `pid-${process.pid}`,
-      chatId: chatId || "", chatType: chatType || "",
+      sessionKey: sessionKey || "", chatType: chatType || "",
       senderOpenId: senderOpenId || "",
     });
     const tmpPath = path.join(queueDir, filename + ".tmp");
@@ -59,12 +59,12 @@ export function pushToFileQueue(text: string, messageId?: string, source?: strin
 export interface QueueMessage {
   text: string;
   messageId: string;
-  chatId: string;
+  sessionKey: string;
   chatType: string;
   senderOpenId: string;
 }
 
-export function claimNextMessage(filterChatId?: string): QueueMessage | null {
+export function claimNextMessage(filterSessionKey?: string): QueueMessage | null {
   if (!queueDir) return null;
 
   let files: string[];
@@ -77,11 +77,11 @@ export function claimNextMessage(filterChatId?: string): QueueMessage | null {
   for (const file of files) {
     const srcPath = path.join(queueDir, file);
 
-    if (filterChatId) {
+    if (filterSessionKey) {
       try {
         const raw = fs.readFileSync(srcPath, "utf-8");
         const parsed = JSON.parse(raw);
-        if ((parsed.chatId || "") !== filterChatId) continue;
+        if ((parsed.sessionKey || parsed.chatId || "") !== filterSessionKey) continue;
       } catch { continue; }
     }
 
@@ -99,7 +99,7 @@ export function claimNextMessage(filterChatId?: string): QueueMessage | null {
       return {
         text: typeof parsed.text === "string" ? parsed.text : raw,
         messageId: parsed.messageId || "",
-        chatId: parsed.chatId || "",
+        sessionKey: parsed.sessionKey || parsed.chatId || "",
         chatType: parsed.chatType || "",
         senderOpenId: parsed.senderOpenId || "",
       };
@@ -111,19 +111,19 @@ export function claimNextMessage(filterChatId?: string): QueueMessage | null {
   return null;
 }
 
-export function claimNextMessageText(filterChatId?: string): string | null {
-  const msg = claimNextMessage(filterChatId);
+export function claimNextMessageText(filterSessionKey?: string): string | null {
+  const msg = claimNextMessage(filterSessionKey);
   return msg ? msg.text : null;
 }
 
-export function pollFileQueue(timeoutMs: number, intervalMs = POLL_INTERVAL_MS, filterChatId?: string): Promise<QueueMessage | null> {
+export function pollFileQueue(timeoutMs: number, intervalMs = POLL_INTERVAL_MS, filterSessionKey?: string): Promise<QueueMessage | null> {
   return new Promise((resolve) => {
-    const immediate = claimNextMessage(filterChatId);
+    const immediate = claimNextMessage(filterSessionKey);
     if (immediate !== null) { resolve(immediate); return; }
 
     const deadline = Date.now() + timeoutMs;
     const timer = setInterval(() => {
-      const msg = claimNextMessage(filterChatId);
+      const msg = claimNextMessage(filterSessionKey);
       if (msg !== null) { clearInterval(timer); resolve(msg); return; }
       if (Date.now() >= deadline) { clearInterval(timer); resolve(null); }
     }, intervalMs);
@@ -131,25 +131,25 @@ export function pollFileQueue(timeoutMs: number, intervalMs = POLL_INTERVAL_MS, 
   });
 }
 
-export async function pollFileQueueBatch(timeoutMs: number, intervalMs = POLL_INTERVAL_MS, filterChatId?: string): Promise<QueueMessage | null> {
-  const first = await pollFileQueue(timeoutMs, intervalMs, filterChatId);
+export async function pollFileQueueBatch(timeoutMs: number, intervalMs = POLL_INTERVAL_MS, filterSessionKey?: string): Promise<QueueMessage | null> {
+  const first = await pollFileQueue(timeoutMs, intervalMs, filterSessionKey);
   if (first === null) return null;
 
   const parts = [first.text];
-  let extra = claimNextMessage(filterChatId);
+  let extra = claimNextMessage(filterSessionKey);
 
   while (extra !== null){
     while (extra !== null) {
       parts.push(extra.text);
-      extra = claimNextMessage(filterChatId);
+      extra = claimNextMessage(filterSessionKey);
     }
 
     await new Promise((r) => setTimeout(r, BATCH_WAIT_MS));
 
-    extra = claimNextMessage(filterChatId);
+    extra = claimNextMessage(filterSessionKey);
   }
 
-  return { text: parts.join("\n"), messageId: first.messageId, chatId: first.chatId, chatType: first.chatType, senderOpenId: first.senderOpenId };
+  return { text: parts.join("\n"), messageId: first.messageId, sessionKey: first.sessionKey, chatType: first.chatType, senderOpenId: first.senderOpenId };
 }
 
 export function getQueueLength(): number {
@@ -161,7 +161,7 @@ export function getQueueLength(): number {
   }
 }
 
-export function getQueueMessages(): { index: number; preview: string; chatId?: string; chatType?: string }[] {
+export function getQueueMessages(): { index: number; preview: string; sessionKey?: string; chatType?: string }[] {
   if (!queueDir) return [];
   try {
     const files = fs.readdirSync(queueDir).filter((f) => f.endsWith(".qmsg")).sort();
@@ -169,7 +169,7 @@ export function getQueueMessages(): { index: number; preview: string; chatId?: s
       try {
         const raw = fs.readFileSync(path.join(queueDir, f), "utf-8");
         const parsed = JSON.parse(raw);
-        return { index: i, preview: (parsed.text ?? "").slice(0, 200), chatId: parsed.chatId || undefined, chatType: parsed.chatType || undefined };
+        return { index: i, preview: (parsed.text ?? "").slice(0, 200), sessionKey: parsed.sessionKey || parsed.chatId || undefined, chatType: parsed.chatType || undefined };
       } catch {
         return { index: i, preview: "(unreadable)" };
       }
@@ -194,7 +194,7 @@ export function getDistinctSessions(): QueueSessionInfo[] {
       try {
         const raw = fs.readFileSync(path.join(queueDir, f), "utf-8");
         const parsed = JSON.parse(raw);
-        const key = parsed.chatId || "";
+        const key = parsed.sessionKey || parsed.chatId || "";
         if (key && !map.has(key)) {
           map.set(key, { chatType: parsed.chatType || "p2p", senderOpenId: parsed.senderOpenId || undefined });
         }
