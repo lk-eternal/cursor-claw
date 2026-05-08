@@ -115,9 +115,13 @@ export function getIndependentTaskStatuses(): Record<string, { running: boolean;
 
 export interface LaunchMeta { messageIds?: string[]; chatId?: string; chatType?: string }
 
-export function buildPrompt(meta?: LaunchMeta, taskMessage?: string, sessionKey?: string): string {
+export function buildPrompt(meta?: LaunchMeta, taskMessage?: string, sessionKey?: string, useMainWorkspace?: boolean): string {
   const prompts: string[] = []
-  prompts.push("请按照digital-identity数字身份定义并遵守工作流规则cursor-claw开始工作")
+  if (useMainWorkspace) {
+    prompts.push("请遵守工作流规则cursor-claw开始工作")
+  } else {
+    prompts.push("请按照digital-identity数字身份定义并遵守工作流规则cursor-claw开始工作")
+  }
 
   if(meta?.chatType === "p2p" || meta?.chatType === "group"){
     prompts.push("如果你当前正在执行任务（上下文中已有进行中的工作），请直接继续，不要重复处理已完成的内容。")
@@ -263,7 +267,7 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
   let workDir = config.workspaceDir
 
   if (!useMainWorkspace) {
-    if (chatType === "group" && !config.enableGroupChat) { pendingLaunches.delete(sessionKey); return { ok: false, error: "群聊未启用" } }
+    if (!config.allowOthers) { pendingLaunches.delete(sessionKey); return { ok: false, error: "未启用其他人使用" } }
     const safeChatId = sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_")
     workDir = path.join(app.getPath("userData"), "workspaces", safeChatId)
     if (!fs.existsSync(workDir)) {
@@ -276,7 +280,7 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
   if (!workDir) { pendingLaunches.delete(sessionKey); return { ok: false, error: "工作目录未配置" } }
   if (!resolveAgentBinary()) { pendingLaunches.delete(sessionKey); return { ok: false, error: "Cursor CLI 未安装" } }
 
-  const prompt = buildPrompt(meta, taskMessage, sessionKey)
+  const prompt = buildPrompt(meta, taskMessage, sessionKey, useMainWorkspace)
   const spawnEnv = makeSpawnEnv(config, { LARK_WORKSPACE_DIR: workDir })
   const overrideConfig = { ...config, workspaceDir: workDir }
 

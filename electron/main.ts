@@ -12,24 +12,26 @@ import {
   checkAgentLoggedIn,
   installCli,
   loginCli,
+  clearMessageQueue,
+  execAgentAsync,
+  applyProxyEnv,
+  initDaemonManager,
+  cleanupDaemonManager,
+  saveAppConfigFromRenderer,
+  checkSdkApiKey,
+  listSdkModels,
+} from "./daemon-manager"
+import { parseListModelsStdout } from "./command-handler"
+import {
   getMcpServerList,
   saveMcpServer,
   deleteMcpServer,
   loginMcpServer,
   toggleMcpServer,
   getMcpEnabledMap,
-  clearMessageQueue,
-  execAgentAsync,
-  applyProxyEnv,
-  parseListModelsStdout,
-  initDaemonManager,
-  cleanupDaemonManager,
-  saveAppConfigFromRenderer,
   getMcpServerTools,
   getMcpStatusMap,
-  checkSdkApiKey,
-  listSdkModels,
-} from "./daemon-manager"
+} from "./mcp-manager"
 import { injectWorkspace } from "./workspace-injector"
 import { initTray, destroyTray } from "./tray"
 import { initAppUpdater } from "./updater"

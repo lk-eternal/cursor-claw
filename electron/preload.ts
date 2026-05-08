@@ -5,7 +5,7 @@ export interface AppConfig {
   larkAppSecret: string
   larkReceiveId: string
   workspaceDir: string
-  enableGroupChat: boolean
+  allowOthers: boolean
   model: string
   modelParams: string
   autoStart: boolean

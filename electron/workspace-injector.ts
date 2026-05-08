@@ -97,7 +97,7 @@ export async function injectMcpToDir(wsDir: string): Promise<boolean> {
 
 // ── Rules injection ────────────────────────────────────────────
 
-export function injectRulesToDir(wsDir: string): boolean {
+export function injectRulesToDir(wsDir: string, skipIdentity = false): boolean {
   try {
     const rulesDir = path.join(wsDir, ".cursor", "rules")
     if (!fs.existsSync(rulesDir)) fs.mkdirSync(rulesDir, { recursive: true })
@@ -111,20 +111,24 @@ export function injectRulesToDir(wsDir: string): boolean {
     fs.writeFileSync(rulePath, ruleContent, "utf-8")
     broadcastLog(`规则已注入: ${rulePath}`)
 
-    const identity = getConfig().digitalIdentity?.trim()
     const identityPath = path.join(rulesDir, "digital-identity.mdc")
-    if (identity) {
-      const identityMdc = [
-        "---",
-        "description: 数字身份规则 - 定义 Agent 的角色、职责和行为边界",
-        "alwaysApply: true",
-        "---",
-        "",
-        identity,
-      ].join("\r\n")
-      fs.writeFileSync(identityPath, identityMdc, "utf-8")
-    } else if (fs.existsSync(identityPath)) {
-      fs.unlinkSync(identityPath)
+    if (skipIdentity) {
+      if (fs.existsSync(identityPath)) fs.unlinkSync(identityPath)
+    } else {
+      const identity = getConfig().digitalIdentity?.trim()
+      if (identity) {
+        const identityMdc = [
+          "---",
+          "description: 对外身份规则 - 定义 Agent 面向其他用户时的角色与行为边界",
+          "alwaysApply: true",
+          "---",
+          "",
+          identity,
+        ].join("\r\n")
+        fs.writeFileSync(identityPath, identityMdc, "utf-8")
+      } else if (fs.existsSync(identityPath)) {
+        fs.unlinkSync(identityPath)
+      }
     }
 
     return true
@@ -163,10 +167,10 @@ export function injectSkillsToDir(wsDir: string): boolean {
 
 // ── Composite: inject all into a directory ─────────────────────
 
-export async function injectWorkspaceToDir(dir: string): Promise<boolean> {
+export async function injectWorkspaceToDir(dir: string, skipIdentity = false): Promise<boolean> {
   await injectMcpToDir(dir)
   injectSkillsToDir(dir)
-  return injectRulesToDir(dir)
+  return injectRulesToDir(dir, skipIdentity)
 }
 
 export async function injectWorkspaceMcpAndRules(): Promise<{ mcpOk: boolean; ruleOk: boolean; skillOk: boolean }> {

@@ -17,7 +17,7 @@ interface AppConfig {
   noProxy: string
   agentNewSession: boolean
   closeWindowAction: "ask" | "minimize" | "quit"
-  enableGroupChat: boolean
+  allowOthers: boolean
   digitalIdentity: string
   wechatEnabled: boolean
   wechatToken: string

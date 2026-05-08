@@ -160,7 +160,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
   const [appSecret, setAppSecret] = useState("")
   const [receiveId, setReceiveId] = useState("")
   const [workspaceDir, setWorkspaceDir] = useState("")
-  const [enableGroupChat, setEnableGroupChat] = useState(false)
+  const [allowOthers, setAllowOthers] = useState(false)
   const [digitalIdentity, setDigitalIdentity] = useState("")
   const [model, setModel] = useState("auto")
   const [modelParams, setModelParams] = useState("")
@@ -384,7 +384,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
       setAppId(config.larkAppId); setAppSecret(config.larkAppSecret)
       setFeishuEnabled(config.feishuEnabled ?? false)
       setReceiveId(config.larkReceiveId)
-      setWorkspaceDir(config.workspaceDir); setEnableGroupChat(!!config.enableGroupChat)
+      setWorkspaceDir(config.workspaceDir); setAllowOthers(!!config.allowOthers)
       setModel(config.model)
       setModelParams(config.modelParams ?? "")
       setProxy(config.httpProxy || config.httpsProxy || "")
@@ -416,7 +416,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
       const r = await window.electronAPI.saveConfig({
         larkAppId: appId.trim(), larkAppSecret: appSecret.trim(),
         larkReceiveId: receiveId.trim(),
-        workspaceDir: workspaceDir.trim(), enableGroupChat,
+        workspaceDir: workspaceDir.trim(), allowOthers,
         model, modelParams,
         httpProxy: proxy.trim(), httpsProxy: proxy.trim(), noProxy: noProxy.trim(),
         agentNewSession,
@@ -441,7 +441,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
       }
       setSaved(true); setTimeout(() => setSaved(false), 1500)
     }, 500)
-  }, [appId, appSecret, receiveId, workspaceDir, enableGroupChat, model, modelParams, proxy, noProxy, agentNewSession, closeWindowAction, digitalIdentity, feishuEnabled, wechatEnabled, wechatToken, wechatAccountId, agentMode, cursorApiKey, refreshMcpServers])
+  }, [appId, appSecret, receiveId, workspaceDir, allowOthers, model, modelParams, proxy, noProxy, agentNewSession, closeWindowAction, digitalIdentity, feishuEnabled, wechatEnabled, wechatToken, wechatAccountId, agentMode, cursorApiKey, refreshMcpServers])
 
   useEffect(() => { autoSave() }, [autoSave])
 
@@ -775,11 +775,13 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                   </div>
                   <p className="mt-1 text-xs text-gray-600">主用户私聊时使用此目录，群聊和其他用户使用自动创建的临时目录</p>
                 </div>
+                {allowOthers && (
                 <div>
-                  <label className="mb-1 block text-xs text-gray-500">数字身份</label>
-                  <textarea value={digitalIdentity} onChange={(e) => setDigitalIdentity(e.target.value)} rows={6} placeholder="定义 Agent 在非主用户会话中的角色、职责与行为规范...&#10;留空则不注入" className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-blue-500 focus:outline-none" />
-                  <p className="mt-1 text-xs text-gray-600">群聊和其他用户会话启动时，会将此内容作为 Agent 规则注入到临时工作目录</p>
+                  <label className="mb-1 block text-xs text-gray-500">对外身份规则</label>
+                  <textarea value={digitalIdentity} onChange={(e) => setDigitalIdentity(e.target.value)} rows={6} placeholder="定义 Agent 面向其他用户时的角色、职责与行为规范...&#10;留空则不注入" className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-blue-500 focus:outline-none" />
+                  <p className="mt-1 text-xs text-gray-600">其他人触发的会话启动时，将此内容作为 Agent 身份规则注入</p>
                 </div>
+                )}
               </section>
               <section className="space-y-3">
                 <h3 className="text-sm font-medium text-gray-300">关闭主窗口</h3>
@@ -866,12 +868,12 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                     </div>
                     <div className="flex items-center justify-between">
                       <div>
-                        <h4 className="text-xs font-medium text-gray-400">允许群聊</h4>
-                        <p className="text-xs text-gray-500">开启后机器人将响应群聊 @消息</p>
+                        <h4 className="text-xs font-medium text-gray-400">允许其他人使用</h4>
+                        <p className="text-xs text-gray-500">开启后机器人将响应其他人私聊及群聊 @消息</p>
                       </div>
-                      <button onClick={() => setEnableGroupChat(!enableGroupChat)}
-                        className={`relative h-6 w-11 rounded-full transition ${enableGroupChat ? "bg-blue-600" : "bg-gray-600"}`}>
-                        <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition ${enableGroupChat ? "left-[22px]" : "left-0.5"}`} />
+                      <button onClick={() => setAllowOthers(!allowOthers)}
+                        className={`relative h-6 w-11 rounded-full transition ${allowOthers ? "bg-blue-600" : "bg-gray-600"}`}>
+                        <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition ${allowOthers ? "left-[22px]" : "left-0.5"}`} />
                       </button>
                     </div>
                   </div>

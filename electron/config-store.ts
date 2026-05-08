@@ -29,7 +29,7 @@ export interface AppConfig {
   verifiedMcpServers: string[]
   /** 主会话 chatId 映射（workspaceDir → chatId），用于 --resume 恢复上下文 */
   mainChatIds: Record<string, string>
-  enableGroupChat: boolean
+  allowOthers: boolean
   digitalIdentity: string
   feishuEnabled: boolean
   wechatEnabled: boolean
@@ -57,7 +57,7 @@ const defaults: AppConfig = {
   scheduledTasks: [],
   verifiedMcpServers: [],
   mainChatIds: {},
-  enableGroupChat: false,
+  allowOthers: false,
   digitalIdentity: "",
   feishuEnabled: false,
   wechatEnabled: false,
@@ -82,6 +82,10 @@ function getStore(): Store<AppConfig> {
 
 export function getConfig(): AppConfig {
   return { ...defaults, ...getStore().store }
+}
+
+export function useSdkMode(): boolean {
+  return getConfig().agentMode === "sdk"
 }
 
 export function saveConfig(partial: Partial<AppConfig>): void {
