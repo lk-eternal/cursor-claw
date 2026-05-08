@@ -1069,7 +1069,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       if (!dir?.trim()) { json(res, { ok: false, error: "dir is required" }, 400); return true; }
       const msgId = `api-ws-${Date.now()}`;
       pushCommandToQueue(`/workspace set ${dir.trim()}`, msgId, "mcp-api");
-      json(res, { ok: true, message: "workspace change accepted, restarting...", dir: dir.trim() });
+      json(res, { ok: true, message: "workspace change accepted", dir: dir.trim() });
       return true;
     }
   }

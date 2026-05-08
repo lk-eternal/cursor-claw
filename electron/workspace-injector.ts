@@ -209,7 +209,7 @@ const ADMIN_SKILL_CONTENT = `# Cursor Claw — 自管理 Skill
 管理定时任务（list / add / update / delete / toggle）。
 
 ### manage_workspace
-管理工作目录（get / set）。set 后自动重启 Daemon。
+管理工作目录（get / set）。
 `
 
 function ensureDir(dirPath: string): void {
