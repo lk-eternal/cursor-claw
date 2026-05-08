@@ -196,9 +196,9 @@ xattr -cr /Applications/Cursor\ Claw.app
 
 | 工具 | 参数 | 说明 |
 |------|------|------|
-| `sync_message` | `message?`, `timeout_seconds?`, `message_id?`, `chat_id?` | 发送消息 / 等待回复，自动路由到飞书或微信 |
-| `send_image` | `image_path`, `message_id?`, `chat_id?` | 发送本地图片到飞书 / 微信 |
-| `send_file` | `file_path`, `message_id?`, `chat_id?` | 发送本地文件到飞书 / 微信 |
+| `sync_message` | `message?`, `timeout_seconds?`, `message_id?`, `session_key?` | 发送消息 / 等待回复，自动路由到飞书或微信 |
+| `send_image` | `image_path`, `message_id?`, `session_key?` | 发送本地图片到飞书 / 微信 |
+| `send_file` | `file_path`, `message_id?`, `session_key?` | 发送本地文件到飞书 / 微信 |
 
 ### 自管理工具（应用版）
 
@@ -381,7 +381,7 @@ Daemon 进程独立于 Cursor 运行，即使 Agent 会话中断，系统也能�
 <details>
 <summary>群聊消息如何路由？</summary>
 
-每个群聊会创建独立的 Agent 会话和工作目录。消息通过 `chat_id` 路由到对应会话，Agent 回复时需携带 `message_id` 或 `chat_id` 以确保消息发送到正确的群（飞书群）或群聊（微信群）。群聊会话空闲 30 分钟后自动回收。
+每个群聊会创建独立的 Agent 会话和工作目录。消息通过 `session_key` 路由到对应会话，Agent 回复时需携带 `message_id` 或 `session_key` 以确保消息发送到正确的群（飞书群）或群聊（微信群）。群聊会话空闲 30 分钟后自动回收。
 
 </details>
 
