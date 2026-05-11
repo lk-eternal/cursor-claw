@@ -953,8 +953,8 @@ export async function saveAppConfigFromRenderer(partial: Partial<AppConfig>): Pr
 
 export function initDaemonManager(): void {
   initSessionDispatcher()
-  registerEnableMcpFn(async (_wsDir, serverNames) => {
-    for (const name of serverNames) await toggleMcpServer(name, true)
+  registerEnableMcpFn(async (wsDir, serverNames) => {
+    for (const name of serverNames) await toggleMcpServer(name, true, wsDir)
   })
   ipcMain.handle("config:apply-workspace-switch", (_, workspaceDir: string, stopOldSessions: boolean) => applyWorkspaceSwitch(workspaceDir, stopOldSessions))
   ipcMain.handle("daemon:get-log-buffer", () => getLogBuffer())

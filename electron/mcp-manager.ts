@@ -157,9 +157,9 @@ export function invalidateMcpEnabledCache(): void {
 
 // ── Public API: Toggle ───────────────────────────────────
 
-export async function toggleMcpServer(serverName: string, enabled: boolean): Promise<{ ok: boolean; output: string }> {
+export async function toggleMcpServer(serverName: string, enabled: boolean, workspaceDirOverride?: string): Promise<{ ok: boolean; output: string }> {
   const config = getConfig()
-  const ws = config.workspaceDir
+  const ws = (workspaceDirOverride ?? config.workspaceDir ?? "").trim()
   if (!ws) return { ok: false, output: "工作目录未配置" }
   if (!resolveAgentBinary()) return { ok: false, output: "Cursor CLI 未安装" }
 
