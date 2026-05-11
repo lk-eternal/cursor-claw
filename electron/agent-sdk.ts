@@ -116,6 +116,7 @@ function handleSdkEvent(sessionKey: string, event: SDKMessage): void {
 // ── 公开 API ────────────────────────────────────────
 
 export function isSdkSessionRunning(sessionKey: string): boolean {
+  if (pendingLaunches.has(sessionKey)) return true
   const s = sdkSessions.get(sessionKey)
   return s !== undefined && !s.abortController.signal.aborted
 }
@@ -297,6 +298,8 @@ export function stopAllSdkSessions(): void {
   for (const key of [...sdkSessions.keys()]) {
     stopSdkSession(key)
   }
+  failedCooldowns.clear()
+  pendingLaunches.clear()
 }
 
 export async function checkSdkApiKey(): Promise<{ ok: boolean; email?: string; error?: string }> {

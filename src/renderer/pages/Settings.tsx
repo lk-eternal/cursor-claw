@@ -303,14 +303,19 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
   const initialLoadDone = useRef(false)
   const saveTimer = useRef<ReturnType<typeof setTimeout>>()
 
+  const [mcpRefreshing, setMcpRefreshing] = useState(false)
   const refreshMcpServers = useCallback(async (force = false) => {
-    const servers = await window.electronAPI.getMcpServers()
-    setMcpServers(servers)
+    setMcpRefreshing(true)
     setMcpStatusLoading(true)
-    const [enabled, status] = await Promise.all([window.electronAPI.getMcpEnabledMap(force), window.electronAPI.getMcpStatusMap(force)])
-    setMcpServers((prev) => prev.map((s) => ({ ...s, enabled: enabled[s.name] ?? false })))
+    const [servers, enabled, status] = await Promise.all([
+      window.electronAPI.getMcpServers(),
+      window.electronAPI.getMcpEnabledMap(force),
+      window.electronAPI.getMcpStatusMap(force),
+    ])
+    setMcpServers(servers.map((s) => ({ ...s, enabled: enabled[s.name] ?? false })))
     setMcpStatus(status)
     setMcpStatusLoading(false)
+    setMcpRefreshing(false)
     for (const s of servers) {
       window.electronAPI.getMcpTools(s.name).then((res) => {
         setMcpTools((p) => ({ ...p, [s.name]: { loading: false, tools: res.tools, error: res.ok ? undefined : res.error } }))
@@ -399,7 +404,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
       setCursorApiKey(config.cursorApiKey ?? "")
       loaded.current = true
     })
-    if (tab === "mcp") refreshMcpServers(true)
+    if (tab === "mcp") refreshMcpServers()
     if (tab === "rules") refreshRules()
     if (tab === "skills") refreshSkills()
     if (tab === "tasks") { refreshTasks(); window.electronAPI.getScheduledTaskStatus().then(setTaskStatuses) }
@@ -579,7 +584,6 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
   const [mcpLoginPending, setMcpLoginPending] = useState<Record<string, boolean>>({})
   const handleMcpLogin = (name: string) => {
     setMcpLoginPending((p) => ({ ...p, [name]: true }))
-    setTimeout(() => setMcpLoginPending((p) => ({ ...p, [name]: false })), 5000)
     window.electronAPI.loginMcp(name).then((res) => {
       setMcpLoginPending((p) => ({ ...p, [name]: false }))
       if (res.ok) {
@@ -1114,7 +1118,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
               <section className="space-y-3">
                 <div className="flex items-center gap-2">
                   <h3 className="text-sm font-medium text-gray-300">MCP 服务器</h3>
-                  <button onClick={() => refreshMcpServers(true)} className="flex items-center gap-1 rounded px-2 py-0.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white"><RefreshCw size={12} />刷新</button>
+                  <button onClick={() => refreshMcpServers(true)} disabled={mcpRefreshing} className="flex items-center gap-1 rounded px-2 py-0.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white disabled:opacity-50"><RefreshCw size={12} className={mcpRefreshing ? "animate-spin" : ""} />{mcpRefreshing ? "加载中" : "刷新"}</button>
                   <div className="flex-1" />
                   <button onClick={openMcpAdd} className="flex items-center gap-1 rounded-md bg-blue-600 px-2.5 py-1 text-xs font-medium text-white transition hover:bg-blue-500"><Plus size={12} />新增</button>
                 </div>
@@ -1133,7 +1137,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                           <button onClick={() => toggleMcpExpand(s.name)} className="shrink-0 rounded p-0.5 text-gray-500 transition hover:text-white">
                             <ChevronDown size={14} className={`transition-transform duration-200 ${expanded ? "rotate-180" : ""}`} />
                           </button>
-                          {s.type === "url" ? (s.authenticated ? <ShieldCheck size={16} className="shrink-0 text-green-400" /> : <ShieldAlert size={16} className="shrink-0 text-amber-400" />) : <Terminal size={16} className="shrink-0 text-gray-400" />}
+                          {s.type === "url" ? (s.enabled && s.authenticated ? <ShieldCheck size={16} className="shrink-0 text-green-400" /> : s.enabled && !s.authenticated ? <ShieldAlert size={16} className="shrink-0 text-amber-400" /> : <Network size={16} className="shrink-0 text-gray-400" />) : <Terminal size={16} className="shrink-0 text-gray-400" />}
                           <div className="min-w-0">
                             <div className="flex items-center gap-2">
                               <p className="truncate text-sm font-medium">{s.name}</p>
@@ -1145,7 +1149,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                           </div>
                         </div>
                         <div className="ml-3 flex shrink-0 items-center gap-2">
-                          {s.type === "url" && (s.authenticated ? <span className="text-xs text-green-400">已认证</span> : mcpLoginPending[s.name] ? <button onClick={() => handleMcpLogin(s.name)} className="flex items-center gap-1 rounded-md bg-blue-600/70 px-2 py-1 text-xs font-medium text-white transition hover:bg-blue-500"><Loader2 size={12} className="animate-spin" />认证中</button> : <button onClick={() => handleMcpLogin(s.name)} className="flex items-center gap-1 rounded-md bg-blue-600 px-2 py-1 text-xs font-medium text-white transition hover:bg-blue-500"><LogIn size={12} />授权</button>)}
+                          {s.type === "url" && s.enabled && (s.authenticated ? <span className="text-xs text-green-400">已认证</span> : mcpLoginPending[s.name] ? <button onClick={() => handleMcpLogin(s.name)} className="flex items-center gap-1 rounded-md bg-blue-600/70 px-2 py-1 text-xs font-medium text-white transition hover:bg-blue-500"><Loader2 size={12} className="animate-spin" />认证中</button> : <button onClick={() => handleMcpLogin(s.name)} className="flex items-center gap-1 rounded-md bg-blue-600 px-2 py-1 text-xs font-medium text-white transition hover:bg-blue-500"><LogIn size={12} />授权</button>)}
                           <button onClick={() => openMcpEdit(s)} className="rounded p-1 text-gray-500 transition hover:bg-gray-800 hover:text-white"><Pencil size={13} /></button>
                           <button onClick={() => handleMcpDelete(s.name)} className="rounded p-1 text-gray-500 transition hover:bg-gray-800 hover:text-red-400"><Trash2 size={13} /></button>
                           {(mcpStatusLoading && s.enabled === undefined) || mcpLoading[s.name] ? (

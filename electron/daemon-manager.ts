@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process"
 import { randomUUID } from "node:crypto"
+import * as http from "node:http"
 import * as https from "node:https"
 import * as path from "node:path"
 import * as fs from "node:fs"
@@ -47,6 +48,7 @@ export { checkAgentLoggedIn, loginCli } from "./agent-launcher"
 export { getLogBuffer } from "./ui-logger"
 export { checkSdkApiKey, listSdkModels } from "./agent-sdk"
 export { injectWorkspaceMcpAndRules, injectWorkspaceToDir, getMcpServerPath, getAdminMcpPath } from "./workspace-injector"
+export { getQueueMessages, clearMessageQueue } from "./session-dispatcher"
 
 
 function isAgentRunning(): boolean {

@@ -18,7 +18,7 @@ import {
   launchSdkAgent, stopSdkSession, stopAllSdkSessions,
   isSdkSessionRunning, getSdkSessionList,
 } from "./agent-sdk"
-import { injectMcpToDir, injectWorkspaceToDir } from "./workspace-injector"
+import { injectWorkspaceToDir } from "./workspace-injector"
 
 // ── 内部工具 ──────────────────────────────────────────────
 
@@ -217,7 +217,7 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
   if (chatType === "task" || chatType === "temp") {
     return _launchIndependentAgentCli(sessionKey, chatName ?? sessionKey, taskMessage ?? "", chatType)
   }
-  return _launchSessionAgent(sessionKey, chatType, injectWorkspaceToDir, meta, useMain, senderOpenId)
+  return _launchSessionAgent(sessionKey, chatType, undefined, meta, useMain, senderOpenId)
 }
 
 export async function launchSessionAgent(
@@ -345,7 +345,19 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
 
 // ── 会话调度主循环 ────────────────────────────────────────
 
+let dispatching = false
+
 export async function dispatchSessionAgents(): Promise<void> {
+  if (dispatching) return
+  dispatching = true
+  try {
+    await _dispatchSessionAgentsInner()
+  } finally {
+    dispatching = false
+  }
+}
+
+async function _dispatchSessionAgentsInner(): Promise<void> {
   const config = getConfig()
   const sessions = await getQueueSessions()
 
@@ -371,8 +383,6 @@ export async function dispatchSessionAgents(): Promise<void> {
       ? `群聊 ${chatName ? `「${chatName}」` : chatId}`
       : (mainUser ? `主用户私聊${userName ? ` (${userName})` : ""}` : `私聊 ${userName || chatId}`)
     broadcastLog(`[Agent] ${label} 有新消息，自动拉起${mainUser ? "(主工作目录)" : ""}`)
-
-    if (config.workspaceDir) await injectMcpToDir(config.workspaceDir)
 
     const meta: import("./agent-launcher").LaunchMeta = { chatId, chatType: chatType as "p2p" | "group" }
     const result = await launchSessionAgent(sessionKey, chatType as "p2p" | "group", undefined, meta, mainUser, senderOpenId)

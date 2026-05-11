@@ -211,8 +211,7 @@ xattr -cr /Applications/Cursor\ Claw.app
 | `manage_rules` | 管理 Cursor Rules 文件（列出 / 读取 / 保存 / 删除） |
 | `manage_skills` | 管理 Agent Skills（列出 / 读取 / 保存 / 删除） |
 | `manage_tasks` | 管理定时任务（列出 / 添加 / 更新 / 删除 / 切换启用） |
-| `manage_workspace` | 查看或切换工作目录（切换后自动重启 Daemon） |
-| `launch_temp_agent` | 启动独立临时 Agent 会话 |
+| `manage_workspace` | 查看或切换工作目录（切换后热更新生效） |
 
 ## 指令系统
 

@@ -15,7 +15,6 @@ import {
   getQueueDir,
   pushToFileQueue,
   claimNextMessage,
-  claimNextMessageText,
   pollFileQueueBatch,
   getQueueLength as getFileQueueLength,
   getQueueMessages as getFileQueueMessages,
@@ -525,48 +524,10 @@ function startHttpServer(): Promise<number> {
           return;
         }
 
-        if (method === "POST" && pathname === "/send") {
-          if (!sender) { json(res, { ok: false, error: "飞书未启用" }, 400); return; }
-          const body = JSON.parse(await readBody(req));
-          await sender.sendMessage(body.text);
-          json(res, { ok: true });
-          return;
-        }
-
-        if (method === "POST" && pathname === "/send-image") {
-          if (!sender) { json(res, { ok: false, error: "飞书未启用" }, 400); return; }
-          const body = JSON.parse(await readBody(req));
-          await sender.sendImage(body.image_path);
-          json(res, { ok: true });
-          return;
-        }
-
-        if (method === "POST" && pathname === "/send-file") {
-          if (!sender) { json(res, { ok: false, error: "飞书未启用" }, 400); return; }
-          const body = JSON.parse(await readBody(req));
-          await sender.sendFile(body.file_path);
-          json(res, { ok: true });
-          return;
-        }
-
         if (method === "POST" && pathname === "/start-bind") {
           if (!sender) { json(res, { ok: false, error: "飞书未启用" }, 400); return; }
           startBind();
           json(res, { ok: true });
-          return;
-        }
-
-        if (method === "POST" && pathname === "/test-bind") {
-          if (!sender) { json(res, { ok: false, error: "飞书未启用" }, 400); return; }
-          const body = JSON.parse(await readBody(req));
-          const chatId = typeof body.chatId === "string" ? body.chatId : "";
-          if (!chatId) { json(res, { error: "chatId is required" }, 400); return; }
-          try {
-            await sender.sendMessageToChat(chatId, "🔗 绑定测试成功！连接正常。");
-            json(res, { ok: true });
-          } catch (e: any) {
-            json(res, { ok: false, error: e?.message ?? "发送失败" }, 500);
-          }
           return;
         }
 
@@ -595,14 +556,6 @@ function startHttpServer(): Promise<number> {
 
         if (method === "POST" && pathname === "/clear-queue") {
           json(res, { ok: true, cleared: clearFileQueue() });
-          return;
-        }
-
-        if (method === "GET" && pathname === "/dequeue") {
-          const chatIdFilter = reqUrl.searchParams.get("chatId") || undefined;
-          const claimed = claimNextMessage(chatIdFilter);
-          if (claimed?.messageId && chatIdFilter) trackMessageSession(claimed.messageId, chatIdFilter);
-          json(res, { message: claimed?.text ?? null, queueLength: getFileQueueLength() });
           return;
         }
 
@@ -641,21 +594,6 @@ function startHttpServer(): Promise<number> {
           log("INFO", `指令执行完成: ok=${body.ok}, msgId=${body.messageId}, chatId=${body.chatId ?? "N/A"}`);
           if (body.messageId) await replyToMessage(body.messageId, body.message, body.chatId);
           json(res, { ok: true });
-          return;
-        }
-
-        if (method === "GET" && pathname === "/poll") {
-          const timeout = Number(reqUrl.searchParams.get("timeout") ?? "20000");
-          const sessionKeyFilter = reqUrl.searchParams.get("sessionKey") || reqUrl.searchParams.get("chatId") || undefined;
-          let disconnected = false;
-          req.on("close", () => { disconnected = true; });
-          const msg = await pollFileQueueBatch(timeout, undefined, sessionKeyFilter);
-          if (disconnected && msg !== null) {
-            pushToFileQueue(msg.text, msg.messageId, `requeue-poll`, msg.sessionKey, msg.chatType, msg.senderOpenId);
-            log("WARN", `/poll 连接断开，消息放回队列`);
-            return;
-          }
-          json(res, { message: msg?.text ?? null, hasMore: getFileQueueLength() > 0 });
           return;
         }
 
@@ -1094,7 +1032,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       json(res, { ok: true, workspaceDir: WORKSPACE_DIR });
       return true;
     }
-    if (method === "PUT") {
+    if (method === "PUT" || method === "POST") {
       const body = JSON.parse(await readBody(req));
       const { dir } = body as { dir?: string };
       if (!dir?.trim()) { json(res, { ok: false, error: "dir is required" }, 400); return true; }
@@ -1103,7 +1041,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       const oldDir = WORKSPACE_DIR;
       WORKSPACE_DIR = newDir;
       log("INFO", `[Workspace] hot-updated: ${oldDir} -> ${newDir}`);
-      json(res, { ok: true, oldDir, newDir });
+      json(res, { ok: true, message: `工作目录已切换`, dir: newDir, oldDir });
       return true;
     }
   }
@@ -1112,9 +1050,9 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
   if (pathname === "/api/agent" && method === "POST") {
     const body = JSON.parse(await readBody(req));
     const { action } = body as { action: string };
-    const supportedActions = ["stop", "restart", "reset", "clean"];
+    const supportedActions = ["stop", "restart", "reset", "clean", "launch"];
 
-    if (action === "launch-temp") {
+    if (action === "launch") {
       const { message } = body as { message?: string };
       if (!message?.trim()) { json(res, { ok: false, error: "message is required" }, 400); return true; }
       const taskId = `temp-${Date.now()}`;
@@ -1134,7 +1072,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       json(res, { ok: true, message: `/${action} command queued` });
       return true;
     }
-    json(res, { ok: false, error: `unknown action, supported: ${[...supportedActions, "launch-temp"].join(", ")}` }, 400);
+    json(res, { ok: false, error: `unknown action, supported: ${supportedActions.join(", ")}` }, 400);
     return true;
   }
 

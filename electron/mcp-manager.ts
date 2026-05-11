@@ -3,7 +3,7 @@ import * as path from "node:path"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import { BrowserWindow } from "electron"
-import { getConfig, useSdkMode } from "./config-store"
+import { getConfig } from "./config-store"
 import { broadcastLog, logCursorAgentInvocation } from "./ui-logger"
 import { resolveAgentBinary, applyProxyEnv, quoteArg, getAgentPaths } from "./agent-cli"
 
@@ -30,12 +30,10 @@ export interface McpToolInfo {
 
 // ── Internal helpers ─────────────────────────────────────
 
-
 const ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]/g
 
 function isEnabledStatus(status: string): boolean {
-  const s = status.toLowerCase()
-  return s !== "disabled" && !s.includes("not loaded")
+  return status.toLowerCase() !== "disabled"
 }
 
 function spawnAsync(args: string[], cwd: string, env: Record<string, string>): Promise<{ code: number; stdout: string; stderr: string; timedOut?: boolean }> {
@@ -79,46 +77,23 @@ function findProjectDir(workspaceDir: string): string | null {
   return null
 }
 
-function getProjectSlug(workspaceDir: string): string {
+function readApprovedServers(workspaceDir: string): Set<string> {
   const dir = findProjectDir(workspaceDir)
-  if (dir) return path.basename(dir)
-  return workspaceDir.replace(/\\/g, "-").replace(/\//g, "-").replace(/:/g, "")
-}
-
-function readMcpAuthFile(workspaceDir: string): Record<string, unknown> {
-  const dir = findProjectDir(workspaceDir)
-  if (!dir) return {}
-  const authPath = path.join(dir, "mcp-auth.json")
+  if (!dir) return new Set()
+  const approvalPath = path.join(dir, "mcp-approvals.json")
   try {
-    if (fs.existsSync(authPath)) return JSON.parse(fs.readFileSync(authPath, "utf-8"))
-  } catch { /* ignore */ }
-  return {}
-}
-
-function readAllMcpServers(): Record<string, Record<string, unknown>> {
-  const config = getConfig()
-  const servers: Record<string, Record<string, unknown>> = {}
-
-  const globalPath = path.join(os.homedir(), ".cursor", "mcp.json")
-  try {
-    if (fs.existsSync(globalPath)) {
-      const cfg = JSON.parse(fs.readFileSync(globalPath, "utf-8"))
-      if (cfg.mcpServers) Object.assign(servers, cfg.mcpServers)
+    if (!fs.existsSync(approvalPath)) return new Set()
+    const entries: string[] = JSON.parse(fs.readFileSync(approvalPath, "utf-8"))
+    const approved = new Set<string>()
+    for (const entry of entries) {
+      const match = entry.match(/^(.+)-[0-9a-f]{16}$/)
+      if (match) approved.add(match[1])
     }
+    return approved
   } catch { /* ignore */ }
-
-  if (config.workspaceDir) {
-    const projectPath = path.join(config.workspaceDir, ".cursor", "mcp.json")
-    try {
-      if (fs.existsSync(projectPath)) {
-        const cfg = JSON.parse(fs.readFileSync(projectPath, "utf-8"))
-        if (cfg.mcpServers) Object.assign(servers, cfg.mcpServers)
-      }
-    } catch { /* ignore */ }
-  }
-
-  return servers
+  return new Set()
 }
+
 
 // ── MCP Enabled Cache ────────────────────────────────────
 
@@ -127,20 +102,6 @@ const MCP_ENABLED_CACHE_TTL_MS = 30_000
 let mcpListCache: McpListCache | null = null
 let mcpListInflight: Promise<McpListCache> | null = null
 
-function fetchMcpListFromJson(ws: string): McpListCache {
-  const enabled: Record<string, boolean> = {}
-  const status: Record<string, string> = {}
-  const servers = getMcpServerList()
-  for (const s of servers) {
-    const disabled = s.rawConfig && (s.rawConfig as Record<string, unknown>).disabled === true
-    enabled[s.name] = !disabled
-    status[s.name] = disabled ? "disabled" : "enabled"
-  }
-  const result: McpListCache = { enabled, status, ts: Date.now(), ws }
-  mcpListCache = result
-  return result
-}
-
 async function fetchMcpList(force = false): Promise<McpListCache> {
   const config = getConfig()
   const ws = (config.workspaceDir || "").trim()
@@ -148,7 +109,6 @@ async function fetchMcpList(force = false): Promise<McpListCache> {
   if (!ws) return empty
   if (!force && mcpListCache && mcpListCache.ws === ws && Date.now() - mcpListCache.ts < MCP_ENABLED_CACHE_TTL_MS) return mcpListCache
 
-  if (useSdkMode()) return fetchMcpListFromJson(ws)
   if (!resolveAgentBinary()) return empty
   if (mcpListInflight) return mcpListInflight
 
@@ -197,56 +157,24 @@ export function invalidateMcpEnabledCache(): void {
 
 // ── Public API: Toggle ───────────────────────────────────
 
-function toggleMcpServerViaJson(serverName: string, enabled: boolean): { ok: boolean; output: string } {
+export async function toggleMcpServer(serverName: string, enabled: boolean): Promise<{ ok: boolean; output: string }> {
   const config = getConfig()
   const ws = config.workspaceDir
   if (!ws) return { ok: false, output: "工作目录未配置" }
-
-  const sources: Array<{ scope: "global" | "project"; filePath: string }> = [
-    { scope: "global", filePath: path.join(os.homedir(), ".cursor", "mcp.json") },
-    { scope: "project", filePath: path.join(ws, ".cursor", "mcp.json") },
-  ]
-
-  for (const { scope, filePath } of sources) {
-    try {
-      if (!fs.existsSync(filePath)) continue
-      const raw = JSON.parse(fs.readFileSync(filePath, "utf-8"))
-      const servers = raw.mcpServers ?? raw.servers ?? {}
-      if (!(serverName in servers)) continue
-      if (enabled) {
-        delete servers[serverName].disabled
-      } else {
-        servers[serverName].disabled = true
-      }
-      fs.writeFileSync(filePath, JSON.stringify(raw, null, 2), "utf-8")
-      invalidateMcpEnabledCache()
-      broadcastLog(`[MCP toggle] ${serverName} → ${enabled ? "enabled" : "disabled"} (${scope})`, "INFO")
-      return { ok: true, output: `${serverName} ${enabled ? "enabled" : "disabled"} (${scope})` }
-    } catch { /* ignore */ }
-  }
-  return { ok: false, output: `未找到 ${serverName}` }
-}
-
-export async function toggleMcpServer(serverName: string, enabled: boolean): Promise<{ ok: boolean; output: string }> {
-  const config = getConfig()
-  if (!config.workspaceDir) return { ok: false, output: "工作目录未配置" }
-
-  if (useSdkMode()) return toggleMcpServerViaJson(serverName, enabled)
   if (!resolveAgentBinary()) return { ok: false, output: "Cursor CLI 未安装" }
 
   const env: Record<string, string> = { ...process.env as Record<string, string> }
   applyProxyEnv(env, config)
 
-  const sub = enabled ? "enable" : "disable"
-  try {
-    const r = await spawnAsync(["mcp", sub, serverName], config.workspaceDir, env)
-    const out = (r.stdout + r.stderr).replace(ANSI_RE, "").replace(/\r/g, "").trim()
-    broadcastLog(`[MCP ${sub}] ${serverName}: ${out}`, r.code === 0 ? "INFO" : "WARN")
+  const action = enabled ? "enable" : "disable"
+  const r = await spawnAsync(["mcp", action, serverName], ws, env)
+  const out = (r.stdout + r.stderr).replace(ANSI_RE, "").replace(/\r/g, "").trim()
+
+  if (r.code === 0) {
     invalidateMcpEnabledCache()
-    return { ok: r.code === 0, output: out }
-  } catch (e: any) {
-    return { ok: false, output: e?.message ?? "未知错误" }
+    broadcastLog(`[MCP toggle] ${serverName} → ${action}d (via CLI)`, "INFO")
   }
+  return { ok: r.code === 0, output: out || (r.code === 0 ? `${serverName} ${action}d` : `操作失败`) }
 }
 
 // ── Public API: CRUD ─────────────────────────────────────
@@ -254,7 +182,7 @@ export async function toggleMcpServer(serverName: string, enabled: boolean): Pro
 export function getMcpServerList(): McpServerEntry[] {
   const config = getConfig()
   const ws = config.workspaceDir || ""
-  const authData = ws ? readMcpAuthFile(ws) : {}
+  const approved = ws ? readApprovedServers(ws) : new Set<string>()
   const result: McpServerEntry[] = []
 
   const globalPath = path.join(os.homedir(), ".cursor", "mcp.json")
@@ -263,7 +191,7 @@ export function getMcpServerList(): McpServerEntry[] {
       const cfg = JSON.parse(fs.readFileSync(globalPath, "utf-8"))
       const servers = cfg.mcpServers ?? cfg.servers ?? {}
       for (const [name, raw] of Object.entries(servers) as [string, Record<string, unknown>][]) {
-        result.push(buildEntry(name, raw, "global", authData))
+        result.push(buildEntry(name, raw, "global", approved))
       }
     }
   } catch { /* ignore */ }
@@ -275,7 +203,7 @@ export function getMcpServerList(): McpServerEntry[] {
         const cfg = JSON.parse(fs.readFileSync(projectPath, "utf-8"))
         const servers = cfg.mcpServers ?? cfg.servers ?? {}
         for (const [name, raw] of Object.entries(servers) as [string, Record<string, unknown>][]) {
-          result.push(buildEntry(name, raw, "project", authData))
+          result.push(buildEntry(name, raw, "project", approved))
         }
       }
     } catch { /* ignore */ }
@@ -284,7 +212,7 @@ export function getMcpServerList(): McpServerEntry[] {
   return result
 }
 
-function buildEntry(name: string, raw: Record<string, unknown>, source: "global" | "project", authData: Record<string, unknown>): McpServerEntry {
+function buildEntry(name: string, raw: Record<string, unknown>, source: "global" | "project", approved: Set<string>): McpServerEntry {
   const type: "command" | "url" = raw.url ? "url" : "command"
   return {
     name,
@@ -294,7 +222,7 @@ function buildEntry(name: string, raw: Record<string, unknown>, source: "global"
     url: raw.url as string | undefined,
     env: raw.env as Record<string, string> | undefined,
     source,
-    authenticated: !!authData[name],
+    authenticated: approved.has(name),
     rawConfig: raw,
     enabled: raw.disabled !== true,
   }
@@ -386,6 +314,7 @@ export async function loginMcpServer(serverName: string): Promise<{ ok: boolean;
     })
 
     const out = (stdout + stderr).replace(ANSI_RE, "").replace(/\r/g, "").trim()
+    if (code === 0) invalidateMcpEnabledCache()
     return { ok: code === 0, output: out || (code === 0 ? "认证完成" : "认证失败") }
   } catch (e: any) {
     return { ok: false, output: e?.message ?? "启动失败" }

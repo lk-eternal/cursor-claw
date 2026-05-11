@@ -44,11 +44,12 @@ export function registerAdminTools(mcpServer: McpServer): void {
 
   mcpServer.tool(
     "manage_agent",
-    "管理应用自身。支持查询状态、停止Agent、重启应用、重置会话、清空队列。",
+    "管理应用自身。支持查询状态、停止Agent、重启应用、重置会话、清空队列、启动临时会话。",
     {
-      action: z.enum(["status", "stop", "restart", "reset", "clean"]).describe("操作：status=查询状态, stop=停止Agent, restart=重启, reset=重置会话, clean=清空队列"),
+      action: z.enum(["status", "stop", "restart", "reset", "clean", "launch"]).describe("操作：status=查询状态, stop=停止Agent, restart=重启, reset=重置会话, clean=清空队列, launch=启动临时Agent会话"),
+      message: z.string().optional().describe("任务描述/指令（仅 launch 时使用）"),
     },
-    async ({ action }) => {
+    async ({ action, message }) => {
       try {
         if (action === "status") {
           const data = await daemonGet("/api/status");
@@ -63,26 +64,13 @@ export function registerAdminTools(mcpServer: McpServer): void {
           ];
           return txt(lines.join("\n"));
         }
+        if (action === "launch") {
+          if (!message?.trim()) return txt("❌ launch 操作需要提供 message 参数");
+          const res = await daemonPost("/api/agent", { action: "launch", message });
+          return txt(res.ok ? `✅ 临时 Agent 已启动` : `❌ ${res.error ?? "启动失败"}`);
+        }
         const res = await daemonPost("/api/agent", { action });
         return txt(res.ok ? `✅ /${action} 已执行` : `❌ ${res.error ?? "操作失败"}`);
-      } catch (e: any) {
-        return txt(`❌ Daemon 通信失败: ${e?.message ?? e}`);
-      }
-    },
-  );
-
-  // ── launch_temp_agent ── 独立启动临时 Agent 会话
-
-  mcpServer.tool(
-    "launch_temp_agent",
-    "独立启动一个临时 Agent 会话（不绑定主会话ID），执行完毕后自动退出。类似定时任务的独立模式。",
-    {
-      message: z.string().describe("要交给临时 Agent 执行的任务描述/指令"),
-    },
-    async ({ message }) => {
-      try {
-        const res = await daemonPost("/api/agent", { action: "launch-temp", message });
-        return txt(res.ok ? `🚀 临时 Agent 已启动 (id=${res.taskId})` : `❌ ${res.error ?? "启动失败"}`);
       } catch (e: any) {
         return txt(`❌ Daemon 通信失败: ${e?.message ?? e}`);
       }
