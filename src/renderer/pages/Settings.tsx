@@ -1137,9 +1137,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                           <button onClick={() => toggleMcpExpand(s.name)} className="shrink-0 rounded p-0.5 text-gray-500 transition hover:text-white">
                             <ChevronDown size={14} className={`transition-transform duration-200 ${expanded ? "rotate-180" : ""}`} />
                           </button>
-                          {s.type === "url"
-                            ? (s.authenticated ? <ShieldCheck size={16} className="shrink-0 text-green-400" /> : s.enabled && isReady ? <Network size={16} className="shrink-0 text-green-400" /> : <Network size={16} className="shrink-0 text-gray-400" />)
-                            : <Terminal size={16} className="shrink-0 text-gray-400" />}
+                          {s.type === "url" ? (s.enabled && s.authenticated ? <ShieldCheck size={16} className="shrink-0 text-green-400" /> : s.enabled && !s.authenticated ? <ShieldAlert size={16} className="shrink-0 text-amber-400" /> : <Network size={16} className="shrink-0 text-gray-400" />) : <Terminal size={16} className="shrink-0 text-gray-400" />}
                           <div className="min-w-0">
                             <div className="flex items-center gap-2">
                               <p className="truncate text-sm font-medium">{s.name}</p>
@@ -1151,7 +1149,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                           </div>
                         </div>
                         <div className="ml-3 flex shrink-0 items-center gap-2">
-                          {s.type === "url" && s.enabled && (s.authenticated ? <span className="text-xs text-green-400">已认证</span> : mcpLoginPending[s.name] ? <button type="button" onClick={() => handleMcpLogin(s.name)} className="rounded border border-gray-600 px-2 py-1 text-xs text-gray-400 transition hover:bg-gray-800"><Loader2 size={12} className="inline animate-spin" /> OAuth…</button> : <button type="button" onClick={() => handleMcpLogin(s.name)} className="rounded border border-gray-600 px-2 py-1 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-gray-200" title="仅当该 MCP 使用浏览器 OAuth 时需要">OAuth 登录</button>)}
+                          {s.type === "url" && s.enabled && (s.authenticated ? <span className="text-xs text-green-400">已认证</span> : mcpLoginPending[s.name] ? <button onClick={() => handleMcpLogin(s.name)} className="flex items-center gap-1 rounded-md bg-blue-600/70 px-2 py-1 text-xs font-medium text-white transition hover:bg-blue-500"><Loader2 size={12} className="animate-spin" />认证中</button> : <button onClick={() => handleMcpLogin(s.name)} className="flex items-center gap-1 rounded-md bg-blue-600 px-2 py-1 text-xs font-medium text-white transition hover:bg-blue-500" title="仅当该 MCP 使用浏览器 OAuth 时需要"><LogIn size={12} />授权</button>)}
                           <button onClick={() => openMcpEdit(s)} className="rounded p-1 text-gray-500 transition hover:bg-gray-800 hover:text-white"><Pencil size={13} /></button>
                           <button onClick={() => handleMcpDelete(s.name)} className="rounded p-1 text-gray-500 transition hover:bg-gray-800 hover:text-red-400"><Trash2 size={13} /></button>
                           {(mcpStatusLoading && s.enabled === undefined) || mcpLoading[s.name] ? (
