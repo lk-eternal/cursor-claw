@@ -555,6 +555,11 @@ export default function Dashboard({ onSettings }: Props) {
 
 const LOG_RE = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) \[(\w+)\] (\w+) (.*)$/
 
+/** 与主进程 escapeLogContentSingleLine 对应：展示时把字面量 \\n 还原为换行 */
+function displayLogMessageBody(msg: string): string {
+  return msg.replace(/\\n/g, "\n").replace(/\\r/g, "\r")
+}
+
 const LEVEL_COLORS: Record<string, string> = {
   ERROR: "text-red-400",
   WARN: "text-yellow-400",
@@ -572,9 +577,10 @@ const PROCESS_COLORS: Record<string, string> = {
 function LogLine({ line }: { line: string }) {
   const m = LOG_RE.exec(line)
   if (!m) {
-    return <div className="whitespace-pre-wrap break-all text-gray-400">{line}</div>
+    return <div className="whitespace-pre-wrap break-all text-gray-400">{displayLogMessageBody(line)}</div>
   }
   const [, ts, proc, level, msg] = m
+  const body = displayLogMessageBody(msg)
   return (
     <div className="whitespace-pre-wrap break-all">
       <span className="text-gray-600">{ts}</span>
@@ -583,7 +589,7 @@ function LogLine({ line }: { line: string }) {
       {" "}
       <span className={LEVEL_COLORS[level] ?? "text-gray-400"}>{level}</span>
       {" "}
-      <span className={level === "ERROR" ? "text-red-300" : level === "WARN" ? "text-yellow-300" : "text-gray-300"}>{msg}</span>
+      <span className={level === "ERROR" ? "text-red-300" : level === "WARN" ? "text-yellow-300" : "text-gray-300"}>{body}</span>
     </div>
   )
 }

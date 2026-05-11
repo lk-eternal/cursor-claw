@@ -4,7 +4,7 @@ import * as fs from "node:fs"
 import * as os from "node:os"
 import { promisify } from "node:util"
 import { getConfig } from "./config-store"
-import { pushUiLog, broadcastLog, logCursorAgentInvocation } from "./ui-logger"
+import { pushUiLog, broadcastLog, logCursorAgentInvocation, logCursorAgentResponse } from "./ui-logger"
 
 const execAsync = promisify(exec)
 
@@ -182,13 +182,17 @@ export function execAgentSync(
     const r = spawnSync(agentNodePath, [agentIndexPath, ...agentArgs], {
       encoding: "utf-8", timeout: timeoutMs, env: mergedEnv, windowsHide: true, cwd,
     })
-    return processSpawnSyncResult(r)
+    const result = processSpawnSyncResult(r)
+    logCursorAgentResponse(opts.logLabel ?? "invoke-sync", result)
+    return result
   }
   const r = spawnSync("agent", agentArgs.map(quoteArg), {
     encoding: "utf-8", timeout: timeoutMs, env: mergedEnv,
     shell: process.platform === "win32", windowsHide: true, cwd,
   })
-  return processSpawnSyncResult(r)
+  const result = processSpawnSyncResult(r)
+  logCursorAgentResponse(opts.logLabel ?? "invoke-sync", result)
+  return result
 }
 
 export async function execAgentAsync(
@@ -215,6 +219,7 @@ export async function execAgentAsync(
       if (settled) return
       settled = true
       if (timer !== undefined) clearTimeout(timer)
+      logCursorAgentResponse(opts.logLabel ?? "invoke-async", r)
       resolve(r)
     }
 

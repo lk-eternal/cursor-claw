@@ -94,3 +94,22 @@ export function logCursorAgentInvocation(logLabel: string, agentArgs: string[], 
   const cwdSuffix = cwd != null && cwd !== "" ? `${cwd} ` : ""
   pushUiLog("Agent", "INFO", `[CLI ${logLabel}] ${cwdSuffix}agent ${agentArgs.join(" ")}`)
 }
+
+const CLI_RESPONSE_LOG_MAX = 12_000
+
+/** 在对应的 [CLI xxx] 发起日志之后，追加一行合并后的 stdout/stderr 摘要（过长截断） */
+export function logCursorAgentResponse(logLabel: string, result: { ok: boolean; stdout: string; stderr: string; error?: string }): void {
+  const parts: string[] = [`ok=${result.ok}`]
+  if (result.error) parts.push(`\\nerr=${escapeLogContentSingleLine(result.error)}`)
+  const combined = [result.stdout, result.stderr].filter(Boolean).join("\n").trim()
+  if (combined) {
+    let body = combined
+    if (body.length > CLI_RESPONSE_LOG_MAX) {
+      body = `${body.slice(0, CLI_RESPONSE_LOG_MAX)} …(+${body.length - CLI_RESPONSE_LOG_MAX} chars)`
+    }
+    parts.push(`\\n${escapeLogContentSingleLine(body)}`)
+  } else if (!result.error) {
+    parts.push("(empty stdout/stderr)")
+  }
+  pushUiLog("Agent", result.ok ? "INFO" : "WARN", `[CLI ${logLabel} →] ${parts.join(" ")}`)
+}

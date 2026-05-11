@@ -4,7 +4,7 @@ import * as fs from "node:fs"
 import * as os from "node:os"
 import { BrowserWindow } from "electron"
 import { getConfig } from "./config-store"
-import { broadcastLog, logCursorAgentInvocation } from "./ui-logger"
+import { broadcastLog, logCursorAgentInvocation, logCursorAgentResponse } from "./ui-logger"
 import { resolveAgentBinary, applyProxyEnv, quoteArg, getAgentPaths } from "./agent-cli"
 
 // ── Types ────────────────────────────────────────────────
@@ -41,10 +41,18 @@ function spawnAsync(args: string[], cwd: string, env: Record<string, string>): P
     const mcpLabel = args.length >= 2 && args[0] === "mcp" ? `mcp-${args[1]}` : `mcp-${args[0] ?? "spawn"}`
     logCursorAgentInvocation(mcpLabel, args, cwd)
     let stdout = "", stderr = "", settled = false, didTimeout = false
+    let spawnErr: string | undefined
     const done = (code: number) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      const ok = code === 0 && !didTimeout && !spawnErr
+      logCursorAgentResponse(mcpLabel, {
+        ok,
+        stdout,
+        stderr,
+        error: didTimeout ? "timeout (30s)" : spawnErr,
+      })
       resolve({ code, stdout, stderr, timedOut: didTimeout || undefined })
     }
     const { agentNodePath: np, agentIndexPath: ip } = getAgentPaths()
@@ -53,7 +61,10 @@ function spawnAsync(args: string[], cwd: string, env: Record<string, string>): P
       : spawn("agent", args.map(quoteArg), { shell: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], cwd, env })
     child.stdout?.on("data", (d: Buffer) => { stdout += d.toString() })
     child.stderr?.on("data", (d: Buffer) => { stderr += d.toString() })
-    child.on("error", () => done(1))
+    child.on("error", (e) => {
+      spawnErr = e instanceof Error ? e.message : String(e)
+      done(1)
+    })
     child.on("exit", (code) => done(code ?? 1))
     const timer = setTimeout(() => { didTimeout = true; try { child.kill() } catch { /* */ }; done(1) }, 30_000)
   })
@@ -172,7 +183,6 @@ export async function toggleMcpServer(serverName: string, enabled: boolean, work
 
   if (r.code === 0) {
     invalidateMcpEnabledCache()
-    broadcastLog(`[MCP toggle] ${serverName} → ${action}d (via CLI)`, "INFO")
   }
   return { ok: r.code === 0, output: out || (r.code === 0 ? `${serverName} ${action}d` : `操作失败`) }
 }
@@ -299,6 +309,8 @@ export async function loginMcpServer(serverName: string): Promise<{ ok: boolean;
     })
 
     let stdout = "", stderr = ""
+    let loginTimedOut = false
+    let spawnErr: string | undefined
     child.stdout?.on("data", (d: Buffer) => { stdout += d.toString() })
     child.stderr?.on("data", (d: Buffer) => {
       const chunk = d.toString()
@@ -311,16 +323,44 @@ export async function loginMcpServer(serverName: string): Promise<{ ok: boolean;
     })
 
     const code = await new Promise<number>((resolve) => {
-      const timer = setTimeout(() => { try { child.kill() } catch { /* */ }; resolve(1) }, 60_000)
-      child.on("exit", (c) => { clearTimeout(timer); resolve(c ?? 1) })
-      child.on("error", () => { clearTimeout(timer); resolve(1) })
+      let settled = false
+      let timer: ReturnType<typeof setTimeout>
+      const finish = (c: number) => {
+        if (settled) {
+          return
+        }
+        settled = true
+        clearTimeout(timer)
+        const ok = c === 0 && !loginTimedOut && !spawnErr
+        logCursorAgentResponse("mcp-login", {
+          ok,
+          stdout,
+          stderr,
+          error: loginTimedOut ? "timeout (60s)" : spawnErr,
+        })
+        resolve(c)
+      }
+      timer = setTimeout(() => {
+        loginTimedOut = true
+        try { child.kill() } catch { /* */ }
+        finish(1)
+      }, 60_000)
+      child.on("exit", (c) => finish(c ?? 1))
+      child.on("error", (err) => {
+        spawnErr = err instanceof Error ? err.message : String(err)
+        finish(1)
+      })
     })
 
     const out = (stdout + stderr).replace(ANSI_RE, "").replace(/\r/g, "").trim()
-    if (code === 0) invalidateMcpEnabledCache()
+    if (code === 0) {
+      invalidateMcpEnabledCache()
+    }
     return { ok: code === 0, output: out || (code === 0 ? "认证完成" : "认证失败") }
   } catch (e: any) {
-    return { ok: false, output: e?.message ?? "启动失败" }
+    const msg = e?.message ?? "启动失败"
+    logCursorAgentResponse("mcp-login", { ok: false, stdout: "", stderr: "", error: msg })
+    return { ok: false, output: msg }
   }
 }
 

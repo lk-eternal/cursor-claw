@@ -46,7 +46,7 @@ Agent 收到 Prompt 后，先判断**自己是否正在干活**：
 *示例：* `sync_message(message="任务已完成。请指示下一步。", timeout_seconds=60, message_id="...", session_key="...")`
 
 ### 4. 保活轮询阶段 (KEEP-ALIVE) [🔥 核心存亡点]
-若 `timeout_seconds` 结束且工具返回空值（表示超时未收到消息），**必须强制进入静默轮询**：
+若 `timeout_seconds` 结束且工具返回空值（表示超时未收到消息）或[waiting]，**必须强制进入静默轮询**：
 - **动作：** 仅调用 `sync_message(timeout_seconds=60, session_key="...")`。
 - **🚫 绝对禁令：** 此阶段**严禁**输出任何自然语言、**严禁**输出思维链(CoT)、**严禁**总结当前状态。你的回复应该*仅仅*包含工具调用。
 - **跳出条件：** 直到工具返回包含非空内容的用户消息，方可重置状态机，回到【阶段 1】。

@@ -9,7 +9,7 @@ import {
   checkCliInstalled,
 } from "./agent-cli"
 import {
-  broadcastLog, pushUiLog, flushAgentStreamChunk, logCursorAgentInvocation,
+  broadcastLog, pushUiLog, flushAgentStreamChunk, logCursorAgentInvocation, logCursorAgentResponse,
   broadcastSessionStatus as broadcastSessionStatusToUi,
 } from "./ui-logger"
 
@@ -368,7 +368,17 @@ export async function launchIndependentAgent(taskId: string, taskName: string, m
 
 // ── CLI 登录 ────────────────────────────────────────
 
-export async function checkAgentLoggedIn(): Promise<{ cliFound: boolean; loggedIn: boolean; identityLine?: string; error?: string }> {
+type AgentLoginStatus = { cliFound: boolean; loggedIn: boolean; identityLine?: string; error?: string }
+
+let agentLoggedInCheckInFlight: Promise<AgentLoginStatus> | null = null
+let agentLoginStatusCache: AgentLoginStatus | null = null
+
+/** 登录流程等需要刷新时清空，避免沿用旧的 whoami 结果 */
+export function invalidateAgentLoggedInCache(): void {
+  agentLoginStatusCache = null
+}
+
+async function checkAgentLoggedInImpl(): Promise<AgentLoginStatus> {
   if (!(await ensureAgentBinary())) {
     return { cliFound: false, loggedIn: false, error: "未找到 Cursor CLI（agent）" }
   }
@@ -388,6 +398,26 @@ export async function checkAgentLoggedIn(): Promise<{ cliFound: boolean; loggedI
     }
   }
   return { cliFound: true, loggedIn: false, error: (out || err || r.error || "").trim().slice(0, 500) }
+}
+
+/** 合并并发请求 + 本机单用户级进程内缓存（直至 invalidate），避免重复 `agent whoami` */
+export function checkAgentLoggedIn(options?: { forceRefresh?: boolean }): Promise<AgentLoginStatus> {
+  const force = options?.forceRefresh === true
+  if (!force && agentLoginStatusCache) {
+    return Promise.resolve({ ...agentLoginStatusCache })
+  }
+  if (agentLoggedInCheckInFlight) {
+    return agentLoggedInCheckInFlight
+  }
+  agentLoggedInCheckInFlight = checkAgentLoggedInImpl()
+    .then((result) => {
+      agentLoginStatusCache = result
+      return result
+    })
+    .finally(() => {
+      agentLoggedInCheckInFlight = null
+    })
+  return agentLoggedInCheckInFlight
 }
 
 export function loginCli(): Promise<{ ok: boolean; output: string }> {
@@ -431,15 +461,27 @@ export function loginCli(): Promise<{ ok: boolean; output: string }> {
       })
       child.on("exit", async (code) => {
         if (settled) return; settled = true
+        logCursorAgentResponse("cli-login", {
+          ok: code === 0,
+          stdout: output,
+          stderr: "",
+          error: code !== 0 ? `exit ${code}` : undefined,
+        })
         if (code !== 0) { resolve({ ok: false, output: output || `登录失败 (exit code: ${code})` }); return }
         for (let i = 0; i < 5; i++) {
           await new Promise((r) => setTimeout(r, 1000))
+          invalidateAgentLoggedInCache()
           const st = await checkAgentLoggedIn()
           if (st.loggedIn) { resolve({ ok: true, output: "Cursor CLI 登录授权成功！" }); return }
         }
         resolve({ ok: true, output: "登录流程已完成，但 whoami 未确认登录态，请刷新重试" })
       })
-      child.on("error", (e) => { if (settled) return; settled = true; resolve({ ok: false, output: `登录进程错误: ${e.message}` }) })
+      child.on("error", (e) => {
+        if (settled) return
+        settled = true
+        logCursorAgentResponse("cli-login", { ok: false, stdout: output, stderr: "", error: `进程错误: ${e.message}` })
+        resolve({ ok: false, output: `登录进程错误: ${e.message}` })
+      })
       setTimeout(() => {
         if (!settled) { settled = true; if (!child.killed) try { child.kill() } catch { /* ignore */ }; resolve({ ok: false, output: "登录超时（2分钟），请重试" }) }
       }, 120_000)
