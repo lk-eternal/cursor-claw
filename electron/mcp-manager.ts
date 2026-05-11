@@ -289,10 +289,13 @@ export async function loginMcpServer(serverName: string): Promise<{ ok: boolean;
   const env: Record<string, string> = { ...process.env as Record<string, string> }
   applyProxyEnv(env, config)
 
+  const cwd = config.workspaceDir.trim()
+  logCursorAgentInvocation("mcp-login", ["mcp", "login", serverName], cwd)
+
   try {
     const child = spawn("agent", ["mcp", "login", serverName].map(quoteArg), {
       shell: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
-      cwd: config.workspaceDir, env,
+      cwd, env,
     })
 
     let stdout = "", stderr = ""
