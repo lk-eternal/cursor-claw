@@ -1,18 +1,5 @@
 [
   {
-    "version": "4.0.0",
-    "date": "2026-05-12",
-    "changes": [
-      "⚠️ 原 Feishu Cursor Bridge 用户请注意: 项目已迁移至 Cursor Claw",
-      "新增: 微信通道支持，飞书 + 微信双通道远程协作",
-      "新增: 按场景配置模型（主用户 / 其他用户 / 定时任务）",
-      "新增: Agent 生命周期通知（启动/退出状态实时推送）",
-      "优化: MCP 注入逻辑，增加缓存避免重复写入",
-      "优化: 消息发送失败自动退避为 chat_id 直接发送",
-      "新项目地址: https://github.com/lk-eternal/cursor-claw"
-    ]
-  },
-  {
     "version": "1.0.0",
     "date": "2026-05-12",
     "changes": [
