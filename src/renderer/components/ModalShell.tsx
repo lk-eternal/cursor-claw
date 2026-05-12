@@ -32,7 +32,7 @@ export function ModalShell({ title, children, footer }: ModalShellProps) {
             {title}
           </h2>
         </div>
-        <div className="px-5 py-4 text-sm leading-relaxed text-gray-300 [word-break:keep-all]">
+        <div className="max-h-[60vh] overflow-y-auto px-5 py-4 text-sm leading-relaxed text-gray-300 [word-break:keep-all]">
           {children}
         </div>
         <div className="flex flex-col gap-3 border-t border-gray-800 bg-gray-900/40 px-5 py-3">
