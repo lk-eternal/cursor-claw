@@ -153,8 +153,9 @@ export class LarkSender {
     const fullText = `${this.messagePrefix}${text}`;
     return {
       content: JSON.stringify({
+        schema: "2.0",
         config: { wide_screen_mode: true },
-        elements: [{ tag: "markdown", content: fullText }],
+        body: { elements: [{ tag: "markdown", content: fullText }] },
       }),
       msgType: "interactive",
     };
