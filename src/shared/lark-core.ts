@@ -149,11 +149,23 @@ export class LarkSender {
     }
   }
 
+  private formatForSend(text: string): { content: string; msgType: string } {
+    const fullText = `${this.messagePrefix}${text}`;
+    return {
+      content: JSON.stringify({
+        config: { wide_screen_mode: true },
+        elements: [{ tag: "markdown", content: fullText }],
+      }),
+      msgType: "interactive",
+    };
+  }
+
   async replyMessage(messageId: string, text: string): Promise<string | undefined> {
     try {
+      const { content, msgType } = this.formatForSend(text);
       const res = await this.client.im.message.reply({
         path: { message_id: messageId },
-        data: { content: JSON.stringify({ text: `${this.messagePrefix}${text}` }), msg_type: "text" },
+        data: { content, msg_type: msgType },
       });
       if ((res as any).code === 0 || (res as any).code === undefined) this.log("INFO", `飞书回复已发送(${text.length}字)`);
       else this.log("ERROR", `飞书回复失败: code=${(res as any).code}, msg=${(res as any).msg}`);
@@ -166,9 +178,10 @@ export class LarkSender {
     const target = this.getTarget();
     if (!target) { this.log("WARN", "无发送目标"); return undefined; }
     try {
+      const { content, msgType } = this.formatForSend(text);
       const res = await this.client.im.message.create({
         params: { receive_id_type: target.receiveIdType as any },
-        data: { receive_id: target.receiveId, content: JSON.stringify({ text: `${this.messagePrefix}${text}` }), msg_type: "text" },
+        data: { receive_id: target.receiveId, content, msg_type: msgType },
       });
       if ((res as any).code === 0 || (res as any).code === undefined) this.log("INFO", `飞书消息已发送(${text.length}字)`);
       else this.log("ERROR", `飞书发送失败: code=${(res as any).code}, msg=${(res as any).msg}`);
@@ -178,9 +191,10 @@ export class LarkSender {
 
   async sendMessageToChat(chatId: string, text: string): Promise<string | undefined> {
     try {
+      const { content, msgType } = this.formatForSend(text);
       const res = await this.client.im.message.create({
         params: { receive_id_type: "chat_id" as any },
-        data: { receive_id: chatId, content: JSON.stringify({ text: `${this.messagePrefix}${text}` }), msg_type: "text" },
+        data: { receive_id: chatId, content, msg_type: msgType },
       });
       if ((res as any).code === 0 || (res as any).code === undefined) this.log("INFO", `飞书消息已发送到会话 ${chatId}(${text.length}字)`);
       else this.log("ERROR", `飞书发送失败: code=${(res as any).code}, msg=${(res as any).msg}`);
