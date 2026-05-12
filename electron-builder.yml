@@ -16,14 +16,6 @@ directories:
 
 files:
   - out/**/*
-  - "!node_modules/**/*"
-  - node_modules/@cursor/**/*
-  - node_modules/@bufbuild/**/*
-  - node_modules/@connectrpc/**/*
-  - node_modules/@statsig/**/*
-  - node_modules/zod/**/*
-  - node_modules/undici/**/*
-  - node_modules/sqlite3/**/*
 
 asarUnpack:
   - node_modules/@cursor/sdk-*/bin/*
