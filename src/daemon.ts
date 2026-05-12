@@ -310,12 +310,22 @@ function startLarkConnection(): void {
       return;
     }
 
+    const enqueue = async (content: string) => {
+      if (parentId && sender) {
+        const original = await sender.fetchMessageContent(parentId);
+        if (original) {
+          content = `[引用消息]: ${original}\n\n[回复]: ${content}`;
+        }
+      }
+      pushMessage(content, messageId, chatId, chatType, senderOpenId, parentId);
+    };
+
     if (messageType === "image" || messageType === "post") {
       sender!.processIncomingMessage(messageId, messageType, rawContent)
-        .then((result) => pushMessage(result, messageId, chatId, chatType, senderOpenId, parentId))
-        .catch(() => pushMessage(cleanText, messageId, chatId, chatType, senderOpenId, parentId));
+        .then((result) => enqueue(result))
+        .catch(() => enqueue(cleanText));
     } else {
-      pushMessage(cleanText, messageId, chatId, chatType, senderOpenId, parentId);
+      enqueue(cleanText);
     }
   });
 }

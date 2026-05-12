@@ -135,6 +135,18 @@ export class LarkSender {
     } catch (e) { this.log("ERROR", "手机号解析失败:", e); return null; }
   }
 
+  async fetchMessageContent(messageId: string): Promise<string | null> {
+    try {
+      const res = await this.client.im.message.get({ path: { message_id: messageId } });
+      const body = (res as any)?.data?.items?.[0]?.body?.content;
+      if (!body) return null;
+      try { return JSON.parse(body)?.text ?? body; } catch { return body; }
+    } catch (e: any) {
+      this.log("WARN", `拉取消息内容失败 (${messageId}): ${e?.message ?? e}`);
+      return null;
+    }
+  }
+
   async replyMessage(messageId: string, text: string): Promise<string | undefined> {
     try {
       const res = await this.client.im.message.reply({
