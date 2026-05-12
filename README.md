@@ -51,7 +51,7 @@ Cursor Agent 的交互被锁死在本地 IDE 中，一旦离开电脑，所有 A
 │  · 微信 iLink 长轮询      │    │  ├── rules/                  │
 │  · 本机 HTTP API          │    │  │   └── cursor-claw.mdc     │
 │  · 文件消息队列           │    │  └── skills/                 │
-│  · 指令路由（飞书/微信）  │    │      └── feishu-bridge-admin │
+│  · 指令路由（飞书/微信）  │    │      └── cursor-claw-admin │
 │  · 会话保活（自动重连）   │    └──────────────┬──────────────┘
 └──────────────┬───────────┘                   │ stdio
                │ HTTP 127.0.0.1                ▼
