@@ -138,9 +138,11 @@ export class LarkSender {
   async fetchMessageContent(messageId: string): Promise<string | null> {
     try {
       const res = await this.client.im.message.get({ path: { message_id: messageId } });
-      const body = (res as any)?.data?.items?.[0]?.body?.content;
-      if (!body) return null;
-      try { return JSON.parse(body)?.text ?? body; } catch { return body; }
+      const item = (res as any)?.data?.items?.[0];
+      const content = item?.body?.content;
+      if (!content) return null;
+      const msgType: string = item?.msg_type ?? "text";
+      return await this.processIncomingMessage(messageId, msgType, content);
     } catch (e: any) {
       this.log("WARN", `拉取消息内容失败 (${messageId}): ${e?.message ?? e}`);
       return null;
