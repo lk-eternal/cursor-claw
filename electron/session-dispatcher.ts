@@ -20,6 +20,19 @@ import {
 } from "./agent-sdk"
 import { injectWorkspaceToDir } from "./workspace-injector"
 
+// ── 生命周期通知 ──────────────────────────────────────────
+
+async function notifyChat(sessionKey: string, text: string): Promise<void> {
+  const lock = readLockFile()
+  if (!lock?.port) return
+  const chatId = extractChatId(sessionKey)
+  try {
+    await httpPost(`http://127.0.0.1:${lock.port}/api/send-text`, { text, session_key: sessionKey }, 5000)
+  } catch (e: any) {
+    broadcastLog(`[Notify] 发送通知失败 (${chatId}): ${e?.message}`, "WARN")
+  }
+}
+
 // ── 内部工具 ──────────────────────────────────────────────
 
 export function isSessionAgentRunning(key: string): boolean {
@@ -68,6 +81,8 @@ function formatDuration(ms: number): string {
 // ── Session 生命周期 ──────────────────────────────────────
 
 export async function handleSessionClosed(sessionKey: string, _chatType: ChatType): Promise<void> {
+  await notifyChat(sessionKey, "Agent已退出")
+
   const previous = previousActiveSessionMap.get(sessionKey)
   previousActiveSessionMap.delete(sessionKey)
   if (!previous) return
@@ -387,6 +402,7 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
       ? `群聊 ${chatName ? `「${chatName}」` : chatId}`
       : (mainUser ? `主用户私聊${userName ? ` (${userName})` : ""}` : `私聊 ${userName || chatId}`)
     broadcastLog(`[Agent] ${label} 有新消息，自动拉起${mainUser ? "(主工作目录)" : ""}`)
+    await notifyChat(sessionKey, "正在启动Agent，请稍等...")
 
     const meta: import("./agent-launcher").LaunchMeta = { chatId, chatType: chatType as "p2p" | "group" }
     const scenario: ModelScenario = mainUser ? "primary" : "others"
@@ -395,7 +411,10 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
       const lock = readLockFile()
       if (lock?.port) await syncActiveSession(lock.port, chatId, sessionKey)
     }
-    if (!result.ok) broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${result.error}`)
+    if (!result.ok) {
+      broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${result.error}`)
+      await notifyChat(sessionKey, `启动Agent失败: ${result.error ?? "未知错误"}`)
+    }
   }
 }
 

@@ -870,8 +870,15 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       json(res, { ok });
     } else if (isFeishuChatId(rawChatId) && sender) {
       let sentMsgId: string | undefined;
-      if (message_id) sentMsgId = await sender.sendMessage(text, message_id);
-      else sentMsgId = await sender.sendMessageToChat(rawChatId, text);
+      if (message_id) {
+        sentMsgId = await sender.sendMessage(text, message_id);
+        if (!sentMsgId) {
+          log("INFO", `回复退避: message_id=${message_id} → chat_id=${rawChatId}`);
+          sentMsgId = await sender.sendMessageToChat(rawChatId, text);
+        }
+      } else {
+        sentMsgId = await sender.sendMessageToChat(rawChatId, text);
+      }
       if (sentMsgId && session_key) trackMessageSession(sentMsgId, session_key);
       json(res, { ok: true, message_id: sentMsgId });
     } else if (wechatManager?.isConnected() && lastWechatChatId) {
@@ -879,8 +886,15 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       json(res, { ok });
     } else if (sender) {
       let sentMsgId: string | undefined;
-      if (message_id) sentMsgId = await sender.sendMessage(text, message_id);
-      else sentMsgId = await sender.sendMessage(text);
+      if (message_id) {
+        sentMsgId = await sender.sendMessage(text, message_id);
+        if (!sentMsgId) {
+          log("INFO", `回复退避: message_id=${message_id} → 默认发送`);
+          sentMsgId = await sender.sendMessage(text);
+        }
+      } else {
+        sentMsgId = await sender.sendMessage(text);
+      }
       if (sentMsgId && session_key) trackMessageSession(sentMsgId, session_key);
       json(res, { ok: true, message_id: sentMsgId });
     } else {

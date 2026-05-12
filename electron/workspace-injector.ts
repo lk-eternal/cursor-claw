@@ -188,10 +188,15 @@ export async function injectWorkspaceToDir(dir: string, skipIdentity = false): P
   const key = norm(dir)
   if (fullyInjectedDirs.has(key)) return true
 
+  const mcpWasCached = injectedMcpHashes.has(key)
   await injectMcpToDir(dir)
   injectSkillsToDir(dir)
   const ok = injectRulesToDir(dir, skipIdentity)
   if (ok) fullyInjectedDirs.add(key)
+  if (!mcpWasCached) {
+    broadcastLog("等待 MCP 服务初始化 (3s)...")
+    await new Promise(r => setTimeout(r, 3000))
+  }
   return ok
 }
 

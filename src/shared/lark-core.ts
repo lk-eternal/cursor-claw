@@ -182,14 +182,21 @@ export class LarkSender {
       const imageKey = uploadRes?.data?.image_key ?? uploadRes?.image_key;
       if (!imageKey) { this.log("ERROR", `图片上传失败`); return; }
       const content = JSON.stringify({ image_key: imageKey });
+      let sent = false;
       if (replyMessageId) {
-        await this.client.im.message.reply({ path: { message_id: replyMessageId }, data: { content, msg_type: "image" } });
-      } else if (chatId) {
-        await this.client.im.message.create({ params: { receive_id_type: "chat_id" as any }, data: { receive_id: chatId, content, msg_type: "image" } });
-      } else {
-        const target = this.getTarget();
-        if (!target) { this.log("WARN", "无发送目标"); return; }
-        await this.client.im.message.create({ params: { receive_id_type: target.receiveIdType as any }, data: { receive_id: target.receiveId, content, msg_type: "image" } });
+        try {
+          await this.client.im.message.reply({ path: { message_id: replyMessageId }, data: { content, msg_type: "image" } });
+          sent = true;
+        } catch (e: any) { this.log("WARN", `图片回复退避 (${replyMessageId}): ${e?.message}`); }
+      }
+      if (!sent) {
+        if (chatId) {
+          await this.client.im.message.create({ params: { receive_id_type: "chat_id" as any }, data: { receive_id: chatId, content, msg_type: "image" } });
+        } else {
+          const target = this.getTarget();
+          if (!target) { this.log("WARN", "无发送目标"); return; }
+          await this.client.im.message.create({ params: { receive_id_type: target.receiveIdType as any }, data: { receive_id: target.receiveId, content, msg_type: "image" } });
+        }
       }
       this.log("INFO", "图片已发送");
     } catch (e: any) { this.log("ERROR", `发送图片异常: ${e?.message ?? e}`); }
@@ -204,14 +211,21 @@ export class LarkSender {
       const fileKey = uploadRes?.data?.file_key ?? uploadRes?.file_key;
       if (!fileKey) { this.log("ERROR", `文件上传失败`); return; }
       const content = JSON.stringify({ file_key: fileKey, file_name: fileName });
+      let sent = false;
       if (replyMessageId) {
-        await this.client.im.message.reply({ path: { message_id: replyMessageId }, data: { content, msg_type: "file" } });
-      } else if (chatId) {
-        await this.client.im.message.create({ params: { receive_id_type: "chat_id" as any }, data: { receive_id: chatId, content, msg_type: "file" } });
-      } else {
-        const target = this.getTarget();
-        if (!target) { this.log("WARN", "无发送目标"); return; }
-        await this.client.im.message.create({ params: { receive_id_type: target.receiveIdType as any }, data: { receive_id: target.receiveId, content, msg_type: "file" } });
+        try {
+          await this.client.im.message.reply({ path: { message_id: replyMessageId }, data: { content, msg_type: "file" } });
+          sent = true;
+        } catch (e: any) { this.log("WARN", `文件回复退避 (${replyMessageId}): ${e?.message}`); }
+      }
+      if (!sent) {
+        if (chatId) {
+          await this.client.im.message.create({ params: { receive_id_type: "chat_id" as any }, data: { receive_id: chatId, content, msg_type: "file" } });
+        } else {
+          const target = this.getTarget();
+          if (!target) { this.log("WARN", "无发送目标"); return; }
+          await this.client.im.message.create({ params: { receive_id_type: target.receiveIdType as any }, data: { receive_id: target.receiveId, content, msg_type: "file" } });
+        }
       }
       this.log("INFO", `文件已发送: ${fileName}`);
     } catch (e: any) { this.log("ERROR", `发送文件异常: ${e?.message ?? e}`); }
