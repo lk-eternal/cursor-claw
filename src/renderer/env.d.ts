@@ -10,6 +10,10 @@ interface AppConfig {
   workspaceDir: string
   model: string
   modelParams: string
+  othersModel: string
+  othersModelParams: string
+  taskModel: string
+  taskModelParams: string
   autoStart: boolean
   setupComplete: boolean
   httpProxy: string

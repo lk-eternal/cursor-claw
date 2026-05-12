@@ -8,13 +8,12 @@ import * as os from "node:os"
 import { app, BrowserWindow, ipcMain, powerSaveBlocker } from "electron"
 import { getConfig, saveConfig, useSdkMode, type AppConfig, type ScheduledTask } from "./config-store"
 import { validateCron, readTasksFromFile, writeTasksToFile, previewCronNextRuns, getNextCronFireLabel } from "./cron-scheduler"
-import { pushLog, pushUiLog, broadcastLog, getLogBuffer, clearLogBuffer, logCursorAgentInvocation, escapeLogContentSingleLine } from "./ui-logger"
+import { pushLog, pushUiLog, broadcastLog, getLogBuffer, clearLogBuffer, logCursorAgentInvocation, escapeLogContentSingleLine, resetLogFilePath } from "./ui-logger"
 import { resolveAgentBinary, applyProxyEnv, quoteArg, getAgentPaths, execAgentSync } from "./agent-cli"
 import {
   stopAgent as _stopCliAgent,
   isAgentRunning as _isCliAgentRunning, getRunningSessionCount as _getCliRunningCount,
   getAgentChildPid, getSessionAgentCount as _getCliSessionCount, getIndependentTaskStatuses as _getCliTaskStatuses,
-  reapIdleGroupAgents as _reapCliIdleGroups,
   P2P_SESSION_KEY, setMainChatId, getMainChatId,
   type ChatType,
 } from "./agent-launcher"
@@ -22,7 +21,7 @@ import { stopAllSdkSessions, getSdkSessionCount, getSdkSessionList, checkSdkApiK
 import {
   setDaemonPort, registerEnableMcpFn, getMcpServerPath, getAdminMcpPath,
   injectMcpToDir, injectRulesToDir, injectSkillsToDir,
-  injectWorkspaceToDir, injectWorkspaceMcpAndRules,
+  injectWorkspaceToDir, injectWorkspaceMcpAndRules, clearInjectionCache,
 } from "./workspace-injector"
 import {
   invalidateMcpEnabledCache,
@@ -47,7 +46,7 @@ export { applyProxyEnv, checkCliInstalled, installCli, execAgentSync, execAgentA
 export { checkAgentLoggedIn, loginCli } from "./agent-launcher"
 export { getLogBuffer } from "./ui-logger"
 export { checkSdkApiKey, listSdkModels } from "./agent-sdk"
-export { injectWorkspaceMcpAndRules, injectWorkspaceToDir, getMcpServerPath, getAdminMcpPath } from "./workspace-injector"
+export { injectWorkspaceMcpAndRules, injectWorkspaceToDir, clearInjectionCache, getMcpServerPath, getAdminMcpPath } from "./workspace-injector"
 export { getQueueMessages, clearMessageQueue } from "./session-dispatcher"
 
 
@@ -79,9 +78,6 @@ function getIndependentTaskStatuses(): Record<string, { running: boolean; pid?: 
   return _getCliTaskStatuses()
 }
 
-function reapIdleGroupAgents(): void {
-  if (!useSdkMode()) _reapCliIdleGroups()
-}
 
 const UNIFIED_DAEMON_PREFIX = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\.\d{3} \[Daemon\] /
 
@@ -433,6 +429,13 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
           } catch { /* ignore */ }
           continue
         }
+        if (line.startsWith("__WORKSPACE_SWITCH__:")) {
+          try {
+            const { dir } = JSON.parse(line.slice("__WORKSPACE_SWITCH__:".length))
+            if (dir) void applyWorkspaceSwitch(dir, false)
+          } catch { /* ignore */ }
+          continue
+        }
         if (line.startsWith("__WECHAT_QR__:")) {
           const dataUrl = line.slice("__WECHAT_QR__:".length)
           BrowserWindow.getAllWindows().forEach((w) => w.webContents.send("wechat:qrcode", dataUrl))
@@ -490,7 +493,6 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
 export async function stopDaemon(): Promise<void> {
   stopStatusPolling()
   stopAgent()
-  stopAllSessionAgents()
   clearLogBuffer()
 
   if (cachedPort) {
@@ -545,8 +547,6 @@ function broadcastStatus(status: DaemonStatus): void {
   }
 }
 
-const AGENT_STALE_TIMEOUT_MS = 10 * 60 * 1000
-let queueStaleStartTime: number | null = null
 
 let powerSaveBlockerId: number | null = null
 let sseReq: http.ClientRequest | null = null
@@ -568,6 +568,9 @@ function stopDaemonPowerSaveBlock(): void {
   }
 }
 
+let sseBackoff = 1_000
+const SSE_BACKOFF_MAX = 30_000
+
 function connectSseQueueEvents(): void {
   disconnectSseQueueEvents()
   const lock = readLockFile()
@@ -575,6 +578,7 @@ function connectSseQueueEvents(): void {
   const url = `http://127.0.0.1:${lock.port}/api/queue-events`
   let buf = ""
   sseReq = http.get(url, { timeout: 0 }, (res) => {
+    sseBackoff = 1_000
     res.on("data", (chunk: Buffer) => {
       buf += chunk.toString()
       const lines = buf.split("\n")
@@ -592,12 +596,14 @@ function connectSseQueueEvents(): void {
     })
     res.on("end", () => {
       sseReq = null
-      setTimeout(() => connectSseQueueEvents(), 3_000)
+      setTimeout(() => connectSseQueueEvents(), sseBackoff)
+      sseBackoff = Math.min(sseBackoff * 2, SSE_BACKOFF_MAX)
     })
   })
   sseReq.on("error", () => {
     sseReq = null
-    setTimeout(() => connectSseQueueEvents(), 5_000)
+    setTimeout(() => connectSseQueueEvents(), sseBackoff)
+    sseBackoff = Math.min(sseBackoff * 2, SSE_BACKOFF_MAX)
   })
 }
 
@@ -608,7 +614,6 @@ function disconnectSseQueueEvents(): void {
 
 function startStatusPolling(): void {
   stopStatusPolling()
-  queueStaleStartTime = null
   startDaemonPowerSaveBlock()
   connectSseQueueEvents()
   statusInterval = setInterval(async () => {
@@ -616,23 +621,9 @@ function startStatusPolling(): void {
       const status = await getDaemonStatus()
       broadcastStatus(status)
 
-      if (status.running && status.queueLength && status.queueLength > 0 && isAgentRunning()) {
-        if (queueStaleStartTime === null) {
-          queueStaleStartTime = Date.now()
-        } else if (Date.now() - queueStaleStartTime > AGENT_STALE_TIMEOUT_MS) {
-          broadcastLog(`[防卡死] Agent 运行中但队列消息已 ${Math.round((Date.now() - queueStaleStartTime) / 60_000)} 分钟未消费，自动终止`, "WARN")
-          stopAgent()
-          queueStaleStartTime = null
-        }
-      } else {
-        queueStaleStartTime = null
-      }
-
       if (status.running && status.queueLength && status.queueLength > 0) {
         await dispatchSessionAgents()
       }
-
-      reapIdleGroupAgents()
 
       const sessions = getSessionAgentList()
       if (getConfig().feishuEnabled) {
@@ -907,6 +898,8 @@ export async function applyWorkspaceSwitch(workspaceDir: string, stopOldSessions
 
   saveConfig({ workspaceDir: w })
   invalidateMcpEnabledCache()
+  clearInjectionCache()
+  resetLogFilePath()
   await injectWorkspaceMcpAndRules()
   broadcastStatus(await getDaemonStatus())
   return { ok: true }
@@ -943,7 +936,10 @@ export async function saveAppConfigFromRenderer(partial: Partial<AppConfig>): Pr
   }
 
   const workspaceDirChanged = partial.workspaceDir !== undefined && nextW !== oldW
-  if (workspaceDirChanged) invalidateMcpEnabledCache()
+  if (workspaceDirChanged) {
+    invalidateMcpEnabledCache()
+    resetLogFilePath()
+  }
 
   saveConfig(partial)
   return { ok: true, ...(workspaceDirChanged ? { workspaceDirChanged: true } : {}) }
@@ -1083,7 +1079,6 @@ export function initDaemonManager(): void {
 export function cleanupDaemonManager(): void {
   stopStatusPolling()
   stopAgent()
-  stopAllSessionAgents()
   if (daemonProcess) {
     try { daemonProcess.kill() } catch { /* ignore */ }
     daemonProcess = null

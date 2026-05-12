@@ -1,7 +1,7 @@
 import * as path from "node:path"
 import * as fs from "node:fs"
 import { app } from "electron"
-import { getConfig, useSdkMode } from "./config-store"
+import { getConfig, useSdkMode, type ModelScenario } from "./config-store"
 import { broadcastLog } from "./ui-logger"
 import { readLockFile, httpGet, httpPost, syncActiveSession, getCurrentActiveSession } from "./daemon-client"
 import { reportCommandResult } from "./command-handler"
@@ -194,6 +194,7 @@ interface LaunchAgentParams {
   senderOpenId?: string
   chatName?: string
   taskMessage?: string
+  modelScenario?: ModelScenario
 }
 
 async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?: string }> {
@@ -210,14 +211,16 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
 
   await injectWorkspaceToDir(workDir, useMain)
 
+  const scenario = p.modelScenario ?? (useMain ? "primary" : chatType === "task" || chatType === "temp" ? "task" : "others")
+
   if (useSdkMode()) {
-    return launchSdkAgent({ sessionKey, chatType, meta, workspaceDir: workDir, senderOpenId, chatName, taskMessage })
+    return launchSdkAgent({ sessionKey, chatType, meta, workspaceDir: workDir, senderOpenId, chatName, taskMessage, modelScenario: scenario })
   }
 
   if (chatType === "task" || chatType === "temp") {
-    return _launchIndependentAgentCli(sessionKey, chatName ?? sessionKey, taskMessage ?? "", chatType)
+    return _launchIndependentAgentCli(sessionKey, chatName ?? sessionKey, taskMessage ?? "", chatType, scenario)
   }
-  return _launchSessionAgent(sessionKey, chatType, undefined, meta, useMain, senderOpenId)
+  return _launchSessionAgent(sessionKey, chatType, undefined, meta, useMain, senderOpenId, scenario)
 }
 
 export async function launchSessionAgent(
@@ -225,12 +228,13 @@ export async function launchSessionAgent(
   _injectFn?: (dir: string) => boolean | Promise<boolean>,
   meta?: import("./agent-launcher").LaunchMeta,
   useMainWorkspace?: boolean, senderOpenId?: string,
+  modelScenario?: ModelScenario,
 ): Promise<{ ok: boolean; error?: string }> {
-  return launchAgent({ sessionKey, chatType, meta, useMainWorkspace, senderOpenId })
+  return launchAgent({ sessionKey, chatType, meta, useMainWorkspace, senderOpenId, modelScenario })
 }
 
-export async function launchIndependentAgent(taskId: string, taskName: string, message: string, type: ChatType = "task", chatId?: string): Promise<{ ok: boolean; error?: string }> {
-  return launchAgent({ sessionKey: taskId, chatType: type, chatName: taskName, taskMessage: message, meta: { chatId: chatId ?? taskName, chatType: type } })
+export async function launchIndependentAgent(taskId: string, taskName: string, message: string, type: ChatType = "task", chatId?: string, modelScenario?: ModelScenario): Promise<{ ok: boolean; error?: string }> {
+  return launchAgent({ sessionKey: taskId, chatType: type, chatName: taskName, taskMessage: message, meta: { chatId: chatId ?? taskName, chatType: type }, modelScenario: modelScenario ?? "task" })
 }
 
 // ── Session 列表 ──────────────────────────────────────────
@@ -385,7 +389,8 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
     broadcastLog(`[Agent] ${label} 有新消息，自动拉起${mainUser ? "(主工作目录)" : ""}`)
 
     const meta: import("./agent-launcher").LaunchMeta = { chatId, chatType: chatType as "p2p" | "group" }
-    const result = await launchSessionAgent(sessionKey, chatType as "p2p" | "group", undefined, meta, mainUser, senderOpenId)
+    const scenario: ModelScenario = mainUser ? "primary" : "others"
+    const result = await launchSessionAgent(sessionKey, chatType as "p2p" | "group", undefined, meta, mainUser, senderOpenId, scenario)
     if (result.ok && chatId !== sessionKey) {
       const lock = readLockFile()
       if (lock?.port) await syncActiveSession(lock.port, chatId, sessionKey)

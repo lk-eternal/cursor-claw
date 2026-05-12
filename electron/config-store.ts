@@ -38,6 +38,12 @@ export interface AppConfig {
   /** Agent 驱动模式: cli = Cursor CLI (默认), sdk = @cursor/sdk */
   agentMode: "cli" | "sdk"
   cursorApiKey: string
+  /** 其他用户 & 群聊使用的模型（留空则跟随主模型） */
+  othersModel: string
+  othersModelParams: string
+  /** 定时任务 / 独立任务使用的模型（留空则跟随主模型） */
+  taskModel: string
+  taskModelParams: string
 }
 
 const defaults: AppConfig = {
@@ -65,6 +71,10 @@ const defaults: AppConfig = {
   wechatAccountId: "",
   agentMode: "cli",
   cursorApiKey: "",
+  othersModel: "",
+  othersModelParams: "",
+  taskModel: "",
+  taskModelParams: "",
 }
 
 let _store: Store<AppConfig> | null = null
@@ -86,6 +96,19 @@ export function getConfig(): AppConfig {
 
 export function useSdkMode(): boolean {
   return getConfig().agentMode === "sdk"
+}
+
+export type ModelScenario = "primary" | "others" | "task"
+
+export function resolveModel(scenario: ModelScenario): { model: string; modelParams: string } {
+  const c = getConfig()
+  if (scenario === "others" && c.othersModel?.trim()) {
+    return { model: c.othersModel, modelParams: c.othersModelParams ?? "" }
+  }
+  if (scenario === "task" && c.taskModel?.trim()) {
+    return { model: c.taskModel, modelParams: c.taskModelParams ?? "" }
+  }
+  return { model: c.model, modelParams: c.modelParams ?? "" }
 }
 
 export function saveConfig(partial: Partial<AppConfig>): void {

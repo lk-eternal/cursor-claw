@@ -164,6 +164,10 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
   const [digitalIdentity, setDigitalIdentity] = useState("")
   const [model, setModel] = useState("auto")
   const [modelParams, setModelParams] = useState("")
+  const [othersModel, setOthersModel] = useState("")
+  const [othersModelParams, setOthersModelParams] = useState("")
+  const [taskModel, setTaskModel] = useState("")
+  const [taskModelParams, setTaskModelParams] = useState("")
   const [showSecret, setShowSecret] = useState(false)
   const [proxy, setProxy] = useState("")
   const [noProxy, setNoProxy] = useState("localhost,127.0.0.1,feishu.cn")
@@ -392,6 +396,10 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
       setWorkspaceDir(config.workspaceDir); setAllowOthers(!!config.allowOthers)
       setModel(config.model)
       setModelParams(config.modelParams ?? "")
+      setOthersModel(config.othersModel ?? "")
+      setOthersModelParams(config.othersModelParams ?? "")
+      setTaskModel(config.taskModel ?? "")
+      setTaskModelParams(config.taskModelParams ?? "")
       setProxy(config.httpProxy || config.httpsProxy || "")
       setNoProxy(config.noProxy || "localhost,127.0.0.1,feishu.cn")
       setAgentNewSession(config.agentNewSession ?? false)
@@ -423,6 +431,8 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
         larkReceiveId: receiveId.trim(),
         workspaceDir: workspaceDir.trim(), allowOthers,
         model, modelParams,
+        othersModel, othersModelParams,
+        taskModel, taskModelParams,
         httpProxy: proxy.trim(), httpsProxy: proxy.trim(), noProxy: noProxy.trim(),
         agentNewSession,
         closeWindowAction,
@@ -441,12 +451,9 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
       if (r.workspaceDirChanged) {
         void refreshMcpServers(true)
       }
-      if (r.restartFailed) {
-        void showAlert("提示", `工作目录已保存，但 Daemon 未能自动启动：\n${r.restartFailed}`)
-      }
       setSaved(true); setTimeout(() => setSaved(false), 1500)
     }, 500)
-  }, [appId, appSecret, receiveId, workspaceDir, allowOthers, model, modelParams, proxy, noProxy, agentNewSession, closeWindowAction, digitalIdentity, feishuEnabled, wechatEnabled, wechatToken, wechatAccountId, agentMode, cursorApiKey, refreshMcpServers])
+  }, [appId, appSecret, receiveId, workspaceDir, allowOthers, model, modelParams, othersModel, othersModelParams, taskModel, taskModelParams, proxy, noProxy, agentNewSession, closeWindowAction, digitalIdentity, feishuEnabled, wechatEnabled, wechatToken, wechatAccountId, agentMode, cursorApiKey, refreshMcpServers])
 
   useEffect(() => { autoSave() }, [autoSave])
 
@@ -1076,25 +1083,55 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
               {/* 模型 */}
               <section className="space-y-3">
                 <div className="flex items-center gap-2">
-                  <h3 className="text-sm font-medium text-gray-300">模型</h3>
+                  <h3 className="text-sm font-medium text-gray-300">模型配置</h3>
                   <button onClick={agentMode === "sdk" ? fetchSdkModels : fetchModels} disabled={loadingModels} className="flex items-center gap-1 rounded px-2 py-0.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white disabled:opacity-50">
                     {loadingModels ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
                     {agentMode === "sdk" ? "从 SDK 获取" : "从 CLI 获取"}
                   </button>
                 </div>
-                {modelOptions.length > 0
-                  ? <SearchableSelect
-                      value={model + (modelParams ? "\0" + modelParams : "")}
-                      onChange={(key) => {
-                        const sep = key.indexOf("\0")
-                        if (sep >= 0) { setModel(key.slice(0, sep)); setModelParams(key.slice(sep + 1)) }
-                        else { setModel(key); setModelParams("") }
-                      }}
-                      options={modelOptions.map((o) => ({ id: o.id + (o.params ? "\0" + o.params : ""), label: o.label }))}
-                      placeholder="选择模型..."
-                    />
-                  : <input type="text" value={model} onChange={(e) => { setModel(e.target.value); setModelParams("") }} placeholder="auto" className={inputCls} />}
                 {agentMode === "sdk" && <p className="text-xs text-amber-500/80">⚠ SDK 目前不支持单独设置代理，请根据自身网络环境合理选择模型，或使用 TUN 模式。</p>}
+                {/* 主模型 */}
+                <div className="rounded-lg border border-gray-700 p-3 space-y-2">
+                  <div>
+                    <label className="mb-1 block text-xs text-gray-400">主模型 <span className="text-gray-600">— 主用户私聊</span></label>
+                    {modelOptions.length > 0
+                      ? <SearchableSelect
+                          value={model + (modelParams ? "\0" + modelParams : "")}
+                          onChange={(key) => { const sep = key.indexOf("\0"); if (sep >= 0) { setModel(key.slice(0, sep)); setModelParams(key.slice(sep + 1)) } else { setModel(key); setModelParams("") } }}
+                          options={modelOptions.map((o) => ({ id: o.id + (o.params ? "\0" + o.params : ""), label: o.label }))}
+                          placeholder="选择模型..."
+                        />
+                      : <input type="text" value={model} onChange={(e) => { setModel(e.target.value); setModelParams("") }} placeholder="auto" className={inputCls} />}
+                  </div>
+                </div>
+                {/* 其他人模型 */}
+                <div className="rounded-lg border border-gray-700 p-3 space-y-2">
+                  <div>
+                    <label className="mb-1 block text-xs text-gray-400">其他人模型 <span className="text-gray-600">— 其他用户私聊 & 群聊</span></label>
+                    {modelOptions.length > 0
+                      ? <SearchableSelect
+                          value={othersModel ? othersModel + (othersModelParams ? "\0" + othersModelParams : "") : ""}
+                          onChange={(key) => { if (!key) { setOthersModel(""); setOthersModelParams(""); return } const sep = key.indexOf("\0"); if (sep >= 0) { setOthersModel(key.slice(0, sep)); setOthersModelParams(key.slice(sep + 1)) } else { setOthersModel(key); setOthersModelParams("") } }}
+                          options={[{ id: "", label: "跟随主模型" }, ...modelOptions.map((o) => ({ id: o.id + (o.params ? "\0" + o.params : ""), label: o.label }))]}
+                          placeholder="跟随主模型"
+                        />
+                      : <input type="text" value={othersModel} onChange={(e) => { setOthersModel(e.target.value); setOthersModelParams("") }} placeholder="留空则跟随主模型" className={inputCls} />}
+                  </div>
+                </div>
+                {/* 定时任务模型 */}
+                <div className="rounded-lg border border-gray-700 p-3 space-y-2">
+                  <div>
+                    <label className="mb-1 block text-xs text-gray-400">定时任务模型 <span className="text-gray-600">— 独立定时任务执行</span></label>
+                    {modelOptions.length > 0
+                      ? <SearchableSelect
+                          value={taskModel ? taskModel + (taskModelParams ? "\0" + taskModelParams : "") : ""}
+                          onChange={(key) => { if (!key) { setTaskModel(""); setTaskModelParams(""); return } const sep = key.indexOf("\0"); if (sep >= 0) { setTaskModel(key.slice(0, sep)); setTaskModelParams(key.slice(sep + 1)) } else { setTaskModel(key); setTaskModelParams("") } }}
+                          options={[{ id: "", label: "跟随主模型" }, ...modelOptions.map((o) => ({ id: o.id + (o.params ? "\0" + o.params : ""), label: o.label }))]}
+                          placeholder="跟随主模型"
+                        />
+                      : <input type="text" value={taskModel} onChange={(e) => { setTaskModel(e.target.value); setTaskModelParams("") }} placeholder="留空则跟随主模型" className={inputCls} />}
+                  </div>
+                </div>
               </section>
               {/* Agent 会话 */}
               <section className="space-y-3">

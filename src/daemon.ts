@@ -1041,6 +1041,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       const oldDir = WORKSPACE_DIR;
       WORKSPACE_DIR = newDir;
       log("INFO", `[Workspace] hot-updated: ${oldDir} -> ${newDir}`);
+      process.stdout.write(`__WORKSPACE_SWITCH__:${JSON.stringify({ dir: newDir })}\n`);
       json(res, { ok: true, message: `工作目录已切换`, dir: newDir, oldDir });
       return true;
     }

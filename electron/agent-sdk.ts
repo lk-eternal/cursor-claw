@@ -2,7 +2,7 @@ import { Agent, type SDKAgent, type Run, type SDKMessage } from "@cursor/sdk"
 import { resolve, join, dirname } from "node:path"
 import { existsSync } from "node:fs"
 import { createRequire } from "node:module"
-import { getConfig } from "./config-store"
+import { getConfig, resolveModel, type ModelScenario } from "./config-store"
 import { pushUiLog, broadcastLog, broadcastSessionStatus } from "./ui-logger"
 import { type ChatType, type LaunchMeta, buildPrompt } from "./agent-launcher"
 
@@ -150,6 +150,7 @@ export interface SdkLaunchOptions {
   senderOpenId?: string
   chatName?: string
   taskMessage?: string
+  modelScenario?: ModelScenario
 }
 
 export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: boolean; error?: string }> {
@@ -180,11 +181,13 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
   try {
     ensureSdkBinaryPaths()
 
-    const modelId = config.model?.trim() || "composer-2"
+    const scenario = opts.modelScenario ?? "primary"
+    const resolved = resolveModel(scenario)
+    const modelId = resolved.model?.trim() || "composer-2"
     const modelSelection: { id: string; params?: { id: string; value: string }[] } = { id: modelId }
-    if (config.modelParams?.trim()) {
+    if (resolved.modelParams?.trim()) {
       try {
-        modelSelection.params = JSON.parse(config.modelParams)
+        modelSelection.params = JSON.parse(resolved.modelParams)
       } catch { /* ignore bad JSON */ }
     }
     pushUiLog("SDK", "INFO", `[${sessionKey}] 正在创建 SDK Agent (cwd=${workspaceDir}, model=${JSON.stringify(modelSelection)})`)

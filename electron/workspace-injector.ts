@@ -18,9 +18,25 @@ export type EnableMcpFn = (wsDir: string, serverNames: string[]) => Promise<void
 
 let daemonPort: number | null = null
 const injectedMcpHashes = new Map<string, string>()
+const fullyInjectedDirs = new Set<string>()
+
+function norm(p: string): string { return path.resolve(p) }
 
 export function setDaemonPort(port: number | null): void {
+  if (daemonPort === port) return
   daemonPort = port
+  clearInjectionCache()
+}
+
+export function clearInjectionCache(dir?: string): void {
+  if (dir) {
+    const n = norm(dir)
+    injectedMcpHashes.delete(n)
+    fullyInjectedDirs.delete(n)
+  } else {
+    injectedMcpHashes.clear()
+    fullyInjectedDirs.clear()
+  }
 }
 
 // ── Path helpers ───────────────────────────────────────────────
@@ -68,9 +84,10 @@ export function registerEnableMcpFn(fn: EnableMcpFn): void {
 
 export async function injectMcpToDir(wsDir: string): Promise<boolean> {
   try {
+    const key = norm(wsDir)
     const newServers = buildMcpServers()
     const hash = JSON.stringify(newServers)
-    if (injectedMcpHashes.get(wsDir) === hash) return true
+    if (injectedMcpHashes.get(key) === hash) return true
 
     const mcpPath = path.join(wsDir, ".cursor", "mcp.json")
     let mcpConfig: Record<string, unknown> = {}
@@ -84,7 +101,7 @@ export async function injectMcpToDir(wsDir: string): Promise<boolean> {
     const dir = path.dirname(mcpPath)
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
     fs.writeFileSync(mcpPath, JSON.stringify(mcpConfig, null, 2), "utf-8")
-    injectedMcpHashes.set(wsDir, hash)
+    injectedMcpHashes.set(key, hash)
     broadcastLog(`MCP 已注入: ${mcpPath}`)
 
     if (_enableMcpFn) await _enableMcpFn(wsDir, Object.keys(newServers))
@@ -168,9 +185,14 @@ export function injectSkillsToDir(wsDir: string): boolean {
 // ── Composite: inject all into a directory ─────────────────────
 
 export async function injectWorkspaceToDir(dir: string, skipIdentity = false): Promise<boolean> {
+  const key = norm(dir)
+  if (fullyInjectedDirs.has(key)) return true
+
   await injectMcpToDir(dir)
   injectSkillsToDir(dir)
-  return injectRulesToDir(dir, skipIdentity)
+  const ok = injectRulesToDir(dir, skipIdentity)
+  if (ok) fullyInjectedDirs.add(key)
+  return ok
 }
 
 export async function injectWorkspaceMcpAndRules(): Promise<{ mcpOk: boolean; ruleOk: boolean; skillOk: boolean }> {
@@ -179,6 +201,7 @@ export async function injectWorkspaceMcpAndRules(): Promise<{ mcpOk: boolean; ru
   const mcpOk = await injectMcpToDir(config.workspaceDir)
   const ruleOk = injectRulesToDir(config.workspaceDir)
   const skillOk = injectSkillsToDir(config.workspaceDir)
+  if (mcpOk && ruleOk) fullyInjectedDirs.add(norm(config.workspaceDir))
   return { mcpOk, ruleOk, skillOk }
 }
 

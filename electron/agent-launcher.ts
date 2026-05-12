@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process"
 import * as path from "node:path"
 import * as fs from "node:fs"
 import { app, BrowserWindow } from "electron"
-import { getConfig, saveConfig, type AppConfig } from "./config-store"
+import { getConfig, saveConfig, resolveModel, type AppConfig, type ModelScenario } from "./config-store"
 import {
   resolveAgentBinary, getAgentPaths, applyProxyEnv, createAgentEnv,
   spawnAgentChild, execAgentSync, execAgentAsync, ensureAgentBinary, quoteArg,
@@ -17,7 +17,6 @@ export const P2P_SESSION_KEY = "__p2p__"
 export function makeMainP2pSessionKey(chatId: string, workspaceDir: string): string {
   return `${chatId}::${workspaceDir}`
 }
-const GROUP_IDLE_TIMEOUT_MS = 30 * 60 * 1000
 const AGENT_NO_PREVIOUS_CHATS = /no previous chats found/i
 
 // ── 会话 Agent ──────────────────────────────────────────
@@ -154,13 +153,14 @@ function makeSpawnEnv(config: AppConfig, extras?: Record<string, string>): Recor
   return env
 }
 
-function buildAgentLaunchArgs(config: AppConfig, prompt: string, resumeChatId: string | false): string[] {
+function buildAgentLaunchArgs(config: AppConfig, prompt: string, resumeChatId: string | false, scenario: ModelScenario = "primary"): string[] {
   const args = [
     "--print", "--force",
     ...(resumeChatId ? ["--resume", resumeChatId] : []),
     "--approve-mcps", "--workspace", config.workspaceDir, "--trust",
   ]
-  if (config.model && config.model !== "auto") args.push("--model", config.model)
+  const { model } = resolveModel(scenario)
+  if (model && model !== "auto") args.push("--model", model)
   args.push(prompt)
   return args
 }
@@ -237,6 +237,7 @@ export interface LaunchAgentOptions {
   senderOpenId?: string
   chatName?: string
   taskMessage?: string
+  modelScenario?: ModelScenario
 }
 
 export async function launchSessionAgent(
@@ -246,14 +247,16 @@ export async function launchSessionAgent(
   meta?: LaunchMeta,
   useMainWorkspace?: boolean,
   senderOpenId?: string,
+  modelScenario?: ModelScenario,
 ): Promise<{ ok: boolean; error?: string }> {
-  return launchAgent({ sessionKey, chatType, injectWorkspaceFn, meta, useMainWorkspace, senderOpenId })
+  return launchAgent({ sessionKey, chatType, injectWorkspaceFn, meta, useMainWorkspace, senderOpenId, modelScenario })
 }
 
 export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boolean; error?: string }> {
   const { sessionKey, chatType, injectWorkspaceFn, meta, senderOpenId, chatName, taskMessage } = opts
   const needResume = chatType === "p2p" || chatType === "group"
   const useMainWorkspace = opts.useMainWorkspace ?? (chatType === "task" || chatType === "temp")
+  const scenario = opts.modelScenario ?? "primary"
 
   if (isSessionAgentRunning(sessionKey)) {
     const sa = sessionAgents.get(sessionKey)
@@ -294,7 +297,7 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
     }
   }
 
-  const args = buildAgentLaunchArgs(overrideConfig, prompt, resumeChatId)
+  const args = buildAgentLaunchArgs(overrideConfig, prompt, resumeChatId, scenario)
 
   try {
     const ws = workDir.trim() || undefined
@@ -346,23 +349,15 @@ export function stopAllSessionAgents(): void {
   for (const [key] of sessionAgents) stopSessionAgent(key)
 }
 
-export function reapIdleGroupAgents(): void {
-  const now = Date.now()
-  for (const [key, sa] of sessionAgents) {
-    if (sa.chatType === "group" && (now - sa.lastActivityAt > GROUP_IDLE_TIMEOUT_MS)) {
-      broadcastLog(`[Agent] 群聊会话 ${key} 空闲 ${Math.round((now - sa.lastActivityAt) / 60_000)} 分钟，自动回收`)
-      stopSessionAgent(key)
-    }
-  }
-}
 
-export async function launchIndependentAgent(taskId: string, taskName: string, message: string, type: ChatType = "task"): Promise<{ ok: boolean; error?: string }> {
+export async function launchIndependentAgent(taskId: string, taskName: string, message: string, type: ChatType = "task", modelScenario: ModelScenario = "task"): Promise<{ ok: boolean; error?: string }> {
   return launchAgent({
     sessionKey: taskId,
     chatType: type,
     chatName: taskName,
     taskMessage: message,
     meta: { chatId: taskName, chatType: type },
+    modelScenario,
   })
 }
 

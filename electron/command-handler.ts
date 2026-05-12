@@ -487,7 +487,7 @@ export async function handleFeishuMcpCommand(port: number, messageId: string, ra
     if (!token) { await reportCommandResult(port, messageId, false, "用法: /mcp delete <序号|名称>"); return }
     const target = resolveMcpTarget(list, token)
     if (!target) { await reportCommandResult(port, messageId, false, `❌ 找不到: ${token}`); return }
-    deleteMcpServer(target.name)
+    deleteMcpServer(target.name, target.source as "global" | "project")
     await reportCommandResult(port, messageId, true, `🗑️ ${target.name} 已删除`)
     return
   }
