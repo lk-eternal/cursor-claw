@@ -17,6 +17,10 @@ directories:
 files:
   - out/**/*
   - "!node_modules/**/*"
+  - node_modules/@cursor/**/*
+
+asarUnpack:
+  - node_modules/@cursor/sdk-*/bin/*
 
 extraResources:
   - from: dist-bundle/
