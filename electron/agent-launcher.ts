@@ -123,8 +123,8 @@ export function buildPrompt(meta?: LaunchMeta, taskMessage?: string, sessionKey?
   }
 
   if(meta?.chatType === "p2p" || meta?.chatType === "group"){
-    prompts.push("如果你当前正在执行任务（上下文中已有进行中的工作），请直接继续，不要重复处理已完成的内容。")
-    prompts.push("否则，请立即通过 sync_message 工具获取待处理的消息并开始工作。")
+    prompts.push("请先通过 sync_message(timeout_seconds=3) 快速检查是否有新消息。")
+    prompts.push("如果有新消息，结合上下文综合评估后执行；如果没有新消息且有进行中的工作，则继续之前的任务。")
   }
   if(meta?.chatType === "temp" && taskMessage){
     prompts.push("[临时任务]")
