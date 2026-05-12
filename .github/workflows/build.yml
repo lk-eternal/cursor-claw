@@ -131,6 +131,40 @@ jobs:
             artifacts/**/latest-linux.yml
             artifacts/**/*.blockmap
 
+      - name: Publish to feishu-cursor-bridge (migration)
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+
+          NOTES="⚠️ 项目已迁移至 Cursor Claw，本版本即最终版本。
+
+          新项目地址: https://github.com/lk-eternal/cursor-claw/releases
+
+          ${{ steps.notes.outputs.body }}"
+
+          mapfile -t FILES < <(find artifacts -type f \( \
+            -name 'cursor-claw-setup-*.exe' -o \
+            -name '*.dmg' -o \
+            -name '*.AppImage' -o \
+            -name '*.deb' -o \
+            -name 'latest.yml' -o \
+            -name 'latest-mac.yml' -o \
+            -name 'latest-linux.yml' -o \
+            -name '*.blockmap' \
+          \))
+
+          echo "Files to upload: ${FILES[*]}"
+
+          gh release create "$TAG" \
+            --repo lk-eternal/feishu-cursor-bridge \
+            --title "v${VERSION} - 迁移至 Cursor Claw" \
+            --notes "$NOTES" \
+            "${FILES[@]}" \
+            || echo "::warning::Failed to publish to feishu-cursor-bridge"
+
       - name: Update Homebrew Tap
         if: success()
         env:
