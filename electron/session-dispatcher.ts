@@ -89,16 +89,15 @@ export async function handleSessionClosed(sessionKey: string, _chatType: ChatTyp
       const drained = await drainSessionMessages(lock.port, sessionKey)
       broadcastLog(`[System] Agent 异常退出(exit=${exitInfo.exitCode})，已清空该会话 ${drained} 条消息`, "WARN")
     }
-    const stderrSnippet = exitInfo.stderr?.trim().slice(-500) || ""
-    const errMsg = stderrSnippet
-      ? `⚠️ Agent 异常退出 (exit=${exitInfo.exitCode})。\n错误信息：\n${stderrSnippet}`
+    const stderrContent = exitInfo.stderr?.trim() || ""
+    const errMsg = stderrContent
+      ? `⚠️ Agent 异常退出 (exit=${exitInfo.exitCode})。\n错误信息：\n${stderrContent}`
       : `⚠️ Agent 异常退出 (exit=${exitInfo.exitCode})。请检查配置后重试。`
     await notifyChat(sessionKey, errMsg)
   } else {
     const output = exitInfo?.stderr?.trim() || exitInfo?.stdout?.trim() || ""
-    const snippet = output.slice(-500)
-    const exitMsg = snippet
-      ? `Agent已退出\n退出前输出：\n${snippet}`
+    const exitMsg = output
+      ? `Agent已退出\n退出前输出：\n${output}`
       : "Agent已退出"
     await notifyChat(sessionKey, exitMsg)
   }
