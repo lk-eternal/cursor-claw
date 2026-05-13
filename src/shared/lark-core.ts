@@ -151,11 +151,12 @@ export class LarkSender {
 
   private formatForSend(text: string): { content: string; msgType: string } {
     const fullText = `${this.messagePrefix}${text}`;
+    const escaped = fullText.replace(/\\/g, "\\\\");
     return {
       content: JSON.stringify({
         schema: "2.0",
         config: { wide_screen_mode: true },
-        body: { elements: [{ tag: "markdown", content: fullText }] },
+        body: { elements: [{ tag: "markdown", content: escaped }] },
       }),
       msgType: "interactive",
     };

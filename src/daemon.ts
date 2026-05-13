@@ -189,7 +189,10 @@ function setActiveSession(chatId: string, sessionKey: string): void {
 
 function resolveRawChatId(sessionKey?: string): string | undefined {
   if (!sessionKey) return undefined;
-  return sessionToChatMap.get(sessionKey);
+  const mapped = sessionToChatMap.get(sessionKey);
+  if (mapped) return mapped;
+  const idx = sessionKey.indexOf("::");
+  return idx > 0 ? sessionKey.slice(0, idx) : sessionKey;
 }
 
 function trackMessageSession(messageId: string, sessionKey: string): void {
@@ -358,15 +361,11 @@ async function replyToMessage(messageId: string, text: string, chatId?: string):
     try { await wechatManager.sendText(chatId, text); } catch (e: any) { log("WARN", `微信回复失败: ${e?.message}`); }
     return;
   }
-  if (!larkClient || !sender) { log("WARN", "飞书未启用，跳过回复"); return; }
-  try {
-    await larkClient.im.message.reply({
-      path: { message_id: messageId },
-      data: { content: JSON.stringify({ text }), msg_type: "text" },
-    });
-  } catch (e: any) {
-    log("WARN", `回复消息失败 (id=${messageId}), fallback 到发送: ${e?.message}`);
-    await sender.sendMessage(text);
+  if (!sender) { log("WARN", "飞书未启用，跳过回复"); return; }
+  if (chatId && isFeishuChatId(chatId)) {
+    await sender.sendMessageToChat(chatId, text);
+  } else {
+    await sender.replyMessage(messageId, text);
   }
 }
 
@@ -1064,6 +1063,17 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       if (!fs.existsSync(newDir)) { json(res, { ok: false, error: "directory does not exist" }, 400); return true; }
       const oldDir = WORKSPACE_DIR;
       WORKSPACE_DIR = newDir;
+      if (oldDir !== newDir) {
+        for (const [chatId, oldSessionKey] of activeSessionMap) {
+          if (oldSessionKey.endsWith(`::${oldDir}`)) {
+            const newSessionKey = `${chatId}::${newDir}`;
+            activeSessionMap.set(chatId, newSessionKey);
+            sessionToChatMap.delete(oldSessionKey);
+            sessionToChatMap.set(newSessionKey, chatId);
+            log("INFO", `[Workspace] 会话路由迁移: ${oldSessionKey} → ${newSessionKey}`);
+          }
+        }
+      }
       log("INFO", `[Workspace] hot-updated: ${oldDir} -> ${newDir}`);
       process.stdout.write(`__WORKSPACE_SWITCH__:${JSON.stringify({ dir: newDir })}\n`);
       json(res, { ok: true, message: `工作目录已切换`, dir: newDir, oldDir });

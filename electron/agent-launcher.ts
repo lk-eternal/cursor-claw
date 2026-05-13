@@ -204,15 +204,11 @@ function ensureMainChatId(config: AppConfig, spawnEnv: Record<string, string>): 
 function spawnAgentWithLogs(args: string[], env: Record<string, string>, label: string, cwd?: string): ChildProcess {
   logCursorAgentInvocation(label, args, cwd)
   const { agentNodePath, agentIndexPath } = getAgentPaths()
+  const spawnOpts = { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] as const, env, cwd }
   if (agentNodePath && agentIndexPath) {
-    return spawn(agentNodePath, [agentIndexPath, ...args], {
-      windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env,
-    })
+    return spawn(agentNodePath, [agentIndexPath, ...args], spawnOpts)
   }
-  return spawn("agent", args.map(quoteArg), {
-    shell: process.platform === "win32", windowsHide: true,
-    stdio: ["ignore", "pipe", "pipe"], env,
-  })
+  return spawn("agent", args.map(quoteArg), { ...spawnOpts, shell: process.platform === "win32" })
 }
 
 function attachStreamLoggers(child: ChildProcess): void {
@@ -238,7 +234,12 @@ export interface LaunchAgentOptions {
   chatName?: string
   taskMessage?: string
   modelScenario?: ModelScenario
+  /** @internal 快速退出自动重试计数 */
+  _retryCount?: number
 }
+
+const QUICK_EXIT_MS = 10_000
+const MAX_QUICK_EXIT_RETRIES = 2
 
 export async function launchSessionAgent(
   sessionKey: string,
@@ -254,6 +255,7 @@ export async function launchSessionAgent(
 
 export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boolean; error?: string }> {
   const { sessionKey, chatType, injectWorkspaceFn, meta, senderOpenId, chatName, taskMessage } = opts
+  const retryCount = opts._retryCount ?? 0
   const needResume = chatType === "p2p" || chatType === "group"
   const useMainWorkspace = opts.useMainWorkspace ?? (chatType === "task" || chatType === "temp")
   const scenario = opts.modelScenario ?? "primary"
@@ -304,10 +306,42 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
     const child = spawnAgentWithLogs(args, spawnEnv, `session-${sessionKey}`, ws)
     attachStreamLoggers(child)
 
+    let stderrChunks = ""
+    child.stderr?.on("data", (d: Buffer) => { stderrChunks += d.toString() })
+    const spawnedAt = Date.now()
+
     child.on("close", (code, signal) => {
-      pushUiLog("Agent", "INFO", `[${sessionKey}] 退出 code=${code}${signal ? ` signal=${signal}` : ""}`)
+      const elapsed = Date.now() - spawnedAt
+      pushUiLog("Agent", "INFO", `[${sessionKey}] 退出 code=${code}${signal ? ` signal=${signal}` : ""} (${elapsed}ms)`)
       sessionAgents.delete(sessionKey)
       broadcastSessionStatus()
+
+      if (code !== 0 && code !== null && elapsed < QUICK_EXIT_MS && retryCount < MAX_QUICK_EXIT_RETRIES) {
+        const delay = (retryCount + 1) * 2000
+        const isUnavailable = stderrChunks.includes("[unavailable]")
+        broadcastLog(
+          `[Agent] ${sessionKey} 在 ${elapsed}ms 内退出` +
+          (isUnavailable ? " (gRPC unavailable)" : "") +
+          `，${delay / 1000}s 后重试 (${retryCount + 1}/${MAX_QUICK_EXIT_RETRIES})`,
+          "WARN",
+        )
+        pendingLaunches.add(sessionKey)
+        setTimeout(() => {
+          pendingLaunches.delete(sessionKey)
+          if (!isSessionAgentRunning(sessionKey)) {
+            launchAgent({ ...opts, _retryCount: retryCount + 1 })
+          }
+        }, delay)
+        return
+      }
+
+      if (code !== 0 && stderrChunks.includes("[unavailable]")) {
+        pushUiLog("Agent", "ERROR",
+          `[${sessionKey}] gRPC [unavailable] 错误，可能原因: ` +
+          "Cursor 未登录 / 网络不通 / 代理配置问题 / macOS 安全限制",
+        )
+      }
+
       if (sessionCloseHandler) sessionCloseHandler(sessionKey, chatType)
     })
     child.on("error", (e) => {

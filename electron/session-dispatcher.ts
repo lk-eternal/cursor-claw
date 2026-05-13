@@ -3,7 +3,7 @@ import * as fs from "node:fs"
 import { app } from "electron"
 import { getConfig, useSdkMode, type ModelScenario } from "./config-store"
 import { broadcastLog } from "./ui-logger"
-import { readLockFile, httpGet, httpPost, syncActiveSession, getCurrentActiveSession } from "./daemon-client"
+import { readLockFile, httpGet, httpPost, syncActiveSession, getCurrentActiveSession, drainSessionMessages } from "./daemon-client"
 import { reportCommandResult } from "./command-handler"
 import {
   launchSessionAgent as _launchSessionAgent,
@@ -414,6 +414,11 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
     if (!result.ok) {
       broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${result.error}`)
       await notifyChat(sessionKey, `启动Agent失败: ${result.error ?? "未知错误"}`)
+      const lock = readLockFile()
+      if (lock?.port) {
+        const drained = await drainSessionMessages(lock.port, sessionKey)
+        if (drained > 0) broadcastLog(`[Agent] ${sessionKey} 已丢弃 ${drained} 条消息（启动被拒绝）`)
+      }
     }
   }
 }

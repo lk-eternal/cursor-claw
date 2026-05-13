@@ -64,3 +64,10 @@ export async function getCurrentActiveSession(port: number, chatId: string): Pro
     return res?.sessions?.[chatId]
   } catch { return undefined }
 }
+
+export async function drainSessionMessages(port: number, sessionKey: string): Promise<number> {
+  try {
+    const res = (await httpPost(`http://127.0.0.1:${port}/dequeue-all`, { sessionKey })) as { messages?: unknown[] }
+    return res?.messages?.length ?? 0
+  } catch { return 0 }
+}

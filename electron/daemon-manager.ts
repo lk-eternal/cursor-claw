@@ -432,7 +432,7 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
         if (line.startsWith("__WORKSPACE_SWITCH__:")) {
           try {
             const { dir } = JSON.parse(line.slice("__WORKSPACE_SWITCH__:".length))
-            if (dir) void applyWorkspaceSwitch(dir, false)
+            if (dir) void applyWorkspaceSwitch(dir, false, true)
           } catch { /* ignore */ }
           continue
         }
@@ -816,8 +816,10 @@ async function checkAndExecutePendingCommands(): Promise<void> {
               const wsResult = await applyWorkspaceSwitch(newDir, false)
               if (wsResult.ok) {
                 broadcastLog(`[指令 /workspace] 已切换到 ${newDir}`, "INFO")
+                await reply(true, `✅ 工作目录已切换到: ${newDir} 会话上下文已切换`)
               } else {
                 broadcastLog(`[指令 /workspace] 切换失败: ${wsResult.error}`, "ERROR")
+                await reply(false, `❌ 切换失败: ${wsResult.error}`)
               }
             }
           } else {
@@ -888,7 +890,7 @@ export interface ConfigSaveResult {
 /**
  * 切换工作目录：可选地停止旧会话，然后热更新到新目录。
  */
-export async function applyWorkspaceSwitch(workspaceDir: string, stopOldSessions: boolean): Promise<{ ok: boolean; error?: string }> {
+export async function applyWorkspaceSwitch(workspaceDir: string, stopOldSessions: boolean, skipDaemonSync = false): Promise<{ ok: boolean; error?: string }> {
   const w = workspaceDir.trim()
   if (!w) return { ok: false, error: "工作目录为空" }
 
@@ -900,6 +902,18 @@ export async function applyWorkspaceSwitch(workspaceDir: string, stopOldSessions
   invalidateMcpEnabledCache()
   clearInjectionCache()
   resetLogFilePath()
+
+  if (!skipDaemonSync) {
+    const lock = readLockFile()
+    if (lock?.port) {
+      try {
+        await httpPost(`http://127.0.0.1:${lock.port}/api/workspace`, { dir: w })
+      } catch (e: unknown) {
+        broadcastLog(`[Workspace] Daemon WORKSPACE_DIR 同步失败: ${e instanceof Error ? e.message : e}`, "WARN")
+      }
+    }
+  }
+
   await injectWorkspaceMcpAndRules()
   broadcastStatus(await getDaemonStatus())
   return { ok: true }

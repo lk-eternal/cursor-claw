@@ -850,10 +850,12 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                           ? <>
                               <CheckCircle2 size={16} className="text-green-400" />
                               <span className="flex-1 text-sm text-gray-300">已绑定 <span className="ml-1 font-mono text-xs text-gray-500">{receiveId}</span></span>
-                              <button type="button" onClick={handleBind} disabled={bindWaiting} className="flex items-center gap-1 text-xs text-gray-500 transition hover:text-blue-400 disabled:opacity-50">
-                                {bindWaiting && <Loader2 size={12} className="animate-spin" />}
-                                重新绑定
-                              </button>
+                              {bindWaiting
+                                ? <button type="button" onClick={() => setBindWaiting(false)} className="flex items-center gap-1 text-xs text-gray-500 transition hover:text-red-400">
+                                    <Loader2 size={12} className="animate-spin" />取消
+                                  </button>
+                                : <button type="button" onClick={handleBind} className="text-xs text-gray-500 transition hover:text-blue-400">重新绑定</button>
+                              }
                               <span className="text-gray-700">|</span>
                               <button type="button" onClick={() => setReceiveId("")} className="text-xs text-gray-500 transition hover:text-red-400">解绑</button>
                               <span className="text-gray-700">|</span>
@@ -862,10 +864,10 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                           : <>
                               <ShieldAlert size={16} className="text-yellow-500" />
                               <span className="flex-1 text-sm text-gray-500">{bindWaiting ? "请在飞书私聊中发送一条消息..." : "未绑定"}</span>
-                              <button type="button" onClick={handleBind} disabled={bindWaiting} className="flex items-center gap-1.5 rounded-md border border-gray-600 px-3 py-1.5 text-xs text-gray-300 transition hover:border-blue-500 hover:text-blue-400 disabled:opacity-50">
-                                {bindWaiting ? <Loader2 size={13} className="animate-spin" /> : null}
-                                绑定
-                              </button>
+                              {bindWaiting
+                                ? <button type="button" onClick={() => setBindWaiting(false)} className="rounded-md border border-gray-600 px-3 py-1.5 text-xs text-gray-400 transition hover:border-red-500 hover:text-red-400">取消</button>
+                                : <button type="button" onClick={handleBind} className="flex items-center gap-1.5 rounded-md border border-gray-600 px-3 py-1.5 text-xs text-gray-300 transition hover:border-blue-500 hover:text-blue-400">绑定</button>
+                              }
                             </>
                         }
                       </div>
