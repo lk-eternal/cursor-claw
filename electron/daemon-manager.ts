@@ -47,7 +47,7 @@ export { checkAgentLoggedIn, loginCli } from "./agent-launcher"
 export { getLogBuffer } from "./ui-logger"
 export { checkSdkApiKey, listSdkModels } from "./agent-sdk"
 export { injectWorkspaceMcpAndRules, injectWorkspaceToDir, clearInjectionCache, getMcpServerPath, getAdminMcpPath } from "./workspace-injector"
-export { getQueueMessages, clearMessageQueue } from "./session-dispatcher"
+export { getQueueMessages, clearMessageQueue, deleteQueueMessage } from "./session-dispatcher"
 
 
 function isAgentRunning(): boolean {

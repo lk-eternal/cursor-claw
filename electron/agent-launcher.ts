@@ -39,13 +39,20 @@ const sessionAgents = new Map<string, SessionAgent>()
 const pendingLaunches = new Set<string>()
 
 let chatNameResolver: ((chatId: string) => string | undefined) | null = null
-let sessionCloseHandler: ((sessionKey: string, chatType: ChatType) => void | Promise<void>) | null = null
+let sessionCloseHandler: ((sessionKey: string, chatType: ChatType, exitInfo?: SessionExitInfo) => void | Promise<void>) | null = null
+
+export interface SessionExitInfo {
+  exitCode: number | null
+  elapsed: number
+  stderr: string
+  stdout: string
+}
 
 export function setChatNameResolver(fn: (chatId: string) => string | undefined): void {
   chatNameResolver = fn
 }
 
-export function setSessionCloseHandler(fn: (sessionKey: string, chatType: ChatType) => void | Promise<void>): void {
+export function setSessionCloseHandler(fn: (sessionKey: string, chatType: ChatType, exitInfo?: SessionExitInfo) => void | Promise<void>): void {
   sessionCloseHandler = fn
 }
 
@@ -234,12 +241,7 @@ export interface LaunchAgentOptions {
   chatName?: string
   taskMessage?: string
   modelScenario?: ModelScenario
-  /** @internal 快速退出自动重试计数 */
-  _retryCount?: number
 }
-
-const QUICK_EXIT_MS = 10_000
-const MAX_QUICK_EXIT_RETRIES = 2
 
 export async function launchSessionAgent(
   sessionKey: string,
@@ -255,7 +257,6 @@ export async function launchSessionAgent(
 
 export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boolean; error?: string }> {
   const { sessionKey, chatType, injectWorkspaceFn, meta, senderOpenId, chatName, taskMessage } = opts
-  const retryCount = opts._retryCount ?? 0
   const needResume = chatType === "p2p" || chatType === "group"
   const useMainWorkspace = opts.useMainWorkspace ?? (chatType === "task" || chatType === "temp")
   const scenario = opts.modelScenario ?? "primary"
@@ -307,7 +308,9 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
     attachStreamLoggers(child)
 
     let stderrChunks = ""
+    let stdoutChunks = ""
     child.stderr?.on("data", (d: Buffer) => { stderrChunks += d.toString() })
+    child.stdout?.on("data", (d: Buffer) => { stdoutChunks += d.toString() })
     const spawnedAt = Date.now()
 
     child.on("close", (code, signal) => {
@@ -316,25 +319,6 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
       sessionAgents.delete(sessionKey)
       broadcastSessionStatus()
 
-      if (code !== 0 && code !== null && elapsed < QUICK_EXIT_MS && retryCount < MAX_QUICK_EXIT_RETRIES) {
-        const delay = (retryCount + 1) * 2000
-        const isUnavailable = stderrChunks.includes("[unavailable]")
-        broadcastLog(
-          `[Agent] ${sessionKey} 在 ${elapsed}ms 内退出` +
-          (isUnavailable ? " (gRPC unavailable)" : "") +
-          `，${delay / 1000}s 后重试 (${retryCount + 1}/${MAX_QUICK_EXIT_RETRIES})`,
-          "WARN",
-        )
-        pendingLaunches.add(sessionKey)
-        setTimeout(() => {
-          pendingLaunches.delete(sessionKey)
-          if (!isSessionAgentRunning(sessionKey)) {
-            launchAgent({ ...opts, _retryCount: retryCount + 1 })
-          }
-        }, delay)
-        return
-      }
-
       if (code !== 0 && stderrChunks.includes("[unavailable]")) {
         pushUiLog("Agent", "ERROR",
           `[${sessionKey}] gRPC [unavailable] 错误，可能原因: ` +
@@ -342,7 +326,7 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
         )
       }
 
-      if (sessionCloseHandler) sessionCloseHandler(sessionKey, chatType)
+      if (sessionCloseHandler) sessionCloseHandler(sessionKey, chatType, { exitCode: code, elapsed, stderr: stderrChunks, stdout: stdoutChunks })
     })
     child.on("error", (e) => {
       pushUiLog("Agent", "ERROR", `[${sessionKey}] 进程错误: ${e.message}`)

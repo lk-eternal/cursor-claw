@@ -8,6 +8,7 @@ import {
   stopDaemon,
   getDaemonStatus,
   getQueueMessages,
+  deleteQueueMessage,
   checkCliInstalled,
   checkAgentLoggedIn,
   installCli,
@@ -179,6 +180,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle("daemon:stop", () => stopDaemon())
   ipcMain.handle("daemon:status", () => getDaemonStatus())
   ipcMain.handle("daemon:queue", () => getQueueMessages())
+  ipcMain.handle("daemon:queue-delete", (_e, fileId: string) => deleteQueueMessage(fileId))
   ipcMain.handle("daemon:queue-clear", () => clearMessageQueue())
   ipcMain.handle("cli:check", () => checkCliInstalled())
   ipcMain.handle("cli:login-status", () => checkAgentLoggedIn())

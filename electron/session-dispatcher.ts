@@ -12,7 +12,7 @@ import {
   getSessionAgentList as getRawCliSessionList,
   isSessionAgentRunning as _isCliSessionRunning,
   setChatNameResolver, setSessionCloseHandler,
-  type ChatType,
+  type ChatType, type SessionExitInfo,
 } from "./agent-launcher"
 import {
   launchSdkAgent, stopSdkSession, stopAllSdkSessions,
@@ -80,8 +80,28 @@ function formatDuration(ms: number): string {
 
 // ── Session 生命周期 ──────────────────────────────────────
 
-export async function handleSessionClosed(sessionKey: string, _chatType: ChatType): Promise<void> {
-  await notifyChat(sessionKey, "Agent已退出")
+export async function handleSessionClosed(sessionKey: string, _chatType: ChatType, exitInfo?: SessionExitInfo): Promise<void> {
+  const failed = exitInfo && exitInfo.exitCode !== 0 && exitInfo.exitCode !== null
+
+  if (failed) {
+    const lock = readLockFile()
+    if (lock?.port) {
+      const drained = await drainSessionMessages(lock.port, sessionKey)
+      broadcastLog(`[System] Agent 异常退出(exit=${exitInfo.exitCode})，已清空该会话 ${drained} 条消息`, "WARN")
+    }
+    const stderrSnippet = exitInfo.stderr?.trim().slice(-500) || ""
+    const errMsg = stderrSnippet
+      ? `⚠️ Agent 异常退出 (exit=${exitInfo.exitCode})。\n错误信息：\n${stderrSnippet}`
+      : `⚠️ Agent 异常退出 (exit=${exitInfo.exitCode})。请检查配置后重试。`
+    await notifyChat(sessionKey, errMsg)
+  } else {
+    const output = exitInfo?.stderr?.trim() || exitInfo?.stdout?.trim() || ""
+    const snippet = output.slice(-500)
+    const exitMsg = snippet
+      ? `Agent已退出\n退出前输出：\n${snippet}`
+      : "Agent已退出"
+    await notifyChat(sessionKey, exitMsg)
+  }
 
   const previous = previousActiveSessionMap.get(sessionKey)
   previousActiveSessionMap.delete(sessionKey)
@@ -186,16 +206,35 @@ export async function clearMessageQueue(): Promise<number> {
   } catch { return 0 }
 }
 
-export async function getQueueMessages(): Promise<{ index: number; preview: string; chatId?: string; chatType?: string }[]> {
+export interface QueueMessageItem {
+  index: number
+  fileId: string
+  preview: string
+  sessionKey?: string
+  chatType?: string
+  timestamp?: number
+  senderOpenId?: string
+}
+
+export async function getQueueMessages(): Promise<QueueMessageItem[]> {
   const lock = readLockFile()
   if (!lock?.port) return []
   try {
-    const res = await httpGet(`http://127.0.0.1:${lock.port}/queue`) as {
-      messages?: { index: number; preview: string; chatId?: string; chatType?: string }[]
-    }
+    const res = await httpGet(`http://127.0.0.1:${lock.port}/queue`) as { messages?: QueueMessageItem[] }
     return res.messages ?? []
   } catch {
     return []
+  }
+}
+
+export async function deleteQueueMessage(fileId: string): Promise<boolean> {
+  const lock = readLockFile()
+  if (!lock?.port) return false
+  try {
+    const res = await httpPost(`http://127.0.0.1:${lock.port}/queue-delete`, { fileId }, 5000) as { ok?: boolean }
+    return res?.ok ?? false
+  } catch {
+    return false
   }
 }
 

@@ -161,21 +161,51 @@ export function getQueueLength(): number {
   }
 }
 
-export function getQueueMessages(): { index: number; preview: string; sessionKey?: string; chatType?: string }[] {
+export interface QueueMessageView {
+  index: number;
+  fileId: string;
+  preview: string;
+  sessionKey?: string;
+  chatType?: string;
+  timestamp?: number;
+  senderOpenId?: string;
+}
+
+export function getQueueMessages(): QueueMessageView[] {
   if (!queueDir) return [];
   try {
     const files = fs.readdirSync(queueDir).filter((f) => f.endsWith(".qmsg")).sort();
     return files.map((f, i) => {
       try {
-        const raw = fs.readFileSync(path.join(queueDir, f), "utf-8");
+        const filePath = path.join(queueDir, f);
+        const raw = fs.readFileSync(filePath, "utf-8");
         const parsed = JSON.parse(raw);
-        return { index: i, preview: (parsed.text ?? "").slice(0, 200), sessionKey: parsed.sessionKey || parsed.chatId || undefined, chatType: parsed.chatType || undefined };
+        const ts = parsed.timestamp || fs.statSync(filePath).mtimeMs;
+        return {
+          index: i, fileId: f,
+          preview: (parsed.text ?? "").slice(0, 200),
+          sessionKey: parsed.sessionKey || parsed.chatId || undefined,
+          chatType: parsed.chatType || undefined,
+          timestamp: Math.round(ts),
+          senderOpenId: parsed.senderOpenId || undefined,
+        };
       } catch {
-        return { index: i, preview: "(unreadable)" };
+        return { index: i, fileId: f, preview: "(unreadable)" };
       }
     });
   } catch {
     return [];
+  }
+}
+
+export function deleteQueueMessage(fileId: string): boolean {
+  if (!queueDir || !fileId) return false;
+  try {
+    const filePath = path.join(queueDir, fileId);
+    if (fs.existsSync(filePath)) { fs.unlinkSync(filePath); return true; }
+    return false;
+  } catch {
+    return false;
   }
 }
 

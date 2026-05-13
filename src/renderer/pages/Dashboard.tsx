@@ -28,8 +28,9 @@ export default function Dashboard({ onSettings }: Props) {
   const [starting, setStarting] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [actionError, setActionError] = useState("")
-  const [queueMessages, setQueueMessages] = useState<{ index: number; preview: string }[]>([])
+  const [queueMessages, setQueueMessages] = useState<{ index: number; fileId: string; preview: string; sessionKey?: string; chatType?: string; timestamp?: number; senderOpenId?: string }[]>([])
   const [showQueue, setShowQueue] = useState(false)
+  const [expandedSession, setExpandedSession] = useState<string | null>(null)
   const [cliStatus, setCliStatus] = useState<"checking" | "installed" | "missing" | "need-login">("checking")
   const [cliInstalling, setCliInstalling] = useState(false)
   const [cliLoggingIn, setCliLoggingIn] = useState(false)
@@ -242,10 +243,16 @@ export default function Dashboard({ onSettings }: Props) {
     setStoppingAgent(false)
   }
 
+  const refreshQueueMessages = async () => {
+    const msgs = await window.electronAPI.getQueueMessages()
+    setQueueMessages(msgs)
+    return msgs
+  }
+
   const toggleQueue = async () => {
     if (!showQueue) {
-      const msgs = await window.electronAPI.getQueueMessages()
-      setQueueMessages(msgs)
+      await refreshQueueMessages()
+      setShowSessions(false)
     }
     setShowQueue(!showQueue)
   }
@@ -257,6 +264,40 @@ export default function Dashboard({ onSettings }: Props) {
     setQueueMessages([])
     setStatus((prev) => ({ ...prev, queueLength: 0 }))
     setClearingQueue(false)
+  }
+
+  const handleDeleteQueueMessage = async (fileId: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    await window.electronAPI.deleteQueueMessage(fileId)
+    const msgs = queueMessages.filter((m) => m.fileId !== fileId)
+    setQueueMessages(msgs)
+    setStatus((prev) => ({ ...prev, queueLength: Math.max(0, (prev.queueLength ?? 1) - 1) }))
+  }
+
+  const toggleSessionExpand = async (sessionKey: string) => {
+    if (expandedSession === sessionKey) {
+      setExpandedSession(null)
+      return
+    }
+    if (queueMessages.length === 0) await refreshQueueMessages()
+    setExpandedSession(sessionKey)
+  }
+
+  const getSessionQueueMessages = (sessionKey: string) =>
+    queueMessages.filter((m) => m.sessionKey === sessionKey)
+
+  const formatTimestamp = (ts?: number) => {
+    if (!ts) return ""
+    const d = new Date(ts)
+    return d.toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
+  }
+
+  const getSessionLabel = (msg: { sessionKey?: string; chatType?: string }) => {
+    if (!msg.sessionKey) return "未知会话"
+    const parts = msg.sessionKey.split("::")
+    const dir = parts[1]?.split(/[\\/]/).pop() || ""
+    const chatLabel = msg.chatType === "group" ? "群聊" : msg.chatType === "task" ? "定时" : "私聊"
+    return `${chatLabel}${dir ? ` 📁${dir}` : ""}`
   }
 
   const formatUptime = (seconds?: number): string => {
@@ -368,7 +409,7 @@ export default function Dashboard({ onSettings }: Props) {
             : "等待目标"
           }
         />
-        <div onClick={() => { if (sessionList.length > 0 || status.agentRunning) setShowSessions((v) => !v) }} className={sessionList.length > 0 || status.agentRunning ? "cursor-pointer" : ""}>
+        <div onClick={async () => { if (sessionList.length > 0 || status.agentRunning) { const next = !showSessions; setShowSessions(next); if (next) { setShowQueue(false); await refreshQueueMessages() } } }} className={sessionList.length > 0 || status.agentRunning ? "cursor-pointer" : ""}>
           <StatusCard
             icon={Bot}
             label="Agent"
@@ -421,40 +462,90 @@ export default function Dashboard({ onSettings }: Props) {
             <button onClick={async () => { await window.electronAPI.stopAllSessionAgents(); setSessionList([]) }} className="text-xs text-red-400 hover:text-red-300">全部停止</button>
           </div>
           <div className="space-y-1.5">
-            {sessionList.map((s) => (
-              <div key={s.sessionKey} className="flex items-center justify-between rounded-lg bg-gray-800/60 px-3 py-2">
-                <div className="flex items-center gap-2 overflow-hidden">
-                  <span className={`h-2 w-2 rounded-full ${s.chatType === "group" ? "bg-green-400" : s.chatType === "task" ? "bg-yellow-400" : "bg-blue-400"}`} />
-                  <span className="truncate text-xs text-gray-300" title={s.sessionKey}>
-                    {s.chatType === "group" ? "群聊" : s.chatType === "task" ? "定时" : "私聊"} {s.chatName || (s.sessionKey.length > 20 ? s.sessionKey.slice(0, 20) + "…" : s.sessionKey)}
-                    {s.workspaceDir && s.chatType === "p2p" && <span className="ml-1 text-[10px] text-gray-500" title={s.workspaceDir}>📁{s.workspaceDir.split(/[\\/]/).pop()}</span>}
-                  </span>
-                  <span className="text-xs text-gray-600">PID:{s.pid}</span>
+            {sessionList.map((s) => {
+              const pendingMsgs = getSessionQueueMessages(s.sessionKey)
+              const hasPending = pendingMsgs.length > 0
+              const isExpanded = expandedSession === s.sessionKey
+              return (
+                <div key={s.sessionKey}>
+                  <div
+                    className={`flex items-center justify-between rounded-lg bg-gray-800/60 px-3 py-2 ${hasPending ? "cursor-pointer hover:bg-gray-800/80" : ""}`}
+                    onClick={() => hasPending && toggleSessionExpand(s.sessionKey)}
+                  >
+                    <div className="flex items-center gap-2 overflow-hidden">
+                      <span className={`h-2 w-2 rounded-full ${s.chatType === "group" ? "bg-green-400" : s.chatType === "task" ? "bg-yellow-400" : "bg-blue-400"}`} />
+                      <span className="truncate text-xs text-gray-300" title={s.sessionKey}>
+                        {s.chatType === "group" ? "群聊" : s.chatType === "task" ? "定时" : "私聊"} {s.chatName || (s.sessionKey.length > 20 ? s.sessionKey.slice(0, 20) + "…" : s.sessionKey)}
+                        {s.workspaceDir && s.chatType === "p2p" && <span className="ml-1 text-[10px] text-gray-500" title={s.workspaceDir}>📁{s.workspaceDir.split(/[\\/]/).pop()}</span>}
+                      </span>
+                      <span className="text-xs text-gray-600">PID:{s.pid}</span>
+                      {hasPending && (
+                        <span className="ml-1 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-yellow-500/90 px-1 text-[10px] font-bold text-gray-900">
+                          {pendingMsgs.length}
+                        </span>
+                      )}
+                    </div>
+                    <button onClick={(e) => { e.stopPropagation(); window.electronAPI.stopSessionAgent(s.sessionKey) }} className="rounded px-1.5 py-0.5 text-xs text-red-400 hover:bg-red-600/20" title="停止此会话">
+                      <Square size={10} />
+                    </button>
+                  </div>
+                  {isExpanded && hasPending && (
+                    <div className="ml-4 mt-1 space-y-1 border-l-2 border-yellow-700/40 pl-3">
+                      {pendingMsgs.map((msg) => (
+                        <div key={msg.fileId} className="group flex items-start justify-between gap-2 rounded bg-gray-800/40 px-2.5 py-1.5">
+                          <div className="min-w-0 flex-1">
+                            <span className="text-[10px] text-gray-500">{formatTimestamp(msg.timestamp)}</span>
+                            <p className="truncate text-xs text-gray-300">{msg.preview}</p>
+                          </div>
+                          <button
+                            onClick={(e) => handleDeleteQueueMessage(msg.fileId, e)}
+                            className="shrink-0 rounded p-0.5 text-gray-600 opacity-0 transition hover:bg-red-600/20 hover:text-red-400 group-hover:opacity-100"
+                            title="删除此消息"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
-                <button onClick={() => window.electronAPI.stopSessionAgent(s.sessionKey)} className="rounded px-1.5 py-0.5 text-xs text-red-400 hover:bg-red-600/20" title="停止此会话">
-                  <Square size={10} />
-                </button>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </div>
       )}
 
       {/* Queue messages */}
-      {showQueue && queueMessages.length > 0 && (
-        <div className="mx-6 space-y-1 rounded-lg border border-yellow-800/50 bg-yellow-950/20 p-3">
-          <div className="mb-2 text-xs font-medium text-yellow-400">
-            待处理消息 ({queueMessages.length})
+      {showQueue && (
+        <div className="mx-6 rounded-xl border border-gray-800 bg-gray-900/80 p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-xs font-medium text-gray-400">全局消息队列</span>
+            <span className="text-xs text-gray-600">{queueMessages.length} 条</span>
           </div>
-          {queueMessages.map((msg: any) => (
-            <div
-              key={msg.index}
-              className="rounded border border-gray-800 bg-gray-900/50 px-3 py-2 text-xs text-gray-300"
-            >
-              {msg.chatId && <span className="mr-2 rounded bg-gray-700/80 px-1.5 py-0.5 text-[10px] text-gray-400">{msg.chatType === "group" ? "群聊" : "私聊"}</span>}
-              {msg.preview}
+          {queueMessages.length === 0 ? (
+            <p className="text-center text-xs text-gray-600">队列为空</p>
+          ) : (
+            <div className="space-y-1.5">
+              {queueMessages.map((msg) => (
+                <div key={msg.fileId || msg.index} className="group flex items-start justify-between gap-2 rounded-lg bg-gray-800/60 px-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-medium text-blue-400">{getSessionLabel(msg)}</span>
+                      <span className="text-[10px] text-gray-500">{formatTimestamp(msg.timestamp)}</span>
+                    </div>
+                    <p className="mt-0.5 truncate text-xs text-gray-300">{msg.preview}</p>
+                  </div>
+                  <button
+                    onClick={(e) => handleDeleteQueueMessage(msg.fileId, e)}
+                    className="shrink-0 rounded p-0.5 text-gray-600 opacity-0 transition hover:bg-red-600/20 hover:text-red-400 group-hover:opacity-100"
+                    title="删除此消息"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              ))}
             </div>
-          ))}
+          )}
         </div>
       )}
 

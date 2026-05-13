@@ -18,6 +18,7 @@ import {
   pollFileQueueBatch,
   getQueueLength as getFileQueueLength,
   getQueueMessages as getFileQueueMessages,
+  deleteQueueMessage as deleteFileQueueMessage,
   getDistinctSessions,
   cleanupStaleMessages,
   type QueueMessage,
@@ -519,6 +520,15 @@ function startHttpServer(): Promise<number> {
 
         if (method === "GET" && pathname === "/queue") {
           json(res, { length: getFileQueueLength(), messages: getFileQueueMessages() });
+          return;
+        }
+
+        if (method === "POST" && pathname === "/queue-delete") {
+          const body = JSON.parse(await readBody(req));
+          const { fileId } = body as { fileId?: string };
+          if (!fileId) { json(res, { ok: false, error: "fileId required" }, 400); return; }
+          const ok = deleteFileQueueMessage(fileId);
+          json(res, { ok, queueLength: getFileQueueLength() });
           return;
         }
 
