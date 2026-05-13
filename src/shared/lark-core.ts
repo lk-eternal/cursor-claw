@@ -142,7 +142,9 @@ export class LarkSender {
       const content = item?.body?.content;
       if (!content) return null;
       const msgType: string = item?.msg_type ?? "text";
-      return await this.processIncomingMessage(messageId, msgType, content);
+      this.log("DEBUG", `fetchMessageContent(${messageId}) type=${msgType} content=${content.substring(0, 200)}`);
+      const result = await this.processIncomingMessage(messageId, msgType, content);
+      return result || null;
     } catch (e: any) {
       this.log("WARN", `拉取消息内容失败 (${messageId}): ${e?.message ?? e}`);
       return null;
@@ -294,18 +296,44 @@ export class LarkSender {
           if (parsed.image_key) { result.imageKeys.push({ messageId, imageKey: parsed.image_key }); result.text = "[图片]"; }
           break;
         case "post": {
+          const localized = parsed.zh_cn ?? parsed.en_us ?? parsed.ja_jp ?? parsed;
           const parts: string[] = [];
-          if (parsed.title) parts.push(parsed.title);
-          for (const line of (parsed.content ?? []) as any[][]) {
+          if (localized.title) parts.push(localized.title);
+          const lines = localized.content ?? localized.elements ?? [];
+          if (!Array.isArray(lines)) { result.text = content; break; }
+          for (const line of lines) {
+            if (!Array.isArray(line)) continue;
             for (const el of line) {
               if (el.tag === "text" && el.text) parts.push(el.text);
               else if (el.tag === "img" && el.image_key) { result.imageKeys.push({ messageId, imageKey: el.image_key }); parts.push("[图片]"); }
               else if (el.tag === "a" && el.text) parts.push(el.text);
+              else if (el.tag === "at" && el.user_name) parts.push(`@${el.user_name}`);
+              else if (el.tag === "emotion" && el.emoji_type) parts.push(`[${el.emoji_type}]`);
             }
           }
           result.text = parts.join(""); break;
         }
-        default: result.text = parsed.text ?? content;
+        case "interactive": {
+          const elements = parsed.body?.elements ?? parsed.elements ?? [];
+          if (!Array.isArray(elements)) { result.text = "[卡片消息]"; break; }
+          const parts: string[] = [];
+          for (const el of elements) {
+            if (el.tag === "markdown" && el.content) parts.push(el.content);
+            else if (el.tag === "div" && el.text?.content) parts.push(el.text.content);
+            else if (el.tag === "plain_text" && el.content) parts.push(el.content);
+          }
+          result.text = parts.join("\n") || "[卡片消息]"; break;
+        }
+        case "file": result.text = `[文件: ${parsed.file_name ?? "未知"}]`; break;
+        case "audio": result.text = "[语音消息]"; break;
+        case "video": result.text = "[视频]"; break;
+        case "media": result.text = "[媒体]"; break;
+        case "sticker": result.text = "[表情包]"; break;
+        case "share_chat": result.text = "[分享群聊]"; break;
+        case "share_user": result.text = "[分享名片]"; break;
+        case "merge_forward": result.text = "[合并转发消息]"; break;
+        case "system": result.text = "[系统消息]"; break;
+        default: result.text = parsed.text ?? "[不支持的消息类型]";
       }
     } catch { result.text = content; }
     return result;
@@ -341,7 +369,7 @@ export class LarkSender {
           const rawContent: string = msg?.content ?? "";
           const messageType: string = msg?.message_type ?? "text";
           let text = rawContent;
-          try { text = JSON.parse(rawContent)?.text ?? rawContent; } catch { /* use raw */ }
+          try { text = LarkSender.parseMessageContent(messageId, messageType, rawContent).text || rawContent; } catch { /* use raw */ }
           const senderOpenId = senderObj?.sender_id?.open_id;
           const parentId: string = msg?.parent_id ?? "";
           const mentions: LarkMention[] = (msg?.mentions ?? []).map((m: any) => ({ key: m.key ?? "", id: m.id?.open_id ?? "", name: m.name ?? "" }));

@@ -63,22 +63,31 @@ const emptyMcpForm: McpEditForm = { json: MCP_TEMPLATE, source: "global" }
 
 function CliStatusPanel() {
   const [status, setStatus] = useState<{ checking: boolean; cliFound?: boolean; loggedIn?: boolean; identity?: string; error?: string }>({ checking: true })
-  useEffect(() => {
-    let cancelled = false
-    ;(async () => {
-      try {
-        const cliOk = await window.electronAPI.checkCli()
-        if (cancelled) return
-        if (!cliOk) { setStatus({ checking: false, cliFound: false }); return }
-        const login = await window.electronAPI.checkCliLogin()
-        if (cancelled) return
-        setStatus({ checking: false, cliFound: login.cliFound, loggedIn: login.loggedIn, identity: login.identityLine, error: login.error })
-      } catch (e) {
-        if (!cancelled) setStatus({ checking: false, error: String(e) })
-      }
-    })()
-    return () => { cancelled = true }
+  const [loggingIn, setLoggingIn] = useState(false)
+
+  const refresh = useCallback(async (force = false) => {
+    setStatus((s) => ({ ...s, checking: true }))
+    try {
+      const cliOk = await window.electronAPI.checkCli()
+      if (!cliOk) { setStatus({ checking: false, cliFound: false }); return }
+      const login = await window.electronAPI.checkCliLogin({ forceRefresh: force })
+      setStatus({ checking: false, cliFound: login.cliFound, loggedIn: login.loggedIn, identity: login.identityLine, error: login.error })
+    } catch (e) {
+      setStatus({ checking: false, error: String(e) })
+    }
   }, [])
+
+  useEffect(() => { refresh(true) }, [refresh])
+
+  const handleReLogin = useCallback(async () => {
+    setLoggingIn(true)
+    try {
+      await window.electronAPI.loginCli()
+      await refresh(true)
+    } finally {
+      setLoggingIn(false)
+    }
+  }, [refresh])
 
   if (status.checking) return <div className="flex items-center gap-2 text-xs text-gray-500"><Loader2 size={12} className="animate-spin" />检测中...</div>
   if (!status.cliFound) return (
@@ -89,8 +98,19 @@ function CliStatusPanel() {
   )
   return (
     <div className={`rounded-lg border px-4 py-3 ${status.loggedIn ? "border-green-800/50 bg-green-900/20" : "border-red-800/50 bg-red-900/20"}`}>
-      <div className="flex items-center gap-2 text-sm">
-        {status.loggedIn ? <><ShieldCheck size={14} className="text-green-400" /><span className="text-green-400">已登录</span></> : <><ShieldAlert size={14} className="text-red-400" /><span className="text-red-400">未登录</span></>}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2 text-sm">
+          {status.loggedIn ? <><ShieldCheck size={14} className="text-green-400" /><span className="text-green-400">已登录</span></> : <><ShieldAlert size={14} className="text-red-400" /><span className="text-red-400">未登录</span></>}
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={handleReLogin} disabled={loggingIn} className="flex items-center gap-1 rounded px-2 py-1 text-xs text-blue-400 hover:bg-gray-800 disabled:opacity-50">
+            {loggingIn ? <Loader2 size={12} className="animate-spin" /> : <LogIn size={12} />}
+            {loggingIn ? "登录中..." : "重新登录"}
+          </button>
+          <button onClick={() => refresh(true)} className="flex items-center gap-1 rounded px-2 py-1 text-xs text-gray-400 hover:bg-gray-800">
+            <RefreshCw size={12} />刷新
+          </button>
+        </div>
       </div>
       {status.identity && <p className="mt-1 text-xs text-gray-400">{status.identity}</p>}
       {status.error && <p className="mt-1 text-xs text-red-400">{status.error}</p>}
@@ -190,21 +210,42 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
   const [showApiKey, setShowApiKey] = useState(false)
   const { showAlert, showConfirm, ModalPortal } = useInlineModal()
 
+  const bindAbort = useRef(false)
+
   const handleBind = async () => {
     if (!appId.trim() || !appSecret.trim()) {
       await showAlert("提示", "请先填写飞书 App ID 和 App Secret")
       return
     }
-    const status = await window.electronAPI.getDaemonStatus()
-    if (!status.running) {
-      if (!await showConfirm("启动 Daemon", "绑定需要先启动 Daemon 长连接，是否立即启动？")) return
-      const r = await window.electronAPI.startDaemon()
-      if (!r.ok) { await showAlert("错误", `Daemon 启动失败：${r.error || "未知错误"}`); return }
-      await new Promise((r) => setTimeout(r, 2000))
-    }
+    bindAbort.current = false
     setBindWaiting(true)
-    const r = await window.electronAPI.startBind()
-    if (!r.ok) { setBindWaiting(false); await showAlert("错误", r.error || "绑定启动失败") }
+
+    try {
+      const result = await window.electronAPI.startTempConnection(appId.trim(), appSecret.trim())
+      if (bindAbort.current) return
+      if (result.ok && result.chatId) {
+        setReceiveId(result.chatId)
+        await window.electronAPI.saveConfig({ larkReceiveId: result.chatId })
+      } else {
+        await showAlert("绑定失败", result.error ?? "未收到绑定结果")
+      }
+    } catch (e: unknown) {
+      if (!bindAbort.current) await showAlert("绑定失败", e instanceof Error ? e.message : String(e))
+    } finally {
+      setBindWaiting(false)
+      window.electronAPI.stopTempConnection()
+    }
+  }
+
+  const cancelBind = () => {
+    bindAbort.current = true
+    setBindWaiting(false)
+    window.electronAPI.stopTempConnection()
+  }
+
+  const handleUnbind = async () => {
+    if (!await showConfirm("解绑确认", "确定要解除主用户绑定吗？解绑后将无法接收私聊消息。")) return
+    setReceiveId("")
   }
 
   const startWechatQrLogin = useCallback(async () => {
@@ -342,13 +383,6 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
     void window.electronAPI.getAppVersion().then(setAppVersion)
   }, [])
 
-  useEffect(() => {
-    const off = window.electronAPI.onBindResult((data) => {
-      setBindWaiting(false)
-      if (data.ok && data.value) setReceiveId(data.value)
-    })
-    return off
-  }, [])
 
   useEffect(() => {
     const offS = window.electronAPI.onUpdaterStatus((s) => {
@@ -846,29 +880,27 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                     <div>
                       <h4 className="mb-2 text-xs font-medium text-gray-400">主用户绑定</h4>
                       <div className="flex items-center gap-3 rounded-lg border border-gray-700 px-4 py-3">
-                        {receiveId
+                        {bindWaiting
                           ? <>
-                              <CheckCircle2 size={16} className="text-green-400" />
-                              <span className="flex-1 text-sm text-gray-300">已绑定 <span className="ml-1 font-mono text-xs text-gray-500">{receiveId}</span></span>
-                              {bindWaiting
-                                ? <button type="button" onClick={() => setBindWaiting(false)} className="flex items-center gap-1 text-xs text-gray-500 transition hover:text-red-400">
-                                    <Loader2 size={12} className="animate-spin" />取消
-                                  </button>
-                                : <button type="button" onClick={handleBind} className="text-xs text-gray-500 transition hover:text-blue-400">重新绑定</button>
-                              }
-                              <span className="text-gray-700">|</span>
-                              <button type="button" onClick={() => setReceiveId("")} className="text-xs text-gray-500 transition hover:text-red-400">解绑</button>
-                              <span className="text-gray-700">|</span>
-                              <button type="button" onClick={async () => { const r = await window.electronAPI.testBind(); if (!r.ok) void showAlert("错误", r.error || "测试失败") }} className="text-xs text-gray-500 transition hover:text-green-400">测试</button>
+                              <Loader2 size={16} className="animate-spin text-blue-400" />
+                              <span className="flex-1 text-sm text-blue-300">请在飞书私聊中向机器人发送一条消息...</span>
+                              <button type="button" onClick={cancelBind} className="rounded-md border border-gray-600 px-3 py-1.5 text-xs text-gray-400 transition hover:border-red-500 hover:text-red-400">取消</button>
                             </>
-                          : <>
-                              <ShieldAlert size={16} className="text-yellow-500" />
-                              <span className="flex-1 text-sm text-gray-500">{bindWaiting ? "请在飞书私聊中发送一条消息..." : "未绑定"}</span>
-                              {bindWaiting
-                                ? <button type="button" onClick={() => setBindWaiting(false)} className="rounded-md border border-gray-600 px-3 py-1.5 text-xs text-gray-400 transition hover:border-red-500 hover:text-red-400">取消</button>
-                                : <button type="button" onClick={handleBind} className="flex items-center gap-1.5 rounded-md border border-gray-600 px-3 py-1.5 text-xs text-gray-300 transition hover:border-blue-500 hover:text-blue-400">绑定</button>
-                              }
-                            </>
+                          : receiveId
+                            ? <>
+                                <CheckCircle2 size={16} className="text-green-400" />
+                                <span className="flex-1 text-sm text-gray-300">已绑定 <span className="ml-1 font-mono text-xs text-gray-500">{receiveId}</span></span>
+                                <button type="button" onClick={handleBind} className="text-xs text-gray-500 transition hover:text-blue-400">重新绑定</button>
+                                <span className="text-gray-700">|</span>
+                                <button type="button" onClick={handleUnbind} className="text-xs text-gray-500 transition hover:text-red-400">解绑</button>
+                                <span className="text-gray-700">|</span>
+                                <button type="button" onClick={async () => { const r = await window.electronAPI.testBind(); if (!r.ok) void showAlert("错误", r.error || "测试失败") }} className="text-xs text-gray-500 transition hover:text-green-400">测试</button>
+                              </>
+                            : <>
+                                <ShieldAlert size={16} className="text-yellow-500" />
+                                <span className="flex-1 text-sm text-gray-500">未绑定</span>
+                                <button type="button" onClick={handleBind} className="flex items-center gap-1.5 rounded-md border border-gray-600 px-3 py-1.5 text-xs text-gray-300 transition hover:border-blue-500 hover:text-blue-400">绑定</button>
+                              </>
                         }
                       </div>
                     </div>

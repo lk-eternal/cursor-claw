@@ -258,24 +258,6 @@ function clearFileQueue(): number {
   } catch { return 0; }
 }
 
-// ── 主用户绑定 ─────────────────────────────────────────────
-
-let bindWaiting = false;
-
-function startBind(): void {
-  bindWaiting = true;
-  log("INFO", "进入主用户绑定等待状态");
-}
-
-function tryCaptureBind(chatType: string, chatId: string, senderOpenId?: string): boolean {
-  if (!bindWaiting || chatType !== "p2p") return false;
-  bindWaiting = false;
-  const payload = JSON.stringify({ openId: senderOpenId ?? "", chatId });
-  process.stdout.write(`__BIND_RESULT__:${payload}\n`);
-  log("INFO", `主用户绑定完成: openId=${senderOpenId}, chatId=${chatId}`);
-  return true;
-}
-
 // ── 飞书 WebSocket 长连接 ────────────────────────────────
 
 function isBotMentioned(ev: LarkMessageEvent): boolean {
@@ -302,8 +284,6 @@ function startLarkConnection(): void {
       return;
     }
 
-    if (tryCaptureBind(chatType, chatId, senderOpenId)) return;
-
     const cleanText = chatType === "group" ? stripMentionTags(text) : text;
     log("INFO", `收到消息 [${chatType}] chat=${chatId} sender=${senderOpenId ?? "?"}${parentId ? ` reply=${parentId}` : ""}: ${cleanText.slice(0, 100)}`);
 
@@ -324,12 +304,12 @@ function startLarkConnection(): void {
       pushMessage(content, messageId, chatId, chatType, senderOpenId, parentId);
     };
 
-    if (messageType === "image" || messageType === "post") {
-      sender!.processIncomingMessage(messageId, messageType, rawContent)
-        .then((result) => enqueue(result))
-        .catch(() => enqueue(cleanText));
-    } else {
+    if (messageType === "text") {
       enqueue(cleanText);
+    } else {
+      sender!.processIncomingMessage(messageId, messageType, rawContent)
+        .then((result) => enqueue(result || cleanText))
+        .catch(() => enqueue(cleanText));
     }
   });
 }
@@ -540,13 +520,6 @@ function startHttpServer(): Promise<number> {
             removeLockFile();
             process.exit(0);
           }, 200);
-          return;
-        }
-
-        if (method === "POST" && pathname === "/start-bind") {
-          if (!sender) { json(res, { ok: false, error: "飞书未启用" }, 400); return; }
-          startBind();
-          json(res, { ok: true });
           return;
         }
 
@@ -1206,23 +1179,5 @@ export async function daemonMain(): Promise<void> {
   );
 
   log("INFO", `Daemon 就绪 ✓ port=${daemonPort}`);
-}
-
-export async function tempMain(): Promise<void> {
-  if (!FEISHU_ENABLED || !sender || !APP_ID || !APP_SECRET) {
-    log("ERROR", "飞书未启用或凭据未配置，无法进入绑定模式");
-    process.exit(1);
-  }
-
-  log("INFO", "临时长连接模式启动（仅用于绑定）");
-
-  process.on("SIGINT", () => process.exit(0));
-  process.on("SIGTERM", () => process.exit(0));
-
-  startBind();
-
-  sender.startConnection(APP_ID, APP_SECRET, ENCRYPT_KEY, (ev) => {
-    tryCaptureBind(ev.chatType, ev.chatId, ev.senderOpenId);
-  });
 }
 

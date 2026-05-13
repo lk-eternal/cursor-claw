@@ -21,6 +21,7 @@ import {
   ChevronUp,
   LogIn,
   MessageSquare,
+  Bird,
 } from "lucide-react"
 import SearchableSelect from "../components/SearchableSelect"
 import TitleBar from "../components/TitleBar"
@@ -67,6 +68,8 @@ export default function Setup({ onComplete, onExit }: Props) {
   const [appSecret, setAppSecret] = useState("")
   const [showSecret, setShowSecret] = useState(false)
   const [showBotTip, setShowBotTip] = useState(false)
+  const [showScopes, setShowScopes] = useState(false)
+  const [showEvents, setShowEvents] = useState(false)
   const [scopesCopied, setScopesCopied] = useState(false)
   const [tempConnecting, setTempConnecting] = useState(false)
   const [tempConnected, setTempConnected] = useState(false)
@@ -95,6 +98,7 @@ export default function Setup({ onComplete, onExit }: Props) {
   const [loadingModels, setLoadingModels] = useState(false)
   const [cliReady, setCliReady] = useState<boolean | null>(null)
   const [cliLoggedIn, setCliLoggedIn] = useState<boolean | null>(null)
+  const [cliIdentity, setCliIdentity] = useState<string | undefined>()
   const [cliInstalling, setCliInstalling] = useState(false)
   const [cliLoggingIn, setCliLoggingIn] = useState(false)
   const [cliMsg, setCliMsg] = useState("")
@@ -103,7 +107,7 @@ export default function Setup({ onComplete, onExit }: Props) {
   const [launchSteps, setLaunchSteps] = useState<StepStatus[]>([])
   const [launching, setLaunching] = useState(false)
 
-  const { showAlert, ModalPortal } = useInlineModal()
+  const { showAlert, showConfirm, ModalPortal } = useInlineModal()
   const tempConnCleanupRef = useRef(false)
 
   useEffect(() => {
@@ -159,8 +163,14 @@ export default function Setup({ onComplete, onExit }: Props) {
     } catch (e: unknown) {
       setTempConnecting(false)
       setTempConnected(false)
-      setBindingStatus("error")
-      setBindMsg(e instanceof Error ? e.message : String(e))
+      const msg = e instanceof Error ? e.message : String(e)
+      if (msg === "cancelled") {
+        setBindingStatus("idle")
+        setBindMsg("")
+      } else {
+        setBindingStatus("error")
+        setBindMsg(msg)
+      }
     }
   }, [appId, appSecret])
 
@@ -193,12 +203,15 @@ export default function Setup({ onComplete, onExit }: Props) {
     return () => { unsub1(); unsub2() }
   }, [])
 
-  const checkAndLoadCli = useCallback(async () => {
+  const checkAndLoadCli = useCallback(async (forceRefresh = false) => {
     const ok = await window.electronAPI.checkCli()
     setCliReady(ok)
     if (ok) {
-      const loginStatus = await window.electronAPI.checkCliLogin()
-      setCliLoggedIn(loginStatus.loggedIn)
+      setCliLoggedIn(null)
+      setCliIdentity(undefined)
+      const loginStatus = await window.electronAPI.checkCliLogin({ forceRefresh })
+      setCliLoggedIn(loginStatus.loggedIn ?? false)
+      setCliIdentity(loginStatus.identityLine)
       if (loginStatus.loggedIn) await fetchModels()
     }
   }, [])
@@ -209,7 +222,7 @@ export default function Setup({ onComplete, onExit }: Props) {
     try {
       const r = await window.electronAPI.loginCli()
       setCliMsg(r.output)
-      if (r.ok) await checkAndLoadCli()
+      if (r.ok) await checkAndLoadCli(true)
     } catch (e: unknown) {
       setCliMsg(e instanceof Error ? e.message : String(e))
     }
@@ -226,19 +239,28 @@ export default function Setup({ onComplete, onExit }: Props) {
   }
 
   useEffect(() => {
-    if (step === 1 && enableFeishu && bindingStatus === "idle" && !tempConnecting) {
-      startTempAndBind()
-    }
     if (step === 1 && enableWechat && wechatQrStatus === "idle") {
       startWechatQrLogin()
     }
-  }, [step, bindingStatus, wechatQrStatus])
+  }, [step, wechatQrStatus])
+
+  useEffect(() => {
+    if (step === 2 && agentMode === "cli" && cliReady === null) {
+      checkAndLoadCli(true)
+    }
+  }, [step, agentMode])
 
   const canNext = (): boolean => {
     if (step === 0) return enableFeishu || enableWechat
     if (step === 1) {
-      if (enableFeishu && !appId.trim()) return false
+      if (enableFeishu && (!appId.trim() || !appSecret.trim())) return false
       if (enableWechat && wechatQrStatus !== "confirmed") return false
+      return true
+    }
+    if (step === 2) {
+      if (!workspaceDir.trim()) return false
+      if (agentMode === "cli") return cliReady === true && cliLoggedIn === true
+      if (agentMode === "sdk") return !!cursorApiKey.trim()
       return true
     }
     return true
@@ -274,21 +296,28 @@ export default function Setup({ onComplete, onExit }: Props) {
     }
   }
 
-  const next = async () => {
-    await saveStepConfig(step)
-    if (step === 1) {
-      if (tempConnected) { window.electronAPI.stopTempConnection(); setTempConnected(false) }
-      if (wechatQrStatus !== "confirmed") window.electronAPI.wechatQrLoginCancel()
+  const cleanupStep1 = () => {
+    if (tempConnecting || tempConnected || bindingStatus === "waiting") {
+      window.electronAPI.stopTempConnection()
+      setTempConnecting(false)
+      setTempConnected(false)
+      setBindingStatus((s) => s === "bound" ? s : "idle")
+      setBindMsg("")
     }
-    setStep((s) => Math.min(s + 1, totalSteps - 1))
-  }
-  const prev = () => {
-    if (step === 1) {
-      if (tempConnected) { window.electronAPI.stopTempConnection(); setTempConnected(false); setBindingStatus("idle"); setBindMsg("") }
+    if (wechatQrStatus !== "confirmed" && wechatQrStatus !== "idle") {
       window.electronAPI.wechatQrLoginCancel()
       setWechatQrStatus("idle")
       setWechatQrUrl("")
     }
+  }
+
+  const next = async () => {
+    await saveStepConfig(step)
+    if (step === 1) cleanupStep1()
+    setStep((s) => Math.min(s + 1, totalSteps - 1))
+  }
+  const prev = () => {
+    if (step === 1) cleanupStep1()
     setStep((s) => Math.max(s - 1, 0))
   }
   const skip = () => next()
@@ -417,8 +446,8 @@ export default function Setup({ onComplete, onExit }: Props) {
             </p>
             <div className="space-y-3">
               {([
-                { key: "feishu" as const, label: "飞书", desc: "通过飞书机器人收发消息，支持私聊和群聊", emoji: "🪶" },
-                { key: "wechat" as const, label: "微信", desc: "通过微信ClawBot接入，支持私聊", emoji: "💬" },
+                { key: "feishu" as const, label: "飞书", desc: "通过飞书机器人收发消息，支持私聊和群聊", icon: <Bird size={18} className="text-blue-400" /> },
+                { key: "wechat" as const, label: "微信", desc: "通过微信ClawBot接入，支持私聊", icon: <MessageSquare size={18} className="text-green-400" /> },
               ]).map((ch) => {
                 const enabled = ch.key === "feishu" ? enableFeishu : enableWechat
                 const toggle = ch.key === "feishu" ? setEnableFeishu : setEnableWechat
@@ -430,7 +459,7 @@ export default function Setup({ onComplete, onExit }: Props) {
                     <input type="checkbox" checked={enabled} onChange={() => toggle(!enabled)} className="mt-1 h-4 w-4 rounded border-gray-600 text-blue-600" />
                     <div className="flex-1">
                       <div className="flex items-center gap-2">
-                        <span className="text-lg">{ch.emoji}</span>
+                        {ch.icon}
                         <span className="text-sm font-medium">{ch.label}</span>
                       </div>
                       <p className="mt-1 text-xs text-gray-500">{ch.desc}</p>
@@ -454,7 +483,7 @@ export default function Setup({ onComplete, onExit }: Props) {
             {enableFeishu && (
               <section className="space-y-4 rounded-xl border border-gray-800 p-5">
                 <div className="flex items-center justify-between">
-                  <h3 className="flex items-center gap-2 text-sm font-medium"><span>🪶</span> 飞书</h3>
+                  <h3 className="flex items-center gap-2 text-sm font-medium"><Bird size={16} className="text-blue-400" /> 飞书</h3>
                   <a href="https://open.feishu.cn/app?lang=zh-CN" target="_blank" rel="noreferrer" className="flex items-center gap-1 text-xs text-gray-400 hover:text-blue-400">
                     <ExternalLink size={12} />创建应用
                   </a>
@@ -494,10 +523,13 @@ export default function Setup({ onComplete, onExit }: Props) {
                   )}
                 </div>
 
-                {/* Permission scopes */}
+                {/* Permission scopes (collapsible) */}
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <span className="text-xs text-gray-400">应用权限</span>
+                    <button onClick={() => setShowScopes(!showScopes)} className="flex items-center gap-1 text-xs text-gray-400 hover:text-white">
+                      <ChevronRight size={12} className={`transition-transform ${showScopes ? "rotate-90" : ""}`} />
+                      应用权限 ({REQUIRED_SCOPES.length})
+                    </button>
                     <div className="flex items-center gap-2">
                       {appId.trim() && (
                         <a href={`https://open.feishu.cn/app/${appId.trim()}/auth`} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-xs text-gray-500 hover:text-blue-400">
@@ -509,32 +541,39 @@ export default function Setup({ onComplete, onExit }: Props) {
                       </button>
                     </div>
                   </div>
-                  <div className="rounded-lg border border-gray-800 divide-y divide-gray-800">
-                    {REQUIRED_SCOPES.map((p) => (
-                      <div key={p.scope} className="flex items-center justify-between px-3 py-1.5">
-                        <code className="text-[11px] text-blue-400">{p.scope}</code>
-                        <span className="text-[11px] text-gray-600">{p.desc}</span>
-                      </div>
-                    ))}
-                  </div>
+                  {showScopes && (
+                    <div className="rounded-lg border border-gray-800 divide-y divide-gray-800">
+                      {REQUIRED_SCOPES.map((p) => (
+                        <div key={p.scope} className="flex items-center justify-between px-3 py-1.5">
+                          <code className="text-[11px] text-blue-400">{p.scope}</code>
+                          <span className="text-[11px] text-gray-600">{p.desc}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
-                {/* Event subscription */}
+                {/* Event subscription (collapsible) */}
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <span className="text-xs text-gray-400">事件订阅</span>
+                    <button onClick={() => setShowEvents(!showEvents)} className="flex items-center gap-1 text-xs text-gray-400 hover:text-white">
+                      <ChevronRight size={12} className={`transition-transform ${showEvents ? "rotate-90" : ""}`} />
+                      事件订阅 (1)
+                    </button>
                     {appId.trim() && (
                       <a href={`https://open.feishu.cn/app/${appId.trim()}/event`} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-xs text-gray-500 hover:text-blue-400">
                         <ExternalLink size={10} />设置事件
                       </a>
                     )}
                   </div>
-                  <div className="rounded-lg border border-gray-800 divide-y divide-gray-800 text-xs">
-                    <div className="flex items-center justify-between px-3 py-1.5">
-                      <code className="text-blue-400">im.message.receive_v1</code>
-                      <span className="text-gray-600">长连接（WebSocket）</span>
+                  {showEvents && (
+                    <div className="rounded-lg border border-gray-800 divide-y divide-gray-800 text-xs">
+                      <div className="flex items-center justify-between px-3 py-1.5">
+                        <code className="text-blue-400">im.message.receive_v1</code>
+                        <span className="text-gray-600">长连接（WebSocket）</span>
+                      </div>
                     </div>
-                  </div>
+                  )}
                 </div>
 
                 {/* Publish reminder */}
@@ -549,20 +588,42 @@ export default function Setup({ onComplete, onExit }: Props) {
 
                 {/* Bind status */}
                 {appId.trim() && appSecret.trim() && (<>
-                  {(bindingStatus === "idle" || bindingStatus === "waiting") && (
-                    <div className="rounded-lg border border-blue-800/50 bg-blue-950/20 p-3 space-y-1">
+                  {bindingStatus === "idle" && (
+                    <button
+                      onClick={startTempAndBind}
+                      className="w-full rounded-lg border border-blue-600 bg-blue-600/20 px-4 py-2.5 text-xs font-medium text-blue-300 hover:bg-blue-600/30 transition"
+                    >
+                      开始绑定
+                    </button>
+                  )}
+                  {bindingStatus === "waiting" && (
+                    <div className="rounded-lg border border-blue-800/50 bg-blue-950/20 p-3 space-y-2">
                       <div className="flex items-center gap-2">
                         <Loader2 size={14} className="animate-spin text-blue-400" />
                         <span className="text-xs font-medium text-blue-300">{tempConnected ? "等待绑定..." : "正在启动长连接..."}</span>
                       </div>
                       {tempConnected && <p className="text-xs text-blue-200/70">请在飞书中向机器人发送任意消息。</p>}
+                      <button
+                        onClick={() => window.electronAPI.stopTempConnection()}
+                        className="text-xs text-gray-500 hover:text-red-400"
+                      >
+                        取消
+                      </button>
                     </div>
                   )}
                   {bindingStatus === "bound" && (
                     <div className="flex items-center gap-3 rounded-lg border border-gray-700 px-3 py-2">
                       <CheckCircle2 size={14} className="text-green-400" />
                       <span className="flex-1 text-xs text-gray-300">已绑定 <span className="font-mono text-gray-500">{receiveId}</span></span>
-                      <button onClick={() => { setBindingStatus("idle"); setBindMsg(""); setReceiveId(""); setTempConnected(false) }} className="text-xs text-gray-500 hover:text-blue-400">重新绑定</button>
+                      <button
+                        onClick={async () => {
+                          const ok = await showConfirm("重新绑定", "确定要重新绑定吗？当前绑定关系将被清除。")
+                          if (ok) { setBindingStatus("idle"); setBindMsg(""); setReceiveId(""); setTempConnected(false) }
+                        }}
+                        className="text-xs text-gray-500 hover:text-blue-400"
+                      >
+                        重新绑定
+                      </button>
                       <span className="text-gray-700">|</span>
                       <button onClick={async () => { const r = await window.electronAPI.testBind(); if (!r.ok) void showAlert("错误", r.error || "测试失败"); else void showAlert("成功", "测试消息已发送") }} className="text-xs text-gray-500 hover:text-green-400">测试</button>
                     </div>
@@ -584,7 +645,7 @@ export default function Setup({ onComplete, onExit }: Props) {
             {/* WeChat config - QR code login */}
             {enableWechat && (
               <section className="space-y-4 rounded-xl border border-gray-800 p-5">
-                <h3 className="flex items-center gap-2 text-sm font-medium"><span>💬</span> 微信</h3>
+                <h3 className="flex items-center gap-2 text-sm font-medium"><MessageSquare size={16} className="text-green-400" /> 微信</h3>
                 <p className="text-xs text-gray-400">使用手机微信扫描二维码绑定ClawBot。</p>
 
                 {wechatQrStatus === "loading" && (
@@ -696,15 +757,15 @@ export default function Setup({ onComplete, onExit }: Props) {
               <div className="border-t border-gray-800 pt-4 space-y-3">
                 <h3 className="text-sm font-medium text-gray-400">CLI 状态</h3>
                 {cliReady === null && (
-                  <button onClick={checkAndLoadCli} className="flex items-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 transition hover:bg-gray-800">
-                    <RefreshCw size={14} />检测 Cursor CLI
-                  </button>
+                  <div className="flex items-center gap-2 text-sm text-gray-400">
+                    <Loader2 size={14} className="animate-spin" />正在检测 Cursor CLI...
+                  </div>
                 )}
                 {cliReady === false && (
                   <div className="rounded-lg border border-yellow-800/50 bg-yellow-950/20 p-4 space-y-3">
                     <p className="text-sm text-yellow-300">Cursor CLI 未安装。</p>
                     <button
-                      onClick={async () => { setCliInstalling(true); setCliMsg(""); const r = await window.electronAPI.installCli(); setCliMsg(r.output); if (r.ok) { setCliReady(true); await checkAndLoadCli() } setCliInstalling(false) }}
+                      onClick={async () => { setCliInstalling(true); setCliMsg(""); const r = await window.electronAPI.installCli(); setCliMsg(r.output); if (r.ok) await checkAndLoadCli(true); setCliInstalling(false) }}
                       disabled={cliInstalling}
                       className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500 disabled:opacity-50"
                     >
@@ -712,6 +773,11 @@ export default function Setup({ onComplete, onExit }: Props) {
                       {cliInstalling ? "安装中..." : "一键安装 CLI"}
                     </button>
                     {cliMsg && <pre className="text-xs text-gray-400 whitespace-pre-wrap">{cliMsg}</pre>}
+                  </div>
+                )}
+                {cliReady && cliLoggedIn === null && (
+                  <div className="flex items-center gap-2 text-sm text-gray-400">
+                    <Loader2 size={14} className="animate-spin" />正在检查登录状态...
                   </div>
                 )}
                 {cliReady && cliLoggedIn === false && (
@@ -722,7 +788,7 @@ export default function Setup({ onComplete, onExit }: Props) {
                         {cliLoggingIn ? <Loader2 size={14} className="animate-spin" /> : <LogIn size={14} />}
                         {cliLoggingIn ? "登录中..." : "登录 CLI"}
                       </button>
-                      <button onClick={checkAndLoadCli} className="flex items-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 transition hover:bg-gray-800">
+                      <button onClick={() => checkAndLoadCli(true)} className="flex items-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 transition hover:bg-gray-800">
                         <RefreshCw size={14} />重新检测
                       </button>
                     </div>
@@ -731,7 +797,19 @@ export default function Setup({ onComplete, onExit }: Props) {
                 )}
                 {cliReady && cliLoggedIn && (
                   <div className="space-y-3">
-                    <div className="flex items-center gap-2 text-sm text-green-400"><CheckCircle2 size={16} />CLI 已就绪（已登录）</div>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-sm text-green-400"><CheckCircle2 size={16} />CLI 已就绪（已登录）</div>
+                      <div className="flex items-center gap-1">
+                        <button onClick={doLoginCli} disabled={cliLoggingIn} className="flex items-center gap-1 rounded px-2 py-1 text-xs text-blue-400 hover:bg-gray-800 disabled:opacity-50">
+                          {cliLoggingIn ? <Loader2 size={12} className="animate-spin" /> : <LogIn size={12} />}
+                          {cliLoggingIn ? "登录中..." : "重新登录"}
+                        </button>
+                        <button onClick={() => checkAndLoadCli(true)} className="flex items-center gap-1 rounded px-2 py-1 text-xs text-gray-400 hover:bg-gray-800">
+                          <RefreshCw size={12} />刷新
+                        </button>
+                      </div>
+                    </div>
+                    {cliIdentity && <p className="text-xs text-gray-400 ml-6">{cliIdentity}</p>}
                     <button onClick={fetchModels} disabled={loadingModels} className="flex items-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm text-gray-300 hover:bg-gray-800 disabled:opacity-50">
                       {loadingModels ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}刷新模型列表
                     </button>

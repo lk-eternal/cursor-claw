@@ -183,7 +183,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle("daemon:queue-delete", (_e, fileId: string) => deleteQueueMessage(fileId))
   ipcMain.handle("daemon:queue-clear", () => clearMessageQueue())
   ipcMain.handle("cli:check", () => checkCliInstalled())
-  ipcMain.handle("cli:login-status", () => checkAgentLoggedIn())
+  ipcMain.handle("cli:login-status", (_, opts?: { forceRefresh?: boolean }) => checkAgentLoggedIn(opts))
   ipcMain.handle("cli:install", () => installCli())
   ipcMain.handle("cli:login", () => loginCli())
   ipcMain.handle("mcp:list-all", () => getMcpServerList())

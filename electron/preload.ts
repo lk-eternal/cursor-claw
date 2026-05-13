@@ -163,7 +163,7 @@ const api = {
   deleteQueueMessage: (fileId: string): Promise<boolean> => ipcRenderer.invoke("daemon:queue-delete", fileId),
   clearQueueMessages: (): Promise<number> => ipcRenderer.invoke("daemon:queue-clear"),
   checkCli: (): Promise<boolean> => ipcRenderer.invoke("cli:check"),
-  checkCliLogin: (): Promise<CliLoginStatus> => ipcRenderer.invoke("cli:login-status"),
+  checkCliLogin: (opts?: { forceRefresh?: boolean }): Promise<CliLoginStatus> => ipcRenderer.invoke("cli:login-status", opts),
   installCli: (): Promise<{ ok: boolean; output: string }> => ipcRenderer.invoke("cli:install"),
   loginCli: (): Promise<{ ok: boolean; output: string }> => ipcRenderer.invoke("cli:login"),
   listModels: (): Promise<{ ok: boolean; models: { id: string; label: string; current: boolean }[]; error?: string }> => ipcRenderer.invoke("models:list"),
@@ -211,7 +211,6 @@ const api = {
   startTempConnection: (appId: string, appSecret: string): Promise<{ ok: boolean; openId?: string; chatId?: string; error?: string }> =>
     ipcRenderer.invoke("temp-conn:start", appId, appSecret),
   stopTempConnection: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("temp-conn:stop"),
-  startBind: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("bind:start"),
   testBind: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("bind:test"),
   testWechat: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("bind:test-wechat"),
   onBindResult: (cb: (data: { ok: boolean; value: string }) => void) => {

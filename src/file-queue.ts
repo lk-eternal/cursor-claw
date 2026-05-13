@@ -200,8 +200,10 @@ export function getQueueMessages(): QueueMessageView[] {
 
 export function deleteQueueMessage(fileId: string): boolean {
   if (!queueDir || !fileId) return false;
+  const basename = path.basename(fileId);
+  if (basename !== fileId || !fileId.endsWith(".qmsg")) return false;
   try {
-    const filePath = path.join(queueDir, fileId);
+    const filePath = path.join(queueDir, basename);
     if (fs.existsSync(filePath)) { fs.unlinkSync(filePath); return true; }
     return false;
   } catch {

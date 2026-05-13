@@ -138,7 +138,8 @@ let cachedPort: number | null = null
 /** 本次由本应用启动成功时 Daemon 所绑定的工作目录（用于目录切换后的状态判断） */
 let activeDaemonWorkspaceDir: string | null = null
 
-let tempConnProcess: ChildProcess | null = null
+let tempWsClient: import("@larksuiteoapi/node-sdk").WSClient | null = null
+let tempConnAbort: (() => void) | null = null
 
 function getDaemonEntryPath(): string {
   if (app.isPackaged) {
@@ -149,53 +150,41 @@ function getDaemonEntryPath(): string {
   return path.join(app.getAppPath(), "dist", "daemon-entry.js")
 }
 
-function startTempConnection(appId: string, appSecret: string): Promise<{ openId: string; chatId: string }> {
+async function startTempConnection(appId: string, appSecret: string): Promise<{ openId: string; chatId: string }> {
   stopTempConnection()
+  const Lark = await import("@larksuiteoapi/node-sdk")
   return new Promise((resolve, reject) => {
-    const entry = getDaemonEntryPath()
-    const env: Record<string, string> = {
-      ...process.env as Record<string, string>,
-      LARK_APP_ID: appId,
-      LARK_APP_SECRET: appSecret,
-      LARK_TEMP_MODE: "1",
-      APP_DATA_DIR: app.getPath("userData"),
-    }
-    const child = spawn(process.execPath, [entry], { env, stdio: ["ignore", "pipe", "pipe"] })
-    tempConnProcess = child
-
     let settled = false
-    child.stdout?.on("data", (chunk: Buffer) => {
-      const lines = chunk.toString().split("\n")
-      for (const line of lines) {
-        if (line.startsWith("__BIND_RESULT__:")) {
-          const json = line.slice("__BIND_RESULT__:".length).trim()
-          try {
-            const result = JSON.parse(json)
-            settled = true
-            resolve(result)
-          } catch { /* ignore parse error */ }
-        }
-      }
+    const timeout = setTimeout(() => {
+      if (!settled) { settled = true; stopTempConnection(); reject(new Error("绑定超时（90秒内未收到飞书私聊消息）")) }
+    }, 90_000)
+    const settle = (fn: () => void) => { if (!settled) { settled = true; clearTimeout(timeout); tempConnAbort = null; fn() } }
+    tempConnAbort = () => settle(() => reject(new Error("cancelled")))
+
+    const eventDispatcher = new Lark.EventDispatcher({}).register({
+      "im.message.receive_v1": (data: any) => {
+        const msg = data?.message
+        if ((msg?.chat_type ?? "p2p") !== "p2p") return
+        settle(() => resolve({
+          openId: data?.sender?.sender_id?.open_id ?? "",
+          chatId: msg?.chat_id ?? "",
+        }))
+      },
     })
-    child.stderr?.on("data", (chunk: Buffer) => {
-      const text = chunk.toString().trim()
-      if (text) pushLog(`[TEMP_CONN] ${text}`)
-    })
-    child.on("exit", (code) => {
-      tempConnProcess = null
-      if (!settled) reject(new Error(`临时连接进程退出: code=${code}`))
-    })
-    child.on("error", (err) => {
-      tempConnProcess = null
-      if (!settled) reject(err)
-    })
+
+    const wsClient = new Lark.WSClient({ appId, appSecret, loggerLevel: Lark.LoggerLevel.error })
+    tempWsClient = wsClient
+    wsClient.start({ eventDispatcher })
+      .then(() => pushLog("[TEMP_CONN] 飞书临时 WebSocket 连接建立成功"))
+      .catch((e: any) => settle(() => reject(new Error(`WebSocket 连接失败: ${e?.message ?? e}`))))
   })
 }
 
 function stopTempConnection(): void {
-  if (tempConnProcess) {
-    tempConnProcess.kill()
-    tempConnProcess = null
+  if (tempConnAbort) { tempConnAbort(); tempConnAbort = null }
+  if (tempWsClient) {
+    try { tempWsClient.close({ force: true }) } catch { /* ignore */ }
+    tempWsClient = null
   }
 }
 
@@ -232,7 +221,7 @@ async function larkSendTestMessage(receiveId: string): Promise<void> {
   if (!token) throw new Error("获取 access_token 失败")
   const sendResp = await httpsPost(
     `https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id`,
-    { receive_id: receiveId, msg_type: "text", content: JSON.stringify({ text: "🔗 绑定测试成功！连接正常。" }) },
+    { receive_id: receiveId, msg_type: "interactive", content: JSON.stringify({ schema: "2.0", config: { wide_screen_mode: true }, body: { elements: [{ tag: "markdown", content: "🔗 绑定测试成功！连接正常。" }] } }) },
     { Authorization: `Bearer ${token}` },
   )
   if (sendResp?.code !== 0) throw new Error(sendResp?.msg || "发送失败")
@@ -970,16 +959,6 @@ export function initDaemonManager(): void {
   ipcMain.handle("daemon:get-log-buffer", () => getLogBuffer())
   ipcMain.handle("agent:stop", () => { stopAgent(); return { ok: true } })
   ipcMain.handle("agent:sessions", () => getSessionAgentList())
-  ipcMain.handle("bind:start", async () => {
-    const lock = readLockFile()
-    if (!lock) return { ok: false, error: "Daemon 未运行" }
-    try {
-      await httpPost(`http://127.0.0.1:${lock.port}/start-bind`, {})
-      return { ok: true }
-    } catch {
-      return { ok: false, error: "无法通知 Daemon" }
-    }
-  })
   ipcMain.handle("bind:test", async () => {
     const chatId = getConfig().larkReceiveId?.trim()
     if (!chatId) return { ok: false, error: "未绑定主用户" }
