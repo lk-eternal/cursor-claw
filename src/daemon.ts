@@ -754,12 +754,25 @@ function startHttpServer(): Promise<number> {
     });
 
     server.requestTimeout = 300_000;
-    server.on("error", (err) => { log("ERROR", `HTTP Server 错误: ${err.message}`); reject(err); });
-    server.listen(CONFIGURED_PORT, "127.0.0.1", () => {
-      const addr = server.address() as { port: number };
-      log("INFO", `HTTP Server 监听: http://127.0.0.1:${addr.port}`);
-      resolve(addr.port);
-    });
+
+    const tryListen = (port: number) => {
+      server.once("error", (err: NodeJS.ErrnoException) => {
+        if (port > 0 && err.code === "EADDRINUSE") {
+          log("WARN", `端口 ${port} 被占用，回退到随机端口`);
+          server.removeAllListeners("error");
+          tryListen(0);
+          return;
+        }
+        log("ERROR", `HTTP Server 错误: ${err.message}`);
+        reject(err);
+      });
+      server.listen(port, "127.0.0.1", () => {
+        const addr = server.address() as { port: number };
+        log("INFO", `HTTP Server 监听: http://127.0.0.1:${addr.port}`);
+        resolve(addr.port);
+      });
+    };
+    tryListen(CONFIGURED_PORT);
   });
 }
 

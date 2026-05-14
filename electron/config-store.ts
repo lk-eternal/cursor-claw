@@ -35,6 +35,8 @@ export interface AppConfig {
   wechatEnabled: boolean
   wechatToken: string
   wechatAccountId: string
+  /** Daemon 固定端口（0 = 随机） */
+  daemonPort: number
   /** Agent 驱动模式: cli = Cursor CLI (默认), sdk = @cursor/sdk */
   agentMode: "cli" | "sdk"
   cursorApiKey: string
@@ -69,6 +71,7 @@ const defaults: AppConfig = {
   wechatEnabled: false,
   wechatToken: "",
   wechatAccountId: "",
+  daemonPort: 19528,
   agentMode: "cli",
   cursorApiKey: "",
   othersModel: "",

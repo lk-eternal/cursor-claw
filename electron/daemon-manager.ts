@@ -414,6 +414,7 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
       LARK_WORKSPACE_DIR: config.workspaceDir,
       APP_DATA_DIR: app.getPath("userData"),
       NODE_USE_ENV_PROXY: "1",
+      ...(config.daemonPort ? { LARK_DAEMON_PORT: String(config.daemonPort) } : {}),
       ...(feishuReady ? {
         FEISHU_ENABLED: "1",
         LARK_APP_ID: config.larkAppId,
