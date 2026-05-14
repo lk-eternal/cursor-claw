@@ -187,6 +187,8 @@ interface ElectronAPI {
   testBind(): Promise<{ ok: boolean; error?: string }>
   testWechat(): Promise<{ ok: boolean; error?: string }>
   reloadWechat(token: string, accountId: string): Promise<{ ok: boolean; error?: string; message?: string }>
+  wechatWaitFirstMessage(token: string, accountId: string): Promise<{ ok: boolean; chatId?: string; error?: string }>
+  wechatCancelWaitMessage(): Promise<{ ok: boolean }>
 }
 
 declare global {

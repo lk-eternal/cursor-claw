@@ -1094,6 +1094,56 @@ export function initDaemonManager(): void {
     return { ok: true }
   })
 
+  // ── Wait for first WeChat message (runs in main process, no daemon) ──
+  let wechatTempMgr: any = null
+
+  ipcMain.handle("wechat:wait-first-message", async (_e, token: string, accountId: string) => {
+    if (wechatTempMgr) { try { await wechatTempMgr.stop() } catch {} wechatTempMgr = null }
+    const dataDir = path.join(app.getPath("userData"), "wechat-data")
+    const { WeChatManager } = await import("../src/wechat-manager.js")
+
+    return new Promise<{ ok: boolean; chatId?: string; error?: string }>((resolve) => {
+      let done = false
+      const timer = setTimeout(() => {
+        if (done) return; done = true
+        wechatTempMgr?.stop().catch(() => {}); wechatTempMgr = null
+        resolve({ ok: false, error: "等待超时(5分钟)，请重试" })
+      }, 5 * 60_000)
+
+      const mgr = new WeChatManager({
+        dataDir,
+        log: (level: string, ...args: unknown[]) => console.log(`[main-wechat-temp] [${level}]`, ...args),
+        onMessage: (msg: any) => {
+          if (done) return
+          if (msg.chatType === "p2p" && msg.chatId) {
+            done = true; clearTimeout(timer)
+            const stateFile = path.join(dataDir, "state.json")
+            try {
+              let st: any = {}
+              if (fs.existsSync(stateFile)) st = JSON.parse(fs.readFileSync(stateFile, "utf-8"))
+              st.lastChatId = msg.chatId
+              if (!fs.existsSync(path.dirname(stateFile))) fs.mkdirSync(path.dirname(stateFile), { recursive: true })
+              fs.writeFileSync(stateFile, JSON.stringify(st))
+            } catch {}
+            mgr.stop().then(() => { wechatTempMgr = null }).catch(() => { wechatTempMgr = null })
+            resolve({ ok: true, chatId: msg.chatId })
+          }
+        },
+      })
+      wechatTempMgr = mgr
+      mgr.start(token, accountId).catch((err: any) => {
+        if (done) return; done = true; clearTimeout(timer)
+        wechatTempMgr = null
+        resolve({ ok: false, error: err?.message ?? "连接失败" })
+      })
+    })
+  })
+
+  ipcMain.handle("wechat:cancel-wait-message", async () => {
+    if (wechatTempMgr) { try { await wechatTempMgr.stop() } catch {} wechatTempMgr = null }
+    return { ok: true }
+  })
+
   ipcMain.handle("scheduled-tasks:get", () => readTasksFromFile())
   ipcMain.handle("scheduled-tasks:save", (_, tasks) => {
     writeTasksToFile(tasks)

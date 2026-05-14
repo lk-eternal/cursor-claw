@@ -233,6 +233,9 @@ const api = {
   wechatQrLogin: (): Promise<{ ok: boolean; botToken?: string; accountId?: string; baseUrl?: string; error?: string }> =>
     ipcRenderer.invoke("wechat:qr-login"),
   wechatQrLoginCancel: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("wechat:qr-login-cancel"),
+  wechatWaitFirstMessage: (token: string, accountId: string): Promise<{ ok: boolean; chatId?: string; error?: string }> =>
+    ipcRenderer.invoke("wechat:wait-first-message", token, accountId),
+  wechatCancelWaitMessage: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("wechat:cancel-wait-message"),
   onWechatSetupQrCode: (cb: (url: string) => void) => {
     const handler = (_: unknown, url: string) => cb(url)
     ipcRenderer.on("wechat:setup-qrcode", handler)

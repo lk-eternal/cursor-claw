@@ -258,18 +258,21 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
       const res = await window.electronAPI.wechatQrLogin()
       wechatQrBusy.current = false
       if (res.ok) {
-        setWechatQrStatus("confirmed")
         const newToken = res.botToken ?? ""
         const newAccountId = res.accountId ?? ""
         setWechatToken(newToken)
         setWechatAccountId(newAccountId)
         await window.electronAPI.saveConfig({ wechatToken: newToken, wechatAccountId: newAccountId })
-        const reload = await window.electronAPI.reloadWechat(newToken, newAccountId)
-        if (!reload.ok) {
-          setWechatQrStatus("error")
-          setWechatQrMsg(reload.error ?? "微信重载失败，请重试")
-          return
-        }
+        setWechatQrStatus("confirmed")
+        window.electronAPI.wechatWaitFirstMessage(newToken, newAccountId).then((r) => {
+          if (r.ok) {
+            setWechatQrStatus("idle")
+            window.electronAPI.reloadWechat(newToken, newAccountId).catch(() => {})
+          } else {
+            setWechatQrStatus("idle")
+            if (r.error) setWechatQrMsg(r.error)
+          }
+        }).catch(() => { setWechatQrStatus("idle") })
       } else if (res.error === "cancelled") {
         setWechatQrStatus("idle")
       } else {
@@ -282,13 +285,6 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
       setWechatQrMsg(e?.message ?? String(e))
     }
   }, [])
-
-  useEffect(() => {
-    if (wechatReady && wechatToken && wechatQrStatus === "confirmed") {
-      const t = setTimeout(() => setWechatQrStatus("idle"), 1500)
-      return () => clearTimeout(t)
-    }
-  }, [wechatReady, wechatToken, wechatQrStatus])
 
   useEffect(() => {
     const offQr = window.electronAPI.onWechatSetupQrCode?.((url: string) => {
@@ -1001,15 +997,10 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                           <div className="flex items-center gap-2 text-xs text-green-400">
                             <CheckCircle2 size={14} />扫码成功
                           </div>
-                          {!wechatReady ? (
-                            <div className="flex items-center gap-2 rounded-md border border-yellow-700 bg-yellow-900/20 px-3 py-2 text-xs text-yellow-400">
-                              <Loader2 size={12} className="animate-spin" />请在微信中给机器人发送一条消息以完成绑定
-                            </div>
-                          ) : (
-                            <div className="flex items-center gap-2 text-xs text-green-400">
-                              <CheckCircle2 size={14} />绑定完成，即将跳转...
-                            </div>
-                          )}
+                          <div className="flex items-center gap-2 text-xs text-gray-400">
+                            <Loader2 size={14} className="animate-spin" />请在微信中给机器人发送一条消息以完成绑定...
+                          </div>
+                          <button onClick={async () => { await window.electronAPI.wechatCancelWaitMessage(); setWechatQrStatus("idle") }} className="text-xs text-gray-500 hover:text-red-400">跳过</button>
                         </div>
                       )}
 
