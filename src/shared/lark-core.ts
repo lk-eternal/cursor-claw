@@ -137,7 +137,10 @@ export class LarkSender {
 
   async fetchMessageContent(messageId: string): Promise<string | null> {
     try {
-      const res = await this.client.im.message.get({ path: { message_id: messageId } });
+      const res = await this.client.im.message.get({
+        path: { message_id: messageId },
+        params: { card_msg_content_type: "user_card_content" } as any,
+      });
       const item = (res as any)?.data?.items?.[0];
       const content = item?.body?.content;
       if (!content) return null;
@@ -286,6 +289,83 @@ export class LarkSender {
 
   // ── 消息解析 & 处理 ───────────────────────────────────
 
+  private static extractCardText(elements: any[], parts: string[]): void {
+    for (const el of elements) {
+      if (!el) continue;
+      if (Array.isArray(el)) { this.extractCardText(el, parts); continue; }
+      if (typeof el !== "object") continue;
+
+      const tag: string = el.tag ?? "";
+      switch (tag) {
+        case "markdown":
+        case "plain_text":
+          if (el.content) parts.push(el.content);
+          break;
+        case "text":
+          if (el.text) parts.push(el.text);
+          break;
+        case "div":
+          if (el.text?.content) parts.push(el.text.content);
+          if (Array.isArray(el.extra)) this.extractCardText(el.extra, parts);
+          break;
+        case "column_set":
+          if (Array.isArray(el.columns)) {
+            for (const col of el.columns) {
+              if (Array.isArray(col.elements)) this.extractCardText(col.elements, parts);
+            }
+          }
+          break;
+        case "form":
+        case "interactive_container":
+        case "collapsible_panel":
+          if (Array.isArray(el.elements)) this.extractCardText(el.elements, parts);
+          break;
+        case "action":
+          if (Array.isArray(el.actions)) {
+            for (const act of el.actions) {
+              const txt = act.text?.content ?? act.text?.text;
+              if (txt) parts.push(`[按钮: ${txt}]`);
+            }
+          }
+          break;
+        case "button":
+          if (el.text?.content) parts.push(`[按钮: ${el.text.content}]`);
+          break;
+        case "note":
+          if (Array.isArray(el.elements)) {
+            const noteTexts = el.elements.filter((n: any) => n.content).map((n: any) => n.content);
+            if (noteTexts.length) parts.push(noteTexts.join(" "));
+          }
+          break;
+        case "table":
+          if (el.header?.titles) parts.push(el.header.titles.map((t: any) => t.content ?? t).join(" | "));
+          if (Array.isArray(el.rows)) {
+            for (const row of el.rows) {
+              if (Array.isArray(row)) parts.push(row.map((c: any) => c?.content ?? c?.text ?? String(c ?? "")).join(" | "));
+            }
+          }
+          break;
+        case "img":
+        case "img_combination":
+          parts.push("[图片]");
+          break;
+        case "chart":
+          parts.push("[图表]");
+          break;
+        case "person":
+          if (el.user_id) parts.push(`[@用户]`);
+          break;
+        case "hr":
+          break;
+        default:
+          if (el.text?.content) parts.push(el.text.content);
+          if (el.content && typeof el.content === "string") parts.push(el.content);
+          if (Array.isArray(el.elements)) this.extractCardText(el.elements, parts);
+          break;
+      }
+    }
+  }
+
   static parseMessageContent(messageId: string, messageType: string, content: string): ParsedMessage {
     const result: ParsedMessage = { text: "", imageKeys: [] };
     try {
@@ -316,24 +396,34 @@ export class LarkSender {
           result.text = lineTexts.join("\n"); break;
         }
         case "interactive": {
-          const elements = parsed.body?.elements ?? parsed.elements ?? [];
-          if (!Array.isArray(elements)) { result.text = "[卡片消息]"; break; }
           const parts: string[] = [];
-          for (const el of elements) {
-            if (el.tag === "markdown" && el.content) parts.push(el.content);
-            else if (el.tag === "div" && el.text?.content) parts.push(el.text.content);
-            else if (el.tag === "plain_text" && el.content) parts.push(el.content);
-          }
+          const header = parsed.header ?? parsed.i18n_header?.zh_cn ?? parsed.i18n_header?.en_us;
+          if (header?.title?.content) parts.push(header.title.content);
+          const isV2 = parsed.schema === "2.0";
+          const elements = isV2
+            ? (parsed.body?.elements ?? [])
+            : (parsed.elements ?? parsed.i18n_elements?.zh_cn ?? parsed.i18n_elements?.en_us ?? parsed.i18n_body?.zh_cn?.elements ?? []);
+          if (Array.isArray(elements)) this.extractCardText(elements, parts);
           result.text = parts.join("\n") || "[卡片消息]"; break;
         }
         case "file": result.text = `[文件: ${parsed.file_name ?? "未知"}]`; break;
-        case "audio": result.text = "[语音消息]"; break;
-        case "video": result.text = "[视频]"; break;
-        case "media": result.text = "[媒体]"; break;
+        case "audio": result.text = parsed.duration ? `[语音消息 ${Math.ceil(parsed.duration / 1000)}s]` : "[语音消息]"; break;
+        case "video": result.text = parsed.file_name ? `[视频: ${parsed.file_name}]` : "[视频]"; break;
+        case "media": result.text = parsed.file_name ? `[媒体: ${parsed.file_name}]` : "[媒体]"; break;
         case "sticker": result.text = "[表情包]"; break;
-        case "share_chat": result.text = "[分享群聊]"; break;
+        case "share_chat": result.text = parsed.chat_name ? `[分享群聊: ${parsed.chat_name}]` : "[分享群聊]"; break;
         case "share_user": result.text = "[分享名片]"; break;
-        case "merge_forward": result.text = "[合并转发消息]"; break;
+        case "merge_forward": {
+          const fwdParts: string[] = ["[合并转发消息]"];
+          if (Array.isArray(parsed.message_list)) {
+            for (const msg of parsed.message_list.slice(0, 5)) {
+              const sub = this.parseMessageContent(msg.message_id ?? "", msg.msg_type ?? "text", msg.content ?? "{}");
+              if (sub.text) fwdParts.push(`  > ${sub.text.split("\n")[0]}`);
+            }
+            if (parsed.message_list.length > 5) fwdParts.push(`  > ...共${parsed.message_list.length}条`);
+          }
+          result.text = fwdParts.join("\n"); break;
+        }
         case "system": result.text = "[系统消息]"; break;
         default: result.text = parsed.text ?? "[不支持的消息类型]";
       }
