@@ -615,10 +615,10 @@ export default function Setup({ onComplete, onExit }: Props) {
                 </div>
 
                 {/* Publish reminder */}
-                <div className="rounded-lg border border-amber-800/40 bg-amber-950/20 px-3 py-2">
-                  <p className="text-xs text-amber-300">⚠️ 绑定前请确保已在飞书后台「版本管理」中创建并发布版本。</p>
+                <div className="flex items-center gap-1 text-xs text-gray-500">
+                  <span>绑定前请确保已在飞书后台「版本管理」中创建并发布版本。</span>
                   {appId.trim() && (
-                    <a href={`https://open.feishu.cn/app/${appId.trim()}/version`} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 text-xs text-blue-400 hover:underline">
+                    <a href={`https://open.feishu.cn/app/${appId.trim()}/version`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-blue-400 hover:underline">
                       <ExternalLink size={10} />前往版本管理
                     </a>
                   )}
@@ -660,7 +660,7 @@ export default function Setup({ onComplete, onExit }: Props) {
                         重新绑定
                       </button>
                       <span className="text-gray-700">|</span>
-                      <button onClick={async () => { try { const r = await window.electronAPI.testBind(); if (!r.ok) void showAlert("错误", r.error || "测试失败"); else void showAlert("成功", "测试消息已发送") } catch { void showAlert("提示", "Daemon 未运行，请先启动 Daemon 后再测试") } }} className="text-xs text-gray-500 hover:text-green-400">测试</button>
+                      <button onClick={async () => { const r = await window.electronAPI.testBind(); if (!r.ok) void showAlert("错误", r.error || "测试失败"); else void showAlert("成功", "测试消息已发送") }} className="text-xs text-gray-500 hover:text-green-400">测试</button>
                     </div>
                   )}
                   {bindingStatus === "error" && (
@@ -708,15 +708,12 @@ export default function Setup({ onComplete, onExit }: Props) {
                 )}
 
                 {wechatQrStatus === "confirmed" && (
-                  <div className="flex items-center gap-3 rounded-lg border border-green-800/50 bg-green-950/20 p-4">
-                    <CheckCircle2 size={20} className="text-green-400" />
-                    <div className="flex-1">
-                      <p className="text-sm font-medium text-green-300">微信登录成功</p>
-                      {wechatAccountId && <p className="text-xs text-gray-500">Account: {wechatAccountId}</p>}
-                    </div>
-                    <button onClick={() => { prevWechatToken.current = wechatToken; prevWechatAccountId.current = wechatAccountId; setWechatQrStatus("idle"); setWechatToken(""); setWechatQrUrl("") }} className="text-xs text-gray-500 hover:text-blue-400">重新扫码</button>
+                  <div className="flex items-center gap-3 rounded-lg border border-gray-700 px-3 py-2">
+                    <CheckCircle2 size={14} className="text-green-400" />
+                    <span className="flex-1 text-xs text-gray-300">已绑定{wechatAccountId && <span className="ml-1 font-mono text-gray-500">{wechatAccountId}</span>}</span>
+                    <button onClick={() => { prevWechatToken.current = wechatToken; prevWechatAccountId.current = wechatAccountId; setWechatQrStatus("idle"); setWechatToken(""); setWechatQrUrl("") }} className="text-xs text-gray-500 hover:text-blue-400">重新绑定</button>
                     <span className="text-gray-700">|</span>
-                    <button onClick={async () => { try { const r = await window.electronAPI.testWechat(); if (!r.ok) void showAlert("提示", r.error || "测试失败"); else void showAlert("成功", "微信测试消息已发送") } catch { void showAlert("提示", "Daemon 未运行，请先启动 Daemon 后再测试") } }} className="text-xs text-gray-500 hover:text-green-400">测试</button>
+                    <button onClick={async () => { const r = await window.electronAPI.testWechat(); if (!r.ok) void showAlert("提示", r.error || "测试失败"); else void showAlert("成功", "测试消息已发送") }} className="text-xs text-gray-500 hover:text-green-400">测试</button>
                   </div>
                 )}
 

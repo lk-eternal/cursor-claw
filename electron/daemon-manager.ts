@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process"
-import { randomUUID } from "node:crypto"
+import { randomUUID, randomBytes } from "node:crypto"
 import * as http from "node:http"
 import * as https from "node:https"
 import * as path from "node:path"
@@ -225,6 +225,53 @@ async function larkSendTestMessage(receiveId: string): Promise<void> {
     { Authorization: `Bearer ${token}` },
   )
   if (sendResp?.code !== 0) throw new Error(sendResp?.msg || "发送失败")
+}
+
+async function wechatSendTestMessage(): Promise<void> {
+  const cfg = getConfig()
+  if (!cfg.wechatToken) throw new Error("微信 Token 未配置")
+  const dataDir = path.join(app.getPath("userData"), "wechat-data")
+  const stateFile = path.join(dataDir, "state.json")
+  if (!fs.existsSync(stateFile)) throw new Error("暂无微信交互记录，请先给机器人发一条消息")
+  const state = JSON.parse(fs.readFileSync(stateFile, "utf-8"))
+  const chatId = state?.lastChatId as string | undefined
+  if (!chatId) throw new Error("暂无微信交互记录，请先给机器人发一条消息")
+  const ctFile = path.join(dataDir, "wechat-ctx-tokens.json")
+  if (!fs.existsSync(ctFile)) throw new Error("无会话上下文，请先给机器人发一条消息")
+  const ctMap = JSON.parse(fs.readFileSync(ctFile, "utf-8")) as Record<string, string>
+  const contextToken = ctMap[chatId]
+  if (!contextToken) throw new Error("无会话上下文，请先给机器人发一条消息")
+  const clientId = `claw:${Date.now()}-${randomBytes(4).toString("hex")}`
+  const uin = Buffer.from(String(randomBytes(4).readUInt32BE(0)), "utf-8").toString("base64")
+  const bodyStr = JSON.stringify({
+    msg: {
+      from_user_id: "", to_user_id: chatId, client_id: clientId,
+      message_type: 2, message_state: 2,
+      item_list: [{ type: 1, text_item: { text: "🔗 微信测试成功！连接正常。" } }],
+      context_token: contextToken,
+    },
+    base_info: { channel_version: "standalone-0.1.0" },
+  })
+  const res = await fetch("https://ilinkai.weixin.qq.com/ilink/bot/sendmessage", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "AuthorizationType": "ilink_bot_token",
+      "Authorization": `Bearer ${cfg.wechatToken.trim()}`,
+      "Content-Length": String(Buffer.byteLength(bodyStr, "utf-8")),
+      "X-WECHAT-UIN": uin,
+    },
+    body: bodyStr,
+  })
+  const raw = await res.text()
+  if (!res.ok) throw new Error(`微信 API 错误 ${res.status}: ${raw}`)
+  try {
+    const json = JSON.parse(raw)
+    if (json.ret && json.ret !== 0) throw new Error(`微信 API 返回错误: ${json.errmsg ?? raw}`)
+  } catch (e) {
+    if (e instanceof SyntaxError) return
+    throw e
+  }
 }
 
 
@@ -970,11 +1017,9 @@ export function initDaemonManager(): void {
     }
   })
   ipcMain.handle("bind:test-wechat", async () => {
-    const lock = readLockFile()
-    if (!lock?.port) return { ok: false, error: "Daemon 未运行" }
     try {
-      const res = await httpPost(`http://127.0.0.1:${lock.port}/wechat-test`, {}) as { ok?: boolean; error?: string }
-      return res
+      await wechatSendTestMessage()
+      return { ok: true }
     } catch (e: any) {
       return { ok: false, error: e?.message ?? "发送失败" }
     }
@@ -984,6 +1029,14 @@ export function initDaemonManager(): void {
     if (!lock?.port) return { ok: false, error: "Daemon 未运行" }
     try {
       const res = await httpPost(`http://127.0.0.1:${lock.port}/wechat-reload`, { token, accountId }) as { ok?: boolean; error?: string; message?: string }
+      if (res.ok) {
+        setTimeout(async () => {
+          try {
+            const status = await getDaemonStatus()
+            broadcastStatus(status)
+          } catch { /* ignore */ }
+        }, 2000)
+      }
       return res
     } catch (e: any) {
       return { ok: false, error: e?.message ?? "重载失败" }

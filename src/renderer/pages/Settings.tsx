@@ -263,9 +263,13 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
         const newAccountId = res.accountId ?? ""
         setWechatToken(newToken)
         setWechatAccountId(newAccountId)
-        window.electronAPI.saveConfig({ wechatToken: newToken, wechatAccountId: newAccountId }).then(() => {
-          window.electronAPI.reloadWechat(newToken, newAccountId)
-        })
+        await window.electronAPI.saveConfig({ wechatToken: newToken, wechatAccountId: newAccountId })
+        const reload = await window.electronAPI.reloadWechat(newToken, newAccountId)
+        if (!reload.ok) {
+          setWechatQrStatus("error")
+          setWechatQrMsg(reload.error ?? "微信重载失败，请重试")
+          return
+        }
       } else if (res.error === "cancelled") {
         setWechatQrStatus("idle")
       } else {
@@ -278,6 +282,13 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
       setWechatQrMsg(e?.message ?? String(e))
     }
   }, [])
+
+  useEffect(() => {
+    if (wechatReady && wechatToken && wechatQrStatus === "confirmed") {
+      const t = setTimeout(() => setWechatQrStatus("idle"), 1500)
+      return () => clearTimeout(t)
+    }
+  }, [wechatReady, wechatToken, wechatQrStatus])
 
   useEffect(() => {
     const offQr = window.electronAPI.onWechatSetupQrCode?.((url: string) => {
@@ -894,7 +905,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                                 <span className="text-gray-700">|</span>
                                 <button type="button" onClick={handleUnbind} className="text-xs text-gray-500 transition hover:text-red-400">解绑</button>
                                 <span className="text-gray-700">|</span>
-                                <button type="button" onClick={async () => { const r = await window.electronAPI.testBind(); if (!r.ok) void showAlert("错误", r.error || "测试失败") }} className="text-xs text-gray-500 transition hover:text-green-400">测试</button>
+                                <button type="button" onClick={async () => { const r = await window.electronAPI.testBind(); if (!r.ok) void showAlert("错误", r.error || "测试失败"); else void showAlert("成功", "测试消息已发送") }} className="text-xs text-gray-500 transition hover:text-green-400">测试</button>
                               </>
                             : <>
                                 <ShieldAlert size={16} className="text-yellow-500" />
@@ -939,111 +950,89 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                     <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition ${wechatEnabled ? "left-[22px]" : "left-0.5"}`} />
                   </button>
                 </div>
-                {wechatEnabled && (
-                  <div className="space-y-3 rounded-lg border border-gray-700 p-4">
-                    <div className="flex items-center gap-2">
-                      <span className={`h-2 w-2 rounded-full ${
-                        wechatReady ? "bg-green-400"
-                        : wechatStatus === "logging_in" || wechatStatus === "qr_pending" || wechatStatus === "connected" ? "bg-yellow-400"
-                        : wechatToken ? "bg-yellow-400"
-                        : "bg-gray-500"
-                      }`} />
-                      <span className="text-xs text-gray-400">
-                        {wechatReady ? "已连接"
-                        : wechatStatus === "logging_in" ? "连接中..."
-                        : wechatStatus === "qr_pending" ? "等待扫码..."
-                        : wechatStatus === "connected" ? "等待首条消息"
-                        : wechatToken ? "已认证"
-                        : "未认证"}
-                      </span>
+                {wechatEnabled && (wechatToken && wechatQrStatus === "idle"
+                  ? <div className="flex items-center gap-3 rounded-lg border border-gray-700 px-4 py-3">
+                      <CheckCircle2 size={16} className="text-green-400" />
+                      <span className="flex-1 text-sm text-gray-300">{wechatReady ? "已连接" : "已绑定"}{wechatAccountId && <span className="ml-1 font-mono text-xs text-gray-500">{wechatAccountId}</span>}</span>
+                      <button type="button" onClick={startWechatQrLogin} className="text-xs text-gray-500 transition hover:text-blue-400">重新绑定</button>
+                      <span className="text-gray-700">|</span>
+                      <button type="button" onClick={async () => {
+                        if (!await showConfirm("解绑确认", "确定要解除微信绑定吗？解绑后将无法接收微信消息。")) return
+                        setWechatToken(""); setWechatAccountId(""); setWechatQrStatus("idle")
+                        await window.electronAPI.saveConfig({ wechatToken: "", wechatAccountId: "" })
+                        window.electronAPI.reloadWechat("", "")
+                      }} className="text-xs text-gray-500 transition hover:text-red-400">解绑</button>
+                      <span className="text-gray-700">|</span>
+                      <button type="button" onClick={async () => {
+                        const r = await window.electronAPI.testWechat()
+                        if (!r.ok) void showAlert("提示", r.error || "测试失败")
+                        else void showAlert("成功", "微信测试消息已发送")
+                      }} className="text-xs text-gray-500 transition hover:text-green-400">测试</button>
                     </div>
-
-                    {wechatQrStatus === "loading" && (
-                      <div className="flex items-center gap-2 py-4 text-xs text-gray-400">
-                        <Loader2 size={14} className="animate-spin" />正在获取二维码...
-                        <button onClick={async () => { await window.electronAPI.wechatQrLoginCancel(); wechatQrBusy.current = false; setWechatQrStatus("idle") }} className="ml-2 text-xs text-gray-500 hover:text-red-400">取消</button>
-                      </div>
-                    )}
-
-                    {(wechatQrStatus === "wait" || wechatQrStatus === "scaned") && wechatQrUrl && (
-                      <div className="flex flex-col items-center gap-3 py-2">
-                        <div className="rounded-lg bg-white p-3">
-                          <img src={wechatQrUrl} alt="微信登录二维码" className="h-48 w-48" />
+                  : <div className="space-y-3 rounded-lg border border-gray-700 p-4">
+                      {wechatQrStatus === "idle" && !wechatToken && (
+                        <div className="flex items-center gap-2">
+                          <span className="h-2 w-2 rounded-full bg-gray-500" />
+                          <span className="text-xs text-gray-400">未绑定</span>
                         </div>
-                        <p className="text-xs text-gray-400">
-                          {wechatQrStatus === "scaned" ? "✅ 已扫描，请在手机上确认登录" : "请使用手机微信扫描二维码"}
-                        </p>
-                        <button onClick={async () => { await window.electronAPI.wechatQrLoginCancel(); wechatQrBusy.current = false; setWechatQrStatus("idle") }} className="text-xs text-gray-500 transition hover:text-red-400">取消扫码</button>
-                      </div>
-                    )}
+                      )}
 
-                    {wechatQrStatus === "confirmed" && (
-                      <div className="py-2 space-y-2">
-                        <div className="flex items-center gap-2 text-xs text-green-400">
-                          <CheckCircle2 size={14} />扫码成功
+                      {wechatQrStatus === "loading" && (
+                        <div className="flex items-center gap-2 py-4 text-xs text-gray-400">
+                          <Loader2 size={14} className="animate-spin" />正在获取二维码...
+                          <button onClick={async () => { await window.electronAPI.wechatQrLoginCancel(); wechatQrBusy.current = false; setWechatQrStatus("idle") }} className="ml-2 text-xs text-gray-500 hover:text-red-400">取消</button>
                         </div>
-                        {!wechatReady && (
-                          <div className="flex items-center gap-2 rounded-md border border-yellow-700 bg-yellow-900/20 px-3 py-2 text-xs text-yellow-400">
-                            <Loader2 size={12} className="animate-spin" />
-                            请在微信中给机器人发送一条消息以完成认证
+                      )}
+
+                      {(wechatQrStatus === "wait" || wechatQrStatus === "scaned") && wechatQrUrl && (
+                        <div className="flex flex-col items-center gap-3 py-2">
+                          <div className="rounded-lg bg-white p-3">
+                            <img src={wechatQrUrl} alt="微信登录二维码" className="h-48 w-48" />
                           </div>
-                        )}
-                        {wechatReady && (
+                          <p className="text-xs text-gray-400">
+                            {wechatQrStatus === "scaned" ? "✅ 已扫描，请在手机上确认登录" : "请使用手机微信扫描二维码"}
+                          </p>
+                          <button onClick={async () => { await window.electronAPI.wechatQrLoginCancel(); wechatQrBusy.current = false; setWechatQrStatus("idle") }} className="text-xs text-gray-500 transition hover:text-red-400">取消扫码</button>
+                        </div>
+                      )}
+
+                      {wechatQrStatus === "confirmed" && (
+                        <div className="space-y-2 py-2">
                           <div className="flex items-center gap-2 text-xs text-green-400">
-                            <CheckCircle2 size={14} />认证完成，微信通道已就绪
+                            <CheckCircle2 size={14} />扫码成功
                           </div>
-                        )}
-                      </div>
-                    )}
+                          {!wechatReady ? (
+                            <div className="flex items-center gap-2 rounded-md border border-yellow-700 bg-yellow-900/20 px-3 py-2 text-xs text-yellow-400">
+                              <Loader2 size={12} className="animate-spin" />请在微信中给机器人发送一条消息以完成绑定
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-2 text-xs text-green-400">
+                              <CheckCircle2 size={14} />绑定完成，即将跳转...
+                            </div>
+                          )}
+                        </div>
+                      )}
 
-                    {wechatQrStatus === "expired" && (
-                      <div className="space-y-2 py-2">
-                        <p className="text-xs text-yellow-400">二维码已过期</p>
-                        <button onClick={startWechatQrLogin} className="text-xs text-blue-400 hover:underline">重新获取</button>
-                      </div>
-                    )}
+                      {wechatQrStatus === "expired" && (
+                        <div className="space-y-2 py-2">
+                          <p className="text-xs text-yellow-400">二维码已过期</p>
+                          <button onClick={startWechatQrLogin} className="text-xs text-blue-400 hover:underline">重新获取</button>
+                        </div>
+                      )}
 
-                    {wechatQrStatus === "error" && (
-                      <div className="space-y-2 py-2">
-                        <p className="text-xs text-red-400">登录失败：{wechatQrMsg}</p>
-                        <button onClick={startWechatQrLogin} className="text-xs text-blue-400 hover:underline">重试</button>
-                      </div>
-                    )}
+                      {wechatQrStatus === "error" && (
+                        <div className="space-y-2 py-2">
+                          <p className="text-xs text-red-400">登录失败：{wechatQrMsg}</p>
+                          <button onClick={startWechatQrLogin} className="text-xs text-blue-400 hover:underline">重试</button>
+                        </div>
+                      )}
 
-                    {wechatQrStatus === "idle" && !wechatToken && (
-                      <button
-                        onClick={startWechatQrLogin}
-                        className="flex items-center gap-2 rounded-md border border-gray-600 px-3 py-2 text-xs text-gray-300 transition hover:border-blue-500 hover:text-blue-400"
-                      >
-                        <LogIn size={13} />扫码绑定ClawBot
-                      </button>
-                    )}
-
-                    {(wechatQrStatus === "idle" || wechatQrStatus === "confirmed") && wechatToken && (
-                      <div className="flex items-center gap-3">
-                        <button onClick={startWechatQrLogin} className="flex items-center gap-1.5 text-xs text-gray-400 transition hover:text-blue-400">
-                          <RefreshCw size={12} />重新扫码
+                      {wechatQrStatus === "idle" && !wechatToken && (
+                        <button onClick={startWechatQrLogin} className="flex items-center gap-2 rounded-md border border-gray-600 px-3 py-2 text-xs text-gray-300 transition hover:border-blue-500 hover:text-blue-400">
+                          <LogIn size={13} />扫码绑定ClawBot
                         </button>
-                        <span className="text-gray-700">|</span>
-                        <button type="button" onClick={async () => {
-                          if (!await showConfirm("解绑确认", "确定要解除微信绑定吗？解绑后将无法接收微信消息。")) return
-                          setWechatToken(""); setWechatAccountId(""); setWechatQrStatus("idle")
-                          await window.electronAPI.saveConfig({ wechatToken: "", wechatAccountId: "" })
-                          window.electronAPI.reloadWechat("", "")
-                        }} className="text-xs text-gray-400 transition hover:text-red-400">解绑</button>
-                        <span className="text-gray-700">|</span>
-                        <button type="button" onClick={async () => {
-                          try {
-                            const r = await window.electronAPI.testWechat()
-                            if (!r.ok) void showAlert("提示", r.error || "测试失败")
-                            else void showAlert("成功", "微信测试消息已发送")
-                          } catch { void showAlert("提示", "Daemon 未运行，请先启动 Daemon") }
-                        }} className="text-xs text-gray-400 transition hover:text-green-400">测试</button>
-                      </div>
-                    )}
-
-                    <p className="text-xs text-gray-600">扫码成功后自动保存并立即生效。</p>
-                  </div>
+                      )}
+                    </div>
                 )}
               </section>
               <p className="text-xs text-gray-500">至少启用一个消息通道，设置自动保存并立即生效。</p>
