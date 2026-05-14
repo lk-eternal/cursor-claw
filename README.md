@@ -317,7 +317,7 @@ Daemon 进程独立于 Cursor 运行，即使 Agent 会话中断，系统也能�
 3. 点击「连接」，扫码登录
 4. 登录成功后微信消息即可与 Agent 交互
 
-> 微信通道使用 `wechat-ilink-client` 库，通过长轮询方式接收消息。
+> 微信通道使用微信ClawBot，通过长轮询方式接收消息。
 
 ## 全链路研发自动化
 
@@ -407,3 +407,13 @@ npm run dist:mac   # macOS
 ## License
 
 MIT
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=lk-eternal%2Fcursor-claw&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=lk-eternal/cursor-claw&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=lk-eternal/cursor-claw&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=lk-eternal/cursor-claw&type=date&legend=top-left" />
+ </picture>
+</a>
