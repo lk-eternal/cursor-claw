@@ -252,7 +252,7 @@ interface LaunchAgentParams {
 
 async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?: string }> {
   const { sessionKey, chatType, meta, senderOpenId, chatName, taskMessage } = p
-  const useMain = p.useMainWorkspace ?? (chatType === "p2p" || chatType === "task" || chatType === "temp")
+  const useMain = p.useMainWorkspace ?? (chatType === "p2p")
   const config = getConfig()
 
   let workDir = config.workspaceDir

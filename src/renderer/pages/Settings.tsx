@@ -264,7 +264,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
         setWechatToken(newToken)
         setWechatAccountId(newAccountId)
         window.electronAPI.saveConfig({ wechatToken: newToken, wechatAccountId: newAccountId }).then(() => {
-          window.electronAPI.stopDaemon().then(() => window.electronAPI.startDaemon())
+          window.electronAPI.reloadWechat(newToken, newAccountId)
         })
       } else if (res.error === "cancelled") {
         setWechatQrStatus("idle")
@@ -953,7 +953,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                         : wechatStatus === "logging_in" ? "连接中..."
                         : wechatStatus === "qr_pending" ? "等待扫码..."
                         : wechatStatus === "connected" ? "等待首条消息"
-                        : wechatToken ? "已认证（重启 Daemon 后生效）"
+                        : wechatToken ? "已认证"
                         : "未认证"}
                       </span>
                     </div>
@@ -1020,40 +1020,33 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                     )}
 
                     {(wechatQrStatus === "idle" || wechatQrStatus === "confirmed") && wechatToken && (
-                      <div className="space-y-2">
-                        <div className="flex items-center gap-3">
-                          <button
-                            onClick={startWechatQrLogin}
-                            className="flex items-center gap-1.5 text-xs text-gray-400 transition hover:text-blue-400"
-                          >
-                            <RefreshCw size={12} />重新扫码
-                          </button>
-                          {wechatReady && (
-                            <button
-                              type="button"
-                              onClick={async () => {
-                                try {
-                                  const r = await window.electronAPI.testWechat()
-                                  if (!r.ok) void showAlert("提示", r.error || "测试失败")
-                                  else void showAlert("成功", "微信测试消息已发送")
-                                } catch {
-                                  void showAlert("提示", "Daemon 未运行，请先启动 Daemon")
-                                }
-                              }}
-                              className="flex items-center gap-1.5 text-xs text-gray-400 transition hover:text-green-400"
-                            >
-                              测试消息
-                            </button>
-                          )}
-                        </div>
+                      <div className="flex items-center gap-3">
+                        <button onClick={startWechatQrLogin} className="flex items-center gap-1.5 text-xs text-gray-400 transition hover:text-blue-400">
+                          <RefreshCw size={12} />重新扫码
+                        </button>
+                        <span className="text-gray-700">|</span>
+                        <button type="button" onClick={async () => {
+                          if (!await showConfirm("解绑确认", "确定要解除微信绑定吗？解绑后将无法接收微信消息。")) return
+                          setWechatToken(""); setWechatAccountId(""); setWechatQrStatus("idle")
+                          await window.electronAPI.saveConfig({ wechatToken: "", wechatAccountId: "" })
+                          window.electronAPI.reloadWechat("", "")
+                        }} className="text-xs text-gray-400 transition hover:text-red-400">解绑</button>
+                        <span className="text-gray-700">|</span>
+                        <button type="button" onClick={async () => {
+                          try {
+                            const r = await window.electronAPI.testWechat()
+                            if (!r.ok) void showAlert("提示", r.error || "测试失败")
+                            else void showAlert("成功", "微信测试消息已发送")
+                          } catch { void showAlert("提示", "Daemon 未运行，请先启动 Daemon") }
+                        }} className="text-xs text-gray-400 transition hover:text-green-400">测试</button>
                       </div>
                     )}
 
-                    <p className="text-xs text-gray-600">扫码成功后自动保存 Token，重启 Daemon 生效。</p>
+                    <p className="text-xs text-gray-600">扫码成功后自动保存并立即生效。</p>
                   </div>
                 )}
               </section>
-              <p className="text-xs text-gray-500">至少启用一个消息通道，设置自动保存，部分项需重启 Daemon 后生效。</p>
+              <p className="text-xs text-gray-500">至少启用一个消息通道，设置自动保存并立即生效。</p>
             </>)}
 
             {/* ═══ Proxy ═══ */}

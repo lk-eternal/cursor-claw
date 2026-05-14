@@ -979,6 +979,16 @@ export function initDaemonManager(): void {
       return { ok: false, error: e?.message ?? "发送失败" }
     }
   })
+  ipcMain.handle("wechat:reload", async (_e, token: string, accountId: string) => {
+    const lock = readLockFile()
+    if (!lock?.port) return { ok: false, error: "Daemon 未运行" }
+    try {
+      const res = await httpPost(`http://127.0.0.1:${lock.port}/wechat-reload`, { token, accountId }) as { ok?: boolean; error?: string; message?: string }
+      return res
+    } catch (e: any) {
+      return { ok: false, error: e?.message ?? "重载失败" }
+    }
+  })
   ipcMain.handle("agent:stop-session", (_e, sessionKey: string) => { stopSessionAgent(sessionKey); return { ok: true } })
   ipcMain.handle("agent:stop-all-sessions", () => { stopAllSessionAgents(); return { ok: true } })
 
@@ -998,12 +1008,13 @@ export function initDaemonManager(): void {
   ipcMain.handle("wechat:qr-login", async () => {
     if (wechatQrAbort) wechatQrAbort.abort()
     wechatQrAbort = new AbortController()
+    const signal = wechatQrAbort.signal
     try {
       const { WeChatClient } = await import("../src/wechat/index.js")
       const QRCode = await import("qrcode")
       const tmpClient = new WeChatClient()
       const result = await tmpClient.login({
-        signal: wechatQrAbort.signal,
+        signal,
         async onQRCode(url) {
           const dataUrl = await QRCode.toDataURL(url, { width: 280, margin: 2 })
           BrowserWindow.getAllWindows().forEach((w) => w.webContents.send("wechat:setup-qrcode", dataUrl))
@@ -1016,10 +1027,11 @@ export function initDaemonManager(): void {
       if (result.connected) {
         return { ok: true, botToken: result.botToken, accountId: result.accountId, baseUrl: result.baseUrl }
       }
+      if (signal.aborted) return { ok: false, error: "cancelled" }
       return { ok: false, error: result.message }
     } catch (err: any) {
       wechatQrAbort = null
-      if (err?.name === "AbortError") return { ok: false, error: "cancelled" }
+      if (err?.name === "AbortError" || signal.aborted) return { ok: false, error: "cancelled" }
       return { ok: false, error: err?.message ?? String(err) }
     }
   })

@@ -40,9 +40,9 @@ let WORKSPACE_DIR = process.env.LARK_WORKSPACE_DIR ?? process.cwd();
 const MESSAGE_PREFIX = process.env.LARK_MESSAGE_PREFIX ?? "";
 const APP_DATA_DIR = process.env.APP_DATA_DIR || "";
 
-const WECHAT_TOKEN = process.env.WECHAT_TOKEN ?? "";
-const WECHAT_ACCOUNT_ID = process.env.WECHAT_ACCOUNT_ID ?? "";
-const WECHAT_ENABLED = process.env.WECHAT_ENABLED === "1";
+let WECHAT_TOKEN = process.env.WECHAT_TOKEN ?? "";
+let WECHAT_ACCOUNT_ID = process.env.WECHAT_ACCOUNT_ID ?? "";
+let WECHAT_ENABLED = process.env.WECHAT_ENABLED === "1";
 const FEISHU_ENABLED = process.env.FEISHU_ENABLED === "1";
 
 const savedProxyKeys = stripProxyEnv();
@@ -533,6 +533,27 @@ function startHttpServer(): Promise<number> {
             json(res, { ok });
           } catch (e: any) {
             json(res, { ok: false, error: e?.message ?? "发送失败" }, 500);
+          }
+          return;
+        }
+
+        if (method === "POST" && pathname === "/wechat-reload") {
+          const body = JSON.parse(await readBody(req));
+          const token = typeof body.token === "string" ? body.token : "";
+          const accountId = typeof body.accountId === "string" ? body.accountId : "";
+          if (wechatManager) { try { await wechatManager.stop(); } catch { /* ignore */ } wechatManager = null; }
+          WECHAT_TOKEN = token;
+          WECHAT_ACCOUNT_ID = accountId;
+          WECHAT_ENABLED = !!(token && accountId);
+          if (WECHAT_ENABLED) {
+            loadWechatState();
+            wechatManager = initWeChatManager();
+            wechatManager.start(WECHAT_TOKEN, WECHAT_ACCOUNT_ID).catch((e: any) => {
+              log("WARN", `[WeChat] 重载启动失败: ${e?.message ?? e}`);
+            });
+            json(res, { ok: true, message: "微信已重载" });
+          } else {
+            json(res, { ok: true, message: "微信已停止" });
           }
           return;
         }

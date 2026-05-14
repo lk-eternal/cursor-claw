@@ -297,21 +297,23 @@ export class LarkSender {
           break;
         case "post": {
           const localized = parsed.zh_cn ?? parsed.en_us ?? parsed.ja_jp ?? parsed;
-          const parts: string[] = [];
-          if (localized.title) parts.push(localized.title);
+          const lineTexts: string[] = [];
+          if (localized.title) lineTexts.push(localized.title);
           const lines = localized.content ?? localized.elements ?? [];
           if (!Array.isArray(lines)) { result.text = content; break; }
           for (const line of lines) {
             if (!Array.isArray(line)) continue;
+            const segs: string[] = [];
             for (const el of line) {
-              if (el.tag === "text" && el.text) parts.push(el.text);
-              else if (el.tag === "img" && el.image_key) { result.imageKeys.push({ messageId, imageKey: el.image_key }); parts.push("[图片]"); }
-              else if (el.tag === "a" && el.text) parts.push(el.text);
-              else if (el.tag === "at" && el.user_name) parts.push(`@${el.user_name}`);
-              else if (el.tag === "emotion" && el.emoji_type) parts.push(`[${el.emoji_type}]`);
+              if (el.tag === "text" && el.text) segs.push(el.text);
+              else if (el.tag === "img" && el.image_key) { result.imageKeys.push({ messageId, imageKey: el.image_key }); segs.push("[图片]"); }
+              else if (el.tag === "a" && el.text) segs.push(el.text);
+              else if (el.tag === "at" && el.user_name) segs.push(`@${el.user_name}`);
+              else if (el.tag === "emotion" && el.emoji_type) segs.push(`[${el.emoji_type}]`);
             }
+            lineTexts.push(segs.join(""));
           }
-          result.text = parts.join(""); break;
+          result.text = lineTexts.join("\n"); break;
         }
         case "interactive": {
           const elements = parsed.body?.elements ?? parsed.elements ?? [];
@@ -341,11 +343,19 @@ export class LarkSender {
 
   async processIncomingMessage(messageId: string, messageType: string, content: string): Promise<string> {
     const parsed = LarkSender.parseMessageContent(messageId, messageType, content);
+    const total = parsed.imageKeys.length;
+    let text = parsed.text;
+    if (total > 1) {
+      let idx = 0;
+      text = text.replace(/\[图片\]/g, () => `[图片${++idx}]`);
+    }
     const parts: string[] = [];
-    if (parsed.text) parts.push(parsed.text);
-    for (const img of parsed.imageKeys) {
+    if (text) parts.push(text);
+    for (let i = 0; i < total; i++) {
+      const img = parsed.imageKeys[i];
       const localPath = await this.downloadImage(img.messageId, img.imageKey);
-      parts.push(localPath ? `[图片已保存: ${localPath}]` : `[图片下载失败: ${img.imageKey}]`);
+      const label = total > 1 ? `图片${i + 1}` : "图片";
+      parts.push(localPath ? `[${label}已保存: ${localPath}]` : `[${label}下载失败: ${img.imageKey}]`);
     }
     return parts.join("\n");
   }

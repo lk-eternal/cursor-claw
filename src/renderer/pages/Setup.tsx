@@ -76,10 +76,13 @@ export default function Setup({ onComplete, onExit }: Props) {
   const [bindingStatus, setBindingStatus] = useState<"idle" | "waiting" | "bound" | "error">("idle")
   const [bindMsg, setBindMsg] = useState("")
   const [receiveId, setReceiveId] = useState("")
+  const prevReceiveId = useRef("")
 
   // WeChat QR login
   const [wechatToken, setWechatToken] = useState("")
   const [wechatAccountId, setWechatAccountId] = useState("")
+  const prevWechatToken = useRef("")
+  const prevWechatAccountId = useRef("")
   const [wechatQrUrl, setWechatQrUrl] = useState("")
   const [wechatQrStatus, setWechatQrStatus] = useState<"idle" | "loading" | "wait" | "scaned" | "confirmed" | "expired" | "error">("idle")
   const [wechatQrMsg, setWechatQrMsg] = useState("")
@@ -120,7 +123,10 @@ export default function Setup({ onComplete, onExit }: Props) {
       if (cfg.noProxy) setNoProxy(cfg.noProxy)
       if (cfg.larkReceiveId) { setReceiveId(cfg.larkReceiveId); setBindingStatus("bound") }
       if (cfg.wechatEnabled) setEnableWechat(true)
-      if (cfg.wechatToken) setWechatToken(cfg.wechatToken)
+      if (cfg.wechatToken) {
+        setWechatToken(cfg.wechatToken)
+        setWechatQrStatus("confirmed")
+      }
       if (cfg.wechatAccountId) setWechatAccountId(cfg.wechatAccountId)
       if (cfg.agentMode) setAgentMode(cfg.agentMode)
       if (cfg.cursorApiKey) setCursorApiKey(cfg.cursorApiKey)
@@ -137,7 +143,9 @@ export default function Setup({ onComplete, onExit }: Props) {
   }, [])
 
   const startTempAndBind = useCallback(async () => {
+    window.electronAPI.stopTempConnection()
     setTempConnecting(true)
+    setTempConnected(false)
     setBindingStatus("waiting")
     setBindMsg("正在启动临时长连接...")
 
@@ -155,6 +163,11 @@ export default function Setup({ onComplete, onExit }: Props) {
         setBindMsg("")
         await window.electronAPI.saveConfig({ larkReceiveId: result.chatId })
         window.electronAPI.stopTempConnection()
+      } else if (prevReceiveId.current) {
+        setReceiveId(prevReceiveId.current)
+        setBindingStatus("bound")
+        setBindMsg("")
+        setTempConnected(false)
       } else {
         setBindingStatus("error")
         setBindMsg(result.error ?? "绑定失败")
@@ -164,8 +177,16 @@ export default function Setup({ onComplete, onExit }: Props) {
       setTempConnecting(false)
       setTempConnected(false)
       const msg = e instanceof Error ? e.message : String(e)
-      if (msg === "cancelled") {
+      if (msg === "cancelled" && prevReceiveId.current) {
+        setReceiveId(prevReceiveId.current)
+        setBindingStatus("bound")
+        setBindMsg("")
+      } else if (msg === "cancelled") {
         setBindingStatus("idle")
+        setBindMsg("")
+      } else if (prevReceiveId.current) {
+        setReceiveId(prevReceiveId.current)
+        setBindingStatus("bound")
         setBindMsg("")
       } else {
         setBindingStatus("error")
@@ -185,7 +206,13 @@ export default function Setup({ onComplete, onExit }: Props) {
       setWechatQrStatus("confirmed")
       setWechatQrMsg("")
     } else if (result.error === "cancelled") {
-      setWechatQrStatus("idle")
+      if (prevWechatToken.current) {
+        setWechatToken(prevWechatToken.current)
+        setWechatAccountId(prevWechatAccountId.current)
+        setWechatQrStatus("confirmed")
+      } else {
+        setWechatQrStatus("idle")
+      }
     } else {
       setWechatQrStatus("error")
       setWechatQrMsg(result.error ?? "登录失败")
@@ -253,7 +280,7 @@ export default function Setup({ onComplete, onExit }: Props) {
   const canNext = (): boolean => {
     if (step === 0) return enableFeishu || enableWechat
     if (step === 1) {
-      if (enableFeishu && (!appId.trim() || !appSecret.trim())) return false
+      if (enableFeishu && (!appId.trim() || !appSecret.trim() || bindingStatus !== "bound")) return false
       if (enableWechat && wechatQrStatus !== "confirmed") return false
       return true
     }
@@ -301,12 +328,23 @@ export default function Setup({ onComplete, onExit }: Props) {
       window.electronAPI.stopTempConnection()
       setTempConnecting(false)
       setTempConnected(false)
-      setBindingStatus((s) => s === "bound" ? s : "idle")
+      if (prevReceiveId.current) {
+        setReceiveId(prevReceiveId.current)
+        setBindingStatus("bound")
+      } else {
+        setBindingStatus((s) => s === "bound" ? s : "idle")
+      }
       setBindMsg("")
     }
     if (wechatQrStatus !== "confirmed" && wechatQrStatus !== "idle") {
       window.electronAPI.wechatQrLoginCancel()
-      setWechatQrStatus("idle")
+      if (prevWechatToken.current) {
+        setWechatToken(prevWechatToken.current)
+        setWechatAccountId(prevWechatAccountId.current)
+        setWechatQrStatus("confirmed")
+      } else {
+        setWechatQrStatus("idle")
+      }
       setWechatQrUrl("")
     }
   }
@@ -616,16 +654,13 @@ export default function Setup({ onComplete, onExit }: Props) {
                       <CheckCircle2 size={14} className="text-green-400" />
                       <span className="flex-1 text-xs text-gray-300">已绑定 <span className="font-mono text-gray-500">{receiveId}</span></span>
                       <button
-                        onClick={async () => {
-                          const ok = await showConfirm("重新绑定", "确定要重新绑定吗？当前绑定关系将被清除。")
-                          if (ok) { setBindingStatus("idle"); setBindMsg(""); setReceiveId(""); setTempConnected(false) }
-                        }}
+                        onClick={() => { prevReceiveId.current = receiveId; setReceiveId(""); startTempAndBind() }}
                         className="text-xs text-gray-500 hover:text-blue-400"
                       >
                         重新绑定
                       </button>
                       <span className="text-gray-700">|</span>
-                      <button onClick={async () => { const r = await window.electronAPI.testBind(); if (!r.ok) void showAlert("错误", r.error || "测试失败"); else void showAlert("成功", "测试消息已发送") }} className="text-xs text-gray-500 hover:text-green-400">测试</button>
+                      <button onClick={async () => { try { const r = await window.electronAPI.testBind(); if (!r.ok) void showAlert("错误", r.error || "测试失败"); else void showAlert("成功", "测试消息已发送") } catch { void showAlert("提示", "Daemon 未运行，请先启动 Daemon 后再测试") } }} className="text-xs text-gray-500 hover:text-green-400">测试</button>
                     </div>
                   )}
                   {bindingStatus === "error" && (
@@ -652,6 +687,9 @@ export default function Setup({ onComplete, onExit }: Props) {
                   <div className="flex flex-col items-center gap-3 py-6">
                     <Loader2 size={32} className="animate-spin text-blue-400" />
                     <span className="text-sm text-gray-400">正在生成二维码...</span>
+                    {prevWechatToken.current && (
+                      <button onClick={async () => { await window.electronAPI.wechatQrLoginCancel(); setWechatToken(prevWechatToken.current); setWechatAccountId(prevWechatAccountId.current); setWechatQrStatus("confirmed"); setWechatQrUrl("") }} className="text-xs text-gray-500 hover:text-red-400">取消</button>
+                    )}
                   </div>
                 )}
 
@@ -663,6 +701,9 @@ export default function Setup({ onComplete, onExit }: Props) {
                     <span className="text-sm text-gray-300">
                       {wechatQrStatus === "scaned" ? "✅ 已扫码，请在手机上确认登录" : "请使用微信扫描上方二维码"}
                     </span>
+                    {prevWechatToken.current && (
+                      <button onClick={async () => { await window.electronAPI.wechatQrLoginCancel(); setWechatToken(prevWechatToken.current); setWechatAccountId(prevWechatAccountId.current); setWechatQrStatus("confirmed"); setWechatQrUrl("") }} className="text-xs text-gray-500 hover:text-red-400">取消</button>
+                    )}
                   </div>
                 )}
 
@@ -673,7 +714,9 @@ export default function Setup({ onComplete, onExit }: Props) {
                       <p className="text-sm font-medium text-green-300">微信登录成功</p>
                       {wechatAccountId && <p className="text-xs text-gray-500">Account: {wechatAccountId}</p>}
                     </div>
-                    <button onClick={() => { setWechatQrStatus("idle"); setWechatToken(""); setWechatQrUrl("") }} className="text-xs text-gray-500 hover:text-blue-400">重新扫码</button>
+                    <button onClick={() => { prevWechatToken.current = wechatToken; prevWechatAccountId.current = wechatAccountId; setWechatQrStatus("idle"); setWechatToken(""); setWechatQrUrl("") }} className="text-xs text-gray-500 hover:text-blue-400">重新扫码</button>
+                    <span className="text-gray-700">|</span>
+                    <button onClick={async () => { try { const r = await window.electronAPI.testWechat(); if (!r.ok) void showAlert("提示", r.error || "测试失败"); else void showAlert("成功", "微信测试消息已发送") } catch { void showAlert("提示", "Daemon 未运行，请先启动 Daemon 后再测试") } }} className="text-xs text-gray-500 hover:text-green-400">测试</button>
                   </div>
                 )}
 

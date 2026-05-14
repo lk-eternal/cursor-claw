@@ -258,7 +258,7 @@ export async function launchSessionAgent(
 export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boolean; error?: string }> {
   const { sessionKey, chatType, injectWorkspaceFn, meta, senderOpenId, chatName, taskMessage } = opts
   const needResume = chatType === "p2p" || chatType === "group"
-  const useMainWorkspace = opts.useMainWorkspace ?? (chatType === "task" || chatType === "temp")
+  const useMainWorkspace = opts.useMainWorkspace ?? false
   const scenario = opts.modelScenario ?? "primary"
 
   if (isSessionAgentRunning(sessionKey)) {
@@ -273,7 +273,8 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
   let workDir = config.workspaceDir
 
   if (!useMainWorkspace) {
-    if (!config.allowOthers) { pendingLaunches.delete(sessionKey); return { ok: false, error: "未启用其他人使用" } }
+    const isOwnTask = chatType === "task" || chatType === "temp"
+    if (!isOwnTask && !config.allowOthers) { pendingLaunches.delete(sessionKey); return { ok: false, error: "未启用其他人使用" } }
     const safeChatId = sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_")
     workDir = path.join(app.getPath("userData"), "workspaces", safeChatId)
     if (!fs.existsSync(workDir)) {

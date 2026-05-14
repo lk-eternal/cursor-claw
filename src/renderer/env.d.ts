@@ -186,6 +186,7 @@ interface ElectronAPI {
   respondAppModal(requestId: string, response: number): Promise<void>
   testBind(): Promise<{ ok: boolean; error?: string }>
   testWechat(): Promise<{ ok: boolean; error?: string }>
+  reloadWechat(token: string, accountId: string): Promise<{ ok: boolean; error?: string; message?: string }>
 }
 
 declare global {
