@@ -39,7 +39,7 @@ import {
   dispatchSessionAgents, launchSessionAgent, launchIndependentAgent,
   getSessionAgentList, handleChatCommand, clearMessageQueue, getQueueMessages,
   pullMergedMessagesFromQueue, isMainUser, extractChatId, chatNameCache,
-  fetchChatNames, fetchUserNames, initSessionDispatcher,
+  fetchChatNames, fetchUserNames, initSessionDispatcher, previousActiveSessionMap,
 } from "./session-dispatcher"
 
 export { applyProxyEnv, checkCliInstalled, installCli, execAgentSync, execAgentAsync, type ExecAgentOptions as ExecAgentSyncOptions } from "./agent-cli"
@@ -400,6 +400,9 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
     } catch { /* ignore orphan cleanup */ }
   }
 
+  // 强制清理旧 lock，确保 waitForLockFile 不会读到残留数据
+  try { fs.unlinkSync(getLockFilePath()) } catch { /* ok if absent */ }
+
   const entryPath = getDaemonEntryPath()
   if (!fs.existsSync(entryPath)) {
     return { ok: false, error: `Daemon 入口文件不存在: ${entryPath}` }
@@ -449,7 +452,15 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
         if (line.startsWith("__IND_LAUNCH__:")) {
           try {
             const payload = JSON.parse(line.slice("__IND_LAUNCH__:".length))
-            void launchIndependentAgent(payload.taskId, payload.taskName, payload.content)
+            const chatType = payload.chatType ?? "task"
+            const chatId = payload.chatId as string | undefined
+            void launchIndependentAgent(payload.taskId, payload.taskName, payload.content, chatType, chatId).then(async (result) => {
+              if (result.ok && chatId && daemonPort) {
+                const currentActive = await getCurrentActiveSession(daemonPort, chatId)
+                if (currentActive && currentActive !== payload.taskId) previousActiveSessionMap.set(payload.taskId, currentActive)
+                await syncActiveSession(daemonPort, chatId, payload.taskId)
+              }
+            })
           } catch { /* ignore malformed */ }
           continue
         }
@@ -506,7 +517,7 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
       broadcastStatus({ running: false, error: `Daemon 退出 (code=${code})` })
     })
 
-    const lock = await waitForLockFile(15_000)
+    const lock = await waitForLockFile(15_000, daemonProcess?.pid)
     if (!lock) {
       if (earlyExit !== null) {
         return { ok: false, error: `Daemon 进程已退出 (code=${earlyExit})。输出:\n${earlyOutput.slice(-500)}` }
@@ -558,12 +569,12 @@ export async function stopDaemon(): Promise<void> {
   })
 }
 
-function waitForLockFile(timeoutMs: number): Promise<{ port: number } | null> {
+function waitForLockFile(timeoutMs: number, expectedPid?: number): Promise<{ port: number } | null> {
   return new Promise((resolve) => {
     const start = Date.now()
     const check = () => {
       const lock = readLockFile()
-      if (lock?.port) {
+      if (lock?.port && (!expectedPid || lock.pid === expectedPid)) {
         resolve(lock)
         return
       }

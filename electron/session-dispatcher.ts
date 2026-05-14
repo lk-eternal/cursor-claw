@@ -52,7 +52,7 @@ export function stopAllSessionAgents(): void {
 // ── Session 状态 ──────────────────────────────────────────
 
 export const chatNameCache = new Map<string, string>()
-const previousActiveSessionMap = new Map<string, string>()
+export const previousActiveSessionMap = new Map<string, string>()
 
 // ── Session 工具 ──────────────────────────────────────────
 

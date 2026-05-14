@@ -69,7 +69,7 @@ export function getSkillsTemplateDir(): string {
 
 export function buildMcpServers(): Record<string, unknown> {
   if (!daemonPort) return {}
-  const env: Record<string, string> = { LARK_DAEMON_PORT: String(daemonPort) }
+  const env = { LARK_DAEMON_PORT: String(daemonPort) }
   return {
     "cursor-claw": { command: "node", args: [getMcpServerPath()], env },
     "cursor-claw-admin": { command: "node", args: [getAdminMcpPath()], env },

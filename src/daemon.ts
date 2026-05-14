@@ -24,6 +24,10 @@ import {
   type QueueMessage,
 } from "./file-queue.js";
 import { LOCK_FILE_NAME } from "./shared/constants.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { z } from "zod";
+import { registerAdminTools } from "./server-admin.js";
 
 const _require = createRequire(import.meta.url);
 const PKG_VERSION: string = (_require("../package.json") as { version: string }).version;
@@ -46,6 +50,10 @@ let WECHAT_ENABLED = process.env.WECHAT_ENABLED === "1";
 const FEISHU_ENABLED = process.env.FEISHU_ENABLED === "1";
 
 const savedProxyKeys = stripProxyEnv();
+
+// ── 活跃 MCP 连接追踪 ──
+let activeMcpConnections = 0;
+let lastMcpRequestTime = 0;
 
 // ── 日志 ─────────────────────────────────────────────────
 
@@ -470,6 +478,120 @@ function json(res: http.ServerResponse, data: unknown, status = 200): void {
   res.end(JSON.stringify(data));
 }
 
+// ── MCP over StreamableHTTP ─────────────────────────────
+
+
+function httpJson<T = any>(url: string, body?: unknown): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const isPost = body !== undefined;
+    const payload = isPost ? JSON.stringify(body) : undefined;
+    const parsed = new URL(url);
+    const req = http.request({
+      hostname: parsed.hostname,
+      port: parsed.port,
+      path: parsed.pathname + parsed.search,
+      method: isPost ? "POST" : "GET",
+      headers: isPost ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload!) } : undefined,
+      timeout: 180_000,
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (c: Buffer) => chunks.push(c));
+      res.on("end", () => {
+        try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
+        catch { reject(new Error(`daemon JSON parse: ${Buffer.concat(chunks).toString().slice(0, 200)}`)); }
+      });
+    });
+    req.on("error", (e) => reject(new Error(`daemon request failed: ${e.message}`)));
+    req.on("timeout", () => { req.destroy(); reject(new Error("daemon request timeout")); });
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+function localDaemonUrl(p: string): string {
+  return `http://127.0.0.1:${daemonPort}${p}`;
+}
+
+async function pollDaemon(timeoutMs: number, sessionKey?: string) {
+  const params = new URLSearchParams({ timeout: String(timeoutMs) });
+  if (sessionKey) params.set("sessionKey", sessionKey);
+  const res = await httpJson<{ message: any }>(localDaemonUrl(`/api/poll-message?${params}`));
+  return res.message ?? null;
+}
+
+function createMcpServer(): McpServer {
+  const s = new McpServer({ name: "cursor-claw", version: PKG_VERSION, description: "消息桥接 – 通过飞书/微信与用户沟通" });
+
+  s.tool(
+    "sync_message",
+    "消息同步工具（飞书/微信）。传 message 则发送消息；传 timeout_seconds 则等待用户回复；两者同时传则先发送再等待。均不传时仅检查待处理消息。",
+    {
+      message: z.string().optional().describe("要发送给用户的消息内容。不传则不发送"),
+      timeout_seconds: z.number().optional().describe("等待用户回复的超时秒数。不传则不等待，立即返回"),
+      message_id: z.string().optional().describe("要回复的消息ID，传入后以回复模式发送"),
+      session_key: z.string().optional().describe("目标会话的 sessionKey，用于精确投递和拉取消息"),
+    },
+    async ({ message, timeout_seconds, message_id, session_key }) => {
+      try {
+        if (message) {
+          await httpJson(localDaemonUrl("/api/send-text"), { text: message, message_id, session_key });
+        }
+        const MAX_POLL_MS = 25_000;
+        const timeoutMs = Math.min((timeout_seconds && timeout_seconds > 0) ? timeout_seconds * 1000 : 0, MAX_POLL_MS);
+        if (timeoutMs > 0) {
+          const reply = await pollDaemon(timeoutMs, session_key);
+          if (reply === null) return { content: [{ type: "text" as const, text: "[waiting]" }] };
+          const meta = [reply.text];
+          if (reply.messageId) meta.push(`[message_id=${reply.messageId}]`);
+          if (reply.sessionKey) meta.push(`[session_key=${reply.sessionKey}]`);
+          if (reply.chatType) meta.push(`[chat_type=${reply.chatType}]`);
+          return { content: [{ type: "text" as const, text: meta.join("\n") }] };
+        }
+        return { content: [{ type: "text" as const, text: message ? "消息已发送" : "ok" }] };
+      } catch (e: any) {
+        log("ERROR", `sync_message 异常: ${e?.message ?? e}`);
+        return { content: [{ type: "text" as const, text: `[error] ${e?.message ?? "unknown error"}` }] };
+      }
+    },
+  );
+
+  s.tool(
+    "send_image",
+    "发送本地图片到飞书/微信。image_path 为本地文件绝对路径。",
+    {
+      image_path: z.string().describe("图片绝对路径"),
+      message_id: z.string().optional().describe("要回复的消息ID，传入后以回复模式发送"),
+      session_key: z.string().optional().describe("目标会话的 sessionKey，用于精确投递"),
+    },
+    async ({ image_path, message_id, session_key }) => {
+      await httpJson(localDaemonUrl("/api/send-image"), { image_path, message_id, session_key });
+      return { content: [{ type: "text" as const, text: "图片已发送" }] };
+    },
+  );
+
+  s.tool(
+    "send_file",
+    "发送本地文件到飞书/微信。file_path 为本地文件绝对路径。",
+    {
+      file_path: z.string().describe("文件绝对路径"),
+      message_id: z.string().optional().describe("要回复的消息ID，传入后以回复模式发送"),
+      session_key: z.string().optional().describe("目标会话的 sessionKey，用于精确投递"),
+    },
+    async ({ file_path, message_id, session_key }) => {
+      await httpJson(localDaemonUrl("/api/send-file"), { file_path, message_id, session_key });
+      return { content: [{ type: "text" as const, text: "文件已发送" }] };
+    },
+  );
+
+  return s;
+}
+
+function createAdminMcpServer(): McpServer {
+  const s = new McpServer({ name: "cursor-claw-admin", version: PKG_VERSION, description: "cursor-claw 管理工具" });
+  registerAdminTools(s);
+  return s;
+}
+
 function startHttpServer(): Promise<number> {
   return new Promise((resolve, reject) => {
     const server = http.createServer(async (req, res) => {
@@ -478,6 +600,20 @@ function startHttpServer(): Promise<number> {
       const method = req.method;
 
       try {
+        if (pathname === "/mcp" || pathname === "/mcp-admin") {
+          const isAgent = pathname === "/mcp";
+          const srv = isAgent ? createMcpServer() : createAdminMcpServer();
+          const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+          if (isAgent) { activeMcpConnections++; lastMcpRequestTime = Date.now(); }
+          res.on("close", () => {
+            transport.close(); srv.close();
+            if (isAgent) activeMcpConnections = Math.max(0, activeMcpConnections - 1);
+          });
+          await srv.connect(transport);
+          await transport.handleRequest(req, res);
+          return;
+        }
+
         if (await handleAdminApi(pathname, method!, req, res)) return;
 
         if (method === "GET" && (pathname === "/health" || pathname === "/status")) {
@@ -672,8 +808,13 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
 
   if (method === "GET" && pathname === "/api/status") {
     const tasks = readTasks();
+    const recentlyActive = lastMcpRequestTime > 0 && (Date.now() - lastMcpRequestTime) < 120_000;
     json(res, {
-      daemon: { running: true, version: PKG_VERSION, uptime: Math.floor(process.uptime()), port: daemonPort },
+      daemon: {
+        running: true, version: PKG_VERSION, uptime: Math.floor(process.uptime()), port: daemonPort,
+        agentRunning: activeMcpConnections > 0 || recentlyActive,
+        sessionAgentCount: activeMcpConnections,
+      },
       queue: { length: getFileQueueLength() },
       tasks: { total: tasks.length, enabled: tasks.filter((t) => t.enabled).length },
       feishu: { connected: FEISHU_ENABLED, hasTarget: !!sender?.getTarget() },
@@ -1092,10 +1233,10 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const supportedActions = ["stop", "restart", "reset", "clean", "launch"];
 
     if (action === "launch") {
-      const { message } = body as { message?: string };
+      const { message, chatId } = body as { message?: string; chatId?: string };
       if (!message?.trim()) { json(res, { ok: false, error: "message is required" }, 400); return true; }
       const taskId = `temp-${Date.now()}`;
-      const payload = JSON.stringify({ taskId, taskName: "临时会话", content: message.trim() });
+      const payload = JSON.stringify({ taskId, taskName: "临时会话", content: message.trim(), chatType: "temp", chatId });
       process.stdout.write(`__IND_LAUNCH__:${payload}\n`);
       json(res, { ok: true, taskId, message: "临时 Agent 已启动" });
       return true;
@@ -1188,7 +1329,9 @@ export async function daemonMain(): Promise<void> {
   }
 
   daemonPort = await startHttpServer();
+  process.env.LARK_DAEMON_PORT = String(daemonPort);
   writeLockFile(daemonPort);
+  log("INFO", "MCP 服务已就绪 (/mcp + /mcp-admin)");
 
   setDaemonSchedulerLogger((msg) => { log("INFO", msg); });
   startDaemonScheduledTasks(

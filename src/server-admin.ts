@@ -2,10 +2,12 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import http from "node:http";
 
-const DAEMON_PORT = process.env.LARK_DAEMON_PORT ? Number(process.env.LARK_DAEMON_PORT) : 0;
+function getDaemonPort(): number {
+  return process.env.LARK_DAEMON_PORT ? Number(process.env.LARK_DAEMON_PORT) : 0;
+}
 
 function daemonUrl(path: string): string {
-  return `http://127.0.0.1:${DAEMON_PORT}${path}`;
+  return `http://127.0.0.1:${getDaemonPort()}${path}`;
 }
 
 function txt(text: string) { return { content: [{ type: "text" as const, text }] }; }
@@ -38,7 +40,6 @@ async function daemonPost(path: string, body: unknown): Promise<any> {
 }
 
 export function registerAdminTools(mcpServer: McpServer): void {
-  if (!DAEMON_PORT) return;
 
   // ── manage_agent ──
 
@@ -48,8 +49,9 @@ export function registerAdminTools(mcpServer: McpServer): void {
     {
       action: z.enum(["status", "stop", "restart", "reset", "clean", "launch"]).describe("操作：status=查询状态, stop=停止Agent, restart=重启, reset=重置会话, clean=清空队列, launch=启动临时Agent会话"),
       message: z.string().optional().describe("任务描述/指令（仅 launch 时使用）"),
+      session_key: z.string().optional().describe("当前会话的session_key，用于路由消息（仅 launch 时使用）"),
     },
-    async ({ action, message }) => {
+    async ({ action, message, session_key }) => {
       try {
         if (action === "status") {
           const data = await daemonGet("/api/status");
@@ -66,7 +68,8 @@ export function registerAdminTools(mcpServer: McpServer): void {
         }
         if (action === "launch") {
           if (!message?.trim()) return txt("❌ launch 操作需要提供 message 参数");
-          const res = await daemonPost("/api/agent", { action: "launch", message });
+          const chatId = session_key?.includes("::") ? session_key.split("::")[0] : session_key;
+          const res = await daemonPost("/api/agent", { action: "launch", message, chatId });
           return txt(res.ok ? `✅ 临时 Agent 已启动` : `❌ ${res.error ?? "启动失败"}`);
         }
         const res = await daemonPost("/api/agent", { action });
