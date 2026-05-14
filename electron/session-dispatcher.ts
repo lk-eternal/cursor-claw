@@ -108,7 +108,6 @@ export async function handleSessionClosed(sessionKey: string, _chatType: ChatTyp
   previousActiveSessionMap.delete(sessionKey)
   if (!previous) return
 
-  const chatId = extractChatId(sessionKey)
   const lock = readLockFile()
   if (!lock) return
 
