@@ -41,20 +41,6 @@ export function clearInjectionCache(dir?: string): void {
 
 // ── Path helpers ───────────────────────────────────────────────
 
-export function getMcpServerPath(): string {
-  if (app.isPackaged) return path.join(process.resourcesPath, "daemon", "mcp-server.mjs")
-  const bundled = path.join(app.getAppPath(), "dist-bundle", "mcp-server.mjs")
-  if (fs.existsSync(bundled)) return bundled
-  return path.join(app.getAppPath(), "dist", "index.js")
-}
-
-export function getAdminMcpPath(): string {
-  if (app.isPackaged) return path.join(process.resourcesPath, "daemon", "mcp-admin.mjs")
-  const bundled = path.join(app.getAppPath(), "dist-bundle", "mcp-admin.mjs")
-  if (fs.existsSync(bundled)) return bundled
-  return path.join(app.getAppPath(), "dist", "server-admin-entry.js")
-}
-
 export function getRuleTemplatePath(): string {
   if (app.isPackaged) return path.join(process.resourcesPath, "cursor-claw.mdc")
   return path.join(app.getAppPath(), "resources", "cursor-claw.mdc")
@@ -69,10 +55,10 @@ export function getSkillsTemplateDir(): string {
 
 export function buildMcpServers(): Record<string, unknown> {
   if (!daemonPort) return {}
-  const env = { LARK_DAEMON_PORT: String(daemonPort) }
+  const base = `http://127.0.0.1:${daemonPort}`
   return {
-    "cursor-claw": { command: "node", args: [getMcpServerPath()], env },
-    "cursor-claw-admin": { command: "node", args: [getAdminMcpPath()], env },
+    "cursor-claw": { url: `${base}/mcp` },
+    "cursor-claw-admin": { url: `${base}/mcp-admin` },
   }
 }
 

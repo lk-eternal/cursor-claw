@@ -38,20 +38,6 @@ async function main() {
     outfile: path.resolve(__dirname, "../dist-bundle/daemon-entry.mjs"),
   });
   console.log("✓ daemon-entry.mjs bundled to dist-bundle/");
-
-  await build({
-    ...common,
-    entryPoints: [path.resolve(__dirname, "../dist/index.js")],
-    outfile: path.resolve(__dirname, "../dist-bundle/mcp-server.mjs"),
-  });
-  console.log("✓ mcp-server.mjs bundled to dist-bundle/");
-
-  await build({
-    ...common,
-    entryPoints: [path.resolve(__dirname, "../dist/server-admin-entry.js")],
-    outfile: path.resolve(__dirname, "../dist-bundle/mcp-admin.mjs"),
-  });
-  console.log("✓ mcp-admin.mjs bundled to dist-bundle/");
 }
 
 main().catch((e) => {

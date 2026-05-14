@@ -1,8 +1,19 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import fs from "node:fs";
+import path from "node:path";
 import http from "node:http";
+import { LOCK_FILE_NAME } from "./shared/constants.js";
+
+const APP_DATA_DIR = process.env.LARK_APP_DATA_DIR ?? "";
 
 function getDaemonPort(): number {
+  if (APP_DATA_DIR) {
+    try {
+      const lock = JSON.parse(fs.readFileSync(path.join(APP_DATA_DIR, LOCK_FILE_NAME), "utf-8"));
+      if (lock.port) return Number(lock.port);
+    } catch { /* fall through to env */ }
+  }
   return process.env.LARK_DAEMON_PORT ? Number(process.env.LARK_DAEMON_PORT) : 0;
 }
 

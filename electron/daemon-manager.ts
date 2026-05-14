@@ -19,7 +19,7 @@ import {
 } from "./agent-launcher"
 import { stopAllSdkSessions, getSdkSessionCount, getSdkSessionList, checkSdkApiKey, listSdkModels } from "./agent-sdk"
 import {
-  setDaemonPort, registerEnableMcpFn, getMcpServerPath, getAdminMcpPath,
+  setDaemonPort, registerEnableMcpFn,
   injectMcpToDir, injectRulesToDir, injectSkillsToDir,
   injectWorkspaceToDir, injectWorkspaceMcpAndRules, clearInjectionCache,
 } from "./workspace-injector"
@@ -46,7 +46,7 @@ export { applyProxyEnv, checkCliInstalled, installCli, execAgentSync, execAgentA
 export { checkAgentLoggedIn, loginCli } from "./agent-launcher"
 export { getLogBuffer } from "./ui-logger"
 export { checkSdkApiKey, listSdkModels } from "./agent-sdk"
-export { injectWorkspaceMcpAndRules, injectWorkspaceToDir, clearInjectionCache, getMcpServerPath, getAdminMcpPath } from "./workspace-injector"
+export { injectWorkspaceMcpAndRules, injectWorkspaceToDir, clearInjectionCache } from "./workspace-injector"
 export { getQueueMessages, clearMessageQueue, deleteQueueMessage } from "./session-dispatcher"
 
 

@@ -82,6 +82,8 @@ function formatDuration(ms: number): string {
 
 export async function handleSessionClosed(sessionKey: string, _chatType: ChatType, exitInfo?: SessionExitInfo): Promise<void> {
   const failed = exitInfo && exitInfo.exitCode !== 0 && exitInfo.exitCode !== null
+  const chatId = extractChatId(sessionKey)
+  const mainChat = isMainUser(chatId, _chatType as string)
 
   if (failed) {
     const lock = readLockFile()
@@ -89,16 +91,16 @@ export async function handleSessionClosed(sessionKey: string, _chatType: ChatTyp
       const drained = await drainSessionMessages(lock.port, sessionKey)
       broadcastLog(`[System] Agent 异常退出(exit=${exitInfo.exitCode})，已清空该会话 ${drained} 条消息`, "WARN")
     }
-    const stderrContent = exitInfo.stderr?.trim() || ""
-    const errMsg = stderrContent
-      ? `⚠️ Agent 异常退出 (exit=${exitInfo.exitCode})。\n错误信息：\n${stderrContent}`
-      : `⚠️ Agent 异常退出 (exit=${exitInfo.exitCode})。请检查配置后重试。`
-    await notifyChat(sessionKey, errMsg)
-  } else {
+    if (mainChat) {
+      const stderrContent = exitInfo.stderr?.trim() || ""
+      const errMsg = stderrContent
+        ? `⚠️ Agent 异常退出 (exit=${exitInfo.exitCode})。\n错误信息：\n${stderrContent}`
+        : `⚠️ Agent 异常退出 (exit=${exitInfo.exitCode})。请检查配置后重试。`
+      await notifyChat(sessionKey, errMsg)
+    }
+  } else if (mainChat) {
     const output = exitInfo?.stderr?.trim() || exitInfo?.stdout?.trim() || ""
-    const exitMsg = output
-      ? `Agent已退出\n退出前输出：\n${output}`
-      : "Agent已退出"
+    const exitMsg = output ? `Agent已退出\n退出前输出：\n${output}` : "Agent已退出"
     await notifyChat(sessionKey, exitMsg)
   }
 
