@@ -14,6 +14,23 @@ alwaysApply: true
 - **仅传 `timeout_seconds`** 👉 [静默轮询] 阻塞等待用户新消息。
 - **同时传 `message` + `timeout_seconds`** 👉 [发送并等待] 发送消息后，立即阻塞等待回复。
 
+### 🔌 HTTP API 退避方案 (MCP Fallback)
+
+当 MCP 工具不可用（工具列表中无 `sync_message`）时，**必须**切换到 HTTP API 直连模式。Daemon 端口固定为 19528。
+
+**等价 API 映射：**
+| MCP 工具调用 | HTTP API 等价 |
+|---|---|
+| `sync_message(message=..., message_id=..., session_key=...)` | `POST http://127.0.0.1:{port}/api/send-text` body: `{text, message_id, session_key}` |
+| `sync_message(timeout_seconds=N, session_key=...)` | `GET http://127.0.0.1:{port}/api/poll-message?timeout={N*1000}&sessionKey={session_key}` |
+| `send_image(image_path=..., ...)` | `POST http://127.0.0.1:{port}/api/send-image` body: `{image_path, message_id, session_key}` |
+| `send_file(file_path=..., ...)` | `POST http://127.0.0.1:{port}/api/send-file` body: `{file_path, message_id, session_key}` |
+
+**退避规则：**
+1. 冷启动时尝试调用 MCP `sync_message`，若工具不存在则切换为 HTTP 直连。
+2. `poll-message` 返回 `{"message":null}` 等同于 MCP 返回 `[waiting]`；返回的 `message` 对象包含 `text`/`messageId`/`sessionKey`/`chatType` 字段。
+3. 退避模式与 MCP 模式共享同一套状态机和路由规则，行为完全等价。
+
 ---
 
 ## 🔄 核心状态机 (State Machine)
