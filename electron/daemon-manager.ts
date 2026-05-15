@@ -19,15 +19,13 @@ import {
 } from "./agent-launcher"
 import { stopAllSdkSessions, getSdkSessionCount, getSdkSessionList, checkSdkApiKey, listSdkModels } from "./agent-sdk"
 import {
-  setDaemonPort, registerEnableMcpFn,
-  injectMcpToDir, injectRulesToDir, injectSkillsToDir,
+  setDaemonPort,
   injectWorkspaceToDir, injectWorkspaceMcpAndRules, clearInjectionCache,
 } from "./workspace-injector"
 import {
   invalidateMcpEnabledCache,
   getMcpServerList,
   getMcpEnabledMap,
-  toggleMcpServer,
   deleteMcpServer,
   saveMcpServer,
   McpServerEntry,
@@ -1011,9 +1009,6 @@ export async function saveAppConfigFromRenderer(partial: Partial<AppConfig>): Pr
 
 export function initDaemonManager(): void {
   initSessionDispatcher()
-  registerEnableMcpFn(async (wsDir, serverNames) => {
-    for (const name of serverNames) await toggleMcpServer(name, true, wsDir)
-  })
   ipcMain.handle("config:apply-workspace-switch", (_, workspaceDir: string, stopOldSessions: boolean) => applyWorkspaceSwitch(workspaceDir, stopOldSessions))
   ipcMain.handle("daemon:get-log-buffer", () => getLogBuffer())
   ipcMain.handle("agent:stop", () => { stopAgent(); return { ok: true } })

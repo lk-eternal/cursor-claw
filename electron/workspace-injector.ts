@@ -1,4 +1,5 @@
 import * as fs from "node:fs"
+import * as os from "node:os"
 import * as path from "node:path"
 import { app } from "electron"
 import { getConfig } from "./config-store"
@@ -12,13 +13,14 @@ export interface InjectResult {
   message: string
 }
 
-export type EnableMcpFn = (wsDir: string, serverNames: string[]) => Promise<void>
-
 // ── State ──────────────────────────────────────────────────────
 
 let daemonPort: number | null = null
-const injectedMcpHashes = new Map<string, string>()
+let lastMcpHash = ""
 const fullyInjectedDirs = new Set<string>()
+
+const HOME_DIR = os.homedir()
+const GLOBAL_MCP_PATH = path.join(HOME_DIR, ".cursor", "mcp.json")
 
 function norm(p: string): string { return path.resolve(p) }
 
@@ -30,11 +32,9 @@ export function setDaemonPort(port: number | null): void {
 
 export function clearInjectionCache(dir?: string): void {
   if (dir) {
-    const n = norm(dir)
-    injectedMcpHashes.delete(n)
-    fullyInjectedDirs.delete(n)
+    fullyInjectedDirs.delete(norm(dir))
   } else {
-    injectedMcpHashes.clear()
+    lastMcpHash = ""
     fullyInjectedDirs.clear()
   }
 }
@@ -62,38 +62,28 @@ export function buildMcpServers(): Record<string, unknown> {
   }
 }
 
-let _enableMcpFn: EnableMcpFn | null = null
-
-export function registerEnableMcpFn(fn: EnableMcpFn): void {
-  _enableMcpFn = fn
-}
-
-export async function injectMcpToDir(wsDir: string): Promise<boolean> {
+export async function injectMcpGlobal(): Promise<boolean> {
   try {
-    const key = norm(wsDir)
     const newServers = buildMcpServers()
     const hash = JSON.stringify(newServers)
-    if (injectedMcpHashes.get(key) === hash) return true
+    if (lastMcpHash === hash) return true
 
-    const mcpPath = path.join(wsDir, ".cursor", "mcp.json")
     let mcpConfig: Record<string, unknown> = {}
-    if (fs.existsSync(mcpPath)) {
-      try { mcpConfig = JSON.parse(fs.readFileSync(mcpPath, "utf-8")) } catch { mcpConfig = {} }
+    if (fs.existsSync(GLOBAL_MCP_PATH)) {
+      try { mcpConfig = JSON.parse(fs.readFileSync(GLOBAL_MCP_PATH, "utf-8")) } catch { mcpConfig = {} }
     }
     const existing = (mcpConfig.mcpServers ?? {}) as Record<string, unknown>
     Object.assign(existing, newServers)
     mcpConfig.mcpServers = existing
 
-    const dir = path.dirname(mcpPath)
+    const dir = path.dirname(GLOBAL_MCP_PATH)
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(mcpPath, JSON.stringify(mcpConfig, null, 2), "utf-8")
-    injectedMcpHashes.set(key, hash)
-    broadcastLog(`MCP 已注入: ${mcpPath}`)
-
-    if (_enableMcpFn) await _enableMcpFn(wsDir, Object.keys(newServers))
+    fs.writeFileSync(GLOBAL_MCP_PATH, JSON.stringify(mcpConfig, null, 2), "utf-8")
+    lastMcpHash = hash
+    broadcastLog(`MCP 已注入全局配置: ${GLOBAL_MCP_PATH}`)
     return true
   } catch (e: unknown) {
-    broadcastLog(`MCP 注入失败: ${e instanceof Error ? e.message : e}`, "ERROR")
+    broadcastLog(`MCP 全局注入失败: ${e instanceof Error ? e.message : e}`, "ERROR")
     return false
   }
 }
@@ -174,22 +164,16 @@ export async function injectWorkspaceToDir(dir: string, skipIdentity = false): P
   const key = norm(dir)
   if (fullyInjectedDirs.has(key)) return true
 
-  const mcpWasCached = injectedMcpHashes.has(key)
-  await injectMcpToDir(dir)
   injectSkillsToDir(dir)
   const ok = injectRulesToDir(dir, skipIdentity)
   if (ok) fullyInjectedDirs.add(key)
-  if (!mcpWasCached) {
-    broadcastLog("等待 MCP 服务初始化 (3s)...")
-    await new Promise(r => setTimeout(r, 3000))
-  }
   return ok
 }
 
 export async function injectWorkspaceMcpAndRules(): Promise<{ mcpOk: boolean; ruleOk: boolean; skillOk: boolean }> {
   const config = getConfig()
-  if (!config.workspaceDir) return { mcpOk: false, ruleOk: false, skillOk: false }
-  const mcpOk = await injectMcpToDir(config.workspaceDir)
+  const mcpOk = await injectMcpGlobal()
+  if (!config.workspaceDir) return { mcpOk, ruleOk: false, skillOk: false }
   const ruleOk = injectRulesToDir(config.workspaceDir)
   const skillOk = injectSkillsToDir(config.workspaceDir)
   if (mcpOk && ruleOk) fullyInjectedDirs.add(norm(config.workspaceDir))
