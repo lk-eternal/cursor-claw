@@ -385,13 +385,20 @@ export class LarkSender {
             if (!Array.isArray(line)) continue;
             const segs: string[] = [];
             for (const el of line) {
-              if (el.tag === "text" && el.text) segs.push(el.text);
-              else if (el.tag === "img" && el.image_key) { result.imageKeys.push({ messageId, imageKey: el.image_key }); segs.push("[图片]"); }
-              else if (el.tag === "a" && el.text) segs.push(el.text);
-              else if (el.tag === "at" && el.user_name) segs.push(`@${el.user_name}`);
-              else if (el.tag === "emotion" && el.emoji_type) segs.push(`[${el.emoji_type}]`);
+              switch (el.tag) {
+                case "text": if (el.text) segs.push(el.text); break;
+                case "a": if (el.text) segs.push(el.href ? `${el.text}(${el.href})` : el.text); break;
+                case "at": if (el.user_name) segs.push(`@${el.user_name}`); break;
+                case "img":
+                  if (el.image_key) { result.imageKeys.push({ messageId, imageKey: el.image_key }); segs.push("[图片]"); }
+                  break;
+                case "media": segs.push("[视频]"); break;
+                case "emotion": if (el.emoji_type) segs.push(`[${el.emoji_type}]`); break;
+                case "code_block": if (el.text) segs.push(`\`\`\`${el.language ?? ""}\n${el.text}\n\`\`\``); break;
+                case "hr": segs.push("---"); break;
+              }
             }
-            lineTexts.push(segs.join(""));
+            if (segs.length) lineTexts.push(segs.join(""));
           }
           result.text = lineTexts.join("\n"); break;
         }
@@ -407,24 +414,45 @@ export class LarkSender {
           result.text = parts.join("\n") || "[卡片消息]"; break;
         }
         case "file": result.text = `[文件: ${parsed.file_name ?? "未知"}]`; break;
+        case "folder": result.text = `[文件夹: ${parsed.folder_name ?? "未知"}]`; break;
         case "audio": result.text = parsed.duration ? `[语音消息 ${Math.ceil(parsed.duration / 1000)}s]` : "[语音消息]"; break;
         case "video": result.text = parsed.file_name ? `[视频: ${parsed.file_name}]` : "[视频]"; break;
-        case "media": result.text = parsed.file_name ? `[媒体: ${parsed.file_name}]` : "[媒体]"; break;
+        case "media": {
+          const mediaParts = [parsed.file_name ?? "视频"];
+          if (parsed.duration) mediaParts.push(`${Math.ceil(parsed.duration / 1000)}s`);
+          result.text = `[媒体: ${mediaParts.join(" ")}]`;
+          if (parsed.image_key) result.imageKeys.push({ messageId, imageKey: parsed.image_key });
+          break;
+        }
         case "sticker": result.text = "[表情包]"; break;
         case "share_chat": result.text = parsed.chat_name ? `[分享群聊: ${parsed.chat_name}]` : "[分享群聊]"; break;
-        case "share_user": result.text = "[分享名片]"; break;
-        case "merge_forward": {
-          const fwdParts: string[] = ["[合并转发消息]"];
-          if (Array.isArray(parsed.message_list)) {
-            for (const msg of parsed.message_list.slice(0, 5)) {
-              const sub = this.parseMessageContent(msg.message_id ?? "", msg.msg_type ?? "text", msg.content ?? "{}");
-              if (sub.text) fwdParts.push(`  > ${sub.text.split("\n")[0]}`);
-            }
-            if (parsed.message_list.length > 5) fwdParts.push(`  > ...共${parsed.message_list.length}条`);
+        case "share_user": result.text = parsed.user_id ? `[分享名片: ${parsed.user_id}]` : "[分享名片]"; break;
+        case "merge_forward": result.text = "[合并转发消息]"; break;
+        case "system": {
+          const tpl = parsed.template ?? "";
+          if (parsed.content) {
+            try {
+              const sysContent = JSON.parse(parsed.content);
+              result.text = `[系统消息: ${sysContent.text ?? tpl}]`;
+            } catch { result.text = `[系统消息: ${tpl || parsed.content}]`; }
+          } else {
+            result.text = tpl ? `[系统消息: ${tpl}]` : "[系统消息]";
           }
-          result.text = fwdParts.join("\n"); break;
+          break;
         }
-        case "system": result.text = "[系统消息]"; break;
+        case "hongbao": result.text = "[红包]"; break;
+        case "share_calendar_event": result.text = parsed.summary ? `[日程: ${parsed.summary}]` : "[日程邀请]"; break;
+        case "calendar": result.text = parsed.summary ? `[日历: ${parsed.summary}]` : "[日历消息]"; break;
+        case "general_calendar": result.text = parsed.summary ? `[日程: ${parsed.summary}]` : "[通用日历]"; break;
+        case "location": result.text = parsed.name ? `[位置: ${parsed.name}]` : "[位置]"; break;
+        case "video_chat": {
+          const topic = parsed.topic ?? "";
+          const vcType = parsed.call_type === "1" ? "视频通话" : "语音通话";
+          result.text = topic ? `[${vcType}: ${topic}]` : `[${vcType}]`;
+          break;
+        }
+        case "todo": result.text = parsed.task_content?.summary ?? "[待办任务]"; break;
+        case "vote": result.text = parsed.topic ? `[投票: ${parsed.topic}]` : "[投票]"; break;
         default: result.text = parsed.text ?? "[不支持的消息类型]";
       }
     } catch { result.text = content; }
