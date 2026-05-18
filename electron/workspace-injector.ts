@@ -96,11 +96,12 @@ export function injectRulesToDir(wsDir: string, skipIdentity = false): boolean {
     if (!fs.existsSync(rulesDir)) fs.mkdirSync(rulesDir, { recursive: true })
     const rulePath = path.join(rulesDir, "cursor-claw.mdc")
     const tplPath = getRuleTemplatePath()
-    const ruleContent = fs.existsSync(tplPath) ? fs.readFileSync(tplPath, "utf-8") : ""
+    let ruleContent = fs.existsSync(tplPath) ? fs.readFileSync(tplPath, "utf-8") : ""
     if (!ruleContent) {
       broadcastLog(`规则模板文件不存在: ${tplPath}`, "WARN")
       return false
     }
+    if (daemonPort) ruleContent = ruleContent.replace(/\{\{DAEMON_PORT\}\}/g, String(daemonPort))
     fs.writeFileSync(rulePath, ruleContent, "utf-8")
     broadcastLog(`规则已注入: ${rulePath}`)
 
@@ -158,6 +159,33 @@ export function injectSkillsToDir(wsDir: string): boolean {
   }
 }
 
+// ── Project-level MCP cleanup ──────────────────────────────────
+
+const CLAW_MCP_KEYS = ["cursor-claw", "cursor-claw-admin"]
+
+function cleanProjectMcpStale(wsDir: string): void {
+  const projectMcpPath = path.join(wsDir, ".cursor", "mcp.json")
+  if (!fs.existsSync(projectMcpPath)) return
+  try {
+    const cfg = JSON.parse(fs.readFileSync(projectMcpPath, "utf-8"))
+    const servers = cfg.mcpServers as Record<string, unknown> | undefined
+    if (!servers) return
+    let changed = false
+    for (const key of CLAW_MCP_KEYS) {
+      if (key in servers) { delete servers[key]; changed = true }
+    }
+    if (!changed) return
+    if (Object.keys(servers).length === 0 && Object.keys(cfg).filter((k) => k !== "mcpServers").length === 0) {
+      fs.unlinkSync(projectMcpPath)
+      broadcastLog(`已删除空的项目级 MCP 配置: ${projectMcpPath}`)
+    } else {
+      cfg.mcpServers = servers
+      fs.writeFileSync(projectMcpPath, JSON.stringify(cfg, null, 2), "utf-8")
+      broadcastLog(`已清理项目级 MCP 残留: ${projectMcpPath}`)
+    }
+  } catch { /* ignore */ }
+}
+
 // ── Composite: inject all into a directory ─────────────────────
 
 export async function injectWorkspaceToDir(dir: string, skipIdentity = false): Promise<boolean> {
@@ -174,6 +202,7 @@ export async function injectWorkspaceMcpAndRules(): Promise<{ mcpOk: boolean; ru
   const config = getConfig()
   const mcpOk = await injectMcpGlobal()
   if (!config.workspaceDir) return { mcpOk, ruleOk: false, skillOk: false }
+  cleanProjectMcpStale(config.workspaceDir)
   const ruleOk = injectRulesToDir(config.workspaceDir)
   const skillOk = injectSkillsToDir(config.workspaceDir)
   if (mcpOk && ruleOk) fullyInjectedDirs.add(norm(config.workspaceDir))
