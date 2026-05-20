@@ -20,16 +20,26 @@ import {
 } from "./agent-sdk"
 import { injectWorkspaceToDir } from "./workspace-injector"
 
+// ── readLockFile 短 TTL 缓存 ─────────────────────────────
+let _lockCache: { value: ReturnType<typeof readLockFile>; ts: number } | null = null
+function cachedLock() {
+  const now = Date.now()
+  if (_lockCache && now - _lockCache.ts < 2000) return _lockCache.value
+  const v = readLockFile()
+  _lockCache = { value: v, ts: now }
+  return v
+}
+
 // ── 生命周期通知 ──────────────────────────────────────────
 
 async function notifyChat(sessionKey: string, text: string): Promise<void> {
-  const lock = readLockFile()
+  const lock = cachedLock()
   if (!lock?.port) return
   const chatId = extractChatId(sessionKey)
   try {
     await httpPost(`http://127.0.0.1:${lock.port}/api/send-text`, { text, session_key: sessionKey }, 5000)
-  } catch (e: any) {
-    broadcastLog(`[Notify] 发送通知失败 (${chatId}): ${e?.message}`, "WARN")
+  } catch (e: unknown) {
+    broadcastLog(`[Notify] 发送通知失败 (${chatId}): ${e instanceof Error ? e.message : String(e)}`, "WARN")
   }
 }
 
@@ -80,13 +90,13 @@ function formatDuration(ms: number): string {
 
 // ── Session 生命周期 ──────────────────────────────────────
 
-export async function handleSessionClosed(sessionKey: string, _chatType: ChatType, exitInfo?: SessionExitInfo): Promise<void> {
+export async function handleSessionClosed(sessionKey: string, chatType: ChatType, exitInfo?: SessionExitInfo): Promise<void> {
   const failed = exitInfo && exitInfo.exitCode !== 0 && exitInfo.exitCode !== null
   const chatId = extractChatId(sessionKey)
-  const mainChat = isMainUser(chatId, _chatType as string)
+  const mainChat = isMainUser(chatId, chatType)
 
   if (failed) {
-    const lock = readLockFile()
+    const lock = cachedLock()
     if (lock?.port) {
       const drained = await drainSessionMessages(lock.port, sessionKey)
       broadcastLog(`[System] Agent 异常退出(exit=${exitInfo.exitCode})，已清空该会话 ${drained} 条消息`, "WARN")
@@ -108,7 +118,7 @@ export async function handleSessionClosed(sessionKey: string, _chatType: ChatTyp
   previousActiveSessionMap.delete(sessionKey)
   if (!previous) return
 
-  const lock = readLockFile()
+  const lock = cachedLock()
   if (!lock) return
 
   const currentActive = await getCurrentActiveSession(lock.port, chatId)
@@ -117,7 +127,7 @@ export async function handleSessionClosed(sessionKey: string, _chatType: ChatTyp
   const fallbackKey = isSessionAgentRunning(previous) ? previous : undefined
   if (fallbackKey) {
     await syncActiveSession(lock.port, chatId, fallbackKey)
-    broadcastLog("info", `[System] 临时会话已结束，活跃会话自动回退至: ${fallbackKey}`)
+    broadcastLog(`[System] 临时会话已结束，活跃会话自动回退至: ${fallbackKey}`, "INFO")
   }
 }
 
@@ -126,7 +136,7 @@ export async function handleSessionClosed(sessionKey: string, _chatType: ChatTyp
 export async function fetchChatNames(chatIds: string[]): Promise<void> {
   const missing = chatIds.filter((id) => id && !chatNameCache.has(id))
   if (missing.length === 0) return
-  const lock = readLockFile()
+  const lock = cachedLock()
   if (!lock?.port) return
   try {
     const res = (await httpPost(`http://127.0.0.1:${lock.port}/api/chat-names`, { chatIds: missing }, 15_000)) as { names?: Record<string, string> }
@@ -139,7 +149,7 @@ export async function fetchChatNames(chatIds: string[]): Promise<void> {
 export async function fetchUserNames(openIds: string[]): Promise<void> {
   const missing = openIds.filter((id) => id && !chatNameCache.has(id))
   if (missing.length === 0) return
-  const lock = readLockFile()
+  const lock = cachedLock()
   if (!lock?.port) return
   try {
     const res = (await httpPost(`http://127.0.0.1:${lock.port}/api/user-names`, { openIds: missing }, 15_000)) as { names?: Record<string, string> }
@@ -155,7 +165,7 @@ interface DequeuedMessage { text: string; messageId: string; chatId: string; cha
 interface MergedMessages { text: string; count: number; chatType?: string; messageIds: string[]; chatId?: string; senderOpenId?: string }
 
 export async function pullMergedMessagesFromQueue(chatId?: string): Promise<MergedMessages | null> {
-  const lock = readLockFile()
+  const lock = cachedLock()
   if (!lock?.port) return null
   try {
     const body = chatId ? { chatId } : {}
@@ -187,7 +197,7 @@ export async function pullMergedMessagesFromQueue(chatId?: string): Promise<Merg
 interface QueueSession { sessionKey: string; chatType: string; senderOpenId?: string }
 
 async function getQueueSessions(): Promise<QueueSession[]> {
-  const lock = readLockFile()
+  const lock = cachedLock()
   if (!lock?.port) return []
   try {
     const res = (await httpGet(`http://127.0.0.1:${lock.port}/queue-chat-ids`)) as { chats?: QueueSession[] } | null
@@ -198,7 +208,7 @@ async function getQueueSessions(): Promise<QueueSession[]> {
 }
 
 export async function clearMessageQueue(): Promise<number> {
-  const lock = readLockFile()
+  const lock = cachedLock()
   if (!lock?.port) return 0
   try {
     const res = await httpPost(`http://127.0.0.1:${lock.port}/clear-queue`, {}) as { cleared?: number }
@@ -217,7 +227,7 @@ export interface QueueMessageItem {
 }
 
 export async function getQueueMessages(): Promise<QueueMessageItem[]> {
-  const lock = readLockFile()
+  const lock = cachedLock()
   if (!lock?.port) return []
   try {
     const res = await httpGet(`http://127.0.0.1:${lock.port}/queue`) as { messages?: QueueMessageItem[] }
@@ -228,7 +238,7 @@ export async function getQueueMessages(): Promise<QueueMessageItem[]> {
 }
 
 export async function deleteQueueMessage(fileId: string): Promise<boolean> {
-  const lock = readLockFile()
+  const lock = cachedLock()
   if (!lock?.port) return false
   try {
     const res = await httpPost(`http://127.0.0.1:${lock.port}/queue-delete`, { fileId }, 5000) as { ok?: boolean }
@@ -279,7 +289,6 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
 
 export async function launchSessionAgent(
   sessionKey: string, chatType: ChatType,
-  _injectFn?: (dir: string) => boolean | Promise<boolean>,
   meta?: import("./agent-launcher").LaunchMeta,
   useMainWorkspace?: boolean, senderOpenId?: string,
   modelScenario?: ModelScenario,
@@ -445,15 +454,15 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
 
     const meta: import("./agent-launcher").LaunchMeta = { chatId, chatType: chatType as "p2p" | "group" }
     const scenario: ModelScenario = mainUser ? "primary" : "others"
-    const result = await launchSessionAgent(sessionKey, chatType as "p2p" | "group", undefined, meta, mainUser, senderOpenId, scenario)
+    const result = await launchSessionAgent(sessionKey, chatType as "p2p" | "group", meta, mainUser, senderOpenId, scenario)
     if (result.ok && chatId !== sessionKey) {
-      const lock = readLockFile()
+      const lock = cachedLock()
       if (lock?.port) await syncActiveSession(lock.port, chatId, sessionKey)
     }
     if (!result.ok) {
       broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${result.error}`)
       await notifyChat(sessionKey, `启动Agent失败: ${result.error ?? "未知错误"}`)
-      const lock = readLockFile()
+      const lock = cachedLock()
       if (lock?.port) {
         const drained = await drainSessionMessages(lock.port, sessionKey)
         if (drained > 0) broadcastLog(`[Agent] ${sessionKey} 已丢弃 ${drained} 条消息（启动被拒绝）`)

@@ -204,6 +204,30 @@ function resolveRawChatId(sessionKey?: string): string | undefined {
   return idx > 0 ? sessionKey.slice(0, idx) : sessionKey;
 }
 
+type ResolvedChannel =
+  | { type: "wechat"; chatId: string }
+  | { type: "feishu"; chatId?: string }
+  | { type: "error"; message: string };
+
+function resolveChannel(sessionKey?: string): ResolvedChannel {
+  const rawChatId = resolveRawChatId(sessionKey);
+  if (isWechatChatId(rawChatId)) {
+    return wechatManager?.isConnected()
+      ? { type: "wechat", chatId: rawChatId }
+      : { type: "error", message: "微信未连接" };
+  }
+  if (isFeishuChatId(rawChatId) && sender) {
+    return { type: "feishu", chatId: rawChatId };
+  }
+  if (wechatManager?.isConnected() && lastWechatChatId) {
+    return { type: "wechat", chatId: lastWechatChatId };
+  }
+  if (sender) {
+    return { type: "feishu" };
+  }
+  return { type: "error", message: "无可用消息通道" };
+}
+
 function trackMessageSession(messageId: string, sessionKey: string): void {
   if (!messageId || !sessionKey) return;
   if (messageSessionMap.size >= MSG_SESSION_MAP_MAX) {
@@ -816,7 +840,273 @@ function writeTasks(tasks: TaskEntry[]): void {
   writeJsonSafe(TASKS_FILE, tasks);
 }
 
-// ── 管理 API 路由处理 ────────────────────────────────────
+// ── CRUD 子路由 ──────────────────────────────────────────
+
+async function handleMcpAdmin(method: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> {
+  if (method === "GET") {
+    const globalCfg = readJsonSafe(GLOBAL_MCP_PATH);
+    const projectCfg = readJsonSafe(getProjectMcpPath());
+    const servers: Record<string, { config: unknown; scope: string }> = {};
+    if (globalCfg?.mcpServers) {
+      for (const [k, v] of Object.entries(globalCfg.mcpServers)) servers[k] = { config: v, scope: "global" };
+    }
+    if (projectCfg?.mcpServers) {
+      for (const [k, v] of Object.entries(projectCfg.mcpServers)) servers[k] = { config: v, scope: "project" };
+    }
+    json(res, { ok: true, servers });
+    return true;
+  }
+  if (method === "POST") {
+    const body = JSON.parse(await readBody(req));
+    const { action, name, config, scope } = body as { action: string; name?: string; config?: string; scope?: string };
+    const targetPath = (scope ?? "global") === "project" ? getProjectMcpPath() : GLOBAL_MCP_PATH;
+
+    if (action === "add") {
+      if (!name || !config) { json(res, { ok: false, error: "name and config required" }, 400); return true; }
+      let parsed: unknown;
+      try { parsed = JSON.parse(config); } catch { json(res, { ok: false, error: "invalid config JSON" }, 400); return true; }
+      const mcpJson = readJsonSafe(targetPath) ?? {};
+      if (!mcpJson.mcpServers) mcpJson.mcpServers = {};
+      mcpJson.mcpServers[name] = parsed;
+      writeJsonSafe(targetPath, mcpJson);
+      json(res, { ok: true, message: `${name} saved` });
+      return true;
+    }
+    if (action === "delete") {
+      if (!name) { json(res, { ok: false, error: "name required" }, 400); return true; }
+      for (const p of [GLOBAL_MCP_PATH, getProjectMcpPath()]) {
+        const mcpJson = readJsonSafe(p);
+        if (mcpJson?.mcpServers?.[name]) {
+          delete mcpJson.mcpServers[name];
+          writeJsonSafe(p, mcpJson);
+          json(res, { ok: true, message: `${name} deleted` });
+          return true;
+        }
+      }
+      json(res, { ok: false, error: "not found" }, 404);
+      return true;
+    }
+    json(res, { ok: false, error: "unknown action" }, 400);
+    return true;
+  }
+  return false;
+}
+
+async function handleRulesAdmin(method: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> {
+  if (method === "GET") {
+    if (!fs.existsSync(getRulesDir())) { json(res, { ok: true, rules: [] }); return true; }
+    const files = fs.readdirSync(getRulesDir()).filter((f) => f.endsWith(".mdc") || f.endsWith(".md"));
+    json(res, { ok: true, rules: files });
+    return true;
+  }
+  if (method === "POST") {
+    const body = JSON.parse(await readBody(req));
+    const { action, name, content } = body as { action: string; name?: string; content?: string };
+
+    if (action === "read") {
+      if (!name) { json(res, { ok: false, error: "name required" }, 400); return true; }
+      const fp = path.join(getRulesDir(), name);
+      if (!fs.existsSync(fp)) { json(res, { ok: false, error: "not found" }, 404); return true; }
+      json(res, { ok: true, content: fs.readFileSync(fp, "utf-8") });
+      return true;
+    }
+    if (action === "save") {
+      if (!name || content === undefined) { json(res, { ok: false, error: "name and content required" }, 400); return true; }
+      let fileName = name.trim();
+      if (!fileName.endsWith(".mdc") && !fileName.endsWith(".md")) fileName += ".mdc";
+      if (!fs.existsSync(getRulesDir())) fs.mkdirSync(getRulesDir(), { recursive: true });
+      fs.writeFileSync(path.join(getRulesDir(), fileName), content, "utf-8");
+      json(res, { ok: true, message: `${fileName} saved` });
+      return true;
+    }
+    if (action === "delete") {
+      if (!name) { json(res, { ok: false, error: "name required" }, 400); return true; }
+      const fp = path.join(getRulesDir(), name);
+      if (!fs.existsSync(fp)) { json(res, { ok: false, error: "not found" }, 404); return true; }
+      fs.unlinkSync(fp);
+      json(res, { ok: true, message: `${name} deleted` });
+      return true;
+    }
+    json(res, { ok: false, error: "unknown action" }, 400);
+    return true;
+  }
+  return false;
+}
+
+async function handleSkillsAdmin(method: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> {
+  if (method === "GET") {
+    if (!fs.existsSync(SKILLS_DIR)) { json(res, { ok: true, skills: [] }); return true; }
+    const dirs = fs.readdirSync(SKILLS_DIR, { withFileTypes: true }).filter((d) => d.isDirectory());
+    const skills = dirs.map((d) => {
+      const skillFile = path.join(SKILLS_DIR, d.name, "SKILL.md");
+      const preview = fs.existsSync(skillFile) ? fs.readFileSync(skillFile, "utf-8").split("\n")[0].slice(0, 80) : "";
+      return { name: d.name, preview };
+    });
+    json(res, { ok: true, skills });
+    return true;
+  }
+  if (method === "POST") {
+    const body = JSON.parse(await readBody(req));
+    const { action, name, content } = body as { action: string; name?: string; content?: string };
+
+    if (action === "read") {
+      if (!name) { json(res, { ok: false, error: "name required" }, 400); return true; }
+      const fp = path.join(SKILLS_DIR, name, "SKILL.md");
+      if (!fs.existsSync(fp)) { json(res, { ok: false, error: "not found" }, 404); return true; }
+      json(res, { ok: true, content: fs.readFileSync(fp, "utf-8") });
+      return true;
+    }
+    if (action === "save") {
+      if (!name || content === undefined) { json(res, { ok: false, error: "name and content required" }, 400); return true; }
+      const dir = path.join(SKILLS_DIR, name.trim());
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "SKILL.md"), content, "utf-8");
+      json(res, { ok: true, message: `${name} saved` });
+      return true;
+    }
+    if (action === "delete") {
+      if (!name) { json(res, { ok: false, error: "name required" }, 400); return true; }
+      const dir = path.join(SKILLS_DIR, name);
+      if (!fs.existsSync(dir)) { json(res, { ok: false, error: "not found" }, 404); return true; }
+      fs.rmSync(dir, { recursive: true, force: true });
+      json(res, { ok: true, message: `${name} deleted` });
+      return true;
+    }
+    json(res, { ok: false, error: "unknown action" }, 400);
+    return true;
+  }
+  return false;
+}
+
+async function handleTasksAdmin(method: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> {
+  if (method === "GET") {
+    json(res, { ok: true, tasks: readTasks() });
+    return true;
+  }
+  if (method === "POST") {
+    const body = JSON.parse(await readBody(req));
+    const { action, id, name, cron, content, enabled, independent } = body as {
+      action: string; id?: string; name?: string; cron?: string; content?: string; enabled?: boolean; independent?: boolean
+    };
+    const tasks = readTasks();
+
+    if (action === "add") {
+      if (!name || !cron || !content) { json(res, { ok: false, error: "name, cron, content required" }, 400); return true; }
+      const newTask: TaskEntry = { id: crypto.randomUUID(), name: name.trim(), cron: cron.trim(), content, enabled: enabled ?? true, independent: independent ?? true };
+      tasks.push(newTask);
+      writeTasks(tasks);
+      json(res, { ok: true, task: newTask });
+      return true;
+    }
+    if (!id) { json(res, { ok: false, error: "id required" }, 400); return true; }
+    const idx = tasks.findIndex((t) => t.id === id);
+    if (idx === -1) { json(res, { ok: false, error: "task not found" }, 404); return true; }
+
+    if (action === "update") {
+      if (name !== undefined) tasks[idx].name = name.trim();
+      if (cron !== undefined) tasks[idx].cron = cron.trim();
+      if (content !== undefined) tasks[idx].content = content;
+      if (enabled !== undefined) tasks[idx].enabled = enabled;
+      if (independent !== undefined) tasks[idx].independent = independent;
+      writeTasks(tasks);
+      json(res, { ok: true, task: tasks[idx] });
+      return true;
+    }
+    if (action === "delete") {
+      const removed = tasks.splice(idx, 1)[0];
+      writeTasks(tasks);
+      json(res, { ok: true, removed });
+      return true;
+    }
+    if (action === "toggle") {
+      tasks[idx].enabled = !tasks[idx].enabled;
+      writeTasks(tasks);
+      json(res, { ok: true, task: tasks[idx] });
+      return true;
+    }
+    json(res, { ok: false, error: "unknown action" }, 400);
+    return true;
+  }
+  return false;
+}
+
+// ── 管理 API 路由分发 ────────────────────────────────────
+
+type RouteHandler = (method: string, req: http.IncomingMessage, res: http.ServerResponse) => Promise<boolean>;
+
+const ADMIN_CRUD_ROUTES: Record<string, RouteHandler> = {
+  "/api/mcp": handleMcpAdmin,
+  "/api/rules": handleRulesAdmin,
+  "/api/skills": handleSkillsAdmin,
+  "/api/tasks": handleTasksAdmin,
+};
+
+async function handleWorkspaceAdmin(method: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> {
+  if (method === "GET") {
+    json(res, { ok: true, workspaceDir: WORKSPACE_DIR });
+    return true;
+  }
+  if (method === "PUT" || method === "POST") {
+    const body = JSON.parse(await readBody(req));
+    const { dir } = body as { dir?: string };
+    if (!dir?.trim()) { json(res, { ok: false, error: "dir is required" }, 400); return true; }
+    const newDir = dir.trim();
+    if (!fs.existsSync(newDir)) { json(res, { ok: false, error: "directory does not exist" }, 400); return true; }
+    const oldDir = WORKSPACE_DIR;
+    WORKSPACE_DIR = newDir;
+    if (oldDir !== newDir) {
+      for (const [chatId, oldSessionKey] of activeSessionMap) {
+        if (oldSessionKey.endsWith(`::${oldDir}`)) {
+          const newSessionKey = `${chatId}::${newDir}`;
+          activeSessionMap.set(chatId, newSessionKey);
+          sessionToChatMap.delete(oldSessionKey);
+          sessionToChatMap.set(newSessionKey, chatId);
+          log("INFO", `[Workspace] 会话路由迁移: ${oldSessionKey} → ${newSessionKey}`);
+        }
+      }
+    }
+    log("INFO", `[Workspace] hot-updated: ${oldDir} -> ${newDir}`);
+    process.stdout.write(`__WORKSPACE_SWITCH__:${JSON.stringify({ dir: newDir })}\n`);
+    json(res, { ok: true, message: `工作目录已切换`, dir: newDir, oldDir });
+    return true;
+  }
+  return false;
+}
+
+async function handleAgentAdmin(_method: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> {
+  if (_method !== "POST") return false;
+  const body = JSON.parse(await readBody(req));
+  const { action } = body as { action: string };
+  const supportedActions = ["stop", "restart", "reset", "clean", "launch"];
+
+  if (action === "launch") {
+    const { message, chatId } = body as { message?: string; chatId?: string };
+    if (!message?.trim()) { json(res, { ok: false, error: "message is required" }, 400); return true; }
+    const taskId = `temp-${Date.now()}`;
+    const payload = JSON.stringify({ taskId, taskName: "临时会话", content: message.trim(), chatType: "temp", chatId });
+    process.stdout.write(`__IND_LAUNCH__:${payload}\n`);
+    json(res, { ok: true, taskId, message: "临时 Agent 已启动" });
+    return true;
+  }
+  if (action === "clean") {
+    const cleared = clearFileQueue();
+    json(res, { ok: true, cleared });
+    return true;
+  }
+  if (supportedActions.includes(action)) {
+    const msgId = `api-${Date.now()}`;
+    pushCommandToQueue(`/${action}`, msgId, `mcp-api`);
+    json(res, { ok: true, message: `/${action} command queued` });
+    return true;
+  }
+  json(res, { ok: false, error: `unknown action, supported: ${supportedActions.join(", ")}` }, 400);
+  return true;
+}
+
+const ADMIN_ENTITY_ROUTES: Record<string, RouteHandler> = {
+  "/api/workspace": handleWorkspaceAdmin,
+  "/api/agent": handleAgentAdmin,
+};
 
 async function handleAdminApi(pathname: string, method: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> {
   if (!pathname.startsWith("/api/")) return false;
@@ -838,236 +1128,32 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     return true;
   }
 
-  // ── MCP 管理 ──
-  if (pathname === "/api/mcp") {
-    if (method === "GET") {
-      const globalCfg = readJsonSafe(GLOBAL_MCP_PATH);
-      const projectCfg = readJsonSafe(getProjectMcpPath());
-      const servers: Record<string, { config: unknown; scope: string }> = {};
-      if (globalCfg?.mcpServers) {
-        for (const [k, v] of Object.entries(globalCfg.mcpServers)) servers[k] = { config: v, scope: "global" };
-      }
-      if (projectCfg?.mcpServers) {
-        for (const [k, v] of Object.entries(projectCfg.mcpServers)) servers[k] = { config: v, scope: "project" };
-      }
-      json(res, { ok: true, servers });
-      return true;
-    }
-    if (method === "POST") {
-      const body = JSON.parse(await readBody(req));
-      const { action, name, config, scope } = body as { action: string; name?: string; config?: string; scope?: string };
-      const targetPath = (scope ?? "global") === "project" ? getProjectMcpPath() : GLOBAL_MCP_PATH;
+  const crudHandler = ADMIN_CRUD_ROUTES[pathname];
+  if (crudHandler) return crudHandler(method, req, res);
 
-      if (action === "add") {
-        if (!name || !config) { json(res, { ok: false, error: "name and config required" }, 400); return true; }
-        let parsed: unknown;
-        try { parsed = JSON.parse(config); } catch { json(res, { ok: false, error: "invalid config JSON" }, 400); return true; }
-        const mcpJson = readJsonSafe(targetPath) ?? {};
-        if (!mcpJson.mcpServers) mcpJson.mcpServers = {};
-        mcpJson.mcpServers[name] = parsed;
-        writeJsonSafe(targetPath, mcpJson);
-        json(res, { ok: true, message: `${name} saved` });
-        return true;
-      }
-      if (action === "delete") {
-        if (!name) { json(res, { ok: false, error: "name required" }, 400); return true; }
-        for (const p of [GLOBAL_MCP_PATH, getProjectMcpPath()]) {
-          const mcpJson = readJsonSafe(p);
-          if (mcpJson?.mcpServers?.[name]) {
-            delete mcpJson.mcpServers[name];
-            writeJsonSafe(p, mcpJson);
-            json(res, { ok: true, message: `${name} deleted` });
-            return true;
-          }
-        }
-        json(res, { ok: false, error: "not found" }, 404);
-        return true;
-      }
-      json(res, { ok: false, error: "unknown action" }, 400);
-      return true;
-    }
-  }
-
-  // ── Rules 管理 ──
-  if (pathname === "/api/rules") {
-    if (method === "GET") {
-      if (!fs.existsSync(getRulesDir())) { json(res, { ok: true, rules: [] }); return true; }
-      const files = fs.readdirSync(getRulesDir()).filter((f) => f.endsWith(".mdc") || f.endsWith(".md"));
-      json(res, { ok: true, rules: files });
-      return true;
-    }
-    if (method === "POST") {
-      const body = JSON.parse(await readBody(req));
-      const { action, name, content } = body as { action: string; name?: string; content?: string };
-
-      if (action === "read") {
-        if (!name) { json(res, { ok: false, error: "name required" }, 400); return true; }
-        const fp = path.join(getRulesDir(), name);
-        if (!fs.existsSync(fp)) { json(res, { ok: false, error: "not found" }, 404); return true; }
-        json(res, { ok: true, content: fs.readFileSync(fp, "utf-8") });
-        return true;
-      }
-      if (action === "save") {
-        if (!name || content === undefined) { json(res, { ok: false, error: "name and content required" }, 400); return true; }
-        let fileName = name.trim();
-        if (!fileName.endsWith(".mdc") && !fileName.endsWith(".md")) fileName += ".mdc";
-        if (!fs.existsSync(getRulesDir())) fs.mkdirSync(getRulesDir(), { recursive: true });
-        fs.writeFileSync(path.join(getRulesDir(), fileName), content, "utf-8");
-        json(res, { ok: true, message: `${fileName} saved` });
-        return true;
-      }
-      if (action === "delete") {
-        if (!name) { json(res, { ok: false, error: "name required" }, 400); return true; }
-        const fp = path.join(getRulesDir(), name);
-        if (!fs.existsSync(fp)) { json(res, { ok: false, error: "not found" }, 404); return true; }
-        fs.unlinkSync(fp);
-        json(res, { ok: true, message: `${name} deleted` });
-        return true;
-      }
-      json(res, { ok: false, error: "unknown action" }, 400);
-      return true;
-    }
-  }
-
-  // ── Skills 管理 ──
-  if (pathname === "/api/skills") {
-    if (method === "GET") {
-      if (!fs.existsSync(SKILLS_DIR)) { json(res, { ok: true, skills: [] }); return true; }
-      const dirs = fs.readdirSync(SKILLS_DIR, { withFileTypes: true }).filter((d) => d.isDirectory());
-      const skills = dirs.map((d) => {
-        const skillFile = path.join(SKILLS_DIR, d.name, "SKILL.md");
-        const preview = fs.existsSync(skillFile) ? fs.readFileSync(skillFile, "utf-8").split("\n")[0].slice(0, 80) : "";
-        return { name: d.name, preview };
-      });
-      json(res, { ok: true, skills });
-      return true;
-    }
-    if (method === "POST") {
-      const body = JSON.parse(await readBody(req));
-      const { action, name, content } = body as { action: string; name?: string; content?: string };
-
-      if (action === "read") {
-        if (!name) { json(res, { ok: false, error: "name required" }, 400); return true; }
-        const fp = path.join(SKILLS_DIR, name, "SKILL.md");
-        if (!fs.existsSync(fp)) { json(res, { ok: false, error: "not found" }, 404); return true; }
-        json(res, { ok: true, content: fs.readFileSync(fp, "utf-8") });
-        return true;
-      }
-      if (action === "save") {
-        if (!name || content === undefined) { json(res, { ok: false, error: "name and content required" }, 400); return true; }
-        const dir = path.join(SKILLS_DIR, name.trim());
-        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-        fs.writeFileSync(path.join(dir, "SKILL.md"), content, "utf-8");
-        json(res, { ok: true, message: `${name} saved` });
-        return true;
-      }
-      if (action === "delete") {
-        if (!name) { json(res, { ok: false, error: "name required" }, 400); return true; }
-        const dir = path.join(SKILLS_DIR, name);
-        if (!fs.existsSync(dir)) { json(res, { ok: false, error: "not found" }, 404); return true; }
-        fs.rmSync(dir, { recursive: true, force: true });
-        json(res, { ok: true, message: `${name} deleted` });
-        return true;
-      }
-      json(res, { ok: false, error: "unknown action" }, 400);
-      return true;
-    }
-  }
-
-  // ── Tasks 管理 ──
-  if (pathname === "/api/tasks") {
-    if (method === "GET") {
-      json(res, { ok: true, tasks: readTasks() });
-      return true;
-    }
-    if (method === "POST") {
-      const body = JSON.parse(await readBody(req));
-      const { action, id, name, cron, content, enabled, independent } = body as {
-        action: string; id?: string; name?: string; cron?: string; content?: string; enabled?: boolean; independent?: boolean
-      };
-      const tasks = readTasks();
-
-      if (action === "add") {
-        if (!name || !cron || !content) { json(res, { ok: false, error: "name, cron, content required" }, 400); return true; }
-        const newTask: TaskEntry = { id: crypto.randomUUID(), name: name.trim(), cron: cron.trim(), content, enabled: enabled ?? true, independent: independent ?? true };
-        tasks.push(newTask);
-        writeTasks(tasks);
-        json(res, { ok: true, task: newTask });
-        return true;
-      }
-      if (!id) { json(res, { ok: false, error: "id required" }, 400); return true; }
-      const idx = tasks.findIndex((t) => t.id === id);
-      if (idx === -1) { json(res, { ok: false, error: "task not found" }, 404); return true; }
-
-      if (action === "update") {
-        if (name !== undefined) tasks[idx].name = name.trim();
-        if (cron !== undefined) tasks[idx].cron = cron.trim();
-        if (content !== undefined) tasks[idx].content = content;
-        if (enabled !== undefined) tasks[idx].enabled = enabled;
-        if (independent !== undefined) tasks[idx].independent = independent;
-        writeTasks(tasks);
-        json(res, { ok: true, task: tasks[idx] });
-        return true;
-      }
-      if (action === "delete") {
-        const removed = tasks.splice(idx, 1)[0];
-        writeTasks(tasks);
-        json(res, { ok: true, removed });
-        return true;
-      }
-      if (action === "toggle") {
-        tasks[idx].enabled = !tasks[idx].enabled;
-        writeTasks(tasks);
-        json(res, { ok: true, task: tasks[idx] });
-        return true;
-      }
-      json(res, { ok: false, error: "unknown action" }, 400);
-      return true;
-    }
-  }
-
-  // ── MCP Server 代理 API ──
+  // ── 消息发送 API ──
   if (method === "POST" && pathname === "/api/send-text") {
     const body = JSON.parse(await readBody(req));
     const { text, message_id, session_key } = body as { text: string; message_id?: string; session_key?: string };
     if (!text) { json(res, { ok: false, error: "text is required" }, 400); return true; }
 
-    const rawChatId = resolveRawChatId(session_key);
-    if (isWechatChatId(rawChatId)) {
-      if (!wechatManager?.isConnected()) { json(res, { ok: false, error: "微信未连接，无法发送到微信会话" }, 400); return true; }
-      const ok = await wechatManager.sendText(rawChatId, text);
-      json(res, { ok });
-    } else if (isFeishuChatId(rawChatId) && sender) {
-      let sentMsgId: string | undefined;
-      if (message_id) {
-        sentMsgId = await sender.sendMessage(text, message_id);
-        if (!sentMsgId) {
-          log("INFO", `回复退避: message_id=${message_id} → chat_id=${rawChatId}`);
-          sentMsgId = await sender.sendMessage(text, undefined, rawChatId);
-        }
-      } else {
-        sentMsgId = await sender.sendMessage(text, undefined, rawChatId);
-      }
-      if (sentMsgId && session_key) trackMessageSession(sentMsgId, session_key);
-      json(res, { ok: true, message_id: sentMsgId });
-    } else if (wechatManager?.isConnected() && lastWechatChatId) {
-      const ok = await wechatManager.sendText(lastWechatChatId, text);
-      json(res, { ok });
-    } else if (sender) {
-      let sentMsgId: string | undefined;
-      if (message_id) {
-        sentMsgId = await sender.sendMessage(text, message_id);
-        if (!sentMsgId) {
-          log("INFO", `回复退避: message_id=${message_id} → 默认发送`);
-          sentMsgId = await sender.sendMessage(text);
-        }
-      } else {
-        sentMsgId = await sender.sendMessage(text);
-      }
-      if (sentMsgId && session_key) trackMessageSession(sentMsgId, session_key);
-      json(res, { ok: true, message_id: sentMsgId });
+    const ch = resolveChannel(session_key);
+    if (ch.type === "error") { json(res, { ok: false, error: ch.message }, 400); return true; }
+    if (ch.type === "wechat") {
+      json(res, { ok: await wechatManager!.sendText(ch.chatId, text) });
     } else {
-      json(res, { ok: false, error: "无可用消息通道" }, 400);
+      let sentMsgId: string | undefined;
+      if (message_id) {
+        sentMsgId = await sender!.sendMessage(text, message_id);
+        if (!sentMsgId) {
+          log("INFO", `回复退避: message_id=${message_id} → ${ch.chatId ? `chat_id=${ch.chatId}` : "默认发送"}`);
+          sentMsgId = await sender!.sendMessage(text, undefined, ch.chatId);
+        }
+      } else {
+        sentMsgId = await sender!.sendMessage(text, undefined, ch.chatId);
+      }
+      if (sentMsgId && session_key) trackMessageSession(sentMsgId, session_key);
+      json(res, { ok: true, message_id: sentMsgId });
     }
     return true;
   }
@@ -1076,18 +1162,12 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const body = JSON.parse(await readBody(req));
     const { image_path, message_id, session_key } = body as { image_path: string; message_id?: string; session_key?: string };
     if (!image_path) { json(res, { ok: false, error: "image_path is required" }, 400); return true; }
-    const rawChatId = resolveRawChatId(session_key);
-    if (isWechatChatId(rawChatId)) {
-      if (!wechatManager?.isConnected()) { json(res, { ok: false, error: "微信未连接，无法发送图片到微信会话" }, 400); return true; }
-      await wechatManager.sendMedia(rawChatId, image_path);
-    } else if (isFeishuChatId(rawChatId) && sender) {
-      await sender.sendImage(image_path, message_id, rawChatId);
-    } else if (wechatManager?.isConnected() && lastWechatChatId) {
-      await wechatManager.sendMedia(lastWechatChatId, image_path);
-    } else if (sender) {
-      await sender.sendImage(image_path, message_id);
+    const ch = resolveChannel(session_key);
+    if (ch.type === "error") { json(res, { ok: false, error: ch.message }, 400); return true; }
+    if (ch.type === "wechat") {
+      await wechatManager!.sendMedia(ch.chatId, image_path);
     } else {
-      json(res, { ok: false, error: "无可用消息通道" }, 400); return true;
+      await sender!.sendImage(image_path, message_id, ch.chatId);
     }
     json(res, { ok: true });
     return true;
@@ -1097,18 +1177,12 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const body = JSON.parse(await readBody(req));
     const { file_path, message_id, session_key } = body as { file_path: string; message_id?: string; session_key?: string };
     if (!file_path) { json(res, { ok: false, error: "file_path is required" }, 400); return true; }
-    const rawChatId = resolveRawChatId(session_key);
-    if (isWechatChatId(rawChatId)) {
-      if (!wechatManager?.isConnected()) { json(res, { ok: false, error: "微信未连接，无法发送文件到微信会话" }, 400); return true; }
-      await wechatManager.sendMedia(rawChatId, file_path);
-    } else if (isFeishuChatId(rawChatId) && sender) {
-      await sender.sendFile(file_path, message_id, rawChatId);
-    } else if (wechatManager?.isConnected() && lastWechatChatId) {
-      await wechatManager.sendMedia(lastWechatChatId, file_path);
-    } else if (sender) {
-      await sender.sendFile(file_path, message_id);
+    const ch = resolveChannel(session_key);
+    if (ch.type === "error") { json(res, { ok: false, error: ch.message }, 400); return true; }
+    if (ch.type === "wechat") {
+      await wechatManager!.sendMedia(ch.chatId, file_path);
     } else {
-      json(res, { ok: false, error: "无可用消息通道" }, 400); return true;
+      await sender!.sendFile(file_path, message_id, ch.chatId);
     }
     json(res, { ok: true });
     return true;
@@ -1209,67 +1283,8 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     return true;
   }
 
-  // ── Workspace 管理 ──
-  if (pathname === "/api/workspace") {
-    if (method === "GET") {
-      json(res, { ok: true, workspaceDir: WORKSPACE_DIR });
-      return true;
-    }
-    if (method === "PUT" || method === "POST") {
-      const body = JSON.parse(await readBody(req));
-      const { dir } = body as { dir?: string };
-      if (!dir?.trim()) { json(res, { ok: false, error: "dir is required" }, 400); return true; }
-      const newDir = dir.trim();
-      if (!fs.existsSync(newDir)) { json(res, { ok: false, error: "directory does not exist" }, 400); return true; }
-      const oldDir = WORKSPACE_DIR;
-      WORKSPACE_DIR = newDir;
-      if (oldDir !== newDir) {
-        for (const [chatId, oldSessionKey] of activeSessionMap) {
-          if (oldSessionKey.endsWith(`::${oldDir}`)) {
-            const newSessionKey = `${chatId}::${newDir}`;
-            activeSessionMap.set(chatId, newSessionKey);
-            sessionToChatMap.delete(oldSessionKey);
-            sessionToChatMap.set(newSessionKey, chatId);
-            log("INFO", `[Workspace] 会话路由迁移: ${oldSessionKey} → ${newSessionKey}`);
-          }
-        }
-      }
-      log("INFO", `[Workspace] hot-updated: ${oldDir} -> ${newDir}`);
-      process.stdout.write(`__WORKSPACE_SWITCH__:${JSON.stringify({ dir: newDir })}\n`);
-      json(res, { ok: true, message: `工作目录已切换`, dir: newDir, oldDir });
-      return true;
-    }
-  }
-
-  // ── Agent 控制 ──
-  if (pathname === "/api/agent" && method === "POST") {
-    const body = JSON.parse(await readBody(req));
-    const { action } = body as { action: string };
-    const supportedActions = ["stop", "restart", "reset", "clean", "launch"];
-
-    if (action === "launch") {
-      const { message, chatId } = body as { message?: string; chatId?: string };
-      if (!message?.trim()) { json(res, { ok: false, error: "message is required" }, 400); return true; }
-      const taskId = `temp-${Date.now()}`;
-      const payload = JSON.stringify({ taskId, taskName: "临时会话", content: message.trim(), chatType: "temp", chatId });
-      process.stdout.write(`__IND_LAUNCH__:${payload}\n`);
-      json(res, { ok: true, taskId, message: "临时 Agent 已启动" });
-      return true;
-    }
-    if (action === "clean") {
-      const cleared = clearFileQueue();
-      json(res, { ok: true, cleared });
-      return true;
-    }
-    if (supportedActions.includes(action)) {
-      const msgId = `api-${Date.now()}`;
-      pushCommandToQueue(`/${action}`, msgId, `mcp-api`);
-      json(res, { ok: true, message: `/${action} command queued` });
-      return true;
-    }
-    json(res, { ok: false, error: `unknown action, supported: ${supportedActions.join(", ")}` }, 400);
-    return true;
-  }
+  const crudHandler2 = ADMIN_ENTITY_ROUTES[pathname];
+  if (crudHandler2) return crudHandler2(method, req, res);
 
   return false;
 }

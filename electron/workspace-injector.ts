@@ -265,17 +265,10 @@ export async function injectWorkspace(): Promise<{ results: InjectResult[] }> {
   if (!config.workspaceDir) {
     return { results: [{ file: "", action: "skipped", message: "工作目录未配置" }] }
   }
-
-  const wsDir = config.workspaceDir
-  const results: InjectResult[] = []
-
-  results.push(
-    injectFile(
-      path.join(wsDir, ".cursor", "skills", "cursor-claw-admin", "SKILL.md"),
-      ADMIN_SKILL_CONTENT,
-      true,
-    ),
+  const result = injectFile(
+    path.join(config.workspaceDir, ".cursor", "skills", "cursor-claw-admin", "SKILL.md"),
+    ADMIN_SKILL_CONTENT,
+    true,
   )
-
-  return { results }
+  return { results: [result] }
 }

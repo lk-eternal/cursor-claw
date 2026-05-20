@@ -43,6 +43,7 @@ import SearchableSelect from "../components/SearchableSelect"
 import WorkspaceSessionModal, { type SessionEntry } from "../components/WorkspaceSessionModal"
 import TitleBar from "../components/TitleBar"
 import useInlineModal from "../components/useInlineModal"
+import { REQUIRED_FEISHU_SCOPES, FEISHU_SCOPES_JSON } from "../constants"
 
 interface Props { onBack: () => void; onResetSetup?: () => void; initialTab?: string; onTabConsumed?: () => void }
 
@@ -143,15 +144,6 @@ function SdkKeyStatus({ apiKey }: { apiKey: string }) {
   if (status.error) return <div className="flex items-center gap-2 text-xs text-red-400"><ShieldAlert size={14} />{status.error}</div>
   return null
 }
-
-const REQUIRED_PERMISSIONS: { scope: string; desc: string }[] = [
-  { scope: "im:message", desc: "发送消息（create / reply）" },
-  { scope: "im:message.p2p_msg:readonly", desc: "接收私聊消息" },
-  { scope: "im:message.group_at_msg:readonly", desc: "接收群聊 @消息" },
-  { scope: "im:resource", desc: "上传/下载图片与文件" },
-  { scope: "im:chat:read", desc: "获取群聊名称" },
-  { scope: "contact:contact.base:readonly", desc: "获取用户名（私聊会话显示）" },
-]
 
 const TABS: { id: Tab; label: string; icon: typeof SettingsIcon }[] = [
   { id: "general", label: "通用", icon: SettingsIcon },
@@ -279,10 +271,10 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
         setWechatQrStatus("error")
         setWechatQrMsg(res.error ?? "登录失败")
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       wechatQrBusy.current = false
       setWechatQrStatus("error")
-      setWechatQrMsg(e?.message ?? String(e))
+      setWechatQrMsg(e instanceof Error ? e.message : String(e))
     }
   }, [])
 
@@ -380,10 +372,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
     window.electronAPI.getSkillTree().then(setSkillTree)
   }, [])
   const refreshTasks = useCallback(() => {
-    window.electronAPI.getScheduledTasks().then((t) => {
-      console.log("[Settings] getScheduledTasks returned", t.length, "tasks", t)
-      setTasks(t)
-    }).catch((e) => console.error("[Settings] getScheduledTasks error:", e))
+    window.electronAPI.getScheduledTasks().then(setTasks)
   }, [])
 
   useEffect(() => {
@@ -461,6 +450,19 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
     if (tab === "skills") refreshSkills()
     if (tab === "tasks") { refreshTasks(); window.electronAPI.getScheduledTaskStatus().then(setTaskStatuses) }
   }, [tab, refreshMcpServers, refreshRules, refreshSkills, refreshTasks])
+
+  useEffect(() => {
+    if (tab !== "agent" || modelOptions.length > 0 || !loaded.current) return
+    setLoadingModels(true)
+    const p = agentMode === "sdk"
+      ? window.electronAPI.listSdkModels()
+      : window.electronAPI.listModels()
+    p.then((r) => {
+      if (r.ok && r.models.length > 0) {
+        setModelOptions(agentMode === "sdk" ? r.models : r.models.map((m) => ({ ...m, params: "" })))
+      }
+    }).finally(() => setLoadingModels(false))
+  }, [tab, agentMode, modelOptions.length])
 
   const autoSave = useCallback(() => {
     if (!loaded.current) return
@@ -1417,8 +1419,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                     )}
                     <button
                       onClick={() => {
-                        const json = JSON.stringify({ scopes: { tenant: REQUIRED_PERMISSIONS.map((p) => p.scope), user: [] } }, null, 2)
-                        navigator.clipboard.writeText(json)
+                        navigator.clipboard.writeText(FEISHU_SCOPES_JSON)
                       }}
                       className="inline-flex items-center gap-1.5 rounded-md border border-gray-700 px-2.5 py-1 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white"
                     >
@@ -1427,7 +1428,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                   </div>
                 </div>
                 <div className="rounded-lg border border-gray-800 divide-y divide-gray-800">
-                  {REQUIRED_PERMISSIONS.map((p) => (
+                  {REQUIRED_FEISHU_SCOPES.map((p) => (
                     <div key={p.scope} className="flex items-center justify-between px-3 py-2">
                       <code className="text-xs text-blue-400">{p.scope}</code>
                       <span className="text-xs text-gray-500">{p.desc}</span>

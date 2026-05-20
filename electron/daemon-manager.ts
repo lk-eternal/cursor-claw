@@ -79,29 +79,11 @@ function getIndependentTaskStatuses(): Record<string, { running: boolean; pid?: 
 
 const UNIFIED_DAEMON_PREFIX = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\.\d{3} \[Daemon\] /
 
-const LEGACY_COMMA_DAEMON = /^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\.\d{3}),(?:Lark)?Daemon,(INFO|WARN|ERROR|DEBUG),(.+)$/
-
-function normalizeUnifiedDaemonLine(s: string): string {
-  return s.replace(/^(\d{4}-\d{2}-\d{2})T(\d{2}:)/, "$1 $2")
-}
-
 function pushDaemonStderrLine(rawLine: string): void {
   const t = rawLine.trim()
   if (!t) return
   if (UNIFIED_DAEMON_PREFIX.test(t)) {
-    pushLog(normalizeUnifiedDaemonLine(t))
-    return
-  }
-  const legacyComma = t.match(LEGACY_COMMA_DAEMON)
-  if (legacyComma) {
-    const ts = legacyComma[1].replace("T", " ")
-    pushLog(`${ts} [Daemon] ${legacyComma[2]} ${legacyComma[3]}`)
-    return
-  }
-  const legacy = t.match(/^\[(?:Lark)?Daemon\]\[([^\]]+)\]\[([^\]]+)\]\s*(.*)$/)
-  if (legacy) {
-    const ts = legacy[1].replace("T", " ")
-    pushLog(`${ts} [Daemon] ${legacy[2]} ${escapeLogContentSingleLine(legacy[3])}`)
+    pushLog(t.replace(/^(\d{4}-\d{2}-\d{2})T(\d{2}:)/, "$1 $2"))
     return
   }
   pushUiLog("Daemon", "WARN", t)
@@ -691,23 +673,6 @@ function stopStatusPolling(): void {
     statusInterval = null
   }
   stopDaemonPowerSaveBlock()
-}
-
-
-
-
-// ── CLI 检测与安装 ──────────────────────────────────────────
-
-
-
-
-// ── Agent 状态与会话管理（委托 agent-launcher） ─────────────
-
-export type AgentLoginStatus = {
-  cliFound: boolean
-  loggedIn: boolean
-  identityLine?: string
-  error?: string
 }
 
 async function checkAndExecutePendingCommands(): Promise<void> {

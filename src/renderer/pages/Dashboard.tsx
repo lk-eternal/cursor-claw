@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, memo } from "react"
 import {
   Play,
   Square,
@@ -24,7 +24,7 @@ interface Props {
 
 export default function Dashboard({ onSettings }: Props) {
   const [status, setStatus] = useState<DaemonStatus>({ running: false })
-  const [logs, setLogs] = useState("")
+  const [logLines, setLogLines] = useState<string[]>([])
   const [starting, setStarting] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [actionError, setActionError] = useState("")
@@ -44,22 +44,18 @@ export default function Dashboard({ onSettings }: Props) {
   const logRef = useRef<HTMLPreElement>(null)
 
   useEffect(() => {
-    window.electronAPI.getConfig().then((cfg) => {
-      setConfigModel(cfg.model?.trim() || "auto")
-      setAgentMode(cfg.agentMode ?? "cli")
-    })
+    const syncCliStatus = (s: DaemonStatus) => {
+      if (s.running && s.cliAvailable !== undefined) {
+        setCliStatus((prev) =>
+          !s.cliAvailable && (prev === "installed" || prev === "need-login") ? "missing" : prev,
+        )
+      }
+    }
 
     const refresh = async () => {
       const s = await window.electronAPI.getDaemonStatus()
       setStatus(s)
-      if (s.running && s.cliAvailable !== undefined) {
-        setCliStatus((prev) => {
-          if (!s.cliAvailable && (prev === "installed" || prev === "need-login")) {
-            return "missing"
-          }
-          return prev
-        })
-      }
+      syncCliStatus(s)
       if (s.queueLength && s.queueLength > 0) {
         const msgs = await window.electronAPI.getQueueMessages()
         setQueueMessages(msgs)
@@ -71,30 +67,24 @@ export default function Dashboard({ onSettings }: Props) {
     const timer = setInterval(refresh, 5_000)
 
     window.electronAPI.getLogBuffer().then((buf) => {
-      if (buf.length > 0) setLogs(buf.join("\n"))
+      if (buf.length > 0) setLogLines(buf.slice(-300))
     })
 
     const unsub = window.electronAPI.onDaemonStatus((s) => {
       setStatus(s)
-      if (s.running && s.cliAvailable !== undefined) {
-        setCliStatus((prev) => {
-          if (!s.cliAvailable && (prev === "installed" || prev === "need-login")) {
-            return "missing"
-          }
-          return prev
-        })
-      }
+      syncCliStatus(s)
     })
     const unsubLog = window.electronAPI.onDaemonLog((line) => {
-      setLogs((prev) => {
-        const next = prev ? prev + "\n" + line : line
-        const lines = next.split("\n")
-        return lines.length > 300 ? lines.slice(-300).join("\n") : next
+      setLogLines((prev) => {
+        const next = [...prev, line]
+        return next.length > 300 ? next.slice(-300) : next
       })
     })
 
     let cancelCliSchedule: (() => void) | undefined
     window.electronAPI.getConfig().then((cfg) => {
+      setConfigModel(cfg.model?.trim() || "auto")
+      setAgentMode(cfg.agentMode ?? "cli")
       if (cfg.agentMode === "sdk") {
         setCliStatus("installed")
         return
@@ -135,7 +125,7 @@ export default function Dashboard({ onSettings }: Props) {
     if (logRef.current) {
       logRef.current.scrollTop = logRef.current.scrollHeight
     }
-  }, [logs])
+  }, [logLines])
 
   const handleStart = async () => {
     setStarting(true)
@@ -615,17 +605,17 @@ export default function Dashboard({ onSettings }: Props) {
             <span>日志</span>
           </div>
           <div className="flex gap-2">
-            {logs && (
+            {logLines.length > 0 && (
               <button
-                onClick={() => { navigator.clipboard.writeText(logs) }}
+                onClick={() => { navigator.clipboard.writeText(logLines.join("\n")) }}
                 className="rounded px-2 py-0.5 text-xs text-gray-500 transition hover:bg-gray-800 hover:text-gray-300"
               >
                 复制
               </button>
             )}
-            {logs && (
+            {logLines.length > 0 && (
               <button
-                onClick={() => setLogs("")}
+                onClick={() => setLogLines([])}
                 className="rounded px-2 py-0.5 text-xs text-gray-500 transition hover:bg-gray-800 hover:text-gray-300"
               >
                 清空
@@ -637,7 +627,7 @@ export default function Dashboard({ onSettings }: Props) {
           ref={logRef}
           className="flex-1 overflow-auto rounded-lg border border-gray-800 bg-gray-900/50 p-3 font-mono text-xs leading-5"
         >
-          {logs ? logs.split("\n").map((line, i) => <LogLine key={i} line={line} />) : <span className="text-gray-600">暂无日志</span>}
+          {logLines.length > 0 ? logLines.map((line, i) => <LogLine key={i} line={line} />) : <span className="text-gray-600">暂无日志</span>}
         </div>
       </div>
     </div>
@@ -665,7 +655,7 @@ const PROCESS_COLORS: Record<string, string> = {
   Scheduler: "text-teal-400",
 }
 
-function LogLine({ line }: { line: string }) {
+const LogLine = memo(function LogLine({ line }: { line: string }) {
   const m = LOG_RE.exec(line)
   if (!m) {
     return <div className="whitespace-pre-wrap break-all text-gray-400">{displayLogMessageBody(line)}</div>
@@ -683,7 +673,7 @@ function LogLine({ line }: { line: string }) {
       <span className={level === "ERROR" ? "text-red-300" : level === "WARN" ? "text-yellow-300" : "text-gray-300"}>{body}</span>
     </div>
   )
-}
+})
 
 function StatusCard({
   icon: Icon,

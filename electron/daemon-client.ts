@@ -20,7 +20,7 @@ export function readLockFile(): LockInfo | null {
   }
 }
 
-export function httpGet(url: string, timeoutMs = 3000): Promise<any> {
+export function httpGet(url: string, timeoutMs = 3000): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const req = http.get(url, { timeout: timeoutMs }, (res) => {
       const chunks: string[] = []

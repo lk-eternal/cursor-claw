@@ -111,12 +111,7 @@ export function claimNextMessage(filterSessionKey?: string): QueueMessage | null
   return null;
 }
 
-export function claimNextMessageText(filterSessionKey?: string): string | null {
-  const msg = claimNextMessage(filterSessionKey);
-  return msg ? msg.text : null;
-}
-
-export function pollFileQueue(timeoutMs: number, intervalMs = POLL_INTERVAL_MS, filterSessionKey?: string): Promise<QueueMessage | null> {
+function pollFileQueue(timeoutMs: number, intervalMs = POLL_INTERVAL_MS, filterSessionKey?: string): Promise<QueueMessage | null> {
   return new Promise((resolve) => {
     const immediate = claimNextMessage(filterSessionKey);
     if (immediate !== null) { resolve(immediate); return; }

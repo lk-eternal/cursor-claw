@@ -26,6 +26,7 @@ import {
 import SearchableSelect from "../components/SearchableSelect"
 import TitleBar from "../components/TitleBar"
 import useInlineModal from "../components/useInlineModal"
+import { REQUIRED_FEISHU_SCOPES, FEISHU_SCOPES_JSON } from "../constants"
 
 interface Props {
   onComplete: () => void
@@ -37,21 +38,6 @@ interface StepStatus {
   status: "pending" | "running" | "done" | "error"
   message?: string
 }
-
-const REQUIRED_SCOPES = [
-  { scope: "im:message", desc: "发送消息（create / reply）" },
-  { scope: "im:message.p2p_msg:readonly", desc: "接收私聊消息" },
-  { scope: "im:message.group_at_msg:readonly", desc: "接收群聊 @消息" },
-  { scope: "im:resource", desc: "上传/下载图片与文件" },
-  { scope: "im:chat:read", desc: "获取群聊名称" },
-  { scope: "contact:contact.base:readonly", desc: "获取用户名（私聊会话显示）" },
-]
-
-const SCOPES_JSON = JSON.stringify(
-  { scopes: { tenant: REQUIRED_SCOPES.map((p) => p.scope), user: [] } },
-  null,
-  2,
-)
 
 const inputCls = "w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm outline-none transition focus:border-blue-500"
 
@@ -579,7 +565,7 @@ export default function Setup({ onComplete, onExit }: Props) {
                   <div className="flex items-center justify-between">
                     <button onClick={() => setShowScopes(!showScopes)} className="flex items-center gap-1 text-xs text-gray-400 hover:text-white">
                       <ChevronRight size={12} className={`transition-transform ${showScopes ? "rotate-90" : ""}`} />
-                      应用权限 ({REQUIRED_SCOPES.length})
+                      应用权限 ({REQUIRED_FEISHU_SCOPES.length})
                     </button>
                     <div className="flex items-center gap-2">
                       {appId.trim() && (
@@ -587,14 +573,14 @@ export default function Setup({ onComplete, onExit }: Props) {
                           <ExternalLink size={10} />设置权限
                         </a>
                       )}
-                      <button onClick={() => { navigator.clipboard.writeText(SCOPES_JSON); setScopesCopied(true); setTimeout(() => setScopesCopied(false), 2000) }} className="flex items-center gap-1 text-xs text-gray-500 hover:text-white">
+                      <button onClick={() => { navigator.clipboard.writeText(FEISHU_SCOPES_JSON); setScopesCopied(true); setTimeout(() => setScopesCopied(false), 2000) }} className="flex items-center gap-1 text-xs text-gray-500 hover:text-white">
                         <Copy size={10} />{scopesCopied ? "已复制" : "复制 JSON"}
                       </button>
                     </div>
                   </div>
                   {showScopes && (
                     <div className="rounded-lg border border-gray-800 divide-y divide-gray-800">
-                      {REQUIRED_SCOPES.map((p) => (
+                      {REQUIRED_FEISHU_SCOPES.map((p) => (
                         <div key={p.scope} className="flex items-center justify-between px-3 py-1.5">
                           <code className="text-[11px] text-blue-400">{p.scope}</code>
                           <span className="text-[11px] text-gray-600">{p.desc}</span>

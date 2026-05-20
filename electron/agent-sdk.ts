@@ -82,7 +82,7 @@ async function streamRunEvents(session: SdkSessionAgent, run: Run): Promise<void
     if (!session.abortController.signal.aborted) {
       const msg = e instanceof Error ? `[${e.constructor.name}] ${e.message}` : String(e)
       const stack = e instanceof Error ? e.stack?.split("\n").slice(0, 3).join(" | ") : ""
-      const cause = (e as any)?.cause ? JSON.stringify((e as any).cause) : ""
+      const cause = e instanceof Error && "cause" in e && e.cause ? JSON.stringify(e.cause) : ""
       pushUiLog("SDK", "ERROR", `[${session.sessionKey}] 流处理异常: ${msg}${stack ? ` stack=${stack}` : ""}${cause ? ` cause=${cause}` : ""}`)
     }
   }
@@ -107,7 +107,7 @@ function handleSdkEvent(sessionKey: string, event: SDKMessage): void {
       break
     case "status": {
       const lvl = event.status === "ERROR" ? "ERROR" as const : "INFO" as const
-      pushUiLog("SDK", lvl, `[${sessionKey}] [status] ${event.status}${event.message ? ` - ${event.message}` : ""} raw=${JSON.stringify(event)}`)
+      pushUiLog("SDK", lvl, `[${sessionKey}] [status] ${event.status}${event.message ? ` - ${event.message}` : ""}`)
     }
       break
   }
@@ -228,48 +228,20 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
 
     streamRunEvents(session, run).then(async () => {
       const level = run.status === "error" ? "ERROR" : "INFO"
-      const parts: string[] = []
-      if (run.result) parts.push(`result=${run.result}`)
-      if (run.durationMs != null) parts.push(`duration=${run.durationMs}ms`)
-      if (run.model) parts.push(`model=${JSON.stringify(run.model)}`)
-      try {
-        const wr = await run.wait().catch((e: unknown) => e)
-        if (wr instanceof Error) {
-          const errObj = wr as any
-          parts.push(`waitError=[${wr.constructor.name}] ${wr.message}`)
-          for (const k of ["code", "status", "endpoint", "requestId", "operation", "isRetryable"]) {
-            if (errObj[k] !== undefined) parts.push(`${k}=${errObj[k]}`)
-          }
-          if (errObj.cause) parts.push(`cause=${JSON.stringify(errObj.cause)}`)
-        } else if (typeof wr === "object" && wr) {
-          const r = wr as Record<string, unknown>
-          if (r.status) parts.push(`waitStatus=${r.status}`)
-          parts.push(`waitRaw=${JSON.stringify(wr)}`)
-        }
-      } catch (we: unknown) {
-        const errObj = we as any
-        const wm = we instanceof Error ? `[${we.constructor.name}] ${we.message}` : String(we)
-        parts.push(`waitCatchError=${wm}`)
-        for (const k of ["code", "status", "endpoint", "requestId", "operation"]) {
-          if (errObj?.[k] !== undefined) parts.push(`${k}=${errObj[k]}`)
-        }
-      }
+      const summary = [
+        run.result && `result=${run.result}`,
+        run.durationMs != null && `duration=${run.durationMs}ms`,
+      ].filter(Boolean).join(", ")
+
       if (run.status === "error") {
         try {
-          if (run.supports("conversation")) {
-            const turns = await run.conversation()
-            if (turns.length > 0) {
-              const last = turns[turns.length - 1]
-              parts.push(`lastTurn=${JSON.stringify(last).slice(0, 500)}`)
-            }
-          }
+          const wr = await run.wait().catch((e: unknown) => e)
+          if (wr instanceof Error) pushUiLog("SDK", "ERROR", `[${sessionKey}] wait error: ${wr.message}`)
         } catch { /* ignore */ }
-      }
-      pushUiLog("SDK", level, `[${sessionKey}] Agent 运行结束 (status=${run.status}) ${parts.join(", ")}`)
-      if (run.status === "error") {
         failedCooldowns.set(sessionKey, Date.now() + FAIL_COOLDOWN_MS)
-        pushUiLog("SDK", "WARN", `[${sessionKey}] 错误后冷却 ${FAIL_COOLDOWN_MS / 1000}s，防止立即重试`)
       }
+
+      pushUiLog("SDK", level, `[${sessionKey}] Agent 运行结束 (status=${run.status}${summary ? `, ${summary}` : ""})`)
       sdkSessions.delete(sessionKey)
       broadcastSdkSessionStatus()
     })

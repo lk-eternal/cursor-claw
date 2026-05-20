@@ -8,6 +8,10 @@ export interface AppConfig {
   allowOthers: boolean
   model: string
   modelParams: string
+  othersModel: string
+  othersModelParams: string
+  taskModel: string
+  taskModelParams: string
   autoStart: boolean
   setupComplete: boolean
   httpProxy: string
@@ -15,6 +19,13 @@ export interface AppConfig {
   noProxy: string
   agentNewSession: boolean
   closeWindowAction: "ask" | "minimize" | "quit"
+  digitalIdentity: string
+  feishuEnabled: boolean
+  wechatEnabled: boolean
+  wechatToken: string
+  wechatAccountId: string
+  agentMode: "cli" | "sdk"
+  cursorApiKey: string
 }
 
 export interface DaemonStatus {
@@ -31,6 +42,11 @@ export interface DaemonStatus {
   error?: string
   workspaceMismatch?: boolean
   daemonWorkspaceDir?: string
+  feishuEnabled?: boolean
+  feishuConnected?: boolean
+  wechatEnabled?: boolean
+  wechatStatus?: string
+  wechatReady?: boolean
 }
 
 export interface ConfigSaveResult {
@@ -75,6 +91,7 @@ export type UpdaterCheckResult =
       latestVersion: string
       htmlUrl: string
       applyHint: string
+      releaseNotes: string
     }
 
 export interface UpdaterApplyResult {
@@ -115,6 +132,7 @@ export interface McpServerEntry {
   source: "global" | "project"
   authenticated?: boolean
   enabled?: boolean
+  rawConfig?: Record<string, unknown>
 }
 
 const api = {
@@ -151,7 +169,7 @@ const api = {
   stopSessionAgent: (sessionKey: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("agent:stop-session", sessionKey),
   stopAllSessionAgents: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("agent:stop-all-sessions"),
   onSessionAgents: (cb: (list: { sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string }[]) => void) => {
-    const handler = (_e: Electron.IpcRendererEvent, list: any) => cb(list)
+    const handler = (_e: Electron.IpcRendererEvent, list: Parameters<typeof cb>[0]) => cb(list)
     ipcRenderer.on("agent:sessions", handler)
     return () => { ipcRenderer.removeListener("agent:sessions", handler) }
   },

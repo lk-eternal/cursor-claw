@@ -5,7 +5,7 @@ import path from "node:path";
 import http from "node:http";
 import { LOCK_FILE_NAME } from "./shared/constants.js";
 
-const APP_DATA_DIR = process.env.LARK_APP_DATA_DIR ?? "";
+const APP_DATA_DIR = process.env.APP_DATA_DIR ?? "";
 
 function getDaemonPort(): number {
   if (APP_DATA_DIR) {

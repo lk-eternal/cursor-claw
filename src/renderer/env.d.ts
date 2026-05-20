@@ -132,7 +132,7 @@ interface ElectronAPI {
   applyWorkspaceSwitch(workspaceDir: string, stopOldSessions: boolean): Promise<{ ok: boolean; error?: string }>
   respondWindowClose(payload: { action: "minimize" | "quit" | "cancel"; remember: boolean }): Promise<void>
   selectDirectory(): Promise<string | null>
-  injectWorkspace(): Promise<{ results: { file: string; action: string; message: string }[] }>
+  injectWorkspace(): Promise<{ results: { file: string; action: "created" | "updated" | "skipped"; message: string }[] }>
   startDaemon(): Promise<{ ok: boolean; error?: string }>
   stopDaemon(): Promise<void>
   stopAgent(): Promise<{ ok: boolean }>
@@ -142,10 +142,11 @@ interface ElectronAPI {
   onSessionAgents(cb: (list: { sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string }[]) => void): () => void
   getDaemonStatus(): Promise<DaemonStatus>
   getLogBuffer(): Promise<string[]>
-  getQueueMessages(): Promise<{ index: number; preview: string }[]>
+  getQueueMessages(): Promise<{ index: number; fileId: string; preview: string; sessionKey?: string; chatType?: string; timestamp?: number; senderOpenId?: string }[]>
+  deleteQueueMessage(fileId: string): Promise<boolean>
   clearQueueMessages(): Promise<number>
   checkCli(): Promise<boolean>
-  checkCliLogin(): Promise<CliLoginStatus>
+  checkCliLogin(opts?: { forceRefresh?: boolean }): Promise<CliLoginStatus>
   installCli(): Promise<{ ok: boolean; output: string }>
   loginCli(): Promise<{ ok: boolean; output: string }>
   listModels(): Promise<{ ok: boolean; models: { id: string; label: string; current: boolean }[]; error?: string }>
@@ -176,21 +177,32 @@ interface ElectronAPI {
   deleteSkillFile(skillName: string, relativePath: string): Promise<{ ok: boolean; error?: string }>
   createSkillDir(skillName: string, relativePath: string): Promise<{ ok: boolean }>
   saveSkill(name: string, content: string): Promise<{ ok: boolean }>
-    renameSkill(oldName: string, newName: string): Promise<{ ok: boolean }>
-    deleteSkill(name: string): Promise<{ ok: boolean }>
+  renameSkill(oldName: string, newName: string): Promise<{ ok: boolean }>
+  deleteSkill(name: string): Promise<{ ok: boolean }>
   onMcpLoginComplete(cb: (data: { serverName: string; ok: boolean }) => void): () => void
   onDaemonStatus(cb: (status: DaemonStatus) => void): () => void
   onDaemonLog(cb: (line: string) => void): () => void
-  onWechatStatus?(cb: (status: string) => void): () => void
-  onWechatQrCode?(cb: (dataUrl: string) => void): () => void
+  onWechatStatus(cb: (status: string) => void): () => void
+  onWechatQrCode(cb: (dataUrl: string) => void): () => void
   onWindowCloseConfirm(cb: () => void): () => void
   onAppModalRequest(cb: (payload: AppModalRequestPayload) => void): () => void
   respondAppModal(requestId: string, response: number): Promise<void>
+  startTempConnection(appId: string, appSecret: string): Promise<{ ok: boolean; chatId?: string; error?: string }>
+  stopTempConnection(): Promise<{ ok: boolean }>
+  windowMinimize(): Promise<void>
+  windowMaximize(): Promise<void>
+  windowClose(): Promise<void>
+  windowIsMaximized(): Promise<boolean>
+  onWindowMaximizedChange(cb: (maximized: boolean) => void): () => void
   testBind(): Promise<{ ok: boolean; error?: string }>
   testWechat(): Promise<{ ok: boolean; error?: string }>
   reloadWechat(token: string, accountId: string): Promise<{ ok: boolean; error?: string; message?: string }>
+  wechatQrLogin(): Promise<{ ok: boolean; botToken?: string; accountId?: string; baseUrl?: string; error?: string }>
+  wechatQrLoginCancel(): Promise<{ ok: boolean }>
   wechatWaitFirstMessage(token: string, accountId: string): Promise<{ ok: boolean; chatId?: string; error?: string }>
   wechatCancelWaitMessage(): Promise<{ ok: boolean }>
+  onWechatSetupQrCode(cb: (url: string) => void): () => void
+  onWechatSetupStatus(cb: (status: string) => void): () => void
 }
 
 declare global {
