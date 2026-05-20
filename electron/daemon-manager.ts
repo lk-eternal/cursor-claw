@@ -6,7 +6,7 @@ import * as path from "node:path"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import { app, BrowserWindow, ipcMain, powerSaveBlocker } from "electron"
-import { getConfig, saveConfig, useSdkMode, type AppConfig, type ScheduledTask } from "./config-store"
+import { getConfig, saveConfig, useSdkMode, type AppConfig } from "./config-store"
 import { validateCron, readTasksFromFile, writeTasksToFile, previewCronNextRuns, getNextCronFireLabel } from "./cron-scheduler"
 import { pushLog, pushUiLog, broadcastLog, getLogBuffer, clearLogBuffer, logCursorAgentInvocation, escapeLogContentSingleLine, resetLogFilePath } from "./ui-logger"
 import { resolveAgentBinary, applyProxyEnv, quoteArg, getAgentPaths, execAgentSync } from "./agent-cli"
@@ -31,7 +31,7 @@ import {
   McpServerEntry,
 } from "./mcp-manager"
 import { FileCommand, reportCommandResult, handleFeishuModelCommand, handleFeishuMcpCommand, handleFeishuTaskCommand, parseListModelsStdout, type TaskRunFn } from "./command-handler"
-import { readLockFile, httpGet, httpPost, syncActiveSession, getCurrentActiveSession } from "./daemon-client"
+import { readLockFile, getLockFilePath, httpGet, httpPost, syncActiveSession, getCurrentActiveSession } from "./daemon-client"
 import {
   isSessionAgentRunning, stopSessionAgent, stopAllSessionAgents,
   dispatchSessionAgents, launchSessionAgent, launchIndependentAgent,
@@ -409,7 +409,7 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
         FEISHU_ENABLED: "1",
         LARK_APP_ID: config.larkAppId,
         LARK_APP_SECRET: config.larkAppSecret,
-        LARK_RECEIVE_ID: config.larkReceiveId,
+        LARK_RECEIVE_CHAT_ID: config.larkReceiveId,
       } : {}),
       ...(wechatReady ? {
         WECHAT_ENABLED: "1",

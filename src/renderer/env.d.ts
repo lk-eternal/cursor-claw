@@ -23,9 +23,12 @@ interface AppConfig {
   closeWindowAction: "ask" | "minimize" | "quit"
   allowOthers: boolean
   digitalIdentity: string
+  feishuEnabled: boolean
   wechatEnabled: boolean
   wechatToken: string
   wechatAccountId: string
+  agentMode: "cli" | "sdk"
+  cursorApiKey: string
 }
 
 interface ScheduledTask {

@@ -25,8 +25,6 @@ export interface AppConfig {
   agentNewSession: boolean
   /** 点关闭主窗口时：ask=弹窗选择；minimize=隐藏到托盘；quit=直接退出应用 */
   closeWindowAction: "ask" | "minimize" | "quit"
-  scheduledTasks: ScheduledTask[]
-  verifiedMcpServers: string[]
   /** 主会话 chatId 映射（workspaceDir → chatId），用于 --resume 恢复上下文 */
   mainChatIds: Record<string, string>
   allowOthers: boolean
@@ -62,8 +60,6 @@ const defaults: AppConfig = {
   noProxy: "localhost,127.0.0.1,feishu.cn",
   agentNewSession: false,
   closeWindowAction: "ask",
-  scheduledTasks: [],
-  verifiedMcpServers: [],
   mainChatIds: {},
   allowOthers: false,
   digitalIdentity: "",

@@ -61,7 +61,7 @@ export function isMainUser(chatId?: string, chatType?: string): boolean {
   const cfg = getConfig()
   if (cfg.larkReceiveId?.trim() && chatId === cfg.larkReceiveId.trim()) return true
   if (cfg.wechatEnabled && !cfg.feishuEnabled) return true
-  if (cfg.wechatEnabled && cfg.wechatAccountId && chatId && !chatId.startsWith("ou_")) return true
+  if (cfg.wechatEnabled && cfg.wechatAccountId && chatId && !chatId.startsWith("oc_")) return true
   return false
 }
 
