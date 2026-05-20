@@ -25,8 +25,7 @@ export interface DaemonStatus {
   agentPid?: number | null
   sessionAgentCount?: number
   queueLength?: number
-  hasTarget?: boolean
-  autoOpenId?: string | null
+  hasChatId?: boolean
   model?: string
   cliAvailable?: boolean
   error?: string
@@ -208,7 +207,7 @@ const api = {
     ipcRenderer.on("mcp:login-complete", handler)
     return () => ipcRenderer.removeListener("mcp:login-complete", handler)
   },
-  startTempConnection: (appId: string, appSecret: string): Promise<{ ok: boolean; openId?: string; chatId?: string; error?: string }> =>
+  startTempConnection: (appId: string, appSecret: string): Promise<{ ok: boolean; chatId?: string; error?: string }> =>
     ipcRenderer.invoke("temp-conn:start", appId, appSecret),
   stopTempConnection: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("temp-conn:stop"),
   testBind: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("bind:test"),

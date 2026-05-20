@@ -68,8 +68,7 @@ interface DaemonStatus {
   version?: string
   uptime?: number
   queueLength?: number
-  hasTarget?: boolean
-  autoOpenId?: string | null
+  hasChatId?: boolean
   agentRunning?: boolean
   agentPid?: number | null
   sessionAgentCount?: number

@@ -113,8 +113,7 @@ export interface DaemonStatus {
   version?: string
   uptime?: number
   queueLength?: number
-  hasTarget?: boolean
-  autoOpenId?: string | null
+  hasChatId?: boolean
   agentRunning?: boolean
   agentPid?: number | null
   sessionAgentCount?: number
@@ -148,7 +147,7 @@ function getDaemonEntryPath(): string {
   return path.join(app.getAppPath(), "dist", "daemon-entry.js")
 }
 
-async function startTempConnection(appId: string, appSecret: string): Promise<{ openId: string; chatId: string }> {
+async function startTempConnection(appId: string, appSecret: string): Promise<{ chatId: string }> {
   stopTempConnection()
   const Lark = await import("@larksuiteoapi/node-sdk")
   return new Promise((resolve, reject) => {
@@ -163,10 +162,7 @@ async function startTempConnection(appId: string, appSecret: string): Promise<{ 
       "im.message.receive_v1": (data: any) => {
         const msg = data?.message
         if ((msg?.chat_type ?? "p2p") !== "p2p") return
-        settle(() => resolve({
-          openId: data?.sender?.sender_id?.open_id ?? "",
-          chatId: msg?.chat_id ?? "",
-        }))
+        settle(() => resolve({ chatId: msg?.chat_id ?? "" }))
       },
     })
 
@@ -286,8 +282,7 @@ export async function getDaemonStatus(): Promise<DaemonStatus> {
       version: health.version as string,
       uptime: health.uptime as number,
       queueLength: health.queueLength as number,
-      hasTarget: health.hasTarget as boolean,
-      autoOpenId: health.autoOpenId as string | null,
+      hasChatId: health.hasChatId as boolean,
       agentRunning: isAgentRunning() || getSessionAgentCount() > 0,
       agentPid: getAgentChildPid(),
       sessionAgentCount: getRunningSessionCount(),
@@ -297,9 +292,6 @@ export async function getDaemonStatus(): Promise<DaemonStatus> {
       wechatEnabled: health.wechatEnabled as boolean | undefined,
       wechatStatus: health.wechatStatus as string | undefined,
       wechatReady: !!(health.wechatStatus === "connected" && health.lastWechatChatId),
-    }
-    if (status.autoOpenId && !config.larkReceiveId) {
-      saveConfig({ larkReceiveId: status.autoOpenId })
     }
     return status
   }
@@ -418,7 +410,6 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
         LARK_APP_ID: config.larkAppId,
         LARK_APP_SECRET: config.larkAppSecret,
         LARK_RECEIVE_ID: config.larkReceiveId,
-        LARK_RECEIVE_ID_TYPE: "chat_id",
       } : {}),
       ...(wechatReady ? {
         WECHAT_ENABLED: "1",

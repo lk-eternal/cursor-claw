@@ -44,17 +44,11 @@ export function createLarkClient(appId: string, appSecret: string): Lark.Client 
   });
 }
 
-// ── 发送目标解析 ─────────────────────────────────────────
-
-export interface SendTarget {
-  receiveIdType: string;
-  receiveId: string;
-}
+// ── 飞书发送 ─────────────────────────────────────────────
 
 export interface LarkSenderOptions {
   client: Lark.Client;
-  receiveId: string;
-  receiveIdType: string;
+  chatId: string;
   messagePrefix: string;
   log: (level: string, ...args: unknown[]) => void;
 }
@@ -64,75 +58,13 @@ export class LarkSender {
   private messagePrefix: string;
   private log: (level: string, ...args: unknown[]) => void;
 
-  resolvedTarget: SendTarget | null = null;
-  autoOpenId = "";
+  chatId: string | null = null;
 
   constructor(opts: LarkSenderOptions) {
     this.client = opts.client;
     this.messagePrefix = opts.messagePrefix;
     this.log = opts.log;
-    this.initTarget(opts.receiveId, opts.receiveIdType);
-  }
-
-  private initTarget(receiveId: string, receiveIdType: string): void {
-    if (!receiveId) return;
-    const idType = receiveIdType || "auto";
-    if (["open_id", "user_id", "union_id", "chat_id"].includes(idType)) {
-      this.resolvedTarget = { receiveIdType: idType, receiveId };
-    }
-  }
-
-  async resolveTarget(receiveId: string, receiveIdType: string): Promise<void> {
-    if (!receiveId) {
-      this.log("INFO", "未配置 LARK_RECEIVE_ID，将从首条消息自动获取");
-      return;
-    }
-    const idType = receiveIdType || "auto";
-    if (this.resolvedTarget) return;
-
-    if (idType === "email" || (idType === "auto" && receiveId.includes("@"))) {
-      const openId = await this.resolveEmailToOpenId(receiveId);
-      if (openId) { this.resolvedTarget = { receiveIdType: "open_id", receiveId: openId }; return; }
-    }
-    if (idType === "mobile" || (idType === "auto" && /^\+?\d{7,}$/.test(receiveId))) {
-      const openId = await this.resolveMobileToOpenId(receiveId);
-      if (openId) { this.resolvedTarget = { receiveIdType: "open_id", receiveId: openId }; return; }
-    }
-    this.resolvedTarget = { receiveIdType: "open_id", receiveId };
-  }
-
-  getTarget(): SendTarget | null {
-    if (this.resolvedTarget) return this.resolvedTarget;
-    if (this.autoOpenId) return { receiveIdType: "open_id", receiveId: this.autoOpenId };
-    return null;
-  }
-
-  async resolveEmailToOpenId(email: string): Promise<string | null> {
-    try {
-      const res = await this.client.contact.user.batchGetId({
-        params: { user_id_type: "open_id" }, data: { emails: [email] },
-      });
-      const users = res.data?.user_list;
-      if (users && users.length > 0 && users[0].user_id) {
-        this.log("INFO", `邮箱 ${email} → open_id: ${users[0].user_id}`);
-        return users[0].user_id;
-      }
-      return null;
-    } catch (e) { this.log("ERROR", "邮箱解析失败:", e); return null; }
-  }
-
-  async resolveMobileToOpenId(mobile: string): Promise<string | null> {
-    try {
-      const res = await this.client.contact.user.batchGetId({
-        params: { user_id_type: "open_id" }, data: { mobiles: [mobile] },
-      });
-      const users = res.data?.user_list;
-      if (users && users.length > 0 && users[0].user_id) {
-        this.log("INFO", `手机号 ${mobile} → open_id: ${users[0].user_id}`);
-        return users[0].user_id;
-      }
-      return null;
-    } catch (e) { this.log("ERROR", "手机号解析失败:", e); return null; }
+    if (opts.chatId) this.chatId = opts.chatId;
   }
 
   async fetchMessageContent(messageId: string): Promise<string | null> {
@@ -180,30 +112,17 @@ export class LarkSender {
     } catch (e: any) { this.log("ERROR", `飞书回复异常: ${e?.message ?? e}`); return undefined; }
   }
 
-  async sendMessage(text: string, replyMessageId?: string): Promise<string | undefined> {
+  async sendMessage(text: string, replyMessageId?: string, chatId?: string): Promise<string | undefined> {
     if (replyMessageId) { return this.replyMessage(replyMessageId, text); }
-    const target = this.getTarget();
-    if (!target) { this.log("WARN", "无发送目标"); return undefined; }
-    try {
-      const { content, msgType } = this.formatForSend(text);
-      const res = await this.client.im.message.create({
-        params: { receive_id_type: target.receiveIdType as any },
-        data: { receive_id: target.receiveId, content, msg_type: msgType },
-      });
-      if ((res as any).code === 0 || (res as any).code === undefined) this.log("INFO", `飞书消息已发送(${text.length}字)`);
-      else this.log("ERROR", `飞书发送失败: code=${(res as any).code}, msg=${(res as any).msg}`);
-      return (res as any)?.data?.message_id;
-    } catch (e: any) { this.log("ERROR", `飞书发送异常: ${e?.message ?? e}`); return undefined; }
-  }
-
-  async sendMessageToChat(chatId: string, text: string): Promise<string | undefined> {
+    const targetChatId = chatId ?? this.chatId;
+    if (!targetChatId) { this.log("WARN", "无发送目标"); return undefined; }
     try {
       const { content, msgType } = this.formatForSend(text);
       const res = await this.client.im.message.create({
         params: { receive_id_type: "chat_id" as any },
-        data: { receive_id: chatId, content, msg_type: msgType },
+        data: { receive_id: targetChatId, content, msg_type: msgType },
       });
-      if ((res as any).code === 0 || (res as any).code === undefined) this.log("INFO", `飞书消息已发送到会话 ${chatId}(${text.length}字)`);
+      if ((res as any).code === 0 || (res as any).code === undefined) this.log("INFO", `飞书消息已发送(${text.length}字)`);
       else this.log("ERROR", `飞书发送失败: code=${(res as any).code}, msg=${(res as any).msg}`);
       return (res as any)?.data?.message_id;
     } catch (e: any) { this.log("ERROR", `飞书发送异常: ${e?.message ?? e}`); return undefined; }
@@ -225,13 +144,9 @@ export class LarkSender {
         } catch (e: any) { this.log("WARN", `图片回复退避 (${replyMessageId}): ${e?.message}`); }
       }
       if (!sent) {
-        if (chatId) {
-          await this.client.im.message.create({ params: { receive_id_type: "chat_id" as any }, data: { receive_id: chatId, content, msg_type: "image" } });
-        } else {
-          const target = this.getTarget();
-          if (!target) { this.log("WARN", "无发送目标"); return; }
-          await this.client.im.message.create({ params: { receive_id_type: target.receiveIdType as any }, data: { receive_id: target.receiveId, content, msg_type: "image" } });
-        }
+        const targetChatId = chatId ?? this.chatId;
+        if (!targetChatId) { this.log("WARN", "无发送目标"); return; }
+        await this.client.im.message.create({ params: { receive_id_type: "chat_id" as any }, data: { receive_id: targetChatId, content, msg_type: "image" } });
       }
       this.log("INFO", "图片已发送");
     } catch (e: any) { this.log("ERROR", `发送图片异常: ${e?.message ?? e}`); }
@@ -254,13 +169,9 @@ export class LarkSender {
         } catch (e: any) { this.log("WARN", `文件回复退避 (${replyMessageId}): ${e?.message}`); }
       }
       if (!sent) {
-        if (chatId) {
-          await this.client.im.message.create({ params: { receive_id_type: "chat_id" as any }, data: { receive_id: chatId, content, msg_type: "file" } });
-        } else {
-          const target = this.getTarget();
-          if (!target) { this.log("WARN", "无发送目标"); return; }
-          await this.client.im.message.create({ params: { receive_id_type: target.receiveIdType as any }, data: { receive_id: target.receiveId, content, msg_type: "file" } });
-        }
+        const targetChatId = chatId ?? this.chatId;
+        if (!targetChatId) { this.log("WARN", "无发送目标"); return; }
+        await this.client.im.message.create({ params: { receive_id_type: "chat_id" as any }, data: { receive_id: targetChatId, content, msg_type: "file" } });
       }
       this.log("INFO", `文件已发送: ${fileName}`);
     } catch (e: any) { this.log("ERROR", `发送文件异常: ${e?.message ?? e}`); }

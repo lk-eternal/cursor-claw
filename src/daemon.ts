@@ -37,8 +37,7 @@ const PKG_VERSION: string = (_require("../package.json") as { version: string })
 const APP_ID = process.env.LARK_APP_ID ?? "";
 const APP_SECRET = process.env.LARK_APP_SECRET ?? "";
 const ENCRYPT_KEY = process.env.LARK_ENCRYPT_KEY ?? "";
-const RECEIVE_ID = process.env.LARK_RECEIVE_ID ?? "";
-const RECEIVE_ID_TYPE = process.env.LARK_RECEIVE_ID_TYPE ?? "";
+const RECEIVE_CHAT_ID = process.env.LARK_RECEIVE_ID ?? "";
 const CONFIGURED_PORT = process.env.LARK_DAEMON_PORT ? Number(process.env.LARK_DAEMON_PORT) : 0;
 let WORKSPACE_DIR = process.env.LARK_WORKSPACE_DIR ?? process.cwd();
 const MESSAGE_PREFIX = process.env.LARK_MESSAGE_PREFIX ?? "";
@@ -100,8 +99,9 @@ function log(level: string, ...args: unknown[]): void {
 // ── Lark ─────────────────────────────────────────────────
 
 const larkClient = FEISHU_ENABLED ? createLarkClient(APP_ID, APP_SECRET) : null;
-const sender = larkClient ? new LarkSender({ client: larkClient, receiveId: RECEIVE_ID, receiveIdType: RECEIVE_ID_TYPE, messagePrefix: MESSAGE_PREFIX, log }) : null;
+const sender = larkClient ? new LarkSender({ client: larkClient, chatId: RECEIVE_CHAT_ID, messagePrefix: MESSAGE_PREFIX, log }) : null;
 let botOpenId: string | undefined;
+let lastFeishuP2pChatId: string | null = null;
 
 // ── WeChat ───────────────────────────────────────────────
 
@@ -283,9 +283,12 @@ function startLarkConnection(): void {
   sender.startConnection(APP_ID, APP_SECRET, ENCRYPT_KEY, (ev) => {
     const { text, messageId, chatId, chatType, messageType, rawContent, senderOpenId, parentId, mentions } = ev;
 
-    if (chatType === "p2p" && senderOpenId && !sender!.resolvedTarget) {
-      sender!.autoOpenId = senderOpenId;
-      log("INFO", `自动识别用户 open_id: ${senderOpenId}`);
+    if (chatType === "p2p" && chatId) {
+      lastFeishuP2pChatId = chatId;
+      if (!sender!.chatId) {
+        sender!.chatId = chatId;
+        log("INFO", `自动绑定主用户 chat_id: ${chatId}`);
+      }
     }
 
     if (chatType === "group" && !isBotMentioned(ev)) {
@@ -352,7 +355,7 @@ async function replyToMessage(messageId: string, text: string, chatId?: string):
   }
   if (!sender) { log("WARN", "飞书未启用，跳过回复"); return; }
   if (chatId && isFeishuChatId(chatId)) {
-    await sender.sendMessageToChat(chatId, text);
+    await sender.sendMessage(text, undefined, chatId);
   } else {
     await sender.replyMessage(messageId, text);
   }
@@ -623,10 +626,9 @@ function startHttpServer(): Promise<number> {
             version: PKG_VERSION,
             uptime: Math.floor(process.uptime()),
             queueLength: getFileQueueLength(),
-            hasTarget: !!sender?.getTarget(),
-            autoOpenId: sender?.autoOpenId || null,
+            hasChatId: !!sender?.chatId,
             feishuEnabled: FEISHU_ENABLED,
-            feishuConnected: FEISHU_ENABLED && !!sender?.getTarget(),
+            feishuConnected: FEISHU_ENABLED && !!sender?.chatId,
             wechatEnabled: WECHAT_ENABLED,
             wechatStatus: wechatManager?.getStatus() ?? "disconnected",
             lastWechatChatId: lastWechatChatId || null,
@@ -830,7 +832,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       },
       queue: { length: getFileQueueLength() },
       tasks: { total: tasks.length, enabled: tasks.filter((t) => t.enabled).length },
-      feishu: { connected: FEISHU_ENABLED, hasTarget: !!sender?.getTarget() },
+      feishu: { connected: FEISHU_ENABLED, hasChatId: !!sender?.chatId },
       wechat: { enabled: WECHAT_ENABLED, status: wechatManager?.getStatus() ?? "disconnected" },
     });
     return true;
@@ -1041,10 +1043,10 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
         sentMsgId = await sender.sendMessage(text, message_id);
         if (!sentMsgId) {
           log("INFO", `回复退避: message_id=${message_id} → chat_id=${rawChatId}`);
-          sentMsgId = await sender.sendMessageToChat(rawChatId, text);
+          sentMsgId = await sender.sendMessage(text, undefined, rawChatId);
         }
       } else {
-        sentMsgId = await sender.sendMessageToChat(rawChatId, text);
+        sentMsgId = await sender.sendMessage(text, undefined, rawChatId);
       }
       if (sentMsgId && session_key) trackMessageSession(sentMsgId, session_key);
       json(res, { ok: true, message_id: sentMsgId });
@@ -1329,7 +1331,6 @@ export async function daemonMain(): Promise<void> {
       log("WARN", `获取机器人信息失败: ${e?.message ?? e}`);
     }
 
-    await sender.resolveTarget(RECEIVE_ID, RECEIVE_ID_TYPE);
     startLarkConnection();
   }
 
@@ -1348,7 +1349,10 @@ export async function daemonMain(): Promise<void> {
 
   setDaemonSchedulerLogger((msg) => { log("INFO", msg); });
   startDaemonScheduledTasks(
-    (content) => { pushMessage(content); },
+    (content) => {
+      const chatId = lastFeishuP2pChatId ?? lastWechatChatId;
+      pushMessage(content, undefined, chatId ?? undefined, chatId ? "p2p" : undefined);
+    },
     (taskId, taskName, content) => {
       const payload = JSON.stringify({ taskId, taskName, content });
       process.stdout.write(`__IND_LAUNCH__:${payload}\n`);
