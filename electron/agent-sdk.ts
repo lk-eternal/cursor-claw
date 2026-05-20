@@ -147,6 +147,7 @@ export interface SdkLaunchOptions {
   chatType: ChatType
   meta?: LaunchMeta
   workspaceDir: string
+  useMainWorkspace?: boolean
   senderOpenId?: string
   chatName?: string
   taskMessage?: string
@@ -176,7 +177,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     return { ok: false, error: "Cursor API Key 未配置（设置 → Agent 驱动模式）" }
   }
 
-  const prompt = buildPrompt(meta, taskMessage)
+  const prompt = buildPrompt(meta, taskMessage, sessionKey, opts.useMainWorkspace)
 
   try {
     ensureSdkBinaryPaths()

@@ -268,7 +268,7 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
   const scenario = p.modelScenario ?? (useMain ? "primary" : chatType === "task" || chatType === "temp" ? "task" : "others")
 
   if (useSdkMode()) {
-    return launchSdkAgent({ sessionKey, chatType, meta, workspaceDir: workDir, senderOpenId, chatName, taskMessage, modelScenario: scenario })
+    return launchSdkAgent({ sessionKey, chatType, meta, workspaceDir: workDir, useMainWorkspace: useMain, senderOpenId, chatName, taskMessage, modelScenario: scenario })
   }
 
   if (chatType === "task" || chatType === "temp") {

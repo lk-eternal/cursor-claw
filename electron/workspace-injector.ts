@@ -203,7 +203,7 @@ export async function injectWorkspaceMcpAndRules(): Promise<{ mcpOk: boolean; ru
   const mcpOk = await injectMcpGlobal()
   if (!config.workspaceDir) return { mcpOk, ruleOk: false, skillOk: false }
   cleanProjectMcpStale(config.workspaceDir)
-  const ruleOk = injectRulesToDir(config.workspaceDir)
+  const ruleOk = injectRulesToDir(config.workspaceDir, true)
   const skillOk = injectSkillsToDir(config.workspaceDir)
   if (mcpOk && ruleOk) fullyInjectedDirs.add(norm(config.workspaceDir))
   return { mcpOk, ruleOk, skillOk }

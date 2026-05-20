@@ -425,6 +425,9 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
     const unsub4 = window.electronAPI.onDaemonStatus?.((s: Record<string, unknown>) => {
       if (typeof s.wechatStatus === "string") setWechatStatus(s.wechatStatus)
       if (typeof s.wechatReady === "boolean") setWechatReady(s.wechatReady)
+      window.electronAPI.getConfig().then((cfg) => {
+        setWorkspaceDir((prev) => prev !== cfg.workspaceDir ? cfg.workspaceDir : prev)
+      })
     })
     return () => { unsub1(); unsub2(); unsub3?.(); unsub4?.() }
   }, [])
@@ -1749,8 +1752,8 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
         onCancel={() => setWsSwitch(null)}
         onSwitch={async (stopOld) => {
           const dir = wsSwitch?.new ?? ""
-          setWsSwitch(null)
           const res = await window.electronAPI.applyWorkspaceSwitch(dir, stopOld)
+          setWsSwitch(null)
           if (!res.ok) {
             void showAlert("错误", res.error ?? "切换工作目录失败")
             return

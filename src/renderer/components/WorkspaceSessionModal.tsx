@@ -11,7 +11,7 @@ interface Props {
   oldPath: string
   newPath: string
   sessions: SessionEntry[]
-  onSwitch: (stopOldSessions: boolean) => void
+  onSwitch: (stopOldSessions: boolean) => void | Promise<void>
   onCancel: () => void
 }
 
@@ -29,9 +29,9 @@ export default function WorkspaceSessionModal({
 
   const hasSessions = sessions.length > 0
 
-  const handleSwitch = (stopOld: boolean) => {
+  const handleSwitch = async (stopOld: boolean) => {
     setBusy(true)
-    onSwitch(stopOld)
+    try { await onSwitch(stopOld) } finally { setBusy(false) }
   }
 
   return (
