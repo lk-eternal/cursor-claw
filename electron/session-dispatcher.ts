@@ -11,6 +11,7 @@ import {
   stopSessionAgent as _stopCliSession, stopAllSessionAgents as _stopAllCliSessions,
   getSessionAgentList as getRawCliSessionList,
   isSessionAgentRunning as _isCliSessionRunning,
+  getSessionAgentStartedAt,
   setChatNameResolver, setSessionCloseHandler,
   type ChatType, type SessionExitInfo,
 } from "./agent-launcher"
@@ -410,6 +411,23 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
   await reply(false, "💡 /chat 用法:\n  /chat ls — 列出所有活跃会话\n  /chat <序号> — 切换到指定会话\n  /chat stop <序号> — 停止指定会话\n  /chat new <描述> — 创建新临时会话")
 }
 
+// ── 僵尸 Agent 检测 ──────────────────────────────────────
+
+const ZOMBIE_REPLY_SILENCE_MS = 10 * 60 * 1000
+
+async function isZombieAgent(sessionKey: string): Promise<boolean> {
+  const lock = cachedLock()
+  if (!lock?.port) return false
+  try {
+    const res = (await httpGet(`http://127.0.0.1:${lock.port}/api/session-last-reply?sessionKey=${encodeURIComponent(sessionKey)}`)) as { lastReplyAt?: number | null }
+    const refTime = res?.lastReplyAt ?? getSessionAgentStartedAt(sessionKey)
+    if (refTime === null) return false
+    return Date.now() - refTime > ZOMBIE_REPLY_SILENCE_MS
+  } catch {
+    return false
+  }
+}
+
 // ── 会话调度主循环 ────────────────────────────────────────
 
 let dispatching = false
@@ -433,7 +451,15 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
   if (groupKeys.length > 0 && feishuOn) await fetchChatNames(groupKeys)
 
   for (const { sessionKey, chatType, senderOpenId } of sessions) {
-    if (isSessionAgentRunning(sessionKey)) continue
+    if (isSessionAgentRunning(sessionKey)) {
+      if (await isZombieAgent(sessionKey)) {
+        broadcastLog(`[Agent] ${sessionKey} 疑似僵尸(队列有消息且 ${ZOMBIE_REPLY_SILENCE_MS / 60_000}min 无回复消息)，强制终止并重启`, "WARN")
+        stopSessionAgent(sessionKey)
+        await new Promise((r) => setTimeout(r, 1000))
+      } else {
+        continue
+      }
+    }
 
     const chatId = extractChatId(sessionKey)
     const mainUser = isMainUser(chatId, chatType)

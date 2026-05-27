@@ -29,6 +29,7 @@ interface SessionAgent {
   pid: number
   startedAt: number
   lastActivityAt: number
+  lastOutputAt: number
   chatType: ChatType
   workspaceDir?: string
   senderOpenId?: string
@@ -105,6 +106,14 @@ export function getAgentChildPid(): number | null {
 
 export function getSessionAgentCount(): number {
   return sessionAgents.size
+}
+
+export function getSessionAgentLastOutputAt(sessionKey: string): number | null {
+  return sessionAgents.get(sessionKey)?.lastOutputAt ?? null
+}
+
+export function getSessionAgentStartedAt(sessionKey: string): number | null {
+  return sessionAgents.get(sessionKey)?.startedAt ?? null
 }
 
 export function getIndependentTaskStatuses(): Record<string, { running: boolean; pid?: number; startedAt?: number }> {
@@ -308,16 +317,23 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
     const child = spawnAgentWithLogs(args, spawnEnv, `session-${sessionKey}`, ws)
     attachStreamLoggers(child)
 
+    const now = Date.now()
+    const sa: SessionAgent = {
+      sessionKey, child, pid: child.pid!, startedAt: now, lastActivityAt: now, lastOutputAt: now,
+      chatType, workspaceDir: workDir, senderOpenId, chatName,
+    }
+    sessionAgents.set(sessionKey, sa)
+
     let stderrChunks = ""
     let stdoutChunks = ""
-    child.stderr?.on("data", (d: Buffer) => { stderrChunks += d.toString() })
-    child.stdout?.on("data", (d: Buffer) => { stdoutChunks += d.toString() })
-    const spawnedAt = Date.now()
+    child.stderr?.on("data", (d: Buffer) => { stderrChunks += d.toString(); sa.lastOutputAt = Date.now() })
+    child.stdout?.on("data", (d: Buffer) => { stdoutChunks += d.toString(); sa.lastOutputAt = Date.now() })
 
     child.on("close", (code, signal) => {
-      const elapsed = Date.now() - spawnedAt
+      const isCurrent = sessionAgents.get(sessionKey) === sa
+      const elapsed = Date.now() - sa.startedAt
       pushUiLog("Agent", "INFO", `[${sessionKey}] 退出 code=${code}${signal ? ` signal=${signal}` : ""} (${elapsed}ms)`)
-      sessionAgents.delete(sessionKey)
+      if (isCurrent) sessionAgents.delete(sessionKey)
       broadcastSessionStatus()
 
       if (code !== 0 && stderrChunks.includes("[unavailable]")) {
@@ -327,18 +343,14 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
         )
       }
 
-      if (sessionCloseHandler) sessionCloseHandler(sessionKey, chatType, { exitCode: code, elapsed, stderr: stderrChunks, stdout: stdoutChunks })
+      if (isCurrent && sessionCloseHandler) sessionCloseHandler(sessionKey, chatType, { exitCode: code, elapsed, stderr: stderrChunks, stdout: stdoutChunks })
     })
     child.on("error", (e) => {
       pushUiLog("Agent", "ERROR", `[${sessionKey}] 进程错误: ${e.message}`)
-      sessionAgents.delete(sessionKey)
+      if (sessionAgents.get(sessionKey) === sa) sessionAgents.delete(sessionKey)
       broadcastSessionStatus()
     })
 
-    sessionAgents.set(sessionKey, {
-      sessionKey, child, pid: child.pid!, startedAt: Date.now(), lastActivityAt: Date.now(),
-      chatType, workspaceDir: workDir, senderOpenId, chatName,
-    })
     pendingLaunches.delete(sessionKey)
     broadcastLog(`[Agent] 会话 ${sessionKey} (${chatType}) 已启动, pid=${child.pid}`)
     broadcastSessionStatus()

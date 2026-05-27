@@ -189,6 +189,7 @@ const activeSessionMap = new Map<string, string>();
 const messageSessionMap = new Map<string, string>();
 const sessionToChatMap = new Map<string, string>();
 const MSG_SESSION_MAP_MAX = 5000;
+const sessionLastReplyAt = new Map<string, number>();
 
 function setActiveSession(chatId: string, sessionKey: string): void {
   activeSessionMap.set(chatId, sessionKey);
@@ -1155,6 +1156,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       if (sentMsgId && session_key) trackMessageSession(sentMsgId, session_key);
       json(res, { ok: true, message_id: sentMsgId });
     }
+    if (session_key) sessionLastReplyAt.set(session_key, Date.now());
     return true;
   }
 
@@ -1170,6 +1172,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       await sender!.sendImage(image_path, message_id, ch.chatId);
     }
     json(res, { ok: true });
+    if (session_key) sessionLastReplyAt.set(session_key, Date.now());
     return true;
   }
 
@@ -1185,6 +1188,13 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       await sender!.sendFile(file_path, message_id, ch.chatId);
     }
     json(res, { ok: true });
+    if (session_key) sessionLastReplyAt.set(session_key, Date.now());
+    return true;
+  }
+
+  if (method === "GET" && pathname === "/api/session-last-reply") {
+    const sk = new URL(req.url ?? "", "http://localhost").searchParams.get("sessionKey") || "";
+    json(res, { lastReplyAt: sk ? (sessionLastReplyAt.get(sk) ?? null) : null });
     return true;
   }
 
