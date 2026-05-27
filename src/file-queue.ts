@@ -147,6 +147,23 @@ export async function pollFileQueueBatch(timeoutMs: number, intervalMs = POLL_IN
   return { text: parts.join("\n"), messageId: first.messageId, sessionKey: first.sessionKey, chatType: first.chatType, senderOpenId: first.senderOpenId };
 }
 
+export function getEarliestMessageTime(filterSessionKey?: string): number | null {
+  if (!queueDir) return null;
+  try {
+    const files = fs.readdirSync(queueDir).filter((f) => f.endsWith(".qmsg")).sort();
+    for (const file of files) {
+      const filePath = path.join(queueDir, file);
+      try {
+        const raw = fs.readFileSync(filePath, "utf-8");
+        const parsed = JSON.parse(raw);
+        if (filterSessionKey && (parsed.sessionKey || parsed.chatId || "") !== filterSessionKey) continue;
+        return parsed.timestamp || parseInt(file.split("_")[0], 10) || null;
+      } catch { continue; }
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
 export function getQueueLength(): number {
   if (!queueDir) return 0;
   try {

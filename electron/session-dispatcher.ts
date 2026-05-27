@@ -451,10 +451,16 @@ async function isZombieAgent(sessionKey: string): Promise<boolean> {
   const lock = cachedLock()
   if (!lock?.port) return false
   try {
-    const res = (await httpGet(`http://127.0.0.1:${lock.port}/api/session-last-reply?sessionKey=${encodeURIComponent(sessionKey)}`)) as { lastReplyAt?: number | null }
-    const refTime = res?.lastReplyAt ?? getSessionAgentStartedAt(sessionKey)
-    if (refTime === null) return false
-    return Date.now() - refTime > ZOMBIE_REPLY_SILENCE_MS
+    const sk = encodeURIComponent(sessionKey)
+    const [replyRes, msgRes] = await Promise.all([
+      httpGet(`http://127.0.0.1:${lock.port}/api/session-last-reply?sessionKey=${sk}`) as Promise<{ lastReplyAt?: number | null }>,
+      httpGet(`http://127.0.0.1:${lock.port}/api/session-earliest-msg?sessionKey=${sk}`) as Promise<{ earliestMsgTime?: number | null }>,
+    ])
+    const earliestMsgTime = msgRes?.earliestMsgTime ?? null
+    if (earliestMsgTime === null) return false
+    const lastActiveTime = replyRes?.lastReplyAt ?? getSessionAgentStartedAt(sessionKey) ?? 0
+    const startTime = Math.max(earliestMsgTime, lastActiveTime)
+    return Date.now() - startTime > ZOMBIE_REPLY_SILENCE_MS
   } catch {
     return false
   }

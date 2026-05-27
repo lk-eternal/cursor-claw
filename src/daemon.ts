@@ -14,6 +14,7 @@ import {
   initFileQueue,
   getQueueDir,
   pushToFileQueue,
+  getEarliestMessageTime,
   claimNextMessage,
   pollFileQueueBatch,
   getQueueLength as getFileQueueLength,
@@ -1198,6 +1199,12 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
   if (method === "GET" && pathname === "/api/session-last-reply") {
     const sk = new URL(req.url ?? "", "http://localhost").searchParams.get("sessionKey") || "";
     json(res, { lastReplyAt: sk ? (sessionLastReplyAt.get(sk) ?? null) : null });
+    return true;
+  }
+
+  if (method === "GET" && pathname === "/api/session-earliest-msg") {
+    const sk = new URL(req.url ?? "", "http://localhost").searchParams.get("sessionKey") || "";
+    json(res, { earliestMsgTime: sk ? getEarliestMessageTime(sk) : null });
     return true;
   }
 
