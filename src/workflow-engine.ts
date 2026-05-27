@@ -45,8 +45,12 @@ export function buildStartPrompt(
     instance.input ? instance.input : assembleContext(instance),
     ``,
   ];
-  if (node.rules) {
-    lines.push(`### 规则`, node.rules, ``);
+  if (def.config && Object.keys(def.config).length > 0) {
+    lines.push(
+      `### 配置变量`,
+      ...Object.entries(def.config).map(([k, v]) => `- **${k}**: ${v}`),
+      ``,
+    );
   }
   lines.push(
     `### 输出要求`,
@@ -92,8 +96,12 @@ export function buildRetryPrompt(
     assembleContext(instance),
     ``,
   ];
-  if (node.rules) {
-    lines.push(`### 规则`, node.rules, ``);
+  if (def.config && Object.keys(def.config).length > 0) {
+    lines.push(
+      `### 配置变量`,
+      ...Object.entries(def.config).map(([k, v]) => `- **${k}**: ${v}`),
+      ``,
+    );
   }
   lines.push(
     `### 工作流节点一览`,

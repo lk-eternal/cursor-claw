@@ -146,6 +146,7 @@ export function registerWorkflowAdminTools(mcpServer: McpServer): void {
             name: parsed.name || "未命名工作流",
             description: parsed.description,
             workingDirectory: parsed.workingDirectory,
+            config: parsed.config,
             nodes: (parsed.nodes || []).map((n) => ({
               ...n,
               maxRetries: n.maxRetries ?? 2,

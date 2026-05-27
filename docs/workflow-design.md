@@ -30,6 +30,7 @@ interface WorkflowDefinition {
   name: string                  // 工作流名称
   description?: string          // 描述
   workingDirectory?: string     // 默认工作目录（可选，运行时可覆盖）
+  config?: Record<string, string> // 工作流级配置（如 API Token），注入到 Agent 上下文
   nodes: WorkflowNode[]         // 节点列表（数组顺序 = 执行顺序）
   createdAt: number
   updatedAt: number
@@ -39,8 +40,6 @@ interface WorkflowNode {
   id: string                    // 节点唯一标识（如 "analyze"）
   name: string                  // 节点名称（如 "需求分析"）
   prompt: string                // 核心指令（Agent 的任务描述）
-  rules?: string                // 附加规则（注入到 Agent 上下文）
-  skills?: string[]             // 关联的 Skill 名称列表
   model?: string                // 模型覆盖（留空跟随工作流默认）
   maxRetries: number            // 最大重试次数（默认 2）
   isolated?: boolean            // 是否独立 Agent（默认 false）
@@ -183,8 +182,8 @@ Agent 启动时注入的初始 prompt 结构：
 ### 输入
 {assembled_input_from_context}
 
-### 规则
-{node.rules}
+### 配置
+{workflow.config}  （仅当工作流定义了 config 时注入）
 
 ### 输出要求
 完成任务后，你 **必须** 调用 `workflow_next` 工具提交产物。
@@ -219,9 +218,6 @@ Agent 启动时注入的初始 prompt 结构：
 
 ### 输入
 {assembled_input_from_context}
-
-### 规则
-{node.rules}
 ```
 
 ---
@@ -409,6 +405,9 @@ Daemon 在创建 MCP Server 时检测当前会话是否关联工作流实例：
   "id": "wf_code_review_001",
   "name": "代码审查流水线",
   "description": "需求分析 → 编码实现 → 代码审查 → 产出报告",
+  "config": {
+    "gitlab_token": "glpat-xxxxxxxxxxxx"
+  },
   "nodes": [
     {
       "id": "analyze",
@@ -421,8 +420,6 @@ Daemon 在创建 MCP Server 时检测当前会话是否关联工作流实例：
       "id": "implement",
       "name": "编码实现",
       "prompt": "根据技术方案进行编码实现。要求代码简洁、可读，遵循项目编码规范。",
-      "rules": "遵循项目既有的代码风格和架构分层",
-      "skills": ["cursor-claw-admin"],
       "maxRetries": 3
     },
     {

@@ -4,8 +4,6 @@ export interface WorkflowNode {
   id: string
   name: string
   prompt: string
-  rules?: string
-  skills?: string[]
   model?: string
   maxRetries: number
   isolated?: boolean
@@ -16,6 +14,7 @@ export interface WorkflowDefinition {
   name: string
   description?: string
   workingDirectory?: string
+  config?: Record<string, string>
   nodes: WorkflowNode[]
   createdAt: number
   updatedAt: number

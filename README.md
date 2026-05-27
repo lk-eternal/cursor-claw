@@ -197,9 +197,9 @@ xattr -cr /Applications/Cursor\ Claw.app
 | `send_image` | `image_path`, `message_id?`, `session_key?` | 发送本地图片到飞书 / 微信 |
 | `send_file` | `file_path`, `message_id?`, `session_key?` | 发送本地文件到飞书 / 微信 |
 
-### 自管理工具（应用版）
+### 自管理工具
 
-应用版额外提供一组管理工具，Agent 可通过这些工具管理自身运行环境：
+提供一组管理工具，Agent 可通过这些工具管理自身运行环境：
 
 | 工具 | 说明 |
 |------|------|
@@ -209,6 +209,78 @@ xattr -cr /Applications/Cursor\ Claw.app
 | `manage_skills` | 管理 Agent Skills（列出 / 读取 / 保存 / 删除） |
 | `manage_tasks` | 管理定时任务（列出 / 添加 / 更新 / 删除 / 切换启用） |
 | `manage_workspace` | 查看或切换工作目录（切换后热更新生效） |
+| `manage_workflows` | 工作流管理（列出 / 查看 / 创建 / 更新 / 删除 / 运行 / 状态查询） |
+
+### 工作流执行工具
+
+在工作流节点执行过程中，Agent 使用以下工具控制流程流转：
+
+| 工具 | 说明 |
+|------|------|
+| `workflow_next` | 完成当前工作流节点，提交产物并流转到下一个节点 |
+| `workflow_reject` | 驳回当前工作流节点产物，回退到指定节点重新执行 |
+
+## 工作流引擎
+
+工作流引擎支持将复杂任务编排为多节点流水线，由多个 Agent 按顺序协作完成。
+
+### 核心概念
+
+- **WorkflowDefinition**：工作流定义，包含名称、描述、全局配置和有序节点列表
+- **WorkflowNode**：单个执行节点，定义任务 Prompt、模型、重试次数等
+- **WorkflowInstance**：运行中的工作流实例，跟踪当前节点、状态和上下文传递
+
+### 工作流定义结构
+
+```json
+{
+  "name": "代码审查流水线",
+  "description": "需求分析 → 编码实现 → 代码审查 → 产出报告",
+  "config": {
+    "gitlab_token": "glpat-xxxxxxxxxxxx"
+  },
+  "nodes": [
+    { "id": "analyze", "name": "需求分析", "prompt": "分析需求并输出技术方案", "maxRetries": 2 },
+    { "id": "implement", "name": "编码实现", "prompt": "根据技术方案编码", "maxRetries": 3 },
+    { "id": "review", "name": "代码审查", "prompt": "审查代码质量，不达标则驳回", "isolated": true, "maxRetries": 1 },
+    { "id": "report", "name": "产出报告", "prompt": "汇总产物生成交付报告", "maxRetries": 1 }
+  ]
+}
+```
+
+### 执行流程
+
+1. 通过 `manage_workflows` 创建工作流定义
+2. 通过 `manage_workflows(action: "run")` 启动实例，自动拉起第一个节点的 Agent
+3. Agent 完成任务后调用 `workflow_next` 提交产物，引擎自动启动下一个节点
+4. 如果产物不合格，Agent 可调用 `workflow_reject` 驳回到指定节点重做
+5. 所有节点完成后工作流标记为 `completed`
+
+### 关键特性
+
+| 特性 | 说明 |
+|------|------|
+| 上下文传递 | 每个节点的产物自动注入到下一个节点的输入中 |
+| 全局配置 | `config` 字段支持注入工作流级别的配置（如 API Token），所有节点可用 |
+| 驳回重做 | 审查节点可驳回到任意前序节点，支持迭代式质量把关 |
+| 失败重试 | 每个节点可配置 `maxRetries`，失败后自动重试 |
+| 独立 Agent | `isolated: true` 的节点使用全新 Agent 执行，避免上下文污染 |
+| 模型覆盖 | 每个节点可独立指定模型，关键节点可使用更强模型 |
+
+> 详细设计文档见 [docs/workflow-design.md](docs/workflow-design.md)
+
+### 内置示例
+
+系统首次启动时会自动创建内置工作流示例，帮助快速上手：
+
+| 示例 | 说明 |
+|------|------|
+| 飞书需求开发 | 从飞书需求文档出发：编写技术方案 → 实施编码 → 代码检查 → 创建 GitLab MR |
+
+使用方法：
+1. 在工作流管理页面找到「飞书需求开发（示例）」
+2. 编辑 `config.gitlab_token` 填入你的 GitLab 访问令牌
+3. 运行工作流，输入飞书需求文档链接即可
 
 ## 指令系统
 

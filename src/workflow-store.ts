@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { WorkflowDefinition, WorkflowInstance } from "./shared/workflow-types.js";
+import { builtinWorkflows } from "./builtin-workflows.js";
 
 const APP_DATA_DIR = process.env.APP_DATA_DIR || "";
 const WORKFLOW_DIR = path.join(APP_DATA_DIR, "workflows");
@@ -22,6 +23,23 @@ function writeJson(filePath: string, data: unknown): void {
   ensureDir(path.dirname(filePath));
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
 }
+
+// ── Built-in seed ────────────────────────────────────────
+
+function seedBuiltins(): void {
+  const defs = readJsonSafe<WorkflowDefinition[]>(DEFINITIONS_FILE, []);
+  const now = Date.now();
+  let changed = false;
+  for (const b of builtinWorkflows) {
+    if (!defs.some((d) => d.id === b.id)) {
+      defs.push({ ...b, createdAt: b.createdAt || now, updatedAt: b.updatedAt || now });
+      changed = true;
+    }
+  }
+  if (changed) writeJson(DEFINITIONS_FILE, defs);
+}
+
+if (APP_DATA_DIR) seedBuiltins();
 
 // ── Definitions CRUD ─────────────────────────────────────
 
