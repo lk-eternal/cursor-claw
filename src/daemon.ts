@@ -554,7 +554,6 @@ function createMcpServer(): McpServer {
           const meta = [reply.text];
           if (reply.messageId) meta.push(`[message_id=${reply.messageId}]`);
           if (reply.sessionKey) meta.push(`[session_key=${reply.sessionKey}]`);
-          if (reply.chatType) meta.push(`[chat_type=${reply.chatType}]`);
           return { content: [{ type: "text" as const, text: meta.join("\n") }] };
         }
         return { content: [{ type: "text" as const, text: message ? "消息已发送" : "ok" }] };
@@ -1217,7 +1216,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
 
   if (method === "GET" && pathname === "/api/poll-message") {
     const qs = new URL(req.url ?? "", "http://localhost").searchParams;
-    const timeout = Number(qs.get("timeout"));
+    const timeout = Number(qs.get("timeout")) || 0;
     const sessionKeyFilter = qs.get("sessionKey") || qs.get("chatId") || undefined;
     let disconnected = false;
     req.on("close", () => { disconnected = true; });

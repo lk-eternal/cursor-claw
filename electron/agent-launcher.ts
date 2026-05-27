@@ -138,16 +138,10 @@ export function buildPrompt(meta?: LaunchMeta, taskMessage?: string, sessionKey?
     prompts.push("请按照digital-identity数字身份定义并遵守工作流规则cursor-claw开始工作")
   }
 
-  if(meta?.chatType === "p2p" || meta?.chatType === "group"){
-    prompts.push("请先通过 sync_message(timeout_seconds=3) 快速检查是否有新消息。")
-    prompts.push("如果有新消息，结合上下文综合评估后执行；如果没有新消息且有进行中的工作，则继续之前的任务。")
-  }
   if(meta?.chatType === "temp" && taskMessage){
-    prompts.push("[临时任务]")
     prompts.push(taskMessage)
   }
   if(meta?.chatType === "task" && taskMessage){
-    prompts.push("[定时任务]")
     prompts.push(taskMessage)
   }
 
