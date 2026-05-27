@@ -260,6 +260,7 @@ interface LaunchAgentParams {
   chatName?: string
   taskMessage?: string
   modelScenario?: ModelScenario
+  workingDirectory?: string
 }
 
 async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?: string }> {
@@ -267,8 +268,13 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
   const useMain = p.useMainWorkspace ?? (chatType === "p2p")
   const config = getConfig()
 
-  let workDir = config.workspaceDir
-  if (!useMain) {
+  let workDir: string
+  if (p.workingDirectory) {
+    workDir = p.workingDirectory
+    if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true })
+  } else if (useMain) {
+    workDir = config.workspaceDir
+  } else {
     const safeChatId = sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_")
     workDir = path.join(app.getPath("userData"), "workspaces", safeChatId)
     if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true })
@@ -299,6 +305,32 @@ export async function launchSessionAgent(
 
 export async function launchIndependentAgent(taskId: string, taskName: string, message: string, type: ChatType = "task", chatId?: string, modelScenario?: ModelScenario): Promise<{ ok: boolean; error?: string }> {
   return launchAgent({ sessionKey: taskId, chatType: type, chatName: taskName, taskMessage: message, meta: { chatId: chatId ?? taskName, chatType: type }, modelScenario: modelScenario ?? "task" })
+}
+
+export async function launchWorkflowAgent(p: {
+  instanceId: string; nodeId: string; nodeName: string
+  prompt: string; workingDirectory: string
+  notifyChatId?: string; model?: string
+}): Promise<{ ok: boolean; error?: string }> {
+  const sessionKey = `${p.notifyChatId || "wf"}::wf_${p.instanceId}_${p.nodeId}`
+  return launchAgent({
+    sessionKey, chatType: "task",
+    chatName: `WF: ${p.nodeName}`,
+    taskMessage: p.prompt,
+    workingDirectory: p.workingDirectory,
+    meta: { chatId: p.notifyChatId || sessionKey, chatType: "task" },
+    modelScenario: "task",
+  })
+}
+
+export async function notifyWorkflowChat(chatId: string, text: string): Promise<void> {
+  const lock = cachedLock()
+  if (!lock?.port) return
+  try {
+    await httpPost(`http://127.0.0.1:${lock.port}/api/send-text`, { text, session_key: chatId }, 5000)
+  } catch (e: unknown) {
+    broadcastLog(`[WF Notify] 发送通知失败: ${e instanceof Error ? e.message : String(e)}`, "WARN")
+  }
 }
 
 // ── Session 列表 ──────────────────────────────────────────

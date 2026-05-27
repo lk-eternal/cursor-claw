@@ -28,6 +28,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { registerAdminTools } from "./server-admin.js";
+import { registerWorkflowAgentTools, registerWorkflowAdminTools } from "./server-workflow.js";
 
 const _require = createRequire(import.meta.url);
 const PKG_VERSION: string = (_require("../package.json") as { version: string }).version;
@@ -611,12 +612,14 @@ function createMcpServer(): McpServer {
     },
   );
 
+  registerWorkflowAgentTools(s);
   return s;
 }
 
 function createAdminMcpServer(): McpServer {
   const s = new McpServer({ name: "cursor-claw-admin", version: PKG_VERSION, description: "cursor-claw 管理工具" });
   registerAdminTools(s);
+  registerWorkflowAdminTools(s);
   return s;
 }
 

@@ -3,6 +3,8 @@ declare module "*.png" {
   export default src
 }
 
+import type { WorkflowDefinition, WorkflowInstance } from "../shared/workflow-types"
+
 interface AppConfig {
   larkAppId: string
   larkAppSecret: string
@@ -194,6 +196,16 @@ interface ElectronAPI {
   windowClose(): Promise<void>
   windowIsMaximized(): Promise<boolean>
   onWindowMaximizedChange(cb: (maximized: boolean) => void): () => void
+
+  // ── Workflow ──────────────────────────────────────────
+  getWorkflowDefinitions(): Promise<WorkflowDefinition[]>
+  saveWorkflowDefinition(def: WorkflowDefinition): Promise<{ ok: boolean }>
+  deleteWorkflowDefinition(id: string): Promise<{ ok: boolean }>
+  getWorkflowInstances(): Promise<WorkflowInstance[]>
+  getWorkflowInstance(id: string): Promise<WorkflowInstance | undefined>
+  saveWorkflowInstance(inst: WorkflowInstance): Promise<{ ok: boolean }>
+  deleteWorkflowInstance(id: string): Promise<{ ok: boolean }>
+
   testBind(): Promise<{ ok: boolean; error?: string }>
   testWechat(): Promise<{ ok: boolean; error?: string }>
   reloadWechat(token: string, accountId: string): Promise<{ ok: boolean; error?: string; message?: string }>

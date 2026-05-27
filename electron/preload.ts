@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron"
+import type { WorkflowDefinition, WorkflowInstance } from "../src/shared/workflow-types"
 
 export interface AppConfig {
   larkAppId: string
@@ -295,6 +296,15 @@ const api = {
     ipcRenderer.on("window:maximized-change", handler)
     return () => ipcRenderer.removeListener("window:maximized-change", handler)
   },
+
+  // ── Workflow ──────────────────────────────────────────
+  getWorkflowDefinitions: (): Promise<WorkflowDefinition[]> => ipcRenderer.invoke("workflow:list-definitions"),
+  saveWorkflowDefinition: (def: WorkflowDefinition): Promise<{ ok: boolean }> => ipcRenderer.invoke("workflow:save-definition", def),
+  deleteWorkflowDefinition: (id: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("workflow:delete-definition", id),
+  getWorkflowInstances: (): Promise<WorkflowInstance[]> => ipcRenderer.invoke("workflow:list-instances"),
+  getWorkflowInstance: (id: string): Promise<WorkflowInstance | undefined> => ipcRenderer.invoke("workflow:get-instance", id),
+  saveWorkflowInstance: (inst: WorkflowInstance): Promise<{ ok: boolean }> => ipcRenderer.invoke("workflow:save-instance", inst),
+  deleteWorkflowInstance: (id: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("workflow:delete-instance", id),
 }
 
 contextBridge.exposeInMainWorld("electronAPI", api)

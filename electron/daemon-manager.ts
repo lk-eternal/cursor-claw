@@ -8,6 +8,7 @@ import * as os from "node:os"
 import { app, BrowserWindow, ipcMain, powerSaveBlocker } from "electron"
 import { getConfig, saveConfig, useSdkMode, type AppConfig } from "./config-store"
 import { validateCron, readTasksFromFile, writeTasksToFile, previewCronNextRuns, getNextCronFireLabel } from "./cron-scheduler"
+import { listDefinitions, saveDefinition, deleteDefinition, listInstances, getInstance, saveInstance, deleteInstance } from "./workflow-file"
 import { pushLog, pushUiLog, broadcastLog, getLogBuffer, clearLogBuffer, logCursorAgentInvocation, escapeLogContentSingleLine, resetLogFilePath } from "./ui-logger"
 import { resolveAgentBinary, applyProxyEnv, quoteArg, getAgentPaths, execAgentSync } from "./agent-cli"
 import {
@@ -35,6 +36,7 @@ import { readLockFile, getLockFilePath, httpGet, httpPost, syncActiveSession, ge
 import {
   isSessionAgentRunning, stopSessionAgent, stopAllSessionAgents,
   dispatchSessionAgents, launchSessionAgent, launchIndependentAgent,
+  launchWorkflowAgent, notifyWorkflowChat,
   getSessionAgentList, handleChatCommand, clearMessageQueue, getQueueMessages,
   pullMergedMessagesFromQueue, isMainUser, extractChatId, chatNameCache,
   fetchChatNames, fetchUserNames, initSessionDispatcher, previousActiveSessionMap,
@@ -434,6 +436,22 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
               }
             })
           } catch { /* ignore malformed */ }
+          continue
+        }
+        if (line.startsWith("__WF_LAUNCH__:")) {
+          try {
+            const p = JSON.parse(line.slice("__WF_LAUNCH__:".length))
+            void launchWorkflowAgent(p).then((r) => {
+              if (!r.ok) broadcastLog(`[WF] Agent 启动失败: ${r.error}`, "WARN")
+            })
+          } catch { /* ignore */ }
+          continue
+        }
+        if (line.startsWith("__WF_NOTIFY__:")) {
+          try {
+            const { chatId, text } = JSON.parse(line.slice("__WF_NOTIFY__:".length))
+            if (chatId && text) void notifyWorkflowChat(chatId, text)
+          } catch { /* ignore */ }
           continue
         }
         if (line.startsWith("__BIND_RESULT__:")) {
@@ -1139,6 +1157,15 @@ export function initDaemonManager(): void {
   })
 
   ipcMain.handle("scheduled-tasks:get-status", () => getIndependentTaskStatuses())
+
+  // ── Workflow CRUD ─────────────────────────────────────
+  ipcMain.handle("workflow:list-definitions", () => listDefinitions())
+  ipcMain.handle("workflow:save-definition", (_, def) => { saveDefinition(def); return { ok: true } })
+  ipcMain.handle("workflow:delete-definition", (_, id: string) => ({ ok: deleteDefinition(id) }))
+  ipcMain.handle("workflow:list-instances", () => listInstances())
+  ipcMain.handle("workflow:get-instance", (_, id: string) => getInstance(id))
+  ipcMain.handle("workflow:save-instance", (_, inst) => { saveInstance(inst); return { ok: true } })
+  ipcMain.handle("workflow:delete-instance", (_, id: string) => ({ ok: deleteInstance(id) }))
 
   getDaemonStatus().then((status) => {
     if (status.running) {

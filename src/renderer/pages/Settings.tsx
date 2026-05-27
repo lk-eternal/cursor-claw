@@ -38,8 +38,10 @@ import {
   Info,
   Github,
   MessageSquare,
+  Waypoints,
 } from "lucide-react"
 import SearchableSelect from "../components/SearchableSelect"
+import WorkflowPanel from "../components/WorkflowPanel"
 import WorkspaceSessionModal, { type SessionEntry } from "../components/WorkspaceSessionModal"
 import TitleBar from "../components/TitleBar"
 import useInlineModal from "../components/useInlineModal"
@@ -47,7 +49,7 @@ import { REQUIRED_FEISHU_SCOPES, FEISHU_SCOPES_JSON } from "../constants"
 
 interface Props { onBack: () => void; onResetSetup?: () => void; initialTab?: string; onTabConsumed?: () => void }
 
-type Tab = "general" | "channel" | "proxy" | "agent" | "mcp" | "rules" | "tasks" | "skills" | "setup" | "about"
+type Tab = "general" | "channel" | "proxy" | "agent" | "mcp" | "rules" | "tasks" | "skills" | "workflows" | "setup" | "about"
 type CloseWindowAction = "ask" | "minimize" | "quit"
 
 interface McpEditForm {
@@ -154,6 +156,7 @@ const TABS: { id: Tab; label: string; icon: typeof SettingsIcon }[] = [
   { id: "rules", label: "Rules", icon: FileCode2 },
   { id: "skills", label: "Skills", icon: Sparkles },
   { id: "tasks", label: "定时任务", icon: Timer },
+  { id: "workflows", label: "工作流", icon: Waypoints },
   { id: "setup", label: "帮助引导", icon: BookOpen },
   { id: "about", label: "关于", icon: Info },
 ]
@@ -1388,6 +1391,9 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                 </div>
               </section>
             </>)}
+
+            {/* ═══ Workflows ═══ */}
+            {tab === "workflows" && <WorkflowPanel />}
 
             {/* ═══ Setup Guide ═══ */}
             {tab === "setup" && (<>
