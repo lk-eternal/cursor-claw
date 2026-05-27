@@ -172,7 +172,7 @@ function getNodeIndex(def: WorkflowDefinition, nodeId: string): number {
 
 function getNodeRetryCount(instance: WorkflowInstance, nodeId: string): number {
   return instance.nodeHistory.filter(
-    (h) => h.nodeId === nodeId && (h.status === "rejected" || h.status === "completed"),
+    (h) => h.nodeId === nodeId && h.rejectFromNodeId,
   ).length;
 }
 

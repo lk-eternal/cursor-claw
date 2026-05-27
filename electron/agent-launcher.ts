@@ -169,13 +169,13 @@ function makeSpawnEnv(config: AppConfig, extras?: Record<string, string>): Recor
   return env
 }
 
-function buildAgentLaunchArgs(config: AppConfig, prompt: string, resumeChatId: string | false, scenario: ModelScenario = "primary"): string[] {
+function buildAgentLaunchArgs(config: AppConfig, prompt: string, resumeChatId: string | false, scenario: ModelScenario = "primary", modelOverride?: string): string[] {
   const args = [
     "--print", "--force",
     ...(resumeChatId ? ["--resume", resumeChatId] : []),
     "--approve-mcps", "--workspace", config.workspaceDir, "--trust",
   ]
-  const { model } = resolveModel(scenario)
+  const model = modelOverride?.trim() || resolveModel(scenario).model
   if (model && model !== "auto") args.push("--model", model)
   args.push(prompt)
   return args
@@ -250,6 +250,7 @@ export interface LaunchAgentOptions {
   chatName?: string
   taskMessage?: string
   modelScenario?: ModelScenario
+  modelOverride?: string
 }
 
 export async function launchSessionAgent(
@@ -310,7 +311,7 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
     }
   }
 
-  const args = buildAgentLaunchArgs(overrideConfig, prompt, resumeChatId, scenario)
+  const args = buildAgentLaunchArgs(overrideConfig, prompt, resumeChatId, scenario, opts.modelOverride)
 
   try {
     const ws = workDir.trim() || undefined
@@ -381,7 +382,7 @@ export function stopAllSessionAgents(): void {
 }
 
 
-export async function launchIndependentAgent(taskId: string, taskName: string, message: string, type: ChatType = "task", modelScenario: ModelScenario = "task"): Promise<{ ok: boolean; error?: string }> {
+export async function launchIndependentAgent(taskId: string, taskName: string, message: string, type: ChatType = "task", modelScenario: ModelScenario = "task", modelOverride?: string): Promise<{ ok: boolean; error?: string }> {
   return launchAgent({
     sessionKey: taskId,
     chatType: type,
@@ -389,6 +390,7 @@ export async function launchIndependentAgent(taskId: string, taskName: string, m
     taskMessage: message,
     meta: { chatId: taskName, chatType: type },
     modelScenario,
+    modelOverride,
   })
 }
 

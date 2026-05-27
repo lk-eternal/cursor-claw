@@ -152,6 +152,7 @@ export interface SdkLaunchOptions {
   chatName?: string
   taskMessage?: string
   modelScenario?: ModelScenario
+  modelOverride?: string
 }
 
 export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: boolean; error?: string }> {
@@ -184,7 +185,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
 
     const scenario = opts.modelScenario ?? "primary"
     const resolved = resolveModel(scenario)
-    const modelId = resolved.model?.trim() || "composer-2"
+    const modelId = opts.modelOverride?.trim() || resolved.model?.trim() || "composer-2"
     const modelSelection: { id: string; params?: { id: string; value: string }[] } = { id: modelId }
     if (resolved.modelParams?.trim()) {
       try {

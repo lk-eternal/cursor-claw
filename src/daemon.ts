@@ -466,28 +466,9 @@ function cleanExpiredCommands(): void {
   } catch { /* ignore */ }
 }
 
-function cleanCommandMessagesFromQueue(): void {
-  const queueDir = getQueueDir();
-  if (!queueDir) return;
-  try {
-    const files = fs.readdirSync(queueDir).filter((f) => f.endsWith(".qmsg"));
-    for (const f of files) {
-      try {
-        const raw = fs.readFileSync(path.join(queueDir, f), "utf-8");
-        const parsed = JSON.parse(raw);
-        if (typeof parsed.text === "string" && isCommand(parsed.text)) {
-          fs.unlinkSync(path.join(queueDir, f));
-          log("INFO", `从消息队列中清除指令消息: ${JSON.stringify(parsed.text)}`);
-        }
-      } catch { /* ignore */ }
-    }
-  } catch { /* ignore */ }
-}
-
 async function handleCommand(text: string, messageId: string, chatId?: string, chatType?: string): Promise<void> {
   const trimmed = text.trim();
   pushCommandToQueue(trimmed, messageId, `daemon-${process.pid}`, chatId, chatType);
-  setTimeout(() => cleanCommandMessagesFromQueue(), 2000);
 }
 
 // ── HTTP Server ──────────────────────────────────────────
@@ -511,7 +492,7 @@ function json(res: http.ServerResponse, data: unknown, status = 200): void {
 // ── MCP over StreamableHTTP ─────────────────────────────
 
 
-function httpJson<T = any>(url: string, body?: unknown): Promise<T> {
+function httpJson<T = any>(url: string, body?: unknown, timeoutMs = 30_000): Promise<T> {
   return new Promise((resolve, reject) => {
     const isPost = body !== undefined;
     const payload = isPost ? JSON.stringify(body) : undefined;
@@ -522,7 +503,7 @@ function httpJson<T = any>(url: string, body?: unknown): Promise<T> {
       path: parsed.pathname + parsed.search,
       method: isPost ? "POST" : "GET",
       headers: isPost ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload!) } : undefined,
-      timeout: 180_000,
+      timeout: timeoutMs,
     }, (res) => {
       const chunks: Buffer[] = [];
       res.on("data", (c: Buffer) => chunks.push(c));
@@ -542,13 +523,6 @@ function localDaemonUrl(p: string): string {
   return `http://127.0.0.1:${daemonPort}${p}`;
 }
 
-async function pollDaemon(timeoutMs: number, sessionKey?: string) {
-  const params = new URLSearchParams({ timeout: String(timeoutMs) });
-  if (sessionKey) params.set("sessionKey", sessionKey);
-  const res = await httpJson<{ message: any }>(localDaemonUrl(`/api/poll-message?${params}`));
-  return res.message ?? null;
-}
-
 function createMcpServer(): McpServer {
   const s = new McpServer({ name: "cursor-claw", version: PKG_VERSION, description: "消息桥接 – 通过飞书/微信与用户沟通" });
 
@@ -564,12 +538,18 @@ function createMcpServer(): McpServer {
     async ({ message, timeout_seconds, message_id, session_key }) => {
       try {
         if (message) {
-          await httpJson(localDaemonUrl("/api/send-text"), { text: message, message_id, session_key });
+          const r = await httpJson<{ ok: boolean }>(localDaemonUrl("/api/send-text"), { text: message, message_id, session_key });
+          if (!r?.ok) {
+            log("WARN", `sync_message 发送失败: message_id=${message_id}`);
+            return { content: [{ type: "text" as const, text: "[send_failed] 消息发送失败" }] };
+          }
         }
-        const MAX_POLL_MS = 25_000;
-        const timeoutMs = Math.min((timeout_seconds && timeout_seconds > 0) ? timeout_seconds * 1000 : 0, MAX_POLL_MS);
+        const timeoutMs = (timeout_seconds && timeout_seconds > 0) ? timeout_seconds * 1000 : 0;
         if (timeoutMs > 0) {
-          const reply = await pollDaemon(timeoutMs, session_key);
+          const params = new URLSearchParams({ timeout: String(timeoutMs) });
+          if (session_key) params.set("sessionKey", session_key);
+          const res = await httpJson<{ message: any }>(localDaemonUrl(`/api/poll-message?${params}`), undefined, timeoutMs + 5000);
+          const reply = res.message ?? null;
           if (reply === null) return { content: [{ type: "text" as const, text: "[waiting]" }] };
           const meta = [reply.text];
           if (reply.messageId) meta.push(`[message_id=${reply.messageId}]`);
@@ -1158,7 +1138,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
         sentMsgId = await sender!.sendMessage(text, undefined, ch.chatId);
       }
       if (sentMsgId && session_key) trackMessageSession(sentMsgId, session_key);
-      json(res, { ok: true, message_id: sentMsgId });
+      json(res, { ok: !!sentMsgId, message_id: sentMsgId });
     }
     if (session_key) sessionLastReplyAt.set(session_key, Date.now());
     return true;
@@ -1237,7 +1217,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
 
   if (method === "GET" && pathname === "/api/poll-message") {
     const qs = new URL(req.url ?? "", "http://localhost").searchParams;
-    const timeout = Number(qs.get("timeout") ?? "30000");
+    const timeout = Number(qs.get("timeout"));
     const sessionKeyFilter = qs.get("sessionKey") || qs.get("chatId") || undefined;
     let disconnected = false;
     req.on("close", () => { disconnected = true; });

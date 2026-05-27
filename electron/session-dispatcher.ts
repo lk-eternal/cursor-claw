@@ -260,6 +260,7 @@ interface LaunchAgentParams {
   chatName?: string
   taskMessage?: string
   modelScenario?: ModelScenario
+  modelOverride?: string
   workingDirectory?: string
 }
 
@@ -285,11 +286,11 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
   const scenario = p.modelScenario ?? (useMain ? "primary" : chatType === "task" || chatType === "temp" ? "task" : "others")
 
   if (useSdkMode()) {
-    return launchSdkAgent({ sessionKey, chatType, meta, workspaceDir: workDir, useMainWorkspace: useMain, senderOpenId, chatName, taskMessage, modelScenario: scenario })
+    return launchSdkAgent({ sessionKey, chatType, meta, workspaceDir: workDir, useMainWorkspace: useMain, senderOpenId, chatName, taskMessage, modelScenario: scenario, modelOverride: p.modelOverride })
   }
 
   if (chatType === "task" || chatType === "temp") {
-    return _launchIndependentAgentCli(sessionKey, chatName ?? sessionKey, taskMessage ?? "", chatType, scenario)
+    return _launchIndependentAgentCli(sessionKey, chatName ?? sessionKey, taskMessage ?? "", chatType, scenario, p.modelOverride)
   }
   return _launchSessionAgent(sessionKey, chatType, undefined, meta, useMain, senderOpenId, scenario)
 }
@@ -320,6 +321,7 @@ export async function launchWorkflowAgent(p: {
     workingDirectory: p.workingDirectory,
     meta: { chatId: p.notifyChatId || sessionKey, chatType: "task" },
     modelScenario: "task",
+    modelOverride: p.model,
   })
 }
 
