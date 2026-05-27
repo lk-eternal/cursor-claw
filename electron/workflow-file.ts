@@ -2,6 +2,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { app } from "electron"
 import type { WorkflowDefinition, WorkflowInstance } from "../src/shared/workflow-types"
+import { builtinWorkflows } from "../src/builtin-workflows"
 
 function workflowDir(): string {
   return path.join(app.getPath("userData"), "workflows")
@@ -27,6 +28,21 @@ function readJsonSafe<T>(filePath: string, fallback: T): T {
 function writeJson(filePath: string, data: unknown): void {
   ensureDir(path.dirname(filePath))
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8")
+}
+
+// ── Built-in seed ────────────────────────────────────────
+
+export function seedBuiltins(): void {
+  const defs = readJsonSafe<WorkflowDefinition[]>(definitionsFile(), [])
+  const now = Date.now()
+  let changed = false
+  for (const b of builtinWorkflows) {
+    if (!defs.some((d) => d.id === b.id)) {
+      defs.push({ ...b, createdAt: b.createdAt || now, updatedAt: b.updatedAt || now })
+      changed = true
+    }
+  }
+  if (changed) writeJson(definitionsFile(), defs)
 }
 
 // ── Definitions ──────────────────────────────────────────

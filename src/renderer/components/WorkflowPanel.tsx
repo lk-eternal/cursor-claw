@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback } from "react"
 import {
   Plus, Pencil, Trash2, X, Play, ChevronDown, ChevronRight,
-  Loader2, CheckCircle2, AlertTriangle, Pause, Clock,
+  Loader2, CheckCircle2, AlertTriangle, Pause, Clock, FolderOpen, RefreshCw, GripVertical,
 } from "lucide-react"
 import type { WorkflowDefinition, WorkflowNode, WorkflowInstance, WorkflowStatus } from "../../shared/workflow-types"
+import SearchableSelect from "./SearchableSelect"
 
 const inputCls = "w-full rounded-md border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-gray-200 outline-none focus:border-blue-500"
 
@@ -28,7 +29,7 @@ function emptyNode(): WorkflowNode {
 }
 
 function emptyDef(): WorkflowDefinition {
-  return { id: uid(), name: "", nodes: [emptyNode()], createdAt: Date.now(), updatedAt: Date.now() }
+  return { id: uid(), name: "", nodes: [emptyNode()], createdAt: Date.now(), updatedAt: Date.now(), config: {} }
 }
 
 interface DefEditorProps {
@@ -40,9 +41,43 @@ interface DefEditorProps {
 function DefEditor({ initial, onSave, onCancel }: DefEditorProps) {
   const [def, setDef] = useState<WorkflowDefinition>(() => ({
     ...initial,
+    config: initial.config ?? {},
     nodes: initial.nodes.length ? initial.nodes : [emptyNode()],
   }))
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(def.nodes.map((n) => n.id)))
+  const [activeNodeIdx, setActiveNodeIdx] = useState(0)
+  const [defaultDir, setDefaultDir] = useState("")
+  const [defaultModel, setDefaultModel] = useState("")
+  const [modelOptions, setModelOptions] = useState<{ value: string; label: string }[]>([])
+
+  useEffect(() => {
+    window.electronAPI.getConfig().then((cfg) => {
+      setDefaultDir(cfg.workspaceDir || "未配置")
+      setDefaultModel(cfg.model || "auto")
+      const fetcher = cfg.agentMode === "sdk" ? window.electronAPI.listSdkModels : window.electronAPI.listModels
+      fetcher().then((res) => {
+        if (res.ok) setModelOptions(res.models.map((m) => ({ value: m.id, label: m.label || m.id })))
+      })
+    })
+  }, [])
+
+  const pickDir = async () => {
+    const dir = await window.electronAPI.selectDirectory()
+    if (dir) setDef({ ...def, workingDirectory: dir })
+  }
+
+  const [cfgEntries, setCfgEntries] = useState(() =>
+    Object.entries(initial.config ?? {}).map(([key, value]) => ({ key, value }))
+  )
+  const updateCfgEntry = (idx: number, field: "key" | "value", val: string) =>
+    setCfgEntries((prev) => prev.map((e, i) => (i === idx ? { ...e, [field]: val } : e)))
+  const removeCfgEntry = (idx: number) =>
+    setCfgEntries((prev) => prev.filter((_, i) => i !== idx))
+  const addCfgEntry = () => setCfgEntries((prev) => [...prev, { key: "", value: "" }])
+  const cfgToRecord = () => {
+    const r: Record<string, string> = {}
+    for (const { key, value } of cfgEntries) if (key.trim()) r[key.trim()] = value
+    return r
+  }
 
   const updateNode = (idx: number, patch: Partial<WorkflowNode>) => {
     const nodes = [...def.nodes]
@@ -52,84 +87,162 @@ function DefEditor({ initial, onSave, onCancel }: DefEditorProps) {
 
   const removeNode = (idx: number) => {
     if (def.nodes.length <= 1) return
-    setDef({ ...def, nodes: def.nodes.filter((_, i) => i !== idx) })
+    const nodes = def.nodes.filter((_, i) => i !== idx)
+    setDef({ ...def, nodes })
+    if (activeNodeIdx >= nodes.length) setActiveNodeIdx(nodes.length - 1)
+    else if (activeNodeIdx === idx) setActiveNodeIdx(Math.max(0, idx - 1))
   }
 
   const addNode = () => {
     const n = emptyNode()
     setDef({ ...def, nodes: [...def.nodes, n] })
-    setExpanded((s) => new Set(s).add(n.id))
+    setActiveNodeIdx(def.nodes.length)
   }
 
-  const toggleExpand = (id: string) => {
-    setExpanded((s) => { const next = new Set(s); next.has(id) ? next.delete(id) : next.add(id); return next })
+  const moveNode = (from: number, to: number) => {
+    if (to < 0 || to >= def.nodes.length) return
+    const nodes = [...def.nodes]
+    const [moved] = nodes.splice(from, 1)
+    nodes.splice(to, 0, moved)
+    setDef({ ...def, nodes })
+    setActiveNodeIdx(to)
   }
 
   const canSave = def.name.trim() && def.nodes.every((n) => n.name.trim() && n.prompt.trim())
+  const activeNode = def.nodes[activeNodeIdx]
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-      <div className="flex w-full max-w-2xl flex-col rounded-xl border border-gray-700 bg-gray-900 shadow-2xl" style={{ maxHeight: "85vh" }}>
-        <div className="flex items-center justify-between border-b border-gray-800 px-6 py-4">
+      <div className="flex w-full max-w-4xl flex-col rounded-xl border border-gray-700 bg-gray-900 shadow-2xl" style={{ maxHeight: "90vh" }}>
+        {/* Header */}
+        <div className="flex items-center justify-between border-b border-gray-800 px-6 py-3">
           <h3 className="text-sm font-semibold text-gray-200">{initial.createdAt === def.createdAt && !initial.name ? "新建工作流" : "编辑工作流"}</h3>
           <button onClick={onCancel} className="text-gray-500 hover:text-white"><X size={16} /></button>
         </div>
 
-        <div className="flex-1 space-y-4 overflow-y-auto px-6 py-4">
-          <div>
-            <label className="mb-1 block text-xs text-gray-500">名称</label>
-            <input type="text" value={def.name} onChange={(e) => setDef({ ...def, name: e.target.value })} className={inputCls} placeholder="例如：代码审查流程" />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs text-gray-500">描述（可选）</label>
-            <input type="text" value={def.description ?? ""} onChange={(e) => setDef({ ...def, description: e.target.value })} className={inputCls} placeholder="简要说明工作流用途" />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs text-gray-500">工作目录（可选）</label>
-            <input type="text" value={def.workingDirectory ?? ""} onChange={(e) => setDef({ ...def, workingDirectory: e.target.value })} className={inputCls} placeholder="留空则使用默认" />
-          </div>
-
-          {/* Nodes */}
-          <div>
-            <div className="mb-2 flex items-center justify-between">
-              <label className="text-xs font-medium text-gray-400">节点列表</label>
-              <button onClick={addNode} className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-blue-400 hover:bg-gray-800 hover:text-blue-300">
-                <Plus size={13} />添加节点
-              </button>
+        {/* Body: left sidebar + right editor */}
+        <div className="flex flex-1 overflow-hidden">
+          {/* ── Left: General Settings ── */}
+          <div className="w-72 shrink-0 space-y-3 overflow-y-auto border-r border-gray-800 p-4">
+            <div>
+              <label className="mb-1 block text-xs text-gray-500">名称 *</label>
+              <input type="text" value={def.name} onChange={(e) => setDef({ ...def, name: e.target.value })} className={inputCls} placeholder="例如：代码审查流程" />
             </div>
-            <div className="space-y-2">
-              {def.nodes.map((node, idx) => (
-                <div key={node.id} className="rounded-lg border border-gray-800 bg-gray-800/40">
-                  <div className="flex cursor-pointer items-center gap-2 px-3 py-2" onClick={() => toggleExpand(node.id)}>
-                    {expanded.has(node.id) ? <ChevronDown size={14} className="text-gray-500" /> : <ChevronRight size={14} className="text-gray-500" />}
-                    <span className="flex-1 text-xs text-gray-300">{node.name || `节点 ${idx + 1}`}</span>
+            <div>
+              <label className="mb-1 block text-xs text-gray-500">描述</label>
+              <input type="text" value={def.description ?? ""} onChange={(e) => setDef({ ...def, description: e.target.value })} className={inputCls} placeholder="简要说明工作流用途" />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs text-gray-500">工作目录 <span className="text-gray-600">（默认：{defaultDir}）</span></label>
+              <div className="flex gap-1.5">
+                <input type="text" value={def.workingDirectory ?? ""} onChange={(e) => setDef({ ...def, workingDirectory: e.target.value })} className={inputCls + " flex-1"} placeholder={defaultDir} />
+                <button type="button" onClick={pickDir} className="shrink-0 rounded-md border border-gray-700 bg-gray-800 px-2 text-gray-400 hover:border-blue-500 hover:text-blue-400"><FolderOpen size={14} /></button>
+              </div>
+            </div>
+
+            {/* Config */}
+            <div>
+              <div className="mb-1.5 flex items-center justify-between">
+                <label className="text-xs text-gray-500">环境变量</label>
+                <button onClick={addCfgEntry} className="text-xs text-blue-400 hover:text-blue-300"><Plus size={12} /></button>
+              </div>
+              {cfgEntries.length > 0 && (
+                <div className="space-y-1">
+                  {cfgEntries.map((entry, idx) => (
+                    <div key={idx} className="flex items-center gap-1">
+                      <input type="text" value={entry.key} onChange={(e) => updateCfgEntry(idx, "key", e.target.value)} className="w-20 shrink-0 rounded border border-gray-700 bg-gray-800 px-1.5 py-1 font-mono text-[11px] text-gray-200 outline-none focus:border-blue-500" placeholder="KEY" />
+                      <span className="text-[10px] text-gray-600">=</span>
+                      <input type="text" value={entry.value} onChange={(e) => updateCfgEntry(idx, "value", e.target.value)} className="min-w-0 flex-1 rounded border border-gray-700 bg-gray-800 px-1.5 py-1 font-mono text-[11px] text-gray-200 outline-none focus:border-blue-500" placeholder="value" />
+                      <button onClick={() => removeCfgEntry(idx)} className="shrink-0 text-gray-600 hover:text-red-400"><Trash2 size={11} /></button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Node list */}
+            <div>
+              <div className="mb-1.5 flex items-center justify-between">
+                <label className="text-xs text-gray-500">节点列表</label>
+                <button onClick={addNode} className="text-xs text-blue-400 hover:text-blue-300"><Plus size={12} /></button>
+              </div>
+              <div className="space-y-0.5">
+                {def.nodes.map((node, idx) => (
+                  <div
+                    key={node.id}
+                    onClick={() => setActiveNodeIdx(idx)}
+                    className={`group flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1.5 text-xs transition ${idx === activeNodeIdx ? "bg-blue-600/20 text-blue-300" : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"}`}
+                  >
+                    <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded text-[10px] font-bold ${idx === activeNodeIdx ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400"}`}>{idx + 1}</span>
+                    <span className="min-w-0 flex-1 truncate">{node.name || "未命名节点"}</span>
                     {def.nodes.length > 1 && (
-                      <button onClick={(e) => { e.stopPropagation(); removeNode(idx) }} className="text-gray-600 hover:text-red-400"><Trash2 size={13} /></button>
+                      <button onClick={(e) => { e.stopPropagation(); removeNode(idx) }} className="invisible shrink-0 text-gray-600 hover:text-red-400 group-hover:visible"><Trash2 size={11} /></button>
                     )}
                   </div>
-                  {expanded.has(node.id) && (
-                    <div className="space-y-2 border-t border-gray-800 px-3 py-3">
-                      <div><label className="mb-1 block text-[11px] text-gray-600">节点名称</label><input type="text" value={node.name} onChange={(e) => updateNode(idx, { name: e.target.value })} className={inputCls} placeholder="例如：代码审查" /></div>
-                      <div><label className="mb-1 block text-[11px] text-gray-600">Prompt</label><textarea value={node.prompt} onChange={(e) => updateNode(idx, { prompt: e.target.value })} rows={3} className={inputCls + " font-mono text-xs leading-relaxed"} placeholder="该节点的 Agent 指令..." /></div>
-                      <div className="flex gap-3">
-                        <div className="flex-1"><label className="mb-1 block text-[11px] text-gray-600">最大重试</label><input type="number" min={0} value={node.maxRetries} onChange={(e) => updateNode(idx, { maxRetries: parseInt(e.target.value) || 0 })} className={inputCls} /></div>
-                        <div className="flex-1"><label className="mb-1 block text-[11px] text-gray-600">Model（可选）</label><input type="text" value={node.model ?? ""} onChange={(e) => updateNode(idx, { model: e.target.value || undefined })} className={inputCls} placeholder="留空默认" /></div>
-                      </div>
-                      <label className="flex items-center gap-2 text-xs text-gray-400">
-                        <input type="checkbox" checked={node.isolated ?? false} onChange={(e) => updateNode(idx, { isolated: e.target.checked })} className="rounded border-gray-600" />
-                        隔离运行（独立 Agent 会话）
-                      </label>
-                    </div>
-                  )}
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
           </div>
+
+          {/* ── Right: Active Node Editor ── */}
+          {activeNode && (
+            <div className="flex min-w-0 flex-1 flex-col overflow-y-auto p-5">
+              <div className="mb-4 flex items-center gap-3">
+                <span className="flex h-6 w-6 items-center justify-center rounded-md bg-blue-600 text-xs font-bold text-white">{activeNodeIdx + 1}</span>
+                <h4 className="text-sm font-medium text-gray-200">节点配置</h4>
+                <span className="text-[11px] font-mono text-gray-600">#{activeNode.id}</span>
+                <div className="ml-auto flex gap-1">
+                  <button onClick={() => moveNode(activeNodeIdx, activeNodeIdx - 1)} disabled={activeNodeIdx === 0} className="rounded p-1 text-gray-500 hover:bg-gray-800 hover:text-white disabled:opacity-30" title="上移"><ChevronDown size={14} className="rotate-180" /></button>
+                  <button onClick={() => moveNode(activeNodeIdx, activeNodeIdx + 1)} disabled={activeNodeIdx === def.nodes.length - 1} className="rounded p-1 text-gray-500 hover:bg-gray-800 hover:text-white disabled:opacity-30" title="下移"><ChevronDown size={14} /></button>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">节点名称 *</label>
+                  <input type="text" value={activeNode.name} onChange={(e) => updateNode(activeNodeIdx, { name: e.target.value })} className={inputCls} placeholder="例如：代码审查" />
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">Prompt *</label>
+                  <textarea
+                    value={activeNode.prompt}
+                    onChange={(e) => updateNode(activeNodeIdx, { prompt: e.target.value })}
+                    rows={10}
+                    className={inputCls + " font-mono text-xs leading-relaxed"}
+                    placeholder="该节点的 Agent 指令..."
+                  />
+                </div>
+
+                <div className="flex gap-4">
+                  <div className="w-32">
+                    <label className="mb-1 block text-xs text-gray-500">最大重试</label>
+                    <input type="number" min={0} value={activeNode.maxRetries} onChange={(e) => updateNode(activeNodeIdx, { maxRetries: parseInt(e.target.value) || 0 })} className={inputCls} />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <label className="mb-1 block text-xs text-gray-500">Model（留空使用默认：{defaultModel}）</label>
+                    <SearchableSelect
+                      value={activeNode.model ?? ""}
+                      onChange={(v) => updateNode(activeNodeIdx, { model: v || undefined })}
+                      options={modelOptions}
+                      placeholder={`默认: ${defaultModel}`}
+                    />
+                  </div>
+                </div>
+
+                <label className="flex items-center gap-2 text-xs text-gray-400">
+                  <input type="checkbox" checked={activeNode.isolated ?? false} onChange={(e) => updateNode(activeNodeIdx, { isolated: e.target.checked })} className="rounded border-gray-600" />
+                  隔离运行（独立 Agent 会话）
+                </label>
+              </div>
+            </div>
+          )}
         </div>
 
-        <div className="flex justify-end gap-2 border-t border-gray-800 px-6 py-4">
+        {/* Footer */}
+        <div className="flex justify-end gap-2 border-t border-gray-800 px-6 py-3">
           <button onClick={onCancel} className="rounded-md px-4 py-1.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white">取消</button>
-          <button onClick={() => onSave({ ...def, updatedAt: Date.now() })} disabled={!canSave} className="rounded-md bg-blue-600 px-4 py-1.5 text-xs font-medium text-white transition hover:bg-blue-500 disabled:opacity-40">保存</button>
+          <button onClick={() => onSave({ ...def, config: cfgToRecord(), updatedAt: Date.now() })} disabled={!canSave} className="rounded-md bg-blue-600 px-4 py-1.5 text-xs font-medium text-white transition hover:bg-blue-500 disabled:opacity-40">保存</button>
         </div>
       </div>
     </div>

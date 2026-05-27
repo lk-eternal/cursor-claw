@@ -8,7 +8,7 @@ import * as os from "node:os"
 import { app, BrowserWindow, ipcMain, powerSaveBlocker } from "electron"
 import { getConfig, saveConfig, useSdkMode, type AppConfig } from "./config-store"
 import { validateCron, readTasksFromFile, writeTasksToFile, previewCronNextRuns, getNextCronFireLabel } from "./cron-scheduler"
-import { listDefinitions, saveDefinition, deleteDefinition, listInstances, getInstance, saveInstance, deleteInstance } from "./workflow-file"
+import { seedBuiltins, listDefinitions, saveDefinition, deleteDefinition, listInstances, getInstance, saveInstance, deleteInstance } from "./workflow-file"
 import { pushLog, pushUiLog, broadcastLog, getLogBuffer, clearLogBuffer, logCursorAgentInvocation, escapeLogContentSingleLine, resetLogFilePath } from "./ui-logger"
 import { resolveAgentBinary, applyProxyEnv, quoteArg, getAgentPaths, execAgentSync } from "./agent-cli"
 import {
@@ -982,6 +982,7 @@ export async function saveAppConfigFromRenderer(partial: Partial<AppConfig>): Pr
 // ── 初始化 ───────────────────────────────────────────────
 
 export function initDaemonManager(): void {
+  seedBuiltins()
   initSessionDispatcher()
   ipcMain.handle("config:apply-workspace-switch", (_, workspaceDir: string, stopOldSessions: boolean) => applyWorkspaceSwitch(workspaceDir, stopOldSessions))
   ipcMain.handle("daemon:get-log-buffer", () => getLogBuffer())
