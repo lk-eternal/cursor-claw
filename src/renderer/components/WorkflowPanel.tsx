@@ -47,7 +47,7 @@ function DefEditor({ initial, onSave, onCancel }: DefEditorProps) {
   const [activeNodeIdx, setActiveNodeIdx] = useState(0)
   const [defaultDir, setDefaultDir] = useState("")
   const [defaultModel, setDefaultModel] = useState("")
-  const [modelOptions, setModelOptions] = useState<{ value: string; label: string }[]>([])
+  const [modelOptions, setModelOptions] = useState<{ id: string; label: string }[]>([])
 
   useEffect(() => {
     window.electronAPI.getConfig().then((cfg) => {
@@ -55,7 +55,7 @@ function DefEditor({ initial, onSave, onCancel }: DefEditorProps) {
       setDefaultModel(cfg.model || "auto")
       const fetcher = cfg.agentMode === "sdk" ? window.electronAPI.listSdkModels : window.electronAPI.listModels
       fetcher().then((res) => {
-        if (res.ok) setModelOptions(res.models.map((m) => ({ value: m.id, label: m.label || m.id })))
+        if (res.ok) setModelOptions(res.models.map((m) => ({ id: m.id, label: m.label || m.id })))
       })
     })
   }, [])

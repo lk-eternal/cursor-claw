@@ -544,7 +544,8 @@ function createMcpServer(): McpServer {
             return { content: [{ type: "text" as const, text: "[send_failed] 消息发送失败" }] };
           }
         }
-        const timeoutMs = (timeout_seconds && timeout_seconds > 0) ? timeout_seconds * 1000 : 0;
+        const MAX_POLL_MS = 25_000;
+        const timeoutMs = Math.min((timeout_seconds && timeout_seconds > 0) ? timeout_seconds * 1000 : 0, MAX_POLL_MS);
         if (timeoutMs > 0) {
           const params = new URLSearchParams({ timeout: String(timeoutMs) });
           if (session_key) params.set("sessionKey", session_key);
@@ -1364,8 +1365,12 @@ export async function daemonMain(): Promise<void> {
   setDaemonSchedulerLogger((msg) => { log("INFO", msg); });
   startDaemonScheduledTasks(
     (content) => {
-      const chatId = lastFeishuP2pChatId ?? lastWechatChatId;
-      pushMessage(content, undefined, chatId ?? undefined, chatId ? "p2p" : undefined);
+      const chatId = lastFeishuP2pChatId ?? lastWechatChatId ?? (RECEIVE_CHAT_ID || null);
+      if (chatId) {
+        pushMessage(content, undefined, chatId, "p2p");
+      } else {
+        log("WARN", "定时任务消息无法入队: 无聊天上下文且未配置 larkReceiveId");
+      }
     },
     (taskId, taskName, content) => {
       const payload = JSON.stringify({ taskId, taskName, content });
