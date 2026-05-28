@@ -111,6 +111,16 @@ function DefEditor({ initial, onSave, onCancel }: DefEditorProps) {
   const canSave = def.name.trim() && def.nodes.every((n) => n.name.trim() && n.prompt.trim())
   const activeNode = def.nodes[activeNodeIdx]
 
+  const getInheritedModel = (nodeIdx: number): string => {
+    for (let i = nodeIdx - 1; i >= 0; i--) {
+      if (def.nodes[i].model) {
+        const m = def.nodes[i].model!
+        return modelOptions.find((o) => o.id === m)?.label || m
+      }
+    }
+    return defaultModel
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
       <div className="flex w-full max-w-4xl flex-col rounded-xl border border-gray-700 bg-gray-900 shadow-2xl" style={{ maxHeight: "90vh" }}>
@@ -214,26 +224,34 @@ function DefEditor({ initial, onSave, onCancel }: DefEditorProps) {
                   />
                 </div>
 
-                <div className="flex gap-4">
-                  <div className="w-32">
+                <div className="flex items-end gap-4">
+                  <div className="w-28 shrink-0">
                     <label className="mb-1 block text-xs text-gray-500">最大重试</label>
                     <input type="number" min={0} value={activeNode.maxRetries} onChange={(e) => updateNode(activeNodeIdx, { maxRetries: parseInt(e.target.value) || 0 })} className={inputCls} />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <label className="mb-1 block text-xs text-gray-500">Model（留空使用默认：{defaultModel}）</label>
-                    <SearchableSelect
-                      value={activeNode.model ?? ""}
-                      onChange={(v) => updateNode(activeNodeIdx, { model: v || undefined })}
-                      options={modelOptions}
-                      placeholder={`默认: ${defaultModel}`}
-                    />
+                    <label className="mb-1 block text-xs text-gray-500">模型</label>
+                    {activeNodeIdx === 0 || activeNode.isolated ? (
+                      <SearchableSelect
+                        value={activeNode.model ?? ""}
+                        onChange={(v) => updateNode(activeNodeIdx, { model: v || undefined })}
+                        options={modelOptions}
+                        placeholder={activeNodeIdx === 0 ? `默认: ${defaultModel}` : "选择模型..."}
+                      />
+                    ) : (
+                      <div className="flex h-[34px] items-center rounded-md border border-gray-700/50 bg-gray-800/50 px-3 text-xs text-gray-400">
+                        继承：{getInheritedModel(activeNodeIdx)}
+                      </div>
+                    )}
                   </div>
                 </div>
 
-                <label className="flex items-center gap-2 text-xs text-gray-400">
-                  <input type="checkbox" checked={activeNode.isolated ?? false} onChange={(e) => updateNode(activeNodeIdx, { isolated: e.target.checked })} className="rounded border-gray-600" />
-                  隔离运行（独立 Agent 会话）
-                </label>
+                {activeNodeIdx > 0 && (
+                  <label className="flex items-center gap-2 text-xs text-gray-400 select-none">
+                    <input type="checkbox" checked={activeNode.isolated ?? false} onChange={(e) => updateNode(activeNodeIdx, { isolated: e.target.checked })} className="rounded border-gray-600" />
+                    隔离运行（独立 Agent 会话，可单独设置模型）
+                  </label>
+                )}
               </div>
             </div>
           )}

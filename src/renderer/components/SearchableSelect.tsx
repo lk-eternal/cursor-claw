@@ -28,7 +28,7 @@ export default function SearchableSelect({ value, onChange, options, placeholder
   }, [])
 
   useEffect(() => {
-    if (open && inputRef.current) inputRef.current.focus()
+    if (open && inputRef.current) inputRef.current.focus({ preventScroll: true })
   }, [open])
 
   const filtered = query
@@ -42,7 +42,7 @@ export default function SearchableSelect({ value, onChange, options, placeholder
       <button
         type="button"
         onClick={() => { setOpen(!open); setQuery("") }}
-        className="flex w-full items-center justify-between rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-left text-sm outline-none transition hover:border-gray-600 focus:border-blue-500"
+        className="flex h-[34px] w-full items-center justify-between rounded-md border border-gray-700 bg-gray-800 px-3 text-left text-sm outline-none transition hover:border-gray-600 focus:border-blue-500"
       >
         <span className={selected ? "text-gray-100" : "text-gray-500"}>
           {selected?.label || placeholder || "选择..."}
