@@ -305,6 +305,11 @@ const api = {
   getWorkflowInstance: (id: string): Promise<WorkflowInstance | undefined> => ipcRenderer.invoke("workflow:get-instance", id),
   saveWorkflowInstance: (inst: WorkflowInstance): Promise<{ ok: boolean }> => ipcRenderer.invoke("workflow:save-instance", inst),
   deleteWorkflowInstance: (id: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("workflow:delete-instance", id),
+  onWorkflowInstanceUpdate: (cb: (inst: WorkflowInstance) => void): (() => void) => {
+    const handler = (_: unknown, inst: WorkflowInstance) => cb(inst)
+    ipcRenderer.on("workflow:instance-updated", handler)
+    return () => ipcRenderer.removeListener("workflow:instance-updated", handler)
+  },
 }
 
 contextBridge.exposeInMainWorld("electronAPI", api)

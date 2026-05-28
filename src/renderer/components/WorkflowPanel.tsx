@@ -236,7 +236,7 @@ function DefEditor({ initial, onSave, onCancel }: DefEditorProps) {
                         value={activeNode.model ?? ""}
                         onChange={(v) => updateNode(activeNodeIdx, { model: v || undefined })}
                         options={modelOptions}
-                        placeholder={activeNodeIdx === 0 ? `默认: ${defaultModel}` : "选择模型..."}
+                        placeholder={activeNodeIdx === 0 ? `默认: ${defaultModel}` : `继承: ${getInheritedModel(activeNodeIdx)}`}
                       />
                     ) : (
                       <div className="flex h-[34px] items-center rounded-md border border-gray-700/50 bg-gray-800/50 px-3 text-xs text-gray-400">
@@ -345,6 +345,13 @@ export default function WorkflowPanel() {
     if (subTab === "definitions") void refreshDefs()
     else void refreshInstances()
   }, [subTab, refreshDefs, refreshInstances])
+
+  useEffect(() => {
+    return window.electronAPI.onWorkflowInstanceUpdate((updated) => {
+      setInstances((prev) => prev.map((i) => (i.id === updated.id ? updated : i)))
+      setViewInst((prev) => (prev && prev.id === updated.id ? updated : prev))
+    })
+  }, [])
 
   const saveDef = async (d: WorkflowDefinition) => {
     await window.electronAPI.saveWorkflowDefinition(d)

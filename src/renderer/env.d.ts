@@ -205,6 +205,7 @@ interface ElectronAPI {
   getWorkflowInstance(id: string): Promise<WorkflowInstance | undefined>
   saveWorkflowInstance(inst: WorkflowInstance): Promise<{ ok: boolean }>
   deleteWorkflowInstance(id: string): Promise<{ ok: boolean }>
+  onWorkflowInstanceUpdate(cb: (inst: WorkflowInstance) => void): () => void
 
   testBind(): Promise<{ ok: boolean; error?: string }>
   testWechat(): Promise<{ ok: boolean; error?: string }>

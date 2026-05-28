@@ -21,7 +21,7 @@ const AGENT_NO_PREVIOUS_CHATS = /no previous chats found/i
 
 // ── 会话 Agent ──────────────────────────────────────────
 
-export type ChatType = "p2p" | "group" | "task" | "temp"
+export type ChatType = "p2p" | "group" | "task" | "temp" | "workflow"
 
 interface SessionAgent {
   sessionKey: string
@@ -138,10 +138,7 @@ export function buildPrompt(meta?: LaunchMeta, taskMessage?: string, sessionKey?
     prompts.push("请按照digital-identity数字身份定义并遵守工作流规则cursor-claw开始工作")
   }
 
-  if(meta?.chatType === "temp" && taskMessage){
-    prompts.push(taskMessage)
-  }
-  if(meta?.chatType === "task" && taskMessage){
+  if(taskMessage){
     prompts.push(taskMessage)
   }
 
@@ -277,7 +274,7 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
   let workDir = config.workspaceDir
 
   if (!useMainWorkspace) {
-    const isOwnTask = chatType === "task" || chatType === "temp"
+    const isOwnTask = chatType === "task" || chatType === "temp" || chatType === "workflow"
     if (!isOwnTask && !config.allowOthers) { pendingLaunches.delete(sessionKey); return { ok: false, error: "未启用其他人使用" } }
     const safeChatId = sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_")
     workDir = path.join(app.getPath("userData"), "workspaces", safeChatId)

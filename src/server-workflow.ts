@@ -45,6 +45,10 @@ function emitNotify(chatId: string | undefined, text: string): void {
   process.stdout.write(`__WF_NOTIFY__:${JSON.stringify({ chatId, text })}\n`);
 }
 
+function emitInstanceUpdate(inst: WorkflowInstance): void {
+  process.stdout.write(`__WF_INSTANCE__:${JSON.stringify(inst)}\n`);
+}
+
 // ── Agent 侧工具：workflow_next / workflow_reject ────────
 
 export function registerWorkflowAgentTools(mcpServer: McpServer): void {
@@ -60,6 +64,7 @@ export function registerWorkflowAgentTools(mcpServer: McpServer): void {
 
       const result = handleNext(inst.id, { output });
       const fresh = getInstance(inst.id);
+      if (fresh) emitInstanceUpdate(fresh);
 
       if (result.failed) {
         emitNotify(fresh?.notifyChatId, `❌ 工作流失败: ${result.message}`);
@@ -92,6 +97,7 @@ export function registerWorkflowAgentTools(mcpServer: McpServer): void {
 
       const result = handleReject(inst.id, { reason, targetNodeId: target_node_id });
       const fresh = getInstance(inst.id);
+      if (fresh) emitInstanceUpdate(fresh);
 
       if (result.failed) {
         emitNotify(fresh?.notifyChatId, `❌ 工作流失败: ${result.message}`);
@@ -198,6 +204,7 @@ export function registerWorkflowAdminTools(mcpServer: McpServer): void {
           if (result.failed) return txt(`❌ ${result.message}`);
 
           const fresh = getInstance(inst.id)!;
+          emitInstanceUpdate(fresh);
           emitLaunch(fresh, result);
           emitNotify(fresh.notifyChatId, `🚀 工作流「${def.name}」已启动，第一个节点: ${result.node?.name}`);
 

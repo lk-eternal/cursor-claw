@@ -447,6 +447,13 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
           } catch { /* ignore */ }
           continue
         }
+        if (line.startsWith("__WF_INSTANCE__:")) {
+          try {
+            const inst = JSON.parse(line.slice("__WF_INSTANCE__:".length))
+            BrowserWindow.getAllWindows().forEach((w) => w.webContents.send("workflow:instance-updated", inst))
+          } catch { /* ignore */ }
+          continue
+        }
         if (line.startsWith("__WF_NOTIFY__:")) {
           try {
             const { chatId, text } = JSON.parse(line.slice("__WF_NOTIFY__:".length))

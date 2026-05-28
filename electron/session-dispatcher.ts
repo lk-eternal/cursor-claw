@@ -281,15 +281,16 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
     if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true })
   }
 
-  await injectWorkspaceToDir(workDir, useMain)
+  const skipIdentity = chatType === "workflow"
+  await injectWorkspaceToDir(workDir, useMain || skipIdentity)
 
-  const scenario = p.modelScenario ?? (useMain ? "primary" : chatType === "task" || chatType === "temp" ? "task" : "others")
+  const scenario = p.modelScenario ?? (useMain ? "primary" : chatType === "task" || chatType === "temp" || chatType === "workflow" ? "task" : "others")
 
   if (useSdkMode()) {
     return launchSdkAgent({ sessionKey, chatType, meta, workspaceDir: workDir, useMainWorkspace: useMain, senderOpenId, chatName, taskMessage, modelScenario: scenario, modelOverride: p.modelOverride })
   }
 
-  if (chatType === "task" || chatType === "temp") {
+  if (chatType === "task" || chatType === "temp" || chatType === "workflow") {
     return _launchIndependentAgentCli(sessionKey, chatName ?? sessionKey, taskMessage ?? "", chatType, scenario, p.modelOverride)
   }
   return _launchSessionAgent(sessionKey, chatType, undefined, meta, useMain, senderOpenId, scenario)
@@ -315,11 +316,11 @@ export async function launchWorkflowAgent(p: {
 }): Promise<{ ok: boolean; error?: string }> {
   const sessionKey = `${p.notifyChatId || "wf"}::wf_${p.instanceId}_${p.nodeId}`
   return launchAgent({
-    sessionKey, chatType: "task",
+    sessionKey, chatType: "workflow",
     chatName: `WF: ${p.nodeName}`,
     taskMessage: p.prompt,
     workingDirectory: p.workingDirectory,
-    meta: { chatId: p.notifyChatId || sessionKey, chatType: "task" },
+    meta: { chatId: p.notifyChatId || sessionKey, chatType: "workflow" },
     modelScenario: "task",
     modelOverride: p.model,
   })
@@ -361,7 +362,7 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
     const now = Date.now()
     const lines = sessions.map((s, i) => {
       const idx = `#${i + 1}`
-      const type = s.chatType === "p2p" ? "私聊" : s.chatType === "group" ? "群聊" : s.chatType === "task" ? "定时" : s.chatType === "temp" ? "临时" : s.chatType
+      const type = s.chatType === "p2p" ? "私聊" : s.chatType === "group" ? "群聊" : s.chatType === "task" ? "定时" : s.chatType === "temp" ? "临时" : s.chatType === "workflow" ? "工作流" : s.chatType
       const name = s.chatName || "-"
       const dir = s.workspaceDir ? path.basename(s.workspaceDir) : "-"
       const pid = s.pid || "-"
@@ -421,7 +422,7 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
     }
     const s = sessions[idx - 1]
     const now = Date.now()
-    const type = s.chatType === "p2p" ? "私聊" : s.chatType === "group" ? "群聊" : s.chatType === "task" ? "定时任务" : s.chatType === "temp" ? "临时任务" : s.chatType
+    const type = s.chatType === "p2p" ? "私聊" : s.chatType === "group" ? "群聊" : s.chatType === "task" ? "定时任务" : s.chatType === "temp" ? "临时任务" : s.chatType === "workflow" ? "工作流" : s.chatType
 
     if (chatId) {
       await syncActiveSession(port, chatId, s.sessionKey)
