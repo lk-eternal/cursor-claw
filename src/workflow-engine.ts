@@ -70,6 +70,7 @@ function buildNodePrompt(
   // 3. 严格的字符串变量（供 renderTemplate 使用，类型完全符合 Record<string, string>）
   const stringData: Record<string, string> = {
     WORKFLOW_NAME: def.name,
+    INSTANCE_ID: instance.id,
     NODE_NAME: node.name,
     ATTEMPT_SUFFIX: attemptSuffix,
     REJECT_FROM_NODE_NAME: opts.rejectFromNodeName ?? "",

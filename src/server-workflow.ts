@@ -1,22 +1,18 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
-  findActiveInstance,
   getInstance,
-  saveInstance,
   listInstances,
   listDefinitions,
   getDefinition,
   saveDefinition,
   deleteDefinition,
-  deleteInstance,
 } from "./workflow-store.js";
 import {
   handleNext,
   handleReject,
   createInstance,
   startWorkflow,
-  resumeWorkflow,
   type EngineResult,
 } from "./workflow-engine.js";
 import type { WorkflowDefinition, WorkflowInstance } from "./shared/workflow-types.js";
@@ -49,6 +45,36 @@ function emitInstanceUpdate(inst: WorkflowInstance): void {
   process.stdout.write(`__WF_INSTANCE__:${JSON.stringify(inst)}\n`);
 }
 
+function validateRunning(instanceId: string): string | null {
+  const inst = getInstance(instanceId);
+  if (!inst) return `❌ 工作流实例 "${instanceId}" 不存在`;
+  if (inst.status !== "running") return `❌ 工作流实例 "${instanceId}" 非运行状态（当前: ${inst.status}）`;
+  return null;
+}
+
+function respondEngineResult(
+  instanceId: string,
+  result: EngineResult
+): string {
+  const inst = getInstance(instanceId);
+
+  if (inst) emitInstanceUpdate(inst);
+
+  if (result.failed) {
+    emitNotify(inst?.notifyChatId, `❌ 工作流失败: ${result.message}`);
+    return `❌ ${result.message}`;
+  }
+  if (result.done) {
+    emitNotify(inst?.notifyChatId, "✅ 工作流已完成。所有节点执行成功。");
+    return "✅ 工作流已完成。所有节点执行成功。";
+  }
+  if (result.isolated && inst) {
+    emitLaunch(inst, result);
+    return `✅ 下一节点「${result.node?.name}」将由独立 Agent 处理。`;
+  }
+  return result.prompt ?? "✅ 已提交";
+}
+
 // ── Agent 侧工具：workflow_next / workflow_reject ────────
 
 export function registerWorkflowAgentTools(mcpServer: McpServer): void {
@@ -56,31 +82,18 @@ export function registerWorkflowAgentTools(mcpServer: McpServer): void {
     "workflow_next",
     "完成当前工作流节点，提交产物并流转到下一个节点",
     {
+      instance_id: z.string().describe("工作流实例 ID（见 Prompt 中的「实例 ID」）"),
       output: z.string().describe("当前节点的产出（结构化文本）"),
     },
-    async ({ output }) => {
-      const inst = findActiveInstance();
-      if (!inst) return txt("❌ 当前没有运行中的工作流实例");
+    async ({ instance_id, output }) => {
+      const err = validateRunning(instance_id);
+      if (err) return txt(err);
 
-      const result = handleNext(inst.id, { output });
-      const fresh = getInstance(inst.id);
-      if (fresh) emitInstanceUpdate(fresh);
+      const inst = getInstance(instance_id);
+      emitNotify(inst?.notifyChatId, `✅ 节点产物已提交: ${output}`);
 
-      if (result.failed) {
-        emitNotify(fresh?.notifyChatId, `❌ 工作流失败: ${result.message}`);
-        return txt(`❌ ${result.message}`);
-      }
-      if (result.done) {
-        emitNotify(fresh?.notifyChatId, `✅ 工作流已完成。所有节点执行成功。`);
-        return txt(`✅ 工作流已完成。所有节点执行成功。`);
-      }
-
-      if (result.isolated && fresh) {
-        emitLaunch(fresh, result);
-        return txt(`✅ 产物已提交。下一节点「${result.node?.name}」将由独立 Agent 处理。`);
-      }
-
-      return txt(result.prompt!);
+      const result = handleNext(instance_id, { output });
+      return txt(respondEngineResult(instance_id, result, ));
     },
   );
 
@@ -88,28 +101,19 @@ export function registerWorkflowAgentTools(mcpServer: McpServer): void {
     "workflow_reject",
     "驳回工作流节点产物，回退到指定节点重新执行（默认上一个节点）",
     {
+      instance_id: z.string().describe("工作流实例 ID（见 Prompt 中的「实例 ID」）"),
       reason: z.string().describe("驳回原因"),
       target_node_id: z.string().optional().describe("回退目标节点 ID（可选，默认上一个节点）"),
     },
-    async ({ reason, target_node_id }) => {
-      const inst = findActiveInstance();
-      if (!inst) return txt("❌ 当前没有运行中的工作流实例");
+    async ({ instance_id, reason, target_node_id }) => {
+      const err = validateRunning(instance_id);
+      if (err) return txt(err);
 
-      const result = handleReject(inst.id, { reason, targetNodeId: target_node_id });
-      const fresh = getInstance(inst.id);
-      if (fresh) emitInstanceUpdate(fresh);
+      const inst = getInstance(instance_id);
+      emitNotify(inst?.notifyChatId, `⚠️ 驳回已提交。理由: ${reason}`);
 
-      if (result.failed) {
-        emitNotify(fresh?.notifyChatId, `❌ 工作流失败: ${result.message}`);
-        return txt(`❌ ${result.message}`);
-      }
-
-      if (result.isolated && fresh) {
-        emitLaunch(fresh, result);
-        return txt(`⚠️ 驳回已提交。节点「${result.node?.name}」将由独立 Agent 重新执行。`);
-      }
-
-      return txt(result.prompt!);
+      const result = handleReject(instance_id, { reason, targetNodeId: target_node_id });
+      return txt(respondEngineResult(instance_id, result));
     },
   );
 }
@@ -183,7 +187,7 @@ export function registerWorkflowAdminTools(mcpServer: McpServer): void {
 
         if (action === "delete") {
           if (!id) return txt("❌ 需要提供 id 参数");
-          if (deleteDefinition(id)) return txt(`✅ 工作流已删除。`);
+          if (deleteDefinition(id)) return txt("✅ 工作流已删除。");
           return txt(`❌ 工作流 "${id}" 不存在`);
         }
 
@@ -191,9 +195,6 @@ export function registerWorkflowAdminTools(mcpServer: McpServer): void {
           if (!id) return txt("❌ 需要提供 id 参数（工作流定义 ID）");
           const def = getDefinition(id);
           if (!def) return txt(`❌ 工作流 "${id}" 不存在`);
-
-          const active = findActiveInstance();
-          if (active) return txt(`❌ 已有运行中的工作流实例 "${active.id}"，请等待完成或手动终止`);
 
           const inst = createInstance(def, {
             input,
@@ -212,7 +213,7 @@ export function registerWorkflowAdminTools(mcpServer: McpServer): void {
             `🚀 工作流「${def.name}」已启动`,
             `实例 ID: \`${inst.id}\``,
             `第一个节点: ${result.node?.name}`,
-            `Agent 已发起启动信号`,
+            "Agent 已发起启动信号",
           ].join("\n"));
         }
 

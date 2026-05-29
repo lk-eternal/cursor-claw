@@ -1,5 +1,7 @@
 你正在执行工作流「{{WORKFLOW_NAME}}」。
 
+**实例 ID:** `{{INSTANCE_ID}}`
+
 ## 当前节点: {{NODE_NAME}}{{ATTEMPT_SUFFIX}}
 
 {{#if isRetry}}
@@ -29,5 +31,5 @@
 {{NODES_BRIEF}}
 
 ### 可用的工作流工具
-- workflow_next(output): 推进至下一节点
-- workflow_reject(reason, target_node_id?): 驳回到指定节点
+- workflow_next(instance_id, output): 推进至下一节点
+- workflow_reject(instance_id, reason, target_node_id?): 驳回到指定节点
