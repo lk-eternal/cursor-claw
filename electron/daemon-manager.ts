@@ -677,7 +677,7 @@ function startStatusPolling(): void {
         if (uncachedGroups.length > 0) await fetchChatNames(uncachedGroups)
 
         const uncachedP2pOpenIds = sessions
-          .filter((s) => s.chatType === "p2p" && s.senderOpenId && !chatNameCache.has(s.senderOpenId))
+          .filter((s) => s.chatType === "p2p" && s.senderOpenId?.startsWith("ou_") && !chatNameCache.has(s.senderOpenId))
           .map((s) => s.senderOpenId!)
         if (uncachedP2pOpenIds.length > 0) await fetchUserNames(uncachedP2pOpenIds)
       }

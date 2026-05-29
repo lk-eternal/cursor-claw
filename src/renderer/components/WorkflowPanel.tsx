@@ -49,6 +49,8 @@ function DefEditor({ initial, onSave, onCancel }: DefEditorProps) {
   const [defaultModel, setDefaultModel] = useState("")
   const [modelOptions, setModelOptions] = useState<{ id: string; label: string }[]>([])
 
+  const modelLabel = useCallback((id: string) => modelOptions.find((o) => o.id === id)?.label || id, [modelOptions])
+
   useEffect(() => {
     window.electronAPI.getConfig().then((cfg) => {
       setDefaultDir(cfg.workspaceDir || "未配置")
@@ -113,12 +115,9 @@ function DefEditor({ initial, onSave, onCancel }: DefEditorProps) {
 
   const getInheritedModel = (nodeIdx: number): string => {
     for (let i = nodeIdx - 1; i >= 0; i--) {
-      if (def.nodes[i].model) {
-        const m = def.nodes[i].model!
-        return modelOptions.find((o) => o.id === m)?.label || m
-      }
+      if (def.nodes[i].model) return modelLabel(def.nodes[i].model!)
     }
-    return defaultModel
+    return modelLabel(defaultModel)
   }
 
   return (
@@ -236,7 +235,7 @@ function DefEditor({ initial, onSave, onCancel }: DefEditorProps) {
                         value={activeNode.model ?? ""}
                         onChange={(v) => updateNode(activeNodeIdx, { model: v || undefined })}
                         options={modelOptions}
-                        placeholder={activeNodeIdx === 0 ? `默认: ${defaultModel}` : `继承: ${getInheritedModel(activeNodeIdx)}`}
+                        placeholder={activeNodeIdx === 0 ? `默认: ${modelLabel(defaultModel)}` : `继承: ${getInheritedModel(activeNodeIdx)}`}
                       />
                     ) : (
                       <div className="flex h-[34px] items-center rounded-md border border-gray-700/50 bg-gray-800/50 px-3 text-xs text-gray-400">
@@ -248,7 +247,10 @@ function DefEditor({ initial, onSave, onCancel }: DefEditorProps) {
 
                 {activeNodeIdx > 0 && (
                   <label className="flex items-center gap-2 text-xs text-gray-400 select-none">
-                    <input type="checkbox" checked={activeNode.isolated ?? false} onChange={(e) => updateNode(activeNodeIdx, { isolated: e.target.checked })} className="rounded border-gray-600" />
+                    <input type="checkbox" checked={activeNode.isolated ?? false} onChange={(e) => {
+                      const isolated = e.target.checked
+                      updateNode(activeNodeIdx, isolated ? { isolated } : { isolated: false, model: undefined })
+                    }} className="rounded border-gray-600" />
                     隔离运行（独立 Agent 会话，可单独设置模型）
                   </label>
                 )}

@@ -505,7 +505,7 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
     const chatId = extractChatId(sessionKey)
     const mainUser = isMainUser(chatId, chatType)
 
-    if (feishuOn && chatType === "p2p" && senderOpenId && !chatNameCache.has(senderOpenId)) {
+    if (feishuOn && chatType === "p2p" && senderOpenId?.startsWith("ou_") && !chatNameCache.has(senderOpenId)) {
       await fetchUserNames([senderOpenId])
     }
 
