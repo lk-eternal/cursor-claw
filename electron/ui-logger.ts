@@ -99,7 +99,7 @@ export function logCursorAgentInvocation(logLabel: string, agentArgs: string[], 
   pushUiLog("Agent", "INFO", `[CLI ${logLabel}] ${cwdSuffix}agent ${agentArgs.join(" ")}`)
 }
 
-const CLI_RESPONSE_LOG_MAX = 12_000
+const CLI_RESPONSE_LOG_MAX = 200
 
 /** 在对应的 [CLI xxx] 发起日志之后，追加一行合并后的 stdout/stderr 摘要（过长截断） */
 export function logCursorAgentResponse(logLabel: string, result: { ok: boolean; stdout: string; stderr: string; error?: string }): void {

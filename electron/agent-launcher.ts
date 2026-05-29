@@ -132,7 +132,7 @@ export interface LaunchMeta { messageIds?: string[]; chatId?: string; chatType?:
 
 export function buildPrompt(meta?: LaunchMeta, taskMessage?: string, sessionKey?: string, useMainWorkspace?: boolean): string {
   const prompts: string[] = []
-  if (useMainWorkspace) {
+  if (useMainWorkspace || meta?.chatType == 'workflow') {
     prompts.push("请遵守工作流规则cursor-claw开始工作")
   } else {
     prompts.push("请按照digital-identity数字身份定义并遵守工作流规则cursor-claw开始工作")
