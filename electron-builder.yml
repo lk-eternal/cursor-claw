@@ -33,8 +33,8 @@ extraResources:
     to: icon.png
   - from: resources/icon.ico
     to: icon.ico
-  - from: resources/cursor-claw.mdc
-    to: cursor-claw.mdc
+  - from: resources/template
+    to: template
 
 win:
   icon: resources/icon.ico

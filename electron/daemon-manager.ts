@@ -383,10 +383,15 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
   }
 
   try {
+    const templateDir = app.isPackaged
+      ? path.join(process.resourcesPath, "template")
+      : path.join(app.getAppPath(), "resources", "template")
+
     const env: Record<string, string> = {
       ...process.env as Record<string, string>,
       LARK_WORKSPACE_DIR: config.workspaceDir,
       APP_DATA_DIR: app.getPath("userData"),
+      CURSOR_CLAW_TEMPLATE_DIR: templateDir,
       NODE_USE_ENV_PROXY: "1",
       ...(config.daemonPort ? { LARK_DAEMON_PORT: String(config.daemonPort) } : {}),
       ...(feishuReady ? {

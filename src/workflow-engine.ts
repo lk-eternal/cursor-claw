@@ -13,6 +13,7 @@ import {
   listInstances,
 } from "./workflow-store.js";
 import { randomUUID } from "node:crypto";
+import { readTemplate, renderTemplate } from "./shared/template-utils.js";
 
 // ── Prompt 组装 ──────────────────────────────────────────
 
@@ -27,44 +28,80 @@ function assembleContext(instance: WorkflowInstance): string {
     .map(([k, v]) => `**${k}**: ${typeof v === "string" ? v : JSON.stringify(v)}`)
     .join("\n\n");
 }
+/**
+ * 简单的条件块解析器
+ * 仅接收布尔类型的条件字典
+ */
+function parseConditionals(template: string, conditionals: Record<string, boolean>): string {
+  return template.replace(
+      /\{\{#if (\w+)\}\}([\s\S]*?)\{\{\/if\}\}/g,
+      (_, key, content) => {
+        // 只有对应的条件为 true 时，才保留其中的文本内容
+        return conditionals[key] ? content : "";
+      }
+  );
+}
+
+function buildNodePrompt(
+    def: WorkflowDefinition,
+    node: WorkflowNode,
+    instance: WorkflowInstance,
+    opts: {
+      attempt?: number;
+      rejectFromNodeName?: string;
+      reason?: string;
+      useInitialInput?: boolean;
+    } = {}
+): string {
+  const isRetry = Boolean(opts.rejectFromNodeName);
+  const hasConfig = Boolean(def.config && Object.keys(def.config).length > 0);
+
+  // 1. 次数后缀
+  const attemptSuffix = opts.attempt && opts.attempt > 1
+      ? `（第 ${opts.attempt} 次执行）`
+      : "";
+
+  // 2. 条件控制变量（仅供 parseConditionals 使用）
+  const conditionals: Record<string, boolean> = {
+    isRetry,
+    hasConfig,
+  };
+
+  // 3. 严格的字符串变量（供 renderTemplate 使用，类型完全符合 Record<string, string>）
+  const stringData: Record<string, string> = {
+    WORKFLOW_NAME: def.name,
+    NODE_NAME: node.name,
+    ATTEMPT_SUFFIX: attemptSuffix,
+    REJECT_FROM_NODE_NAME: opts.rejectFromNodeName ?? "",
+    REASON: opts.reason ?? "无说明",
+    NODE_PROMPT: node.prompt,
+    INPUT: opts.useInitialInput && instance.input
+        ? instance.input
+        : assembleContext(instance),
+    CONFIG_VARS: hasConfig
+        ? Object.entries(def.config!)
+            .map(([k, v]) => `- **${k}**: ${v}`)
+            .join("\n")
+        : "",
+    NODES_BRIEF: buildNodesBrief(def.nodes),
+  };
+
+  // 4. 读取主模板
+  const rawTemplate = readTemplate("workflow/node-prompt.md");
+
+  // 5. 先根据布尔条件过滤模板中不符合条件的段落
+  const templateWithParsedLogic = parseConditionals(rawTemplate, conditionals);
+
+  // 6. 再用纯字符串数据渲染最终的 Prompt
+  return renderTemplate(templateWithParsedLogic, stringData);
+}
 
 export function buildStartPrompt(
   def: WorkflowDefinition,
   node: WorkflowNode,
   instance: WorkflowInstance,
 ): string {
-  const lines = [
-    `你正在执行工作流「${def.name}」。`,
-    ``,
-    `## 当前节点: ${node.name}`,
-    ``,
-    `### 任务`,
-    node.prompt,
-    ``,
-    `### 输入`,
-    instance.input ? instance.input : assembleContext(instance),
-    ``,
-  ];
-  if (def.config && Object.keys(def.config).length > 0) {
-    lines.push(
-      `### 配置变量`,
-      ...Object.entries(def.config).map(([k, v]) => `- **${k}**: ${v}`),
-      ``,
-    );
-  }
-  lines.push(
-    `### 输出要求`,
-    `完成任务后，你 **必须** 调用 \`workflow_next\` 工具提交产物。`,
-    `如果你认为输入不合格，调用 \`workflow_reject\` 驳回。`,
-    ``,
-    `### 工作流节点一览`,
-    buildNodesBrief(def.nodes),
-    ``,
-    `### 可用的工作流工具`,
-    `- workflow_next(output): 完成当前节点，提交产物`,
-    `- workflow_reject(reason, target_node_id?): 驳回到指定节点（默认上一个节点）`,
-  );
-  return lines.join("\n");
+  return buildNodePrompt(def, node, instance, { useInitialInput: true });
 }
 
 export function buildRetryPrompt(
@@ -74,44 +111,12 @@ export function buildRetryPrompt(
   attempt: number,
   rejectFromNodeName: string,
   reason: string,
-  previousOutput: unknown,
 ): string {
-  const lines = [
-    `你正在执行工作流「${def.name}」。`,
-    ``,
-    `## 当前节点: ${node.name}（第 ${attempt} 次执行）`,
-    ``,
-    `⚠️ 你被后续节点「${rejectFromNodeName}」驳回了。`,
-    `驳回原因：${reason}`,
-    ``,
-    `请根据上述原因修正你的产出，并重新调用 \`workflow_next\` 提交。`,
-    ``,
-    `### 任务`,
-    node.prompt,
-    ``,
-    `### 上一次的产出（供参考）`,
-    typeof previousOutput === "string" ? previousOutput : JSON.stringify(previousOutput ?? "(无)"),
-    ``,
-    `### 输入`,
-    assembleContext(instance),
-    ``,
-  ];
-  if (def.config && Object.keys(def.config).length > 0) {
-    lines.push(
-      `### 配置变量`,
-      ...Object.entries(def.config).map(([k, v]) => `- **${k}**: ${v}`),
-      ``,
-    );
-  }
-  lines.push(
-    `### 工作流节点一览`,
-    buildNodesBrief(def.nodes),
-    ``,
-    `### 可用的工作流工具`,
-    `- workflow_next(output): 完成当前节点，提交产物`,
-    `- workflow_reject(reason, target_node_id?): 驳回到指定节点（默认上一个节点）`,
-  );
-  return lines.join("\n");
+  return buildNodePrompt(def, node, instance, {
+    attempt,
+    rejectFromNodeName,
+    reason,
+  });
 }
 
 function buildNextNodePrompt(
@@ -343,7 +348,6 @@ export function handleReject(instanceId: string, payload: WorkflowRejectPayload)
 
   // 回退到目标节点
   inst.currentNodeId = targetNode.id;
-  const previousOutput = inst.context[targetNode.id];
 
   const exec: NodeExecution = {
     nodeId: targetNode.id,
@@ -364,7 +368,6 @@ export function handleReject(instanceId: string, payload: WorkflowRejectPayload)
     retryCount + 2,
     currentNode.name,
     payload.reason,
-    previousOutput,
   );
 
   if (targetNode.isolated) {

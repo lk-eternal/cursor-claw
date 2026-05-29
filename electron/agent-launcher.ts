@@ -139,10 +139,13 @@ export function buildPrompt(meta?: LaunchMeta, taskMessage?: string, sessionKey?
   }
 
   if(taskMessage){
+    prompts.push("---")
+    prompts.push("任务内容:")
     prompts.push(taskMessage)
   }
 
-  prompts.push("\n\n---\n会话元数据:\n")
+  prompts.push("---")
+  prompts.push("会话元数据:")
   if (sessionKey) {
     prompts.push(`[session_key=${sessionKey}]`)
   }

@@ -41,14 +41,17 @@ export function clearInjectionCache(dir?: string): void {
 
 // ── Path helpers ───────────────────────────────────────────────
 
+export function getTemplateRoot(): string {
+  if (app.isPackaged) return path.join(process.resourcesPath, "template")
+  return path.join(app.getAppPath(), "resources", "template")
+}
+
 export function getRuleTemplatePath(): string {
-  if (app.isPackaged) return path.join(process.resourcesPath, "cursor-claw.mdc")
-  return path.join(app.getAppPath(), "resources", "cursor-claw.mdc")
+  return path.join(getTemplateRoot(), "rule", "cursor-claw.mdc")
 }
 
 export function getSkillsTemplateDir(): string {
-  if (app.isPackaged) return path.join(process.resourcesPath, "skills")
-  return path.join(app.getAppPath(), "resources", "skills")
+  return path.join(getTemplateRoot(), "skills")
 }
 
 // ── MCP injection ──────────────────────────────────────────────
