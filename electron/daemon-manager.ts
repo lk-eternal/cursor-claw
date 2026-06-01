@@ -32,7 +32,7 @@ import {
   McpServerEntry,
 } from "./mcp-manager"
 import { FileCommand, reportCommandResult, handleFeishuModelCommand, handleFeishuMcpCommand, handleFeishuTaskCommand, parseListModelsStdout, type TaskRunFn } from "./command-handler"
-import { readLockFile, getLockFilePath, httpGet, httpPost, syncActiveSession, getCurrentActiveSession } from "./daemon-client"
+import { readLockFile, getLockFilePath, httpGet, httpPost, syncActiveSession, getCurrentActiveSession, enqueueToMainSession } from "./daemon-client"
 import {
   isSessionAgentRunning, stopSessionAgent, stopAllSessionAgents,
   dispatchSessionAgents, launchSessionAgent, launchIndependentAgent,
@@ -781,7 +781,12 @@ async function checkAndExecutePendingCommands(): Promise<void> {
 
         case "/task": {
           if (!isAdmin) { await denyNonAdmin(); break }
-          await handleFeishuTaskCommand(lock.port, claimed.messageId, rawCmd, (id, name, content) => launchIndependentAgent(id, name, content), claimed.chatId)
+          await handleFeishuTaskCommand(
+            lock.port, claimed.messageId, rawCmd,
+            (id, name, content) => launchIndependentAgent(id, name, content),
+            claimed.chatId,
+            async (content, preferredChatId) => enqueueToMainSession(lock.port, content, preferredChatId ?? claimed.chatId),
+          )
           break
         }
 
@@ -1161,12 +1166,8 @@ export function initDaemonManager(): void {
     }
     const lock = readLockFile()
     if (!lock?.port) return { ok: false, error: "守护进程未运行" }
-    try {
-      await httpPost(`http://127.0.0.1:${lock.port}/enqueue`, { content })
-      return { ok: true }
-    } catch (e: unknown) {
-      return { ok: false, error: e instanceof Error ? e.message : String(e) }
-    }
+    const result = await enqueueToMainSession(lock.port, content)
+    return result
   })
 
   ipcMain.handle("scheduled-tasks:get-status", () => getIndependentTaskStatuses())

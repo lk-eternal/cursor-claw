@@ -709,7 +709,13 @@ function startHttpServer(): Promise<number> {
           const body = JSON.parse(await readBody(req));
           const content = typeof body.content === "string" ? body.content : "";
           if (!content) { json(res, { error: "content is required" }, 400); return; }
-          pushMessage(content);
+          const chatId = typeof body.chatId === "string" ? body.chatId.trim() : "";
+          const chatType = typeof body.chatType === "string" ? body.chatType : "p2p";
+          if (chatId) {
+            pushMessage(content, undefined, chatId, chatType);
+          } else {
+            pushMessage(content);
+          }
           json(res, { ok: true, queueLength: getFileQueueLength() });
           return;
         }

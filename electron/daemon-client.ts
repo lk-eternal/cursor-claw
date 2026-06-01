@@ -3,6 +3,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { app } from "electron"
 import { LOCK_FILE_NAME } from "../src/shared/constants"
+import { getConfig } from "./config-store"
 
 export interface LockInfo { pid: number; port: number; version: string }
 
@@ -70,4 +71,37 @@ export async function drainSessionMessages(port: number, sessionKey: string): Pr
     const res = (await httpPost(`http://127.0.0.1:${port}/dequeue-all`, { sessionKey })) as { messages?: unknown[] }
     return res?.messages?.length ?? 0
   } catch { return 0 }
+}
+
+export async function resolveMainChatId(port: number, preferredChatId?: string): Promise<string | undefined> {
+  const preferred = preferredChatId?.trim()
+  if (preferred) {
+    return preferred
+  }
+  const fromConfig = getConfig().larkReceiveId?.trim()
+  if (fromConfig) {
+    return fromConfig
+  }
+  try {
+    const res = (await httpGet(`http://127.0.0.1:${port}/api/active-sessions`)) as { sessions?: Record<string, string> }
+    const keys = Object.keys(res?.sessions ?? {})
+    return keys[0] || undefined
+  } catch {
+    return undefined
+  }
+}
+
+export async function enqueueToMainSession(
+  port: number, content: string, preferredChatId?: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const chatId = await resolveMainChatId(port, preferredChatId)
+  if (!chatId) {
+    return { ok: false, error: "未绑定主用户且无活跃会话，无法入队" }
+  }
+  try {
+    await httpPost(`http://127.0.0.1:${port}/enqueue`, { content, chatId, chatType: "p2p" })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
 }

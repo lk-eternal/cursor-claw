@@ -238,9 +238,10 @@ function taskPreviewBullet(i: number): string { return TASK_PREVIEW_BULLETS[i] ?
 function formatTaskStatusLine(enabled: boolean): string { return enabled ? "✅ 运行中" : "⏸️ 已停止" }
 
 export type TaskRunFn = (taskId: string, taskName: string, content: string) => Promise<{ ok: boolean; error?: string }>
+export type TaskEnqueueFn = (content: string, chatId?: string) => Promise<{ ok: boolean; error?: string }>
 
 export async function handleFeishuTaskCommand(
-  port: number, messageId: string, raw: string, taskRunFn: TaskRunFn, chatId?: string,
+  port: number, messageId: string, raw: string, taskRunFn: TaskRunFn, chatId?: string, taskEnqueueFn?: TaskEnqueueFn,
 ): Promise<void> {
   const parts = raw.trim().split(/\s+/).filter((p) => p.length > 0)
   const low = (s: string) => s.toLowerCase()
@@ -310,11 +311,15 @@ export async function handleFeishuTaskCommand(
         await reportCommandResult(port, messageId, false, `❌ 独立启动失败: ${result.error}`)
       }
     } else {
-      try {
-        await httpPost(`http://127.0.0.1:${port}/enqueue`, { content })
+      const enqueue = taskEnqueueFn ?? (async (c) => {
+        await httpPost(`http://127.0.0.1:${port}/enqueue`, { content: c, chatId, chatType: chatId ? "p2p" : undefined })
+        return { ok: true }
+      })
+      const result = await enqueue(content, chatId)
+      if (result.ok) {
         await reportCommandResult(port, messageId, true, `🚀 已手动触发任务 #${idx} ${t.name}`)
-      } catch (e: unknown) {
-        await reportCommandResult(port, messageId, false, `❌ 触发失败: ${e instanceof Error ? e.message : String(e)}`)
+      } else {
+        await reportCommandResult(port, messageId, false, `❌ 触发失败: ${result.error}`)
       }
     }
     return
