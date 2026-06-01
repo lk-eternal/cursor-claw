@@ -23,8 +23,8 @@ export function pushToFileQueue(text: string, messageId?: string, source?: strin
   if (!queueDir || !text?.trim()) return false;
 
   const ts = Date.now();
-  const id = messageId || `${ts}-${Math.random().toString(36).slice(2, 8)}`;
-  const safeId = id.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const fileToken = messageId || `${ts}-${Math.random().toString(36).slice(2, 8)}`;
+  const safeId = fileToken.replace(/[^a-zA-Z0-9_-]/g, "_");
   const filename = `${ts}_${safeId}.qmsg`;
 
   if (messageId) {
@@ -41,7 +41,7 @@ export function pushToFileQueue(text: string, messageId?: string, source?: strin
 
   try {
     const data = JSON.stringify({
-      text, messageId: id, timestamp: ts,
+      text, messageId: messageId || "", timestamp: ts,
       source: source || `pid-${process.pid}`,
       sessionKey: sessionKey || "", chatType: chatType || "",
       senderOpenId: senderOpenId || "",
