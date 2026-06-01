@@ -324,6 +324,49 @@ function InstanceDetail({ inst, defName, onClose, onDelete }: {
   )
 }
 
+// ── Run Launch Dialog ───────────────────────────────────────
+
+function RunLaunchDialog({ def, busy, onConfirm, onCancel }: {
+  def: WorkflowDefinition
+  busy?: boolean
+  onConfirm: (input: string) => void
+  onCancel: () => void
+}) {
+  const [input, setInput] = useState("")
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+      <div className="w-full max-w-md rounded-xl border border-gray-700 bg-gray-900 shadow-2xl">
+        <div className="flex items-center justify-between border-b border-gray-800 px-5 py-3">
+          <h3 className="text-sm font-semibold text-gray-200">启动工作流</h3>
+          <button onClick={onCancel} disabled={busy} className="text-gray-500 hover:text-white disabled:opacity-40"><X size={16} /></button>
+        </div>
+        <div className="space-y-3 px-5 py-4">
+          <p className="text-sm text-gray-300">{def.name}</p>
+          <div>
+            <label className="mb-1 block text-xs text-gray-500">初始输入（选填）</label>
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              rows={4}
+              disabled={busy}
+              className={inputCls + " text-xs"}
+              placeholder="将作为工作流实例的初始输入..."
+            />
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 border-t border-gray-800 px-5 py-3">
+          <button onClick={onCancel} disabled={busy} className="rounded-md px-4 py-1.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white disabled:opacity-40">取消</button>
+          <button onClick={() => onConfirm(input.trim())} disabled={busy} className="flex items-center gap-1.5 rounded-md bg-blue-600 px-4 py-1.5 text-xs font-medium text-white transition hover:bg-blue-500 disabled:opacity-40">
+            {busy ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
+            确定启动
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Main Panel ──────────────────────────────────────────────
 
 type SubTab = "definitions" | "instances"
@@ -334,6 +377,9 @@ export default function WorkflowPanel() {
   const [instances, setInstances] = useState<WorkflowInstance[]>([])
   const [editing, setEditing] = useState<WorkflowDefinition | null>(null)
   const [viewInst, setViewInst] = useState<WorkflowInstance | null>(null)
+  const [runningDef, setRunningDef] = useState<WorkflowDefinition | null>(null)
+  const [runBusy, setRunBusy] = useState(false)
+  const [runError, setRunError] = useState("")
 
   const refreshDefs = useCallback(async () => {
     setDefs(await window.electronAPI.getWorkflowDefinitions())
@@ -372,6 +418,24 @@ export default function WorkflowPanel() {
     void refreshInstances()
   }
 
+  const handleRunConfirm = async (input: string) => {
+    if (!runningDef || runBusy) return
+    setRunBusy(true)
+    setRunError("")
+    try {
+      const result = await window.electronAPI.runWorkflow(runningDef.id, input || undefined)
+      if (!result.ok) {
+        setRunError(result.error || "启动失败")
+        return
+      }
+      setRunningDef(null)
+      setSubTab("instances")
+      void refreshInstances()
+    } finally {
+      setRunBusy(false)
+    }
+  }
+
   const defNameMap = Object.fromEntries(defs.map((d) => [d.id, d.name]))
 
   return (
@@ -397,6 +461,7 @@ export default function WorkflowPanel() {
 
         {subTab === "definitions" && (
           <div className="space-y-1.5">
+            {runError && <p className="rounded-md border border-red-800/50 bg-red-950/30 px-3 py-2 text-xs text-red-400">{runError}</p>}
             {defs.length === 0 && <p className="py-4 text-center text-xs text-gray-600">暂无工作流定义</p>}
             {defs.map((d) => (
               <div key={d.id} className="flex items-center gap-3 rounded-lg border border-gray-800 bg-gray-800/30 px-4 py-2.5">
@@ -404,6 +469,7 @@ export default function WorkflowPanel() {
                   <p className="truncate text-sm text-gray-200">{d.name}</p>
                   <p className="truncate text-[11px] text-gray-600">{d.description || `${d.nodes.length} 个节点`}</p>
                 </div>
+                <button onClick={() => { setRunError(""); setRunningDef(d) }} title="启动工作流" className="shrink-0 text-gray-500 hover:text-blue-400"><Play size={14} /></button>
                 <button onClick={() => setEditing({ ...d })} className="shrink-0 text-gray-500 hover:text-blue-400"><Pencil size={14} /></button>
                 <button onClick={() => void deleteDef(d.id)} className="shrink-0 text-gray-500 hover:text-red-400"><Trash2 size={14} /></button>
               </div>
@@ -432,6 +498,7 @@ export default function WorkflowPanel() {
       </section>
 
       {editing && <DefEditor initial={editing} onSave={(d) => void saveDef(d)} onCancel={() => setEditing(null)} />}
+      {runningDef && <RunLaunchDialog def={runningDef} busy={runBusy} onConfirm={(input) => void handleRunConfirm(input)} onCancel={() => !runBusy && setRunningDef(null)} />}
       {viewInst && <InstanceDetail inst={viewInst} defName={defNameMap[viewInst.workflowId] ?? ""} onClose={() => setViewInst(null)} onDelete={() => void deleteInst(viewInst.id)} />}
     </>
   )

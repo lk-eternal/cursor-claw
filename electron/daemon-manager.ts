@@ -9,6 +9,7 @@ import { app, BrowserWindow, ipcMain, powerSaveBlocker } from "electron"
 import { getConfig, saveConfig, useSdkMode, type AppConfig } from "./config-store"
 import { validateCron, readTasksFromFile, writeTasksToFile, previewCronNextRuns, getNextCronFireLabel } from "./cron-scheduler"
 import { seedBuiltins, listDefinitions, saveDefinition, deleteDefinition, listInstances, getInstance, saveInstance, deleteInstance } from "./workflow-file"
+import { runWorkflowDefinition } from "./workflow-runner"
 import { pushLog, pushUiLog, broadcastLog, getLogBuffer, clearLogBuffer, logCursorAgentInvocation, escapeLogContentSingleLine, resetLogFilePath } from "./ui-logger"
 import { resolveAgentBinary, applyProxyEnv, quoteArg, getAgentPaths, execAgentSync } from "./agent-cli"
 import {
@@ -31,7 +32,7 @@ import {
   saveMcpServer,
   McpServerEntry,
 } from "./mcp-manager"
-import { FileCommand, reportCommandResult, handleFeishuModelCommand, handleFeishuMcpCommand, handleFeishuTaskCommand, parseListModelsStdout, type TaskRunFn } from "./command-handler"
+import { FileCommand, reportCommandResult, handleFeishuModelCommand, handleFeishuMcpCommand, handleFeishuTaskCommand, handleFeishuWorkflowCommand, parseListModelsStdout, type TaskRunFn } from "./command-handler"
 import { readLockFile, getLockFilePath, httpGet, httpPost, syncActiveSession, getCurrentActiveSession, enqueueToMainSession } from "./daemon-client"
 import {
   isSessionAgentRunning, stopSessionAgent, stopAllSessionAgents,
@@ -802,6 +803,13 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           break
         }
 
+        case "/workflow":
+        case "/wf": {
+          if (!isAdmin) { await denyNonAdmin(); break }
+          await handleFeishuWorkflowCommand(lock.port, claimed.messageId, rawCmd, claimed.chatId)
+          break
+        }
+
         case "/restart": {
           if (!isAdmin) { await denyNonAdmin(); break }
           stopAgent()
@@ -883,6 +891,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
             "🔹 /list 消息队列",
             "🔹 /clean 清空队列",
             "🔹 /task 定时任务",
+            "🔹 /workflow 工作流管理",
             "🔹 /model 模型设置",
             "🔹 /mcp MCP服务器管理",
             "🔹 /workspace 切换工作目录",
@@ -999,6 +1008,7 @@ export async function saveAppConfigFromRenderer(partial: Partial<AppConfig>): Pr
 // ── 初始化 ───────────────────────────────────────────────
 
 export function initDaemonManager(): void {
+  process.env.APP_DATA_DIR = app.getPath("userData")
   seedBuiltins()
   initSessionDispatcher()
   ipcMain.handle("config:apply-workspace-switch", (_, workspaceDir: string, stopOldSessions: boolean) => applyWorkspaceSwitch(workspaceDir, stopOldSessions))
@@ -1180,6 +1190,11 @@ export function initDaemonManager(): void {
   ipcMain.handle("workflow:get-instance", (_, id: string) => getInstance(id))
   ipcMain.handle("workflow:save-instance", (_, inst) => { saveInstance(inst); return { ok: true } })
   ipcMain.handle("workflow:delete-instance", (_, id: string) => ({ ok: deleteInstance(id) }))
+
+  ipcMain.handle("workflow:run", async (_, workflowId: string, input?: string) => {
+    if (!workflowId?.trim()) return { ok: false, error: "工作流 ID 不能为空" }
+    return runWorkflowDefinition(workflowId.trim(), { input: input?.trim() || undefined })
+  })
 
   getDaemonStatus().then((status) => {
     if (status.running) {
