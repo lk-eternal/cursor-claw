@@ -62,3 +62,27 @@ export interface WorkflowRejectPayload {
   reason: string
   targetNodeId?: string
 }
+
+/** 模板/YAML/JSON 中 prompt 可为 string 或 string[]（数组加载时 join） */
+export type WorkflowPromptInput = string | string[]
+
+export function normalizePrompt(prompt: WorkflowPromptInput | undefined): string {
+  if (prompt == null) {
+    return ""
+  }
+  if (Array.isArray(prompt)) {
+    return prompt.join("\n")
+  }
+  return prompt
+}
+
+export function normalizeWorkflowDefinition(def: WorkflowDefinition): WorkflowDefinition {
+  return {
+    ...def,
+    nodes: def.nodes.map((n) => ({
+      ...n,
+      prompt: normalizePrompt(n.prompt as WorkflowPromptInput),
+      maxRetries: n.maxRetries ?? 2,
+    })),
+  }
+}

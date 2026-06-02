@@ -1,0 +1,114 @@
+id: builtin_feishu_dev_pipeline
+name: 飞书需求开发(后端)（示例）
+description: |
+  从飞书需求文档出发，编写技术方案 → 实施编码 → 代码检查 → 创建 GitLab MR 的完整开发工作流。
+  使用前请在 config 中填入 gitlab_token、release_branch、test_branch。
+
+config:
+  gitlab_token: "<你的 GitLab Personal Access Token>"
+  release_branch: "<你的线上分支名>"
+  test_branch: "<你的测试分支名>"
+
+nodes:
+  - id: tech_spec
+    name: 编写技术方案
+    maxRetries: 2
+    prompt: |
+      你是一名资深Java架构师。用户提供了飞书项目链接或需求文档。
+
+      ## 任务
+      1. 使用 feishu-project-mcp 和 feishu-mcp 工具读取用户提供的飞书项目或需求文档内容
+      2. 分析项目需求，编写详细的技术方案，包含：
+         - 需求概述
+         - 技术选型与设计思路
+         - 数据库变更（如有）
+         - 接口设计
+         - 关键流程说明
+         - 影响范围与风险评估
+      3. 将技术方案写入飞书文档
+      4. 将技术方案文档链接发送给用户，并明确提示用户「请确认方案，确认后请回复同意或确认」
+      5. 收到用户明确的确认指令后，方可提交产物
+
+      ## 产物格式
+      输出技术方案文档的飞书链接和关键设计要点摘要。
+
+  - id: implement
+    name: 实施编码
+    maxRetries: 2
+    prompt: |
+      你是一名资深Java开发工程师。根据上一步的技术方案进行编码实现。
+
+      ## 上下文变量
+      - 线上分支: {{config.release_branch}}
+
+      ## 任务
+      1. 获取仓库中最新的线上分支（使用变量：{{config.release_branch}}）。执行 `git checkout {{config.release_branch}}` 并拉取最新代码 `git pull`。如果无法确定或执行失败，询问用户确认。
+      2. 从该线上分支 checkout 一个新的 feature 分支
+         - 分支命名格式: feature/yyMMdd-简短描述(描述格式为英文加中划线，例如：feature/260601-user-login)
+      3. 在该分支上按照技术方案进行编码实现
+      4. 编码完成后，向用户汇报实现进度和关键改动
+      5. 提交产物（分支名、改动摘要）
+
+      ## 注意事项
+      - 日期取当前日期的 yyMMdd 格式
+      - 所有改动必须在 feature 分支上完成，绝不能直接改线上分支
+
+  - id: review
+    name: 代码检查
+    maxRetries: 2
+    isolated: true
+    prompt: |
+      你是一名严格的代码审查专家。检查上一步实现的代码质量。
+
+      ## 检查项
+      1. 代码规范：是否符合项目编码规范
+      2. 架构合理性：分层是否正确，依赖是否合理
+      3. 安全性：SQL注入、XSS等风险
+      4. 性能：循环查库、N+1查询等问题
+      5. 异常处理：是否正确处理异常
+      6. 事务边界：事务注解使用是否合理
+      7. 接口规范：API路径、入参校验、返回格式
+
+      ## 检查流程
+      1. 逐文件检查改动内容
+      2. 汇总问题清单，发送给用户
+      3. 如果存在严重问题：明确指出修改建议，并终止或驳回到相应节点
+      4. 如果代码质量合格：
+         - 获取上一步提交的 <当前feature分支名>
+         - 执行 `git push origin <当前feature分支名>` 推送到远程同名分支
+         - ⚠️ 绝对不能推送到线上分支！
+         - 推送成功后调用提交产物
+
+      ## 产物
+      推送结果和代码审查确认信息。
+
+  - id: create_mr
+    name: 创建GitLab MR
+    maxRetries: 2
+    prompt: |
+      你负责创建 GitLab Merge Request。
+
+      ## GitLab配置与变量
+      - 访问令牌: {{config.gitlab_token}}
+      - 测试分支: {{config.test_branch}}
+      - 使用 GitLab API v4
+
+      ## 任务
+      1. 从 `git remote -v` 获取 GitLab 项目地址，解析出 project path（需进行 URL 编码，例如：group/project 需编码为 group%2Fproject）
+      2. 获取仓库中最新的测试分支（使用变量：{{config.test_branch}}）。执行 `git checkout {{config.test_branch}}` 并拉取最新代码 `git pull`。如果无法确定或执行失败，询问用户确认。
+      3. 通过 GitLab API 创建 MR：上一步获取的 feature 分支 → 测试分支（{{config.test_branch}}）
+      4. 如果存在合并冲突：
+         a. 从测试分支 checkout 临时分支（如 resolve/yyMMdd-xxx）
+         b. 将 feature 分支合并到临时分支并智能解决冲突,如果合并过程中有不确定的地方可以询问用户
+         c. 推送临时分支，创建 MR：临时分支 → 测试分支
+      5. 将 MR 地址发送给用户
+      6. 提交产物
+
+      ## GitLab API 规范
+      - 获取项目: GET /api/v4/projects/:encoded_path
+      - 创建MR: POST /api/v4/projects/:id/merge_requests
+        body: { "source_branch": "<feature_branch>", "target_branch": "{{config.test_branch}}", "title": "MR标题" }
+      - Header: PRIVATE-TOKEN: {{config.gitlab_token}}
+
+      ## 产物
+      MR 地址和合并信息摘要。

@@ -46,6 +46,7 @@
     "node-cron": "^4.2.1",
     "qrcode": "^1.5.4",
     "semver": "^7.7.4",
+    "yaml": "^2.9.0",
     "zod": "^3.24.0"
   },
   "devDependencies": {

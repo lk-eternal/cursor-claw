@@ -16,6 +16,8 @@ import {
   type EngineResult,
 } from "./workflow-engine.js";
 import type { WorkflowDefinition, WorkflowInstance } from "./shared/workflow-types.js";
+import { normalizeWorkflowDefinition } from "./shared/workflow-types.js";
+import { parseWorkflowDefinitionText } from "./shared/workflow-parse.js";
 import { randomUUID } from "node:crypto";
 
 function txt(text: string) { return { content: [{ type: "text" as const, text }] }; }
@@ -127,7 +129,7 @@ export function registerWorkflowAdminTools(mcpServer: McpServer): void {
     {
       action: z.enum(["list", "get", "create", "update", "delete", "run", "status"]).describe("操作"),
       id: z.string().optional().describe("工作流定义 ID 或实例 ID"),
-      data: z.string().optional().describe("JSON 格式的工作流定义（create/update 时使用）"),
+      data: z.string().optional().describe("工作流定义 YAML 或 JSON（create/update 时使用，YAML 推荐）"),
       input: z.string().optional().describe("run 时的初始输入"),
       workingDirectory: z.string().optional().describe("run 时的工作目录（覆盖定义默认值）"),
     },
@@ -149,21 +151,15 @@ export function registerWorkflowAdminTools(mcpServer: McpServer): void {
 
         if (action === "create") {
           if (!data) return txt("❌ 需要提供 data 参数（JSON 格式的工作流定义）");
-          const parsed = JSON.parse(data) as Partial<WorkflowDefinition>;
+          const parsed = parseWorkflowDefinitionText(data);
           const now = Date.now();
-          const def: WorkflowDefinition = {
+          const def = normalizeWorkflowDefinition({
+            ...parsed,
             id: parsed.id || randomUUID(),
             name: parsed.name || "未命名工作流",
-            description: parsed.description,
-            workingDirectory: parsed.workingDirectory,
-            config: parsed.config,
-            nodes: (parsed.nodes || []).map((n) => ({
-              ...n,
-              maxRetries: n.maxRetries ?? 2,
-            })),
             createdAt: now,
             updatedAt: now,
-          };
+          });
           saveDefinition(def);
           return txt(`✅ 工作流「${def.name}」已创建。ID: \`${def.id}\`\n节点: ${def.nodes.map((n) => n.name).join(" → ")}`);
         }
@@ -173,14 +169,15 @@ export function registerWorkflowAdminTools(mcpServer: McpServer): void {
           if (!data) return txt("❌ 需要提供 data 参数");
           const existing = getDefinition(id);
           if (!existing) return txt(`❌ 工作流 "${id}" 不存在`);
-          const patch = JSON.parse(data) as Partial<WorkflowDefinition>;
-          const updated: WorkflowDefinition = {
+          const patch = parseWorkflowDefinitionText(data);
+          const updated = normalizeWorkflowDefinition({
             ...existing,
             ...patch,
             id: existing.id,
             createdAt: existing.createdAt,
             updatedAt: Date.now(),
-          };
+            nodes: patch.nodes?.length ? patch.nodes : existing.nodes,
+          });
           saveDefinition(updated);
           return txt(`✅ 工作流「${updated.name}」已更新。`);
         }

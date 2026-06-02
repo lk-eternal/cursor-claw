@@ -2,19 +2,29 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { WorkflowDefinition, WorkflowInstance } from "./shared/workflow-types.js";
 import { loadBuiltinWorkflows } from "./builtin-workflows.js";
+import {
+  deleteDefinition as deleteDefinitionFile,
+  getDefinition as getDefinitionFile,
+  listDefinitions as listDefinitionsFiles,
+  saveDefinition as saveDefinitionFile,
+  seedBuiltinDefinitions,
+} from "./shared/workflow-definition-store.js";
 
 const APP_DATA_DIR = process.env.APP_DATA_DIR || "";
 const WORKFLOW_DIR = path.join(APP_DATA_DIR, "workflows");
-const DEFINITIONS_FILE = path.join(WORKFLOW_DIR, "definitions.json");
 const INSTANCES_DIR = path.join(WORKFLOW_DIR, "instances");
 
 function ensureDir(dir: string): void {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
 }
 
 function readJsonSafe<T>(filePath: string, fallback: T): T {
   try {
-    if (fs.existsSync(filePath)) return JSON.parse(fs.readFileSync(filePath, "utf-8")) as T;
+    if (fs.existsSync(filePath)) {
+      return JSON.parse(fs.readFileSync(filePath, "utf-8")) as T;
+    }
   } catch { /* ignore */ }
   return fallback;
 }
@@ -24,50 +34,32 @@ function writeJson(filePath: string, data: unknown): void {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
 }
 
-// ── Built-in seed ────────────────────────────────────────
-
 function seedBuiltins(): void {
-  const defs = readJsonSafe<WorkflowDefinition[]>(DEFINITIONS_FILE, []);
-  const now = Date.now();
-  let changed = false;
-  for (const b of loadBuiltinWorkflows()) {
-    if (!defs.some((d) => d.id === b.id)) {
-      defs.push({ ...b, createdAt: b.createdAt || now, updatedAt: b.updatedAt || now });
-      changed = true;
-    }
+  if (!APP_DATA_DIR) {
+    return;
   }
-  if (changed) writeJson(DEFINITIONS_FILE, defs);
+  seedBuiltinDefinitions(WORKFLOW_DIR, loadBuiltinWorkflows());
 }
 
-if (APP_DATA_DIR) seedBuiltins();
-
-// ── Definitions CRUD ─────────────────────────────────────
+if (APP_DATA_DIR) {
+  seedBuiltins();
+}
 
 export function listDefinitions(): WorkflowDefinition[] {
-  return readJsonSafe<WorkflowDefinition[]>(DEFINITIONS_FILE, []);
+  return listDefinitionsFiles(WORKFLOW_DIR);
 }
 
 export function getDefinition(id: string): WorkflowDefinition | undefined {
-  return listDefinitions().find((d) => d.id === id);
+  return getDefinitionFile(WORKFLOW_DIR, id);
 }
 
 export function saveDefinition(def: WorkflowDefinition): void {
-  const defs = listDefinitions();
-  const idx = defs.findIndex((d) => d.id === def.id);
-  if (idx >= 0) defs[idx] = def; else defs.push(def);
-  writeJson(DEFINITIONS_FILE, defs);
+  saveDefinitionFile(WORKFLOW_DIR, def);
 }
 
 export function deleteDefinition(id: string): boolean {
-  const defs = listDefinitions();
-  const idx = defs.findIndex((d) => d.id === id);
-  if (idx < 0) return false;
-  defs.splice(idx, 1);
-  writeJson(DEFINITIONS_FILE, defs);
-  return true;
+  return deleteDefinitionFile(WORKFLOW_DIR, id);
 }
-
-// ── Instances CRUD ───────────────────────────────────────
 
 function instancePath(id: string): string {
   return path.join(INSTANCES_DIR, `${id}.json`);
@@ -84,7 +76,9 @@ export function saveInstance(inst: WorkflowInstance): void {
 
 export function deleteInstance(id: string): boolean {
   const fp = instancePath(id);
-  if (!fs.existsSync(fp)) return false;
+  if (!fs.existsSync(fp)) {
+    return false;
+  }
   fs.unlinkSync(fp);
   return true;
 }
@@ -96,7 +90,9 @@ export function listInstances(): WorkflowInstance[] {
       .filter((f) => f.endsWith(".json"))
       .map((f) => readJsonSafe<WorkflowInstance | null>(path.join(INSTANCES_DIR, f), null))
       .filter(Boolean) as WorkflowInstance[];
-  } catch { return []; }
+  } catch {
+    return [];
+  }
 }
 
 export function findActiveInstance(): WorkflowInstance | undefined {
