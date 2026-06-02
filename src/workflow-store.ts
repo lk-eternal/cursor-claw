@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { WorkflowDefinition, WorkflowInstance } from "./shared/workflow-types.js";
-import { builtinWorkflows } from "./builtin-workflows.js";
+import { loadBuiltinWorkflows } from "./builtin-workflows.js";
 
 const APP_DATA_DIR = process.env.APP_DATA_DIR || "";
 const WORKFLOW_DIR = path.join(APP_DATA_DIR, "workflows");
@@ -30,7 +30,7 @@ function seedBuiltins(): void {
   const defs = readJsonSafe<WorkflowDefinition[]>(DEFINITIONS_FILE, []);
   const now = Date.now();
   let changed = false;
-  for (const b of builtinWorkflows) {
+  for (const b of loadBuiltinWorkflows()) {
     if (!defs.some((d) => d.id === b.id)) {
       defs.push({ ...b, createdAt: b.createdAt || now, updatedAt: b.updatedAt || now });
       changed = true;

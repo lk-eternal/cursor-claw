@@ -2,7 +2,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { app } from "electron"
 import type { WorkflowDefinition, WorkflowInstance } from "../src/shared/workflow-types"
-import { builtinWorkflows } from "../src/builtin-workflows"
+import { loadBuiltinWorkflows } from "../src/builtin-workflows"
 
 function workflowDir(): string {
   return path.join(app.getPath("userData"), "workflows")
@@ -36,7 +36,7 @@ export function seedBuiltins(): void {
   const defs = readJsonSafe<WorkflowDefinition[]>(definitionsFile(), [])
   const now = Date.now()
   let changed = false
-  for (const b of builtinWorkflows) {
+  for (const b of loadBuiltinWorkflows()) {
     if (!defs.some((d) => d.id === b.id)) {
       defs.push({ ...b, createdAt: b.createdAt || now, updatedAt: b.updatedAt || now })
       changed = true
