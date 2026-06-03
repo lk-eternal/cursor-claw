@@ -12,7 +12,8 @@ Cursor Agent 的交互被锁死在本地 IDE 中，一旦离开电脑，所有 A
 - 即使 Cursor 会话断开，守护进程也能自动重连拉起新会话
 - 支持私聊 + 群聊多会话并行，每个会话独立工作区
 - 支持定时任务和临时独立 Agent，让 AI 按计划自动执行
-- 通过飞书 / 微信指令系统远程管理 Agent、MCP、Rules、Skills、定时任务
+- 支持**多节点工作流**：需求分析 → 编码 → 审查 → 交付等流水线，节点可驳回重做
+- 通过飞书 / 微信指令系统远程管理 Agent、MCP、Rules、Skills、定时任务、工作流
 - 飞书和微信双通道可同时运行，消息自动路由到对应平台
 
 ## 功能特性
@@ -25,6 +26,7 @@ Cursor Agent 的交互被锁死在本地 IDE 中，一旦离开电脑，所有 A
 | 自动重连 | Agent 断开后自动拉起新会话，支持 `--resume` 延续上下文                   |
 | 指令系统 | 发送 `/stop` `/status` `/model` `/task` 等 12+ 指令远程控制     |
 | 定时任务 | Cron 表达式调度，支持独立 Agent 模式，可视化编辑 + 运行预览                  |
+| 工作流 | 多节点流水线编排（YAML 定义），设置页可视化管理，飞书 `/workflow` 指令，支持驳回与重试 |
 | MCP 管理 | 可视化管理 MCP 服务器（JSON 编辑 / 启停 / OAuth 认证 / 工具列表）          |
 | Rule & Skill | 管理 Cursor Rules 和 Agent Skills，支持文件树浏览和编辑              |
 | 自管理能力 | Agent 可通过 MCP 工具管理自身（MCP/Rules/Skills/Tasks/Workspace） |
@@ -71,6 +73,7 @@ Daemon ──┬── 主用户私聊 Agent（使用配置的工作目录）
          ├── 群聊 Agent A（自动创建隔离工作目录）
          ├── 群聊 Agent B（自动创建隔离工作目录）
          ├── 定时任务 Agent（独立会话）
+         ├── 工作流 Agent（按节点顺序执行，可 isolated 独立会话）
          └── 临时 Agent（/run 指令触发）
 ```
 
@@ -186,6 +189,7 @@ xattr -cr /Applications/Cursor\ Claw.app
    - **检查启动**：一键保存、注入工作区并启动 Daemon
 3. （可选）在设置页面中配置微信接入，扫码登录即可双通道运行
 4. 在 Dashboard 查看运行状态，通过飞书或微信开始协作
+5. （可选）在设置页「工作流」Tab 编辑示例流水线，或通过 `/workflow run` 启动
 
 ## MCP 工具
 
@@ -222,39 +226,58 @@ xattr -cr /Applications/Cursor\ Claw.app
 
 ## 工作流引擎
 
-工作流引擎支持将复杂任务编排为多节点流水线，由多个 Agent 按顺序协作完成。
+工作流引擎将复杂任务编排为**多节点流水线**：每个节点由 Agent 执行，产物写入上下文并传给下一节点；审查类节点可 `workflow_reject` 驳回到前序节点重做。
 
 ### 核心概念
 
-- **WorkflowDefinition**：工作流定义，包含名称、描述、全局配置和有序节点列表
-- **WorkflowNode**：单个执行节点，定义任务 Prompt、模型、重试次数等
-- **WorkflowInstance**：运行中的工作流实例，跟踪当前节点、状态和上下文传递
+| 概念 | 说明 |
+|------|------|
+| **WorkflowDefinition** | 工作流定义（名称、描述、`config`、有序 `nodes`） |
+| **WorkflowNode** | 单节点：Prompt、可选模型、`maxRetries`、可选 `isolated` |
+| **WorkflowInstance** | 运行实例：当前节点、状态、各节点产物、执行历史 |
 
-### 工作流定义结构
+定义文件位于用户数据目录 `workflows/definitions/{id}.yaml`（首次启动会从 `resources/template/workflow/example/` 种子示例）。
 
-```json
-{
-  "name": "代码审查流水线",
-  "description": "需求分析 → 编码实现 → 代码审查 → 产出报告",
-  "config": {
-    "gitlab_token": "glpat-xxxxxxxxxxxx"
-  },
-  "nodes": [
-    { "id": "analyze", "name": "需求分析", "prompt": "分析需求并输出技术方案", "maxRetries": 2 },
-    { "id": "implement", "name": "编码实现", "prompt": "根据技术方案编码", "maxRetries": 3 },
-    { "id": "review", "name": "代码审查", "prompt": "审查代码质量，不达标则驳回", "isolated": true, "maxRetries": 1 },
-    { "id": "report", "name": "产出报告", "prompt": "汇总产物生成交付报告", "maxRetries": 1 }
-  ]
-}
+### 使用方式
+
+1. **设置页**：打开「工作流」Tab，查看/编辑定义，点击 ▶ 启动并填写初始输入
+2. **飞书指令**：`/workflow ls`、`/workflow run <序号|ID> [输入]`、`/workflow status` 等
+3. **Agent MCP**：`manage_workflows` 创建/更新/运行；节点内用 `workflow_next` / `workflow_reject` 流转
+
+### 工作流定义示例（YAML）
+
+```yaml
+name: 代码审查流水线
+description: 需求分析 → 编码实现 → 代码审查 → 产出报告
+config:
+  gitlab_token: glpat-xxxxxxxxxxxx
+nodes:
+  - id: analyze
+    name: 需求分析
+    prompt: 分析需求并输出技术方案
+    maxRetries: 2
+  - id: implement
+    name: 编码实现
+    prompt: 根据技术方案编码
+    maxRetries: 3
+  - id: review
+    name: 代码审查
+    prompt: 审查代码质量，不达标则 workflow_reject 驳回
+    isolated: true
+    maxRetries: 1
+  - id: report
+    name: 产出报告
+    prompt: 汇总产物生成交付报告
+    maxRetries: 1
 ```
 
 ### 执行流程
 
-1. 通过 `manage_workflows` 创建工作流定义
-2. 通过 `manage_workflows(action: "run")` 启动实例，自动拉起第一个节点的 Agent
-3. Agent 完成任务后调用 `workflow_next` 提交产物，引擎自动启动下一个节点
-4. 如果产物不合格，Agent 可调用 `workflow_reject` 驳回到指定节点重做
-5. 所有节点完成后工作流标记为 `completed`
+1. 创建或编辑工作流定义（设置页 / `manage_workflows` / 直接编辑 YAML）
+2. 启动实例（设置页 ▶、`/workflow run` 或 `manage_workflows` run）
+3. 引擎拉起首节点 Agent；完成后 Agent 调用 `workflow_next` 提交产物
+4. 不合格时调用 `workflow_reject` 回退到指定节点
+5. 全部节点完成后实例状态为 `completed`
 
 ### 关键特性
 
@@ -292,6 +315,7 @@ xattr -cr /Applications/Cursor\ Claw.app
 | `/status` | 查看 Agent / Daemon 状态 |
 | `/list` | 查看消息队列中的待处理消息 |
 | `/task` | 定时任务管理（`/task ls` 列表、`/task trigger <id>` 手动触发） |
+| `/workflow` / `/wf` | 工作流管理（`ls` / `info` / `run` / `status` / `delete`） |
 | `/run` | 启动一个独立临时 Agent 执行指定任务 |
 | `/model` | Cursor CLI 模型（`/model ls` / `info` / `set <序号>`） |
 | `/mcp` | MCP 服务器管理（`/mcp ls` / `info` / `enable` / `disable` / `add` / `delete`） |
@@ -331,6 +355,7 @@ Daemon 进程独立于 Cursor 运行，即使 Agent 会话中断，系统也能�
 | Rules | Cursor Rules 文件管理 |
 | Skills | Agent Skills 文件树管理 |
 | 定时任务 | Cron 任务编辑、运行预览、手动触发、状态监控 |
+| 工作流 | 工作流定义编辑（YAML）、实例状态、▶ 启动运行 |
 | 帮助引导 | 飞书权限/事件订阅配置参考、重新进入引导 |
 
 ## 平台接入配置
