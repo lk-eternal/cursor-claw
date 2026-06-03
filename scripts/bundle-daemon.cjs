@@ -27,7 +27,16 @@ const common = {
   target: "node20",
   format: "esm",
   sourcemap: true,
-  banner: { js: "import { createRequire as _cr } from 'module'; const require = _cr(import.meta.url);" },
+  banner: {
+    js: [
+      "import { createRequire as _cr } from 'module';",
+      "import { fileURLToPath as _f2p } from 'url';",
+      "import { dirname as _dn } from 'path';",
+      "const require = _cr(import.meta.url);",
+      "const __filename = _f2p(import.meta.url);",
+      "const __dirname = _dn(__filename);",
+    ].join(" "),
+  },
   plugins: [inlinePackageJson],
 };
 
