@@ -8,6 +8,7 @@ import type { WorkflowDefinition, WorkflowInstance } from "../shared/workflow-ty
 interface AppConfig {
   larkAppId: string
   larkAppSecret: string
+  larkAppQuickCreated: boolean
   larkReceiveId: string
   workspaceDir: string
   model: string
@@ -211,6 +212,10 @@ interface ElectronAPI {
   testBind(): Promise<{ ok: boolean; error?: string }>
   testWechat(): Promise<{ ok: boolean; error?: string }>
   reloadWechat(token: string, accountId: string): Promise<{ ok: boolean; error?: string; message?: string }>
+  feishuRegisterApp(): Promise<{ ok: boolean; appId?: string; appSecret?: string; error?: string }>
+  feishuRegisterAppCancel(): Promise<{ ok: boolean }>
+  onFeishuSetupQrCode(cb: (url: string) => void): () => void
+  onFeishuSetupStatus(cb: (status: string) => void): () => void
   wechatQrLogin(): Promise<{ ok: boolean; botToken?: string; accountId?: string; baseUrl?: string; error?: string }>
   wechatQrLoginCancel(): Promise<{ ok: boolean }>
   wechatWaitFirstMessage(token: string, accountId: string): Promise<{ ok: boolean; chatId?: string; error?: string }>

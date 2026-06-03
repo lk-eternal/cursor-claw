@@ -57,6 +57,10 @@ export default function Setup({ onComplete, onExit }: Props) {
   const [showScopes, setShowScopes] = useState(false)
   const [showEvents, setShowEvents] = useState(false)
   const [scopesCopied, setScopesCopied] = useState(false)
+  const [larkQuickCreated, setLarkQuickCreated] = useState(false)
+  const [feishuQrUrl, setFeishuQrUrl] = useState("")
+  const [feishuQrStatus, setFeishuQrStatus] = useState<"idle" | "loading" | "wait" | "error">("idle")
+  const [feishuQrMsg, setFeishuQrMsg] = useState("")
   const [tempConnecting, setTempConnecting] = useState(false)
   const [tempConnected, setTempConnected] = useState(false)
   const [bindingStatus, setBindingStatus] = useState<"idle" | "waiting" | "bound" | "error">("idle")
@@ -103,6 +107,7 @@ export default function Setup({ onComplete, onExit }: Props) {
     window.electronAPI.getConfig().then((cfg) => {
       if (cfg.larkAppId) { setAppId(cfg.larkAppId); setEnableFeishu(true) }
       if (cfg.larkAppSecret) setAppSecret(cfg.larkAppSecret)
+      if (cfg.larkAppQuickCreated) setLarkQuickCreated(true)
       if (cfg.workspaceDir) setWorkspaceDir(cfg.workspaceDir)
       if (cfg.model) setModel(cfg.model)
       if (cfg.httpProxy) setProxy(cfg.httpProxy)
@@ -180,6 +185,35 @@ export default function Setup({ onComplete, onExit }: Props) {
       }
     }
   }, [appId, appSecret])
+
+  const startFeishuRegisterApp = useCallback(async () => {
+    setFeishuQrStatus("loading")
+    setFeishuQrUrl("")
+    setFeishuQrMsg("")
+    const result = await window.electronAPI.feishuRegisterApp()
+    if (result.ok && result.appId && result.appSecret) {
+      setAppId(result.appId)
+      setAppSecret(result.appSecret)
+      setLarkQuickCreated(true)
+      setFeishuQrStatus("idle")
+      setFeishuQrUrl("")
+    } else if (result.error === "cancelled") {
+      setFeishuQrStatus("idle")
+      setFeishuQrUrl("")
+    } else {
+      setFeishuQrStatus("error")
+      setFeishuQrMsg(result.error ?? "创建失败")
+    }
+  }, [])
+
+  useEffect(() => {
+    const unsub1 = window.electronAPI.onFeishuSetupQrCode((url) => {
+      setFeishuQrUrl(url)
+      setFeishuQrStatus("wait")
+    })
+    const unsub2 = window.electronAPI.onFeishuSetupStatus(() => {})
+    return () => { unsub1(); unsub2() }
+  }, [])
 
   const startWechatQrLogin = useCallback(async () => {
     setWechatQrStatus("loading")
@@ -521,10 +555,59 @@ export default function Setup({ onComplete, onExit }: Props) {
               <section className="space-y-4 rounded-xl border border-gray-800 p-5">
                 <div className="flex items-center justify-between">
                   <h3 className="flex items-center gap-2 text-sm font-medium"><Bird size={16} className="text-blue-400" /> 飞书</h3>
-                  <a href="https://open.feishu.cn/app?lang=zh-CN" target="_blank" rel="noreferrer" className="flex items-center gap-1 text-xs text-gray-400 hover:text-blue-400">
-                    <ExternalLink size={12} />创建应用
-                  </a>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={startFeishuRegisterApp}
+                      disabled={feishuQrStatus === "loading" || feishuQrStatus === "wait"}
+                      className="flex items-center gap-1 rounded-md border border-blue-600/50 bg-blue-600/10 px-2 py-1 text-xs text-blue-300 hover:bg-blue-600/20 disabled:opacity-50"
+                    >
+                      <LogIn size={12} />一键创建应用
+                    </button>
+                    <a href="https://open.feishu.cn/app?lang=zh-CN" target="_blank" rel="noreferrer" className="flex items-center gap-1 text-xs text-gray-400 hover:text-blue-400">
+                      <ExternalLink size={12} />手动创建
+                    </a>
+                  </div>
                 </div>
+
+                {feishuQrStatus === "loading" && (
+                  <div className="flex flex-col items-center gap-2 rounded-lg border border-gray-800 py-6">
+                    <Loader2 size={24} className="animate-spin text-blue-400" />
+                    <p className="text-xs text-gray-400">正在生成二维码...</p>
+                    <button
+                      type="button"
+                      onClick={async () => { await window.electronAPI.feishuRegisterAppCancel(); setFeishuQrStatus("idle"); setFeishuQrUrl("") }}
+                      className="text-xs text-gray-500 hover:text-red-400"
+                    >
+                      取消
+                    </button>
+                  </div>
+                )}
+
+                {feishuQrStatus === "wait" && feishuQrUrl && (
+                  <div className="flex flex-col items-center gap-3 rounded-lg border border-blue-800/40 bg-blue-950/20 py-5">
+                    <img src={feishuQrUrl} alt="Feishu QR" className="h-48 w-48 rounded bg-white p-1" />
+                    <p className="text-xs text-blue-200/80">请使用飞书扫描上方二维码，按提示完成应用创建</p>
+                    <button
+                      type="button"
+                      onClick={async () => { await window.electronAPI.feishuRegisterAppCancel(); setFeishuQrStatus("idle"); setFeishuQrUrl("") }}
+                      className="text-xs text-gray-500 hover:text-red-400"
+                    >
+                      取消
+                    </button>
+                  </div>
+                )}
+
+                {feishuQrStatus === "error" && (
+                  <div className="rounded-lg border border-red-800/50 bg-red-950/20 p-3 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <XCircle size={14} className="text-red-400" />
+                      <span className="text-xs font-medium text-red-300">创建失败</span>
+                    </div>
+                    <p className="text-xs text-red-200/70">{feishuQrMsg}</p>
+                    <button type="button" onClick={startFeishuRegisterApp} className="text-xs text-blue-400 hover:underline">重试</button>
+                  </div>
+                )}
 
                 <div className="space-y-3">
                   <div>
@@ -542,8 +625,8 @@ export default function Setup({ onComplete, onExit }: Props) {
                   </div>
                 </div>
 
-                {/* Bot tip */}
-                <div className="rounded-lg border border-gray-800">
+                {/* Bot tip — 仅手动创建应用时展示 */}
+                {!larkQuickCreated && <div className="rounded-lg border border-gray-800">
                   <button onClick={() => setShowBotTip(!showBotTip)} className="flex w-full items-center justify-between px-3 py-2 text-left text-xs text-gray-400 hover:text-gray-200">
                     <span>💡 还没有添加机器人能力？</span>
                     {showBotTip ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
@@ -558,10 +641,10 @@ export default function Setup({ onComplete, onExit }: Props) {
                       )}
                     </div>
                   )}
-                </div>
+                </div>}
 
                 {/* Permission scopes (collapsible) */}
-                <div className="space-y-2">
+                {!larkQuickCreated && <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <button onClick={() => setShowScopes(!showScopes)} className="flex items-center gap-1 text-xs text-gray-400 hover:text-white">
                       <ChevronRight size={12} className={`transition-transform ${showScopes ? "rotate-90" : ""}`} />
@@ -588,10 +671,10 @@ export default function Setup({ onComplete, onExit }: Props) {
                       ))}
                     </div>
                   )}
-                </div>
+                </div>}
 
                 {/* Event subscription (collapsible) */}
-                <div className="space-y-2">
+                {!larkQuickCreated && <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <button onClick={() => setShowEvents(!showEvents)} className="flex items-center gap-1 text-xs text-gray-400 hover:text-white">
                       <ChevronRight size={12} className={`transition-transform ${showEvents ? "rotate-90" : ""}`} />
@@ -611,17 +694,21 @@ export default function Setup({ onComplete, onExit }: Props) {
                       </div>
                     </div>
                   )}
-                </div>
+                </div>}
 
                 {/* Publish reminder */}
-                <div className="flex items-center gap-1 text-xs text-gray-500">
+                {!larkQuickCreated && <div className="flex items-center gap-1 text-xs text-gray-500">
                   <span>绑定前请确保已在飞书后台「版本管理」中创建并发布版本。</span>
                   {appId.trim() && (
                     <a href={`https://open.feishu.cn/app/${appId.trim()}/version`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-blue-400 hover:underline">
                       <ExternalLink size={10} />前往版本管理
                     </a>
                   )}
-                </div>
+                </div>}
+
+                {larkQuickCreated && appId.trim() && appSecret.trim() && (
+                  <p className="text-xs text-green-400/80">✓ 已通过扫码创建应用，凭据已自动填入。请向机器人发送消息完成主用户绑定。</p>
+                )}
 
                 {/* Bind status */}
                 {appId.trim() && appSecret.trim() && (<>

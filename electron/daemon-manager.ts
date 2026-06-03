@@ -1103,6 +1103,62 @@ export function initDaemonManager(): void {
     return { ok: true }
   })
 
+  // ── Feishu one-click app registration (OAuth Device Flow) ──
+  let feishuRegisterAbort: AbortController | null = null
+
+  ipcMain.handle("feishu:register-app", async () => {
+    if (feishuRegisterAbort) feishuRegisterAbort.abort()
+    feishuRegisterAbort = new AbortController()
+    const signal = feishuRegisterAbort.signal
+    try {
+      const lark = await import("@larksuiteoapi/node-sdk")
+      const QRCode = await import("qrcode")
+      const result = await lark.registerApp({
+        signal,
+        source: "cursor-claw",
+        onQRCodeReady(info) {
+          QRCode.toDataURL(info.url, { width: 280, margin: 2 })
+            .then((dataUrl) => {
+              BrowserWindow.getAllWindows().forEach((w) =>
+                w.webContents.send("feishu:setup-qrcode", dataUrl),
+              )
+            })
+            .catch(() => {})
+        },
+        onStatusChange(info) {
+          BrowserWindow.getAllWindows().forEach((w) =>
+            w.webContents.send("feishu:setup-status", info.status),
+          )
+        },
+        appPreset: {
+          name: "Cursor Claw",
+          desc: "Cursor AI 协作助手",
+        },
+      })
+      feishuRegisterAbort = null
+      saveConfig({
+        larkAppId: result.client_id,
+        larkAppSecret: result.client_secret,
+        larkAppQuickCreated: true,
+      })
+      return { ok: true, appId: result.client_id, appSecret: result.client_secret }
+    } catch (err: unknown) {
+      feishuRegisterAbort = null
+      if (signal.aborted) return { ok: false, error: "cancelled" }
+      const e = err as { code?: string; description?: string; message?: string }
+      if (e?.code === "abort") return { ok: false, error: "cancelled" }
+      return { ok: false, error: e?.description ?? e?.message ?? String(err) }
+    }
+  })
+
+  ipcMain.handle("feishu:register-app-cancel", () => {
+    if (feishuRegisterAbort) {
+      feishuRegisterAbort.abort()
+      feishuRegisterAbort = null
+    }
+    return { ok: true }
+  })
+
   // ── Wait for first WeChat message (runs in main process, no daemon) ──
   let wechatTempMgr: any = null
 

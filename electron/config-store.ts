@@ -12,6 +12,8 @@ export interface ScheduledTask {
 export interface AppConfig {
   larkAppId: string
   larkAppSecret: string
+  /** 通过 SDK 一键扫码创建的应用，Setup 中隐藏手动权限/事件配置引导 */
+  larkAppQuickCreated: boolean
   larkReceiveId: string
   workspaceDir: string
   model: string
@@ -49,6 +51,7 @@ export interface AppConfig {
 const defaults: AppConfig = {
   larkAppId: "",
   larkAppSecret: "",
+  larkAppQuickCreated: false,
   larkReceiveId: "",
   workspaceDir: "",
   model: "auto",

@@ -4,6 +4,7 @@ import type { WorkflowDefinition, WorkflowInstance } from "../src/shared/workflo
 export interface AppConfig {
   larkAppId: string
   larkAppSecret: string
+  larkAppQuickCreated: boolean
   larkReceiveId: string
   workspaceDir: string
   allowOthers: boolean
@@ -247,6 +248,19 @@ const api = {
     const handler = (_: unknown, line: string) => cb(line)
     ipcRenderer.on("daemon:log", handler)
     return () => ipcRenderer.removeListener("daemon:log", handler)
+  },
+  feishuRegisterApp: (): Promise<{ ok: boolean; appId?: string; appSecret?: string; error?: string }> =>
+    ipcRenderer.invoke("feishu:register-app"),
+  feishuRegisterAppCancel: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("feishu:register-app-cancel"),
+  onFeishuSetupQrCode: (cb: (url: string) => void) => {
+    const handler = (_: unknown, url: string) => cb(url)
+    ipcRenderer.on("feishu:setup-qrcode", handler)
+    return () => ipcRenderer.removeListener("feishu:setup-qrcode", handler)
+  },
+  onFeishuSetupStatus: (cb: (status: string) => void) => {
+    const handler = (_: unknown, status: string) => cb(status)
+    ipcRenderer.on("feishu:setup-status", handler)
+    return () => ipcRenderer.removeListener("feishu:setup-status", handler)
   },
   wechatQrLogin: (): Promise<{ ok: boolean; botToken?: string; accountId?: string; baseUrl?: string; error?: string }> =>
     ipcRenderer.invoke("wechat:qr-login"),
