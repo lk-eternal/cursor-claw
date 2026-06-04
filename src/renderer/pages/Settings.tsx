@@ -299,6 +299,8 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
   const [updateCheck, setUpdateCheck] = useState<Awaited<ReturnType<typeof window.electronAPI.checkAppUpdate>> | null>(null)
   const [updateMsg, setUpdateMsg] = useState<string | null>(null)
   const [updateDownloadPct, setUpdateDownloadPct] = useState<number | null>(null)
+  const [updateDownloading, setUpdateDownloading] = useState(false)
+  const updateDownloadingRef = useRef(false)
 
   const [saved, setSaved] = useState(false)
   const [modelOptions, setModelOptions] = useState<{ id: string; label: string; params: string }[]>([])
@@ -384,20 +386,37 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
 
 
   useEffect(() => {
+    updateDownloadingRef.current = updateDownloading
+  }, [updateDownloading])
+
+  useEffect(() => {
     const offS = window.electronAPI.onUpdaterStatus((s) => {
       if (s.kind === "downloading") {
-        setUpdateDownloadPct(0)
+        setUpdateDownloading(true)
+        setUpdateDownloadPct(null)
+        setUpdateMsg("正在下载更新…")
       }
       if (s.kind === "downloaded") {
+        setUpdateDownloading(false)
         setUpdateDownloadPct(null)
+        setUpdateMsg(`新版本 v${s.version} 已下载，可立即安装。`)
+        void window.electronAPI.checkAppUpdate().then((r) => {
+          if (r.status === "ready" || r.status === "available") {
+            setUpdateCheck(r)
+          }
+        })
       }
     })
     const offP = window.electronAPI.onUpdaterProgress((pct) => {
+      if (!updateDownloadingRef.current) {
+        return
+      }
       const p = Math.round(pct)
       setUpdateDownloadPct(p)
       setUpdateMsg(`正在下载更新… ${p}%`)
     })
     const offE = window.electronAPI.onUpdaterError((m) => {
+      setUpdateDownloading(false)
       setUpdateDownloadPct(null)
       setUpdateMsg((prev) => (prev ? `${prev}\n${m}` : m))
     })
@@ -407,6 +426,29 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
       offE()
     }
   }, [])
+
+  useEffect(() => {
+    if (tab !== "about") {
+      return
+    }
+    void window.electronAPI.checkAppUpdate().then((r) => {
+      if (r.status === "ready") {
+        setUpdateCheck(r)
+        setUpdateDownloading(false)
+        setUpdateDownloadPct(null)
+        setUpdateMsg(`新版本 v${r.latestVersion} 已下载，可立即安装。`)
+      } else if (r.status === "available") {
+        setUpdateCheck(r)
+        if (!updateDownloading) {
+          setUpdateMsg(`发现新版本 v${r.latestVersion}，当前 v${r.currentVersion}。`)
+        }
+      } else if (r.status === "latest") {
+        setUpdateCheck(r)
+        setUpdateDownloading(false)
+        setUpdateDownloadPct(null)
+      }
+    })
+  }, [tab])
 
   useEffect(() => {
     const unsub1 = window.electronAPI.onMcpLoginComplete(({ serverName, ok }) => {
@@ -511,6 +553,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
     setUpdateMsg(null)
     setUpdateCheck(null)
     setUpdateDownloadPct(null)
+    setUpdateDownloading(false)
     try {
       const r = await window.electronAPI.checkAppUpdate()
       setUpdateCheck(r)
@@ -521,8 +564,9 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
       } else if (r.status === "error") {
         setUpdateMsg(r.message)
       } else if (r.status === "available") {
-        const notes = r.releaseNotes ? `\n\n更新内容：\n${r.releaseNotes}` : ""
-        setUpdateMsg(`发现新版本 v${r.latestVersion}，当前 v${r.currentVersion}。${notes}`)
+        setUpdateMsg(`发现新版本 v${r.latestVersion}，当前 v${r.currentVersion}。`)
+      } else if (r.status === "ready") {
+        setUpdateMsg(`新版本 v${r.latestVersion} 已下载，可立即安装。`)
       }
     } finally {
       setUpdateBusy(false)
@@ -538,6 +582,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
         setUpdateMsg(res.message ?? "已触发更新流程。")
         setUpdateCheck(null)
       } else {
+        setUpdateDownloading(false)
         setUpdateDownloadPct(null)
         setUpdateMsg(res.error ?? "更新失败")
       }
@@ -1493,7 +1538,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
-                    disabled={updateBusy || updateDownloadPct !== null}
+                    disabled={updateBusy || updateDownloading}
                     onClick={() => void handleCheckUpdate()}
                     className="inline-flex items-center gap-2 rounded-lg border border-gray-600 bg-gray-800/50 px-4 py-2 text-sm transition hover:border-blue-500 hover:bg-gray-800 disabled:opacity-50"
                   >
@@ -1503,22 +1548,38 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                   {updateCheck?.status === "available" && (
                     <button
                       type="button"
-                      disabled={updateBusy || updateDownloadPct !== null}
+                      disabled={updateBusy || updateDownloading}
                       onClick={() => void handleApplyUpdate()}
                       className="inline-flex items-center gap-2 rounded-lg border border-blue-500 bg-blue-500/15 px-4 py-2 text-sm text-blue-200 transition hover:bg-blue-500/25 disabled:opacity-50"
                     >
                       立即更新
                     </button>
                   )}
+                  {updateCheck?.status === "ready" && (
+                    <button
+                      type="button"
+                      disabled={updateBusy}
+                      onClick={() => void handleApplyUpdate()}
+                      className="inline-flex items-center gap-2 rounded-lg border border-green-500 bg-green-500/15 px-4 py-2 text-sm text-green-200 transition hover:bg-green-500/25 disabled:opacity-50"
+                    >
+                      立即安装
+                    </button>
+                  )}
                 </div>
+                {(updateCheck?.status === "available" || updateCheck?.status === "ready") && updateCheck.releaseNotes && (
+                  <div className="rounded-lg border border-gray-700 bg-gray-900/50 px-3 py-2">
+                    <p className="mb-1.5 text-xs font-medium text-gray-300">更新内容</p>
+                    <p className="whitespace-pre-wrap text-xs leading-relaxed text-gray-400">{updateCheck.releaseNotes}</p>
+                  </div>
+                )}
                 {updateMsg && (
                   <div className="space-y-2">
                     <p className="whitespace-pre-wrap rounded-lg border border-gray-700 bg-gray-900/50 px-3 py-2 text-xs text-gray-400">{updateMsg}</p>
-                    {updateDownloadPct !== null && (
+                    {updateDownloading && (
                       <div className="h-1.5 w-full overflow-hidden rounded-full bg-gray-800">
                         <div
                           className="h-full rounded-full bg-blue-500 transition-[width] duration-300 ease-out"
-                          style={{ width: `${updateDownloadPct}%` }}
+                          style={{ width: updateDownloadPct === null ? "0%" : `${updateDownloadPct}%` }}
                         />
                       </div>
                     )}

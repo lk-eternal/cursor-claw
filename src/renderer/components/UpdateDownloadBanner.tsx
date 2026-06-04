@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 
 export default function UpdateDownloadBanner() {
+  const [downloading, setDownloading] = useState(false)
   const [pct, setPct] = useState<number | null>(null)
   const active = useRef(false)
 
@@ -8,10 +9,12 @@ export default function UpdateDownloadBanner() {
     const offS = window.electronAPI.onUpdaterStatus((s) => {
       if (s.kind === "downloading") {
         active.current = true
-        setPct(0)
+        setDownloading(true)
+        setPct(null)
       }
       if (s.kind === "downloaded" || s.kind === "available") {
         active.current = false
+        setDownloading(false)
         setPct(null)
       }
     })
@@ -21,6 +24,7 @@ export default function UpdateDownloadBanner() {
     })
     const offE = window.electronAPI.onUpdaterError(() => {
       active.current = false
+      setDownloading(false)
       setPct(null)
     })
     return () => {
@@ -30,11 +34,9 @@ export default function UpdateDownloadBanner() {
     }
   }, [])
 
-  if (pct === null) {
+  if (!downloading) {
     return null
   }
-
-  const barWidth = pct <= 0 ? 6 : pct
 
   return (
     <div
@@ -43,12 +45,12 @@ export default function UpdateDownloadBanner() {
       aria-live="polite"
     >
       <p className="text-center text-xs font-medium text-gray-200">
-        {pct <= 0 ? "正在下载更新…" : `正在下载更新 ${pct}%`}
+        {pct === null ? "正在下载更新…" : `正在下载更新 ${pct}%`}
       </p>
       <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-800">
         <div
           className="h-full rounded-full bg-blue-500 transition-[width] duration-300 ease-out"
-          style={{ width: `${barWidth}%` }}
+          style={{ width: pct === null ? "0%" : `${pct}%` }}
         />
       </div>
     </div>

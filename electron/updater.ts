@@ -44,6 +44,7 @@ function devSimulateDetailSuffix(): string {
 export interface LatestRelease {
   version: string
   htmlUrl: string
+  releaseBody?: string
 }
 
 interface ChangelogEntry {
@@ -64,6 +65,14 @@ export type UpdaterCheckResult =
       applyHint: string
       releaseNotes: string
     }
+  | {
+      status: "ready"
+      currentVersion: string
+      latestVersion: string
+      htmlUrl: string
+      applyHint: string
+      releaseNotes: string
+    }
 
 export interface UpdaterApplyResult {
   ok: boolean
@@ -76,6 +85,79 @@ let winDownloadRequested = false
 let lastKnownRemote: LatestRelease | null = null
 let autoUpdaterWired = false
 let updaterIpcRegistered = false
+let downloadedUpdateVersion: string | null = null
+
+function getUpdaterCacheDir(): string {
+  return path.join(app.getPath("userData"), "..", `${app.getName()}-updater`)
+}
+
+function readCachedDownloadVersion(): string | null {
+  try {
+    const infoPath = path.join(getUpdaterCacheDir(), "pending", "update-info.json")
+    if (!fs.existsSync(infoPath)) {
+      return null
+    }
+    const json = JSON.parse(fs.readFileSync(infoPath, "utf-8")) as { version?: string }
+    if (typeof json.version !== "string") {
+      return null
+    }
+    const version = normalizeReleaseVersion(json.version)
+    return semver.valid(version) ? version : null
+  } catch {
+    return null
+  }
+}
+
+async function invalidateStaleDownload(latest: LatestRelease): Promise<void> {
+  const cached = readCachedDownloadVersion()
+  downloadedUpdateVersion = cached
+  if (!cached) {
+    return
+  }
+  if (semver.eq(cached, latest.version)) {
+    return
+  }
+  clearUpdaterCache()
+  downloadedUpdateVersion = null
+}
+
+async function buildAvailableOrReadyResult(
+  currentVersion: string,
+  rel: LatestRelease,
+): Promise<Extract<UpdaterCheckResult, { status: "available" | "ready" }>> {
+  await invalidateStaleDownload(rel)
+  const notes = await resolveReleaseNotes(currentVersion, rel)
+  const base = {
+    currentVersion,
+    latestVersion: rel.version,
+    htmlUrl: rel.htmlUrl,
+    applyHint: applyHintForPlatform(),
+    releaseNotes: notes,
+  }
+  const cached = readCachedDownloadVersion()
+  downloadedUpdateVersion = cached
+  if (cached && semver.eq(cached, rel.version)) {
+    return { status: "ready", ...base }
+  }
+  return { status: "available", ...base }
+}
+
+function promptInstallDownloaded(version: string): void {
+  void showAppModal({
+    variant: "info",
+    title: "更新已就绪",
+    message: `新版本 v${version} 已下载，是否立即安装并重启？`,
+    buttons: ["稍后", "立即安装"],
+    defaultId: 1,
+    cancelId: 0,
+  }).then((resp) => {
+    if (resp === 1) {
+      setImmediate(() => {
+        autoUpdater.quitAndInstall(false, true)
+      })
+    }
+  })
+}
 
 interface AppModalOptions {
   variant?: "info" | "error" | "warning"
@@ -194,6 +276,7 @@ export function fetchLatestRelease(): Promise<LatestRelease | null> {
             const json = JSON.parse(Buffer.concat(chunks).toString("utf-8")) as {
               tag_name?: string
               html_url?: string
+              body?: string | null
             }
             const tag = json.tag_name
             const htmlUrl = json.html_url
@@ -206,7 +289,8 @@ export function fetchLatestRelease(): Promise<LatestRelease | null> {
               resolve(null)
               return
             }
-            resolve({ version, htmlUrl })
+            const releaseBody = typeof json.body === "string" ? json.body.trim() : undefined
+            resolve({ version, htmlUrl, releaseBody: releaseBody || undefined })
           } catch {
             resolve(null)
           }
@@ -222,7 +306,39 @@ export function fetchLatestRelease(): Promise<LatestRelease | null> {
   })
 }
 
-function fetchRemoteChangelog(): Promise<ChangelogEntry[]> {
+function parseChangelogJson(text: string): ChangelogEntry[] {
+  try {
+    const parsed = JSON.parse(text) as unknown
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+    return parsed as ChangelogEntry[]
+  } catch {
+    return []
+  }
+}
+
+function readBundledChangelog(): ChangelogEntry[] {
+  const candidates = app.isPackaged
+    ? [path.join(process.resourcesPath, "changelog.json")]
+    : [path.join(app.getAppPath(), "changelog.json")]
+  for (const filePath of candidates) {
+    try {
+      if (!fs.existsSync(filePath)) {
+        continue
+      }
+      const entries = parseChangelogJson(fs.readFileSync(filePath, "utf-8"))
+      if (entries.length > 0) {
+        return entries
+      }
+    } catch {
+      /* try next */
+    }
+  }
+  return []
+}
+
+function fetchChangelogFromRawGitHub(): Promise<ChangelogEntry[]> {
   const rawUrl = `/${GITHUB_OWNER}/${GITHUB_REPO}/main/changelog.json`
   return new Promise((resolve) => {
     const req = https.request(
@@ -236,12 +352,55 @@ function fetchRemoteChangelog(): Promise<ChangelogEntry[]> {
         const chunks: Buffer[] = []
         res.on("data", (c: Buffer) => chunks.push(c))
         res.on("end", () => {
+          if (res.statusCode !== 200) {
+            resolve([])
+            return
+          }
+          resolve(parseChangelogJson(Buffer.concat(chunks).toString("utf-8")))
+        })
+      },
+    )
+    req.on("error", () => resolve([]))
+    req.setTimeout(15_000, () => {
+      req.destroy()
+      resolve([])
+    })
+    req.end()
+  })
+}
+
+function fetchChangelogViaGitHubApi(): Promise<ChangelogEntry[]> {
+  const apiPath = `/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/changelog.json?ref=main`
+  return new Promise((resolve) => {
+    const req = https.request(
+      {
+        hostname: "api.github.com",
+        path: apiPath,
+        method: "GET",
+        headers: {
+          Accept: "application/vnd.github+json",
+          "User-Agent": "cursor-claw-desktop-updater",
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = []
+        res.on("data", (c: Buffer) => chunks.push(c))
+        res.on("end", () => {
           try {
             if (res.statusCode !== 200) {
               resolve([])
               return
             }
-            resolve(JSON.parse(Buffer.concat(chunks).toString("utf-8")) as ChangelogEntry[])
+            const json = JSON.parse(Buffer.concat(chunks).toString("utf-8")) as {
+              content?: string
+              encoding?: string
+            }
+            if (json.encoding !== "base64" || typeof json.content !== "string") {
+              resolve([])
+              return
+            }
+            const text = Buffer.from(json.content.replace(/\n/g, ""), "base64").toString("utf-8")
+            resolve(parseChangelogJson(text))
           } catch {
             resolve([])
           }
@@ -257,6 +416,18 @@ function fetchRemoteChangelog(): Promise<ChangelogEntry[]> {
   })
 }
 
+async function fetchChangelogEntries(): Promise<ChangelogEntry[]> {
+  const fromRaw = await fetchChangelogFromRawGitHub()
+  if (fromRaw.length > 0) {
+    return fromRaw
+  }
+  const fromApi = await fetchChangelogViaGitHubApi()
+  if (fromApi.length > 0) {
+    return fromApi
+  }
+  return readBundledChangelog()
+}
+
 function buildReleaseNotes(entries: ChangelogEntry[], currentVersion: string): string {
   const newer = entries.filter((e) => semver.valid(e.version) && semver.gt(e.version, currentVersion))
   if (newer.length === 0) {
@@ -269,6 +440,18 @@ function buildReleaseNotes(entries: ChangelogEntry[], currentVersion: string): s
       return header + e.changes.map((c) => `- ${c}`).join("\n")
     })
     .join("\n\n")
+}
+
+async function resolveReleaseNotes(currentVersion: string, latest: LatestRelease | null): Promise<string> {
+  const fromChangelog = buildReleaseNotes(await fetchChangelogEntries(), currentVersion)
+  if (fromChangelog) {
+    return fromChangelog
+  }
+  const body = latest?.releaseBody?.trim()
+  if (body && latest && semver.gt(latest.version, currentVersion)) {
+    return body
+  }
+  return ""
 }
 
 function getBrewExecutable(): string | null {
@@ -350,11 +533,12 @@ async function showWinDownloadFallback(reason: unknown): Promise<void> {
 
 function clearUpdaterCache(): void {
   try {
-    const cacheDir = path.join(app.getPath("userData"), "..", `${app.getName()}-updater`)
+    const cacheDir = getUpdaterCacheDir()
     if (!fs.existsSync(cacheDir)) return
     for (const entry of fs.readdirSync(cacheDir)) {
       fs.rmSync(path.join(cacheDir, entry), { recursive: true, force: true })
     }
+    downloadedUpdateVersion = null
   } catch { /* best-effort */ }
 }
 
@@ -388,22 +572,14 @@ function wireAutoUpdater(): void {
     getMainWindow()?.webContents.send("updater:progress", p.percent)
   })
 
-  autoUpdater.on("update-downloaded", () => {
-    getMainWindow()?.webContents.send("updater:status", { kind: "downloaded" as const })
-    void showAppModal({
-      variant: "info",
-      title: "更新已就绪",
-      message: "新版本已下载，是否立即安装并重启？",
-      buttons: ["稍后", "立即安装"],
-      defaultId: 1,
-      cancelId: 0,
-    }).then((resp) => {
-      if (resp === 1) {
-        setImmediate(() => {
-          autoUpdater.quitAndInstall(false, true)
-        })
-      }
+  autoUpdater.on("update-downloaded", (info) => {
+    const version = normalizeReleaseVersion(info.version)
+    downloadedUpdateVersion = semver.valid(version) ? version : null
+    getMainWindow()?.webContents.send("updater:status", {
+      kind: "downloaded" as const,
+      version: downloadedUpdateVersion ?? version,
     })
+    promptInstallDownloaded(downloadedUpdateVersion ?? version)
   })
 
   autoUpdater.on("error", (err) => {
@@ -451,10 +627,12 @@ async function runStartupUpdateCheck(): Promise<void> {
   const cur = app.getVersion()
   const simSuffix = simulate ? devSimulateDetailSuffix() : ""
 
-  const changelog = simulate
-    ? [{ version: DEV_FAKE_LATEST_VERSION, date: "", changes: ["模拟更新内容", "用于开发测试"] }]
-    : await fetchRemoteChangelog()
-  const notes = buildReleaseNotes(changelog, cur)
+  const notes = simulate
+    ? buildReleaseNotes(
+        [{ version: DEV_FAKE_LATEST_VERSION, date: "", changes: ["模拟更新内容", "用于开发测试"] }],
+        cur,
+      )
+    : await resolveReleaseNotes(cur, rel)
   const notesDetail = notes ? `\n\n更新内容：\n${notes}` : ""
 
   if (process.platform === "darwin") {
@@ -589,16 +767,7 @@ export function registerUpdaterIpc(): void {
     }
     lastKnownRemote = rel
     if (semver.gt(rel.version, currentVersion)) {
-      const changelog = await fetchRemoteChangelog()
-      const notes = buildReleaseNotes(changelog, currentVersion)
-      return {
-        status: "available",
-        currentVersion,
-        latestVersion: rel.version,
-        htmlUrl: rel.htmlUrl,
-        applyHint: applyHintForPlatform(),
-        releaseNotes: notes,
-      }
+      return buildAvailableOrReadyResult(currentVersion, rel)
     }
     return {
       status: "latest",
@@ -637,6 +806,12 @@ export function registerUpdaterIpc(): void {
     }
 
     if (process.platform === "win32") {
+      await invalidateStaleDownload(rel)
+      const cached = readCachedDownloadVersion()
+      if (cached && semver.eq(cached, rel.version)) {
+        autoUpdater.quitAndInstall(false, true)
+        return { ok: true, message: "正在安装并重启…" }
+      }
       winDownloadRequested = true
       clearUpdaterCache()
       try {

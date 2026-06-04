@@ -95,6 +95,14 @@ export type UpdaterCheckResult =
       applyHint: string
       releaseNotes: string
     }
+  | {
+      status: "ready"
+      currentVersion: string
+      latestVersion: string
+      htmlUrl: string
+      applyHint: string
+      releaseNotes: string
+    }
 
 export interface UpdaterApplyResult {
   ok: boolean
@@ -104,7 +112,7 @@ export interface UpdaterApplyResult {
 
 export type UpdaterStatusPayload =
   | { kind: "available" }
-  | { kind: "downloaded" }
+  | { kind: "downloaded"; version: string }
   | { kind: "downloading" }
 
 export interface AppModalRequestPayload {

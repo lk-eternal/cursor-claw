@@ -125,11 +125,19 @@ interface ElectronAPI {
         applyHint: string
         releaseNotes: string
       }
+    | {
+        status: "ready"
+        currentVersion: string
+        latestVersion: string
+        htmlUrl: string
+        applyHint: string
+        releaseNotes: string
+      }
   >
   applyAppUpdate(): Promise<{ ok: boolean; error?: string; message?: string }>
   onUpdaterProgress(cb: (percent: number) => void): () => void
   onUpdaterError(cb: (message: string) => void): () => void
-  onUpdaterStatus(cb: (payload: { kind: "available" } | { kind: "downloaded" } | { kind: "downloading" }) => void): () => void
+  onUpdaterStatus(cb: (payload: { kind: "available" } | { kind: "downloaded"; version: string } | { kind: "downloading" }) => void): () => void
   getConfig(): Promise<AppConfig>
   saveConfig(config: Partial<AppConfig>): Promise<ConfigSaveResult>
   applyWorkspaceSwitch(workspaceDir: string, stopOldSessions: boolean): Promise<{ ok: boolean; error?: string }>
