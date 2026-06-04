@@ -1,7 +1,7 @@
 {
   "name": "cursor-claw",
   "version": "1.1.0",
-  "description": "Cursor Claw - 微信 × Cursor AI 协作桌面应用",
+  "description": "Cursor Claw - 飞书 & 微信 × Cursor AI 协作桌面应用",
   "keywords": [
     "mcp",
     "wechat",
@@ -26,6 +26,7 @@
     "build:bundle": "node scripts/bundle-daemon.cjs",
     "dev:mcp": "tsx src/index.ts",
     "dev": "npm run build && electron-vite dev -- --profile=dev",
+    "dev:fresh-setup": "node scripts/dev-fresh-setup.cjs",
     "build": "npm run clean && npm run build:mcp && npm run build:bundle && electron-vite build",
     "preview": "electron-vite preview",
     "dist": "npm run build && electron-builder",

@@ -324,10 +324,14 @@ export default function Setup({ onComplete, onExit }: Props) {
   const saveStepConfig = async (currentStep: number) => {
     if (currentStep === 0) {
       await window.electronAPI.saveConfig({
+        feishuEnabled: enableFeishu,
         wechatEnabled: enableWechat,
       })
     } else if (currentStep === 1) {
-      const partial: Record<string, unknown> = {}
+      const partial: Record<string, unknown> = {
+        feishuEnabled: enableFeishu,
+        wechatEnabled: enableWechat,
+      }
       if (enableFeishu) {
         partial.larkAppId = appId.trim()
         partial.larkAppSecret = appSecret.trim()
@@ -436,16 +440,18 @@ export default function Setup({ onComplete, onExit }: Props) {
     try {
       updateLaunchStep(0, { status: "running" })
       const saveR = await window.electronAPI.saveConfig({
-        larkAppId: appId.trim(),
-        larkAppSecret: appSecret.trim(),
+        feishuEnabled: enableFeishu,
+        wechatEnabled: enableWechat,
+        larkAppId: enableFeishu ? appId.trim() : "",
+        larkAppSecret: enableFeishu ? appSecret.trim() : "",
+        larkReceiveId: enableFeishu ? receiveId.trim() : "",
         workspaceDir: workspaceDir.trim(),
         model,
         httpProxy: proxy.trim(),
         httpsProxy: proxy.trim(),
         noProxy: noProxy.trim(),
-        wechatEnabled: enableWechat,
-        wechatToken: wechatToken.trim(),
-        wechatAccountId: wechatAccountId.trim(),
+        wechatToken: enableWechat ? wechatToken.trim() : "",
+        wechatAccountId: enableWechat ? wechatAccountId.trim() : "",
         agentMode,
         cursorApiKey: cursorApiKey.trim(),
         setupComplete: true,
