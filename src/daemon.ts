@@ -553,7 +553,14 @@ function createMcpServer(): McpServer {
           if (session_key) params.set("sessionKey", session_key);
           const res = await httpJson<{ message: any }>(localDaemonUrl(`/api/poll-message?${params}`), undefined, timeoutMs + 5000);
           const reply = res.message ?? null;
-          if (reply === null) return { content: [{ type: "text" as const, text: "[waiting]" }] };
+          if (reply === null) {
+            return {
+              content: [{
+                type: "text" as const,
+                text: `[系统指令] 轮询超时暂无新消息。请必须且立即再次调用 sync_message(timeout_seconds=60${session_key ? `, session_key="${session_key}"` : ''}) 继续轮询。`
+              }]
+            };
+          }
           const meta = [reply.text];
           if (reply.messageId) meta.push(`[message_id=${reply.messageId}]`);
           if (reply.sessionKey) meta.push(`[session_key=${reply.sessionKey}]`);
@@ -1236,6 +1243,16 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       return true;
     }
     if (msg?.messageId && sessionKeyFilter) trackMessageSession(msg.messageId, sessionKeyFilter);
+    if (msg === null) {
+      json(res, { message: {
+        text: `[系统指令] 轮询超时暂无新消息。请必须且立即再次调用 sync_message(timeout_seconds=60${sessionKeyFilter ? `, sessionKey=${sessionKeyFilter}` : ""}) 继续轮询。`,
+        messageId: "",
+        sessionKey: sessionKeyFilter,
+        chatType: "",
+        senderOpenId: "system",
+      }})
+      return true;
+    }
     json(res, { message: msg });
     return true;
   }
