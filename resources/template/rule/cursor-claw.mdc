@@ -28,7 +28,7 @@ alwaysApply: true
 
 **退避规则：**
 1. 冷启动时尝试调用 MCP `sync_message`，若工具不存在则切换为 HTTP 直连。
-2. `poll-message` 返回 `{"message":null}` 等同于 MCP 返回 `[waiting]`；返回的 `message` 对象包含 `text`/`messageId`/`sessionKey`/`chatType` 字段。
+2. `poll-message` 返回的 `message` 对象包含 `text`/`messageId`/`sessionKey`/`chatType` 字段。
 3. 退避模式与 MCP 模式共享同一套状态机和路由规则，行为完全等价。
 
 ---
