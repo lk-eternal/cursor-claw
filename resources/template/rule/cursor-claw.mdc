@@ -28,9 +28,11 @@ alwaysApply: true
 | 非阻塞（冷启动） | `GET .../api/poll-message?sessionKey={key}&wait=false` | 立即返回，有消息则消费，无消息返回 `{message:null}` |
 | 阻塞（保活轮询） | `GET .../api/poll-message?sessionKey={key}` | 无限挂起直到有新消息 |
 
+用 `curl -G --data-urlencode` 自动编码 sessionKey（跨平台通用）。**Windows PowerShell 须用 `curl.exe`**（`curl` 是 Invoke-WebRequest 别名，会乱码）：
+
 ```bash
-curl -s "http://127.0.0.1:{{DAEMON_PORT}}/api/poll-message?sessionKey=YOUR_SESSION_KEY&wait=false"
-curl -s "http://127.0.0.1:{{DAEMON_PORT}}/api/poll-message?sessionKey=YOUR_SESSION_KEY"
+curl -G -s "http://127.0.0.1:{{DAEMON_PORT}}/api/poll-message" --data-urlencode "sessionKey=YOUR_SESSION_KEY" --data-urlencode "wait=false"
+curl -G -s "http://127.0.0.1:{{DAEMON_PORT}}/api/poll-message" --data-urlencode "sessionKey=YOUR_SESSION_KEY"
 ```
 
 返回 JSON 中 `message` 对象包含 `text` / `messageId` / `sessionKey` / `chatType` 字段。
