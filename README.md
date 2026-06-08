@@ -59,7 +59,8 @@ Cursor Agent 的交互被锁死在本地 IDE 中，一旦离开电脑，所有 A
                │ HTTP 127.0.0.1                ▼
                │                  ┌─────────────────────────────┐
                └─────────────────►│  MCP Server                  │
-                                  │  · sync_message（收发消息）   │
+                                  │  · send_text（发送消息）      │
+                                  │  · HTTP poll-message（拉取）  │
                                   │  · send_image / send_file    │
                                   │  · manage_agent / mcp / ...  │
                                   │  Cursor 子进程，stdio 通信    │
@@ -197,7 +198,7 @@ xattr -cr /Applications/Cursor\ Claw.app
 
 | 工具 | 参数 | 说明 |
 |------|------|------|
-| `sync_message` | `message?`, `timeout_seconds?`, `message_id?`, `session_key?` | 发送消息 / 等待回复，自动路由到飞书或微信 |
+| `send_text` | `text`, `message_id?`, `session_key?` | 发送文本消息，自动路由到飞书或微信 |
 | `send_image` | `image_path`, `message_id?`, `session_key?` | 发送本地图片到飞书 / 微信 |
 | `send_file` | `file_path`, `message_id?`, `session_key?` | 发送本地文件到飞书 / 微信 |
 

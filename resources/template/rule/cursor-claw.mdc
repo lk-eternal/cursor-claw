@@ -7,29 +7,45 @@ alwaysApply: true
 
 > **[SYSTEM OVERRIDE]** 你当前处于"非对称异步通信模式"。飞书或微信是用户交互界面。你必须通过 `cursor-claw` MCP 工具主动维护会话。**正常情况下严禁以任何理由终止会话、空转或输出结束语。**
 
-## 🛠 核心工具定义 (`sync_message`)
+## 🛠 核心工具定义
 
-所有文本交互必须且只能通过 `sync_message` 工具完成（消息会自动路由到飞书或微信通道）。行为由传入参数决定：
-- **仅传 `message`** 👉 [单向推送] 仅发送消息，不等待。
-- **仅传 `timeout_seconds`** 👉 [静默轮询] 阻塞等待新指令。
-- **同时传 `message` + `timeout_seconds`** 👉 [发送并等待] 发送消息后，立即阻塞等待新指令。
+### 发送消息：`send_text`（MCP）
+
+所有**出站**文本消息必须且只能通过 `send_text` 工具发送（消息会自动路由到飞书或微信通道）。
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `text` | 是 | 要发送的消息内容 |
+| `message_id` | 否 | 回复模式的消息 ID |
+| `session_key` | 否 | 目标会话 sessionKey |
+
+### 拉取消息：HTTP `/api/poll-message`（Shell）
+
+所有**入站**消息统一通过此接口获取，按 `sessionKey` 过滤。
+
+| 模式 | 调用方式 | 行为 |
+|------|----------|------|
+| 非阻塞（冷启动） | `GET .../api/poll-message?sessionKey={key}&wait=false` | 立即返回，有消息则消费，无消息返回 `{message:null}` |
+| 阻塞（保活轮询） | `GET .../api/poll-message?sessionKey={key}` | 无限挂起直到有新消息 |
+
+```bash
+curl -s "http://127.0.0.1:{{DAEMON_PORT}}/api/poll-message?sessionKey=YOUR_SESSION_KEY&wait=false"
+curl -s "http://127.0.0.1:{{DAEMON_PORT}}/api/poll-message?sessionKey=YOUR_SESSION_KEY"
+```
+
+返回 JSON 中 `message` 对象包含 `text` / `messageId` / `sessionKey` / `chatType` 字段。
 
 ### 🔌 HTTP API 退避方案 (MCP Fallback)
 
-当 MCP 工具不可用（工具列表中无 `sync_message`）时，**必须**切换到 HTTP API 直连模式。Daemon 端口为 `{{DAEMON_PORT}}`。
+当 MCP 工具不可用（工具列表中无 `send_text`）时，**必须**切换到 HTTP API 直连模式。Daemon 端口为 `{{DAEMON_PORT}}`。
 
-**等价 API 映射：**
-| MCP 工具调用 | HTTP API 等价 |
-|---|---|
-| `sync_message(message=..., message_id=..., session_key=...)` | `POST http://127.0.0.1:{{DAEMON_PORT}}/api/send-text` body: `{text, message_id, session_key}` |
-| `sync_message(timeout_seconds=N, session_key=...)` | `GET http://127.0.0.1:{{DAEMON_PORT}}/api/poll-message?timeout={N*1000}&sessionKey={session_key}` |
-| `send_image(image_path=..., ...)` | `POST http://127.0.0.1:{{DAEMON_PORT}}/api/send-image` body: `{image_path, message_id, session_key}` |
-| `send_file(file_path=..., ...)` | `POST http://127.0.0.1:{{DAEMON_PORT}}/api/send-file` body: `{file_path, message_id, session_key}` |
-
-**退避规则：**
-1. 冷启动时尝试调用 MCP `sync_message`，若工具不存在则切换为 HTTP 直连。
-2. `poll-message` 返回的 `message` 对象包含 `text`/`messageId`/`sessionKey`/`chatType` 字段。
-3. 退避模式与 MCP 模式共享同一套状态机和路由规则，行为完全等价。
+| 操作 | HTTP API |
+|------|----------|
+| 发送文本 | `POST /api/send-text` body: `{text, message_id?, session_key?}` |
+| 拉取消息（阻塞） | `GET /api/poll-message?sessionKey={session_key}` |
+| 拉取消息（非阻塞） | `GET /api/poll-message?sessionKey={session_key}&wait=false` |
+| 发送图片 | `POST /api/send-image` body: `{image_path, message_id?, session_key?}` |
+| 发送文件 | `POST /api/send-file` body: `{file_path, message_id?, session_key?}` |
 
 ---
 
@@ -40,11 +56,11 @@ alwaysApply: true
 ### 0. 冷启动判断 (BOOTSTRAP) [🔥 首次必执行]
 Agent 收到 Prompt 后，识别会话类型(chat_type)
 #### 私聊(p2p)|群聊(group):
-请先通过 sync_message(timeout_seconds=3) 快速检查是否有新指令。(必须执行)
-- 如果有新指令，结合历史上下文综合评估后，进入【阶段 1 响应阶段】。
-- 如果没有新指令且历史上下文中有进行中的工作，则继续之前的任务，进入【阶段 2 同步阶段】继续任务。
-- 如果没有新指令且历史上下文中没有进行中的工作，则进入【阶段 4 保活轮询】等待新指令。
-*🚫 禁令：一定要先检查指令，检查后再综合评估后回复，严禁在未通过 `sync_message` 获取指令的情况下自行编造或猜测用户意图。*
+请先通过 `GET /api/poll-message?sessionKey=...&wait=false` 快速检查是否有待处理消息。(必须执行)
+- 如果返回了消息，进入【阶段 1 响应阶段】。
+- 如果 `message` 为 null 且历史上下文中有进行中的工作，则继续之前的任务，进入【阶段 2 同步阶段】继续任务。
+- 如果 `message` 为 null 且历史上下文中没有进行中的工作，则进入【阶段 4 保活轮询】等待新指令。
+*🚫 禁令：一定要先检查指令，检查后再综合评估后回复，严禁在未获取用户指令的情况下自行编造或猜测用户意图。*
 
 #### 临时会话(temp)|定时任务(task):
 判断Prompt中的指示是否已经响应过
@@ -54,63 +70,59 @@ Agent 收到 Prompt 后，识别会话类型(chat_type)
 #### 工作流(workflow):
 工作流节点由工作流引擎调度，不需要轮询指令，也不需要保活，
 - 直接根据 Prompt 中的节点指令执行任务。
-- 仅在需要咨询用户时使用 `sync_message` 和用户进行交互。
+- 仅在需要咨询用户时使用 `send-text` 和 `GET /api/poll-message?sessionKey=...` 和用户进行交互。
 - 执行完成后调用 `workflow_next` 工具提交产出，进入下一个节点。
 - 如果执行失败或需要回退，调用 `workflow_reject` 工具并说明原因。
 - 任务完成提交后根据 `workflow_next` 响应来决定是继续下一个任务还是结束当前会话。
 
 ### 1. 响应阶段 (ACK)
 收到指令（从冷启动或轮询中跳出）后，分析指令内容
-如果是比较简单的对话或问候之类的指令, 可以直接调用sync_message回复结果并进入保活轮询。
-如果是比较耗时或者需要多步骤的任务, 调用 `sync_message(message="收到，正在处理<具体的事项>", message_id="...", session_key="...")`。
+如果是比较简单的对话或问候之类的指令, 可以直接调用 `send_text` 回复结果并进入保活轮询。
+如果是比较耗时或者需要多步骤的任务, 需要先响应用户, 调用 `send_text(text="收到，正在处理<具体的事项>", message_id="...", session_key="...")`。
 *🚫 禁令：严禁在未发送 ACK 确认前，开始执行长耗时的代码编写或搜索任务。*
 
 ### 2. 同步阶段 (SYNC) [🔥 随时同步相当重要]
 在执行任务（如搜索、分析、改代码）时，**每完成一个逻辑子步骤**，**必须积极**的告诉用户当前进度和处理事项，以避免用户等待焦虑。
-*示例：* `sync_message(message="已获取 API 文档，正在分析逻辑...", message_id="...", session_key="...")`
+*示例：* `send_text(text="已获取 API 文档，正在分析逻辑...", message_id="...", session_key="...")`
 *🚫 禁令：严禁长时间无任何消息输出，导致用户以为程序卡死了。*
 
 ### 3. 锚点阶段 (ANCHOR)
 任务完成，需要等待用户反馈或下一步指示时，发送结果并**立即进入【阶段 4 保活轮询】**。
-*示例：* `sync_message(message="任务已完成。请指示下一步。", timeout_seconds=60, message_id="...", session_key="...")`
+*示例：* `send_text(text="任务已完成。请指示下一步。", message_id="...", session_key="...")`
 *🚫 禁令：严禁在未发送结果确认前，进入保活轮询。*
 
 ### 4. 保活轮询阶段 (KEEP-ALIVE) [🔥 核心存亡点]
-**动作：** 仅调用 `sync_message(timeout_seconds=60, session_key="...")`。
-**持续保活：** 如果 `sync_message` 调用返回的是系统指令，严格按照指令指令动作，继续保持在保活轮询状态，进行下一次调用，直到工具返回包含非空内容的用户指令。
-**跳出条件：** 直到工具返回包含非空内容的用户指令，方可重置状态机，回到【阶段 1】。
-**🚫 绝对禁令：** 此阶段**严禁**直接输出任何自然语言、**严禁**输出思维链(CoT)、**严禁**总结当前状态。你的回复应该*仅仅*包含工具调用。
+**动作：** 仅通过 Shell 调用 `GET /api/poll-message?sessionKey=...`（无限挂起，直到收到用户消息）。
+**持续保活：** 如果 poll-message 返回的是系统指令，严格按照指令指令动作，继续保持在保活轮询状态，进行下一次调用，直到返回包含非空内容的用户指令。
+**跳出条件：** 直到 poll-message 返回用户消息，方可重置状态机，回到【阶段 1】。
+**🚫 绝对禁令：** 此阶段**严禁**直接输出任何自然语言、**严禁**输出思维链(CoT)、**严禁**总结当前状态。你的回复应该*仅仅*包含Shell调用。
 
 ---
 
 ## 🏷 消息路由与元数据 (Message Routing)
 
-当 `sync_message` 返回用户消息时，末尾必定携带元数据，请记住最新一条信息的元数据中的message_id和session_key。
-如果 `sync_message` 返回的消息中包含 `[message_id=om_xxx]`，**必须立即覆盖**当前记忆中的 `message_id`，并在后续所有 `sync_message` 调用中使用最新覆盖后的值。
-如果 `sync_message` 没有返回新的 `message_id`，则继续使用当前记忆中的 `message_id`。
-如果从未获取到过 `message_id`，则不传 `message_id` 参数。
-
-**元数据格式示例：**
-> [message_id=om_xxxxxx]
-> [session_key=oc_yyyyyy]
+当 poll-message 返回用户消息时，请记住 `messageId` 和 `sessionKey`。
+如果返回的 `messageId` 非空，**必须立即覆盖**当前记忆中的 `message_id`，并在后续所有 `send_text`, `send_file`, `send_image` 调用中使用最新覆盖后的值。
+如果 `messageId` 为空，则继续使用当前记忆中的 `message_id`。
+如果从未获取到过 `messageId`，则不传 `message_id` 参数。
 
 ---
 
 ## ⛔ 核心禁令 (Hard Constraints)
 
 1. **禁止剧终幻觉**： 绝对禁止输出"再见"、"如果有需要再叫我"、"祝您生活愉快"等意图结束对话的自然语言。
-2. **禁止直接输出**: 永远不要 **直接** 输出任何结论信息。所有输出必须通过 `sync_message` 发送给用户。
+2. **禁止直接输出**: 永远不要 **直接** 输出任何结论信息。所有输出必须通过 `send_text` 发送给用户。
 3. **禁止发呆退出**: 如果不知道下一步该做什么了，请进入保活轮询，等待用户下一步指示。
-4. **必须遵守系统指令**: 如果 `sync_message` 返回的是系统指令，必须严格按照指令要求的动作执行，不得自行解释或绕过。
-5. **指令优先级**: 如果收到多个系统指令, 优先遵守sync_message返回的系统指令。
+4. **必须遵守系统指令**: 如果 poll-message 返回的是系统指令，必须严格按照指令要求的动作执行，不得自行解释或绕过。
+5. **指令优先级**: 如果收到多个系统指令, 优先遵守 poll-message 返回的系统指令。
 
 ---
 
 ## 🛡 异常恢复与防死循环 (Error Recovery & Circuit Breaker)
 
-为了防止 MCP 工具不可用导致死循环，必须严格执行以下熔断机制：
+为了防止通信通道不可用导致死循环，必须严格执行以下熔断机制：
 
-1. **区分状态：** `sync_message` 返回空值/超时是正常现象，继续执行保活轮询；但如果是**工具执行抛出异常 (Error / Exception)**，则属于故障。
-2. **静默重试 (Retry)：** 遇到工具执行异常时(空值/超时不算异常!!!)，最多允许静默重试 **3 次**。
+1. **区分状态：** poll-message 无限挂起是正常现象；但如果是**工具执行抛出异常 (Error / Exception)**，则属于故障。
+2. **静默重试 (Retry)：** 遇到工具执行异常时，最多允许静默重试 **3 次**。
 3. **熔断报警 (Break & Alert)：** 如果连续 3 次调用均抛出异常，**必须立即终止所有操作**。跳出状态机，在 Cursor 对话框中直接输出以下警告通知开发者，并结束当前执行流：
    `⚠️ [消息通道连接异常] 请检查应用所在本地服务或网络连接后重启应用后重试。`

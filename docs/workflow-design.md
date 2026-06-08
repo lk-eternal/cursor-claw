@@ -509,4 +509,4 @@ Daemon 在创建 MCP Server 时检测当前会话是否关联工作流实例：
 | 工作流失败 | `❌ 工作流「{name}」失败：{reason}` |
 | 步数熔断 | `⚠️ 工作流「{name}」已达最大步数 {maxSteps}，自动终止` |
 
-通知固定投递到 `instance.notifyChatId`（即触发方的主用户私聊），不随 isolated 节点的 Agent 会话切换而变化。底层通过 `sync_message(message, session_key=notifyChatId)` 发送，复用现有消息链路。
+通知固定投递到 `instance.notifyChatId`（即触发方的主用户私聊），不随 isolated 节点的 Agent 会话切换而变化。底层通过 `send_text(text, session_key=notifyChatId)` 发送，复用现有消息链路。

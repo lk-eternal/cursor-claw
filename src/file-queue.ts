@@ -111,23 +111,35 @@ export function claimNextMessage(filterSessionKey?: string): QueueMessage | null
   return null;
 }
 
-function pollFileQueue(timeoutMs: number, intervalMs = POLL_INTERVAL_MS, filterSessionKey?: string): Promise<QueueMessage | null> {
+function pollFileQueue(
+  timeoutMs: number,
+  intervalMs = POLL_INTERVAL_MS,
+  filterSessionKey?: string,
+  isCancelled?: () => boolean,
+): Promise<QueueMessage | null> {
   return new Promise((resolve) => {
     const immediate = claimNextMessage(filterSessionKey);
     if (immediate !== null) { resolve(immediate); return; }
 
-    const deadline = Date.now() + timeoutMs;
+    const infinite = timeoutMs <= 0;
+    const deadline = infinite ? Number.POSITIVE_INFINITY : Date.now() + timeoutMs;
     const timer = setInterval(() => {
+      if (isCancelled?.()) { clearInterval(timer); resolve(null); return; }
       const msg = claimNextMessage(filterSessionKey);
       if (msg !== null) { clearInterval(timer); resolve(msg); return; }
-      if (Date.now() >= deadline) { clearInterval(timer); resolve(null); }
+      if (!infinite && Date.now() >= deadline) { clearInterval(timer); resolve(null); }
     }, intervalMs);
     timer.unref();
   });
 }
 
-export async function pollFileQueueBatch(timeoutMs: number, intervalMs = POLL_INTERVAL_MS, filterSessionKey?: string): Promise<QueueMessage | null> {
-  const first = await pollFileQueue(timeoutMs, intervalMs, filterSessionKey);
+export async function pollFileQueueBatch(
+  timeoutMs: number,
+  intervalMs = POLL_INTERVAL_MS,
+  filterSessionKey?: string,
+  isCancelled?: () => boolean,
+): Promise<QueueMessage | null> {
+  const first = await pollFileQueue(timeoutMs, intervalMs, filterSessionKey, isCancelled);
   if (first === null) return null;
 
   const parts = [first.text];
@@ -141,6 +153,22 @@ export async function pollFileQueueBatch(timeoutMs: number, intervalMs = POLL_IN
 
     await new Promise((r) => setTimeout(r, BATCH_WAIT_MS));
 
+    extra = claimNextMessage(filterSessionKey);
+  }
+
+  return { text: parts.join("\n"), messageId: first.messageId, sessionKey: first.sessionKey, chatType: first.chatType, senderOpenId: first.senderOpenId };
+}
+
+export function claimMessageBatch(filterSessionKey?: string): QueueMessage | null {
+  const first = claimNextMessage(filterSessionKey);
+  if (first === null) {
+    return null;
+  }
+
+  const parts = [first.text];
+  let extra = claimNextMessage(filterSessionKey);
+  while (extra !== null) {
+    parts.push(extra.text);
     extra = claimNextMessage(filterSessionKey);
   }
 
