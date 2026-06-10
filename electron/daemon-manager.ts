@@ -706,6 +706,24 @@ function stopStatusPolling(): void {
   stopDaemonPowerSaveBlock()
 }
 
+function resolveCommandSessionKey(chatId?: string, chatType?: string): string | undefined {
+  if (!chatId) return undefined
+  const cfg = getConfig()
+  if (chatType === "p2p" && isMainUser(chatId, chatType) && cfg.workspaceDir) {
+    return `${chatId}::${cfg.workspaceDir}`
+  }
+  return chatId
+}
+
+function resolveResetWorkspaceDir(sessionKey?: string, chatId?: string, chatType?: string): string | undefined {
+  if (!sessionKey) return undefined
+  const cfg = getConfig()
+  if (chatType === "p2p" && isMainUser(chatId, chatType)) {
+    return cfg.workspaceDir
+  }
+  return path.join(app.getPath("userData"), "workspaces", sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_"))
+}
+
 async function checkAndExecutePendingCommands(): Promise<void> {
   const lock = readLockFile()
   if (!lock?.port) return
@@ -831,22 +849,14 @@ async function checkAndExecutePendingCommands(): Promise<void> {
         }
 
         case "/reset": {
-          if (isAdmin) {
-            stopAgent()
-            setMainChatId(getConfig().workspaceDir, "")
-            broadcastLog("[指令 /reset] 已清除主会话并停止 Agent，下次启动将创建新会话", "INFO")
-            await reply(true, "✅ 已停止并重置当前会话, 请重新发消息开启新会话")
-          } else {
-            if (claimed.chatId) {
-              if (isSessionAgentRunning(claimed.chatId)) stopSessionAgent(claimed.chatId)
-              // 同步清除该会话工作区存储的 resume 会话ID，否则下次拉起仍会 --resume 旧会话
-              const safeChatId = claimed.chatId.replace(/[^a-zA-Z0-9_-]/g, "_")
-              const sessionWs = path.join(app.getPath("userData"), "workspaces", safeChatId)
-              setMainChatId(sessionWs, "")
-              broadcastLog(`[指令 /reset] 已重置会话 ${claimed.chatId} 并清除 resume 会话ID`, "INFO")
-            }
-            await reply(true, "✅ 当前会话已重置, 请重新发消息开启新会话")
+          const sessionKey = resolveCommandSessionKey(claimed.chatId, claimed.chatType)
+          if (sessionKey && isSessionAgentRunning(sessionKey)) {
+            stopSessionAgent(sessionKey)
           }
+          const wsDir = resolveResetWorkspaceDir(sessionKey, claimed.chatId, claimed.chatType)
+          if (wsDir) setMainChatId(wsDir, "")
+          broadcastLog(`[指令 /reset] 已重置会话 ${sessionKey ?? claimed.chatId ?? "unknown"}`, "INFO")
+          await reply(true, "✅ 当前会话已重置, 请重新发消息开启新会话")
           break
         }
 

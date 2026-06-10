@@ -1238,11 +1238,13 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     req.on("close", () => { disconnected = true; });
     req.socket.setTimeout(0);
     const msg = await pollFileQueueBatch(0, undefined, sessionKeyFilter, () => disconnected);
+    // 仅在响应尚未发出时重入队：客户端已收到 body 后断连不应重复入队，否则会出现「已消费仍留队列」
+    if (disconnected && msg !== null && !res.headersSent) {
+      const requeued = pushToFileQueue(msg.text, msg.messageId, `requeue-poll-message`, msg.sessionKey, msg.chatType, msg.senderOpenId, true);
+      log("WARN", `poll 断连且未响应，消息重新入队${requeued ? "成功" : "失败"}: id=${msg.messageId || "none"} session=${msg.sessionKey}`);
+      return true;
+    }
     if (disconnected) {
-      if (msg !== null) {
-        const requeued = pushToFileQueue(msg.text, msg.messageId, `requeue-poll-message`, msg.sessionKey, msg.chatType, msg.senderOpenId, true);
-        log("WARN", `poll 断连，消息重新入队${requeued ? "成功" : "失败"}: id=${msg.messageId || "none"} session=${msg.sessionKey}`);
-      }
       return true;
     }
     if (msg?.messageId) trackMessageSession(msg.messageId, sessionKeyFilter);
