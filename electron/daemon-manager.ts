@@ -435,10 +435,10 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
             const chatType = payload.chatType ?? "task"
             const chatId = payload.chatId as string | undefined
             void launchIndependentAgent(payload.taskId, payload.taskName, payload.content, chatType, chatId).then(async (result) => {
-              if (result.ok && chatId && daemonPort) {
-                const currentActive = await getCurrentActiveSession(daemonPort, chatId)
+              if (result.ok && chatId && cachedPort) {
+                const currentActive = await getCurrentActiveSession(cachedPort, chatId)
                 if (currentActive && currentActive !== payload.taskId) previousActiveSessionMap.set(payload.taskId, currentActive)
-                await syncActiveSession(daemonPort, chatId, payload.taskId)
+                await syncActiveSession(cachedPort, chatId, payload.taskId)
               }
             })
           } catch { /* ignore malformed */ }
@@ -836,10 +836,15 @@ async function checkAndExecutePendingCommands(): Promise<void> {
             setMainChatId(getConfig().workspaceDir, "")
             broadcastLog("[指令 /reset] 已清除主会话并停止 Agent，下次启动将创建新会话", "INFO")
             await reply(true, "✅ 已停止并重置当前会话, 请重新发消息开启新会话")
-          } else if (claimed.chatId && isSessionAgentRunning(claimed.chatId)) {
-            stopSessionAgent(claimed.chatId)
-            await reply(true, "✅ 当前会话已重置, 请重新发消息开启新会话")
           } else {
+            if (claimed.chatId) {
+              if (isSessionAgentRunning(claimed.chatId)) stopSessionAgent(claimed.chatId)
+              // 同步清除该会话工作区存储的 resume 会话ID，否则下次拉起仍会 --resume 旧会话
+              const safeChatId = claimed.chatId.replace(/[^a-zA-Z0-9_-]/g, "_")
+              const sessionWs = path.join(app.getPath("userData"), "workspaces", safeChatId)
+              setMainChatId(sessionWs, "")
+              broadcastLog(`[指令 /reset] 已重置会话 ${claimed.chatId} 并清除 resume 会话ID`, "INFO")
+            }
             await reply(true, "✅ 当前会话已重置, 请重新发消息开启新会话")
           }
           break

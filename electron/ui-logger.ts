@@ -1,6 +1,7 @@
 import { BrowserWindow, app } from "electron"
 import * as fs from "node:fs"
 import * as path from "node:path"
+import { getConfig } from "./config-store"
 
 const LOG_BUFFER_MAX = 300
 const logBuffer: string[] = []
@@ -12,7 +13,6 @@ export function resetLogFilePath(): void {
 
 function getOrCreateLogFilePath(): string {
   if (logFilePath) return logFilePath
-  const { getConfig } = require("./config-store") as typeof import("./config-store")
   const config = getConfig()
   const dir = config.workspaceDir ? path.join(config.workspaceDir, ".cursor") : path.join(app.getPath("userData"), "logs")
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })

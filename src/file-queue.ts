@@ -19,7 +19,7 @@ export function getQueueDir(): string {
   return queueDir;
 }
 
-export function pushToFileQueue(text: string, messageId?: string, source?: string, sessionKey?: string, chatType?: string, senderOpenId?: string): boolean {
+export function pushToFileQueue(text: string, messageId?: string, source?: string, sessionKey?: string, chatType?: string, senderOpenId?: string, skipDedup?: boolean): boolean {
   if (!queueDir || !text?.trim()) return false;
 
   const ts = Date.now();
@@ -27,7 +27,9 @@ export function pushToFileQueue(text: string, messageId?: string, source?: strin
   const safeId = fileToken.replace(/[^a-zA-Z0-9_-]/g, "_");
   const filename = `${ts}_${safeId}.qmsg`;
 
-  if (messageId) {
+  // skipDedup: 断连重入队场景必须绕过去重——claim 留下的 .done 残留文件会让
+  // 去重扫描误判为重复，导致已领取但未送达的消息被静默丢弃
+  if (messageId && !skipDedup) {
     try {
       const existing = fs.readdirSync(queueDir);
       if (existing.some((f) => {

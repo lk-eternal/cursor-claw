@@ -64,6 +64,8 @@ export function stopAllSessionAgents(): void {
 
 export const chatNameCache = new Map<string, string>()
 export const previousActiveSessionMap = new Map<string, string>()
+const lastCrashAtMap = new Map<string, number>()
+const CRASH_LOOP_WINDOW_MS = 5 * 60 * 1000
 
 // ── Session 工具 ──────────────────────────────────────────
 
@@ -98,9 +100,21 @@ export async function handleSessionClosed(sessionKey: string, chatType: ChatType
 
   if (failed) {
     const lock = cachedLock()
+    const now = Date.now()
+    const prevCrashAt = lastCrashAtMap.get(sessionKey) ?? 0
+    lastCrashAtMap.set(sessionKey, now)
     if (lock?.port) {
-      const drained = await drainSessionMessages(lock.port, sessionKey)
-      broadcastLog(`[System] Agent 异常退出(exit=${exitInfo.exitCode})，已清空该会话 ${drained} 条消息`, "WARN")
+      if (now - prevCrashAt < CRASH_LOOP_WINDOW_MS) {
+        // 短时间内连续崩溃：放弃排队消息，避免 crash-loop 无限重启
+        const drained = await drainSessionMessages(lock.port, sessionKey)
+        broadcastLog(`[System] Agent 连续异常退出(exit=${exitInfo.exitCode})，已放弃该会话 ${drained} 条消息`, "WARN")
+        if (!mainChat && drained > 0) {
+          await notifyChat(sessionKey, `⚠️ Agent 连续异常退出 (exit=${exitInfo.exitCode})，已放弃 ${drained} 条排队消息，请重新发送。`)
+        }
+      } else {
+        // 首次崩溃：保留队列消息，调度器轮询会自动重启 Agent 继续处理
+        broadcastLog(`[System] Agent 异常退出(exit=${exitInfo.exitCode})，保留队列消息等待自动重启`, "WARN")
+      }
     }
     if (mainChat) {
       const stderrContent = exitInfo.stderr?.trim() || ""
