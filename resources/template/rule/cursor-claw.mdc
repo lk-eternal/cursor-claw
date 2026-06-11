@@ -25,7 +25,7 @@ alwaysApply: true
 
 | 模式 | 调用方式 | 行为 |
 |------|----------|------|
-| 非阻塞（冷启动） | `GET .../api/poll-message?sessionKey={key}&wait=false` | 立即返回，有消息则消费，无消息返回 `{message:null}` |
+| 非阻塞（冷启动） | `GET .../api/poll-message?sessionKey={key}&wait=false` | 立即返回，有消息则消费，无消息返回 `{messages:[]}` |
 | 阻塞（保活轮询） | `GET .../api/poll-message?sessionKey={key}` | 无限挂起直到有新消息 |
 
 用 `curl -G --data-urlencode` 自动编码 sessionKey（跨平台通用）。**Windows PowerShell 须用 `curl.exe`**（`curl` 是 Invoke-WebRequest 别名，会乱码）：
@@ -35,7 +35,7 @@ curl -G -s "http://127.0.0.1:{{DAEMON_PORT}}/api/poll-message" --data-urlencode 
 curl -G -s "http://127.0.0.1:{{DAEMON_PORT}}/api/poll-message" --data-urlencode "sessionKey=YOUR_SESSION_KEY"
 ```
 
-返回 JSON 中 `message` 对象包含 `text` / `messageId` / `sessionKey` / `chatType` 字段。
+返回 JSON 中 `messages` 为数组，每项包含 `text` / `messageId` / `sessionKey` / `chatType` / `senderOpenId`。多条消息时逐条处理，回复时使用对应项的 `messageId`。
 
 ### 🔌 HTTP API 退避方案 (MCP Fallback)
 
@@ -59,9 +59,9 @@ curl -G -s "http://127.0.0.1:{{DAEMON_PORT}}/api/poll-message" --data-urlencode 
 Agent 收到 Prompt 后，识别会话类型(chat_type)
 #### 私聊(p2p)|群聊(group):
 请先通过 `GET /api/poll-message?sessionKey=...&wait=false` 快速检查是否有待处理消息。(必须执行)
-- 如果返回了消息，进入【阶段 1 响应阶段】。
-- 如果 `message` 为 null 且历史上下文中有进行中的工作，则继续之前的任务，进入【阶段 2 同步阶段】继续任务。
-- 如果 `message` 为 null 且历史上下文中没有进行中的工作，则进入【阶段 4 保活轮询】等待新指令。
+- 如果 `messages` 非空，进入【阶段 1 响应阶段】。
+- 如果 `messages` 为空且历史上下文中有进行中的工作，则继续之前的任务，进入【阶段 2 同步阶段】继续任务。
+- 如果 `messages` 为空且历史上下文中没有进行中的工作，则进入【阶段 4 保活轮询】等待新指令。
 *🚫 禁令：一定要先检查指令，检查后再综合评估后回复，严禁在未获取用户指令的情况下自行编造或猜测用户意图。*
 
 #### 临时会话(temp)|定时任务(task):
@@ -103,8 +103,9 @@ Agent 收到 Prompt 后，识别会话类型(chat_type)
 
 ## 🏷 消息路由与元数据 (Message Routing)
 
-当 poll-message 返回用户消息时，请记住 `messageId` 和 `sessionKey`。
-如果返回的 `messageId` 非空，**必须立即覆盖**当前记忆中的 `message_id`，并在后续所有 `send_text`, `send_file`, `send_image` 调用中使用最新覆盖后的值。
+当 poll-message 返回用户消息时，请记住每条消息的 `messageId` 和 `sessionKey`。
+回复某条消息时，**必须**在 `send_text` / `send_file` / `send_image` 中传入该条对应的 `message_id`。
+若一次 poll 返回多条，处理最后一条或当前正在回复的那条时，用其 `messageId` 覆盖当前记忆中的 `message_id`。
 如果 `messageId` 为空，则继续使用当前记忆中的 `message_id`。
 如果从未获取到过 `messageId`，则不传 `message_id` 参数。
 

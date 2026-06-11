@@ -3,7 +3,8 @@ import * as path from "node:path";
 
 const POLL_INTERVAL_MS = 400;
 const STALE_MESSAGE_MS = 5 * 60 * 1000;
-const BATCH_WAIT_MS = 800;
+const BATCH_WAIT_MS = 800;  // 800ms 窗口期间内的文件变动视为同一批次，减少重复处理
+const MAX_TOTAL_WAIT = 5000; // 最多允许拼接等待 5 秒，防止被无限拉长的图片流卡死
 
 let queueDir = "";
 
@@ -27,8 +28,6 @@ export function pushToFileQueue(text: string, messageId?: string, source?: strin
   const safeId = fileToken.replace(/[^a-zA-Z0-9_-]/g, "_");
   const filename = `${ts}_${safeId}.qmsg`;
 
-  // skipDedup: 断连重入队场景必须绕过去重——claim 留下的 .done 残留文件会让
-  // 去重扫描误判为重复，导致已领取但未送达的消息被静默丢弃
   if (messageId && !skipDedup) {
     try {
       const existing = fs.readdirSync(queueDir);
@@ -66,7 +65,32 @@ export interface QueueMessage {
   senderOpenId: string;
 }
 
-export function claimNextMessage(filterSessionKey?: string): QueueMessage | null {
+export interface HeldQueueMessage extends QueueMessage {
+  holdFiles: string[];
+}
+
+export function toPublicQueueMessage(held: HeldQueueMessage): QueueMessage {
+  const { holdFiles: _h, ...msg } = held;
+  return msg;
+}
+
+function parseHeldMessage(claimedPath: string): QueueMessage | null {
+  try {
+    const raw = fs.readFileSync(claimedPath, "utf-8");
+    const parsed = JSON.parse(raw);
+    return {
+      text: typeof parsed.text === "string" ? parsed.text : raw,
+      messageId: parsed.messageId || "",
+      sessionKey: parsed.sessionKey || parsed.chatId || "",
+      chatType: parsed.chatType || "",
+      senderOpenId: parsed.senderOpenId || "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function holdNextMessage(filterSessionKey?: string): HeldQueueMessage | null {
   if (!queueDir) return null;
 
   let files: string[];
@@ -93,41 +117,65 @@ export function claimNextMessage(filterSessionKey?: string): QueueMessage | null
     } catch {
       continue;
     }
-    try {
-      const raw = fs.readFileSync(claimedPath, "utf-8");
-      const donePath = claimedPath.replace(/\.claimed$/, ".done");
-      try { fs.renameSync(claimedPath, donePath); } catch { try { fs.unlinkSync(claimedPath); } catch { /* ignore */ } }
-      const parsed = JSON.parse(raw);
-      return {
-        text: typeof parsed.text === "string" ? parsed.text : raw,
-        messageId: parsed.messageId || "",
-        sessionKey: parsed.sessionKey || parsed.chatId || "",
-        chatType: parsed.chatType || "",
-        senderOpenId: parsed.senderOpenId || "",
-      };
-    } catch {
+
+    const parsed = parseHeldMessage(claimedPath);
+    if (!parsed) {
       try { fs.unlinkSync(claimedPath); } catch { /* ignore */ }
       continue;
     }
+
+    return { ...parsed, holdFiles: [claimedPath] };
   }
   return null;
 }
 
-function pollFileQueue(
+export function finalizeHeldMessages(holdFiles: string[]): void {
+  for (const claimedPath of holdFiles) {
+    const donePath = claimedPath.replace(/\.claimed$/, ".done");
+    try {
+      fs.renameSync(claimedPath, donePath);
+    } catch {
+      // 响应已发出，不可回滚为 .qmsg（会导致重复投递）；交给 cleanupStaleMessages 清理残留
+      try { fs.unlinkSync(claimedPath); } catch { /* ignore */ }
+    }
+  }
+}
+
+export function releaseHeldMessages(holdFiles: string[]): void {
+  for (const claimedPath of holdFiles) {
+    const qmsgPath = claimedPath.replace(/\.claimed$/, ".qmsg");
+    try {
+      fs.renameSync(claimedPath, qmsgPath);
+    } catch { /* ignore */ }
+  }
+}
+
+/** 立即消费（dequeue-all 等场景）：hold 后马上 finalize */
+export function claimNextMessage(filterSessionKey?: string): QueueMessage | null {
+  const held = holdNextMessage(filterSessionKey);
+  if (!held) return null;
+  finalizeHeldMessages(held.holdFiles);
+  return toPublicQueueMessage(held);
+}
+
+function pollFileQueueHold(
   timeoutMs: number,
   intervalMs = POLL_INTERVAL_MS,
   filterSessionKey?: string,
   isCancelled?: () => boolean,
-): Promise<QueueMessage | null> {
+): Promise<HeldQueueMessage | null> {
   return new Promise((resolve) => {
-    const immediate = claimNextMessage(filterSessionKey);
+    const immediate = holdNextMessage(filterSessionKey);
     if (immediate !== null) { resolve(immediate); return; }
 
-    const infinite = timeoutMs <= 0;
+    // 0=不等待；<0=无限阻塞；>0=超时毫秒
+    if (timeoutMs === 0) { resolve(null); return; }
+
+    const infinite = timeoutMs < 0;
     const deadline = infinite ? Number.POSITIVE_INFINITY : Date.now() + timeoutMs;
     const timer = setInterval(() => {
       if (isCancelled?.()) { clearInterval(timer); resolve(null); return; }
-      const msg = claimNextMessage(filterSessionKey);
+      const msg = holdNextMessage(filterSessionKey);
       if (msg !== null) { clearInterval(timer); resolve(msg); return; }
       if (!infinite && Date.now() >= deadline) { clearInterval(timer); resolve(null); }
     }, intervalMs);
@@ -135,46 +183,41 @@ function pollFileQueue(
   });
 }
 
-export async function pollFileQueueBatch(
+export async function pollFileQueueHoldBatch(
   timeoutMs: number,
   intervalMs = POLL_INTERVAL_MS,
   filterSessionKey?: string,
   isCancelled?: () => boolean,
-): Promise<QueueMessage | null> {
-  const first = await pollFileQueue(timeoutMs, intervalMs, filterSessionKey, isCancelled);
-  if (first === null) return null;
+): Promise<HeldQueueMessage[]> {
+  const first = await pollFileQueueHold(timeoutMs, intervalMs, filterSessionKey, isCancelled);
+  if (first === null) return [];
 
-  const parts = [first.text];
-  let extra = claimNextMessage(filterSessionKey);
+  const items: HeldQueueMessage[] = [first];
 
-  while (extra !== null){
+  if (timeoutMs === 0) {
+    let extra = holdNextMessage(filterSessionKey);
     while (extra !== null) {
-      parts.push(extra.text);
-      extra = claimNextMessage(filterSessionKey);
+      items.push(extra);
+      extra = holdNextMessage(filterSessionKey);
     }
-
-    await new Promise((r) => setTimeout(r, BATCH_WAIT_MS));
-
-    extra = claimNextMessage(filterSessionKey);
+    return items;
   }
 
-  return { text: parts.join("\n"), messageId: first.messageId, sessionKey: first.sessionKey, chatType: first.chatType, senderOpenId: first.senderOpenId };
-}
+  const startTime = Date.now();
+  while (Date.now() - startTime < MAX_TOTAL_WAIT) {
+    if (isCancelled?.()) break;
 
-export function claimMessageBatch(filterSessionKey?: string): QueueMessage | null {
-  const first = claimNextMessage(filterSessionKey);
-  if (first === null) {
-    return null;
+    const maxWait = Math.min(BATCH_WAIT_MS, MAX_TOTAL_WAIT - (Date.now() - startTime));
+    const nextMsg = await pollFileQueueHold(maxWait, intervalMs, filterSessionKey, isCancelled);
+
+    if (nextMsg !== null) {
+      items.push(nextMsg);
+    } else {
+      break;
+    }
   }
 
-  const parts = [first.text];
-  let extra = claimNextMessage(filterSessionKey);
-  while (extra !== null) {
-    parts.push(extra.text);
-    extra = claimNextMessage(filterSessionKey);
-  }
-
-  return { text: parts.join("\n"), messageId: first.messageId, sessionKey: first.sessionKey, chatType: first.chatType, senderOpenId: first.senderOpenId };
+  return items;
 }
 
 export function getEarliestMessageTime(filterSessionKey?: string): number | null {
@@ -291,7 +334,14 @@ export function cleanupStaleMessages(): void {
       const filePath = path.join(queueDir, f);
       try {
         const stat = fs.statSync(filePath);
-        if (now - stat.mtimeMs > STALE_MESSAGE_MS) fs.unlinkSync(filePath);
+        if (now - stat.mtimeMs > STALE_MESSAGE_MS) {
+          if (f.endsWith(".claimed")) {
+            const qmsgPath = filePath.replace(/\.claimed$/, ".qmsg");
+            try { fs.renameSync(filePath, qmsgPath); } catch { fs.unlinkSync(filePath); }
+          } else {
+            fs.unlinkSync(filePath);
+          }
+        }
       } catch { /* ignore */ }
     }
   } catch { /* ignore */ }
