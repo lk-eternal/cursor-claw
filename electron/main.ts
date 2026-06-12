@@ -36,6 +36,7 @@ import {
 import { injectWorkspace } from "./workspace-injector"
 import { initTray, destroyTray } from "./tray"
 import { initAppUpdater } from "./updater"
+import { broadcastLog } from "./ui-logger"
 
 const profileArg = process.argv.find((a) => a.startsWith("--profile="))
 const profileName = profileArg?.split("=")[1] || ""
@@ -351,6 +352,19 @@ function registerIpcHandlers(): void {
 }
 
 let isQuitting = false
+
+// 第三方 SDK（如 @cursor/sdk）深处的异步 socket 错误无法在调用点捕获，
+// 全局兜底记日志，避免 Electron 默认弹出 "JavaScript error in main process" 并中断运行
+process.on("uncaughtException", (err) => {
+  try {
+    broadcastLog(`[Main] 未捕获异常: ${err?.message ?? err}`, "ERROR")
+  } catch { console.error("[Main] uncaughtException:", err) }
+})
+process.on("unhandledRejection", (reason) => {
+  try {
+    broadcastLog(`[Main] 未处理的 Promise 拒绝: ${reason instanceof Error ? reason.message : reason}`, "ERROR")
+  } catch { console.error("[Main] unhandledRejection:", reason) }
+})
 
 app.on("before-quit", () => {
   isQuitting = true

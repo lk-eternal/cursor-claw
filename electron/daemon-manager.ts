@@ -250,6 +250,37 @@ function httpsPost(url: string, body: object, headers: Record<string, string> = 
   })
 }
 
+function httpsGet(url: string, headers: Record<string, string> = {}, timeoutMs = 8000): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { headers, timeout: timeoutMs }, (res) => {
+      const chunks: string[] = []
+      res.on("data", (c: Buffer) => chunks.push(c.toString()))
+      res.on("end", () => {
+        try { resolve(JSON.parse(chunks.join(""))) } catch { resolve(null) }
+      })
+    })
+    req.on("error", reject)
+    req.on("timeout", () => { req.destroy(); reject(new Error("timeout")) })
+  })
+}
+
+/** 用凭据获取飞书机器人应用信息（app_name / open_id），凭据无效时返回错误 */
+async function fetchLarkBotInfo(appId: string, appSecret: string): Promise<{ ok: boolean; name?: string; openId?: string; error?: string }> {
+  try {
+    const tokenResp = await httpsPost("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
+      app_id: appId, app_secret: appSecret,
+    })
+    const token = tokenResp?.tenant_access_token
+    if (!token) return { ok: false, error: tokenResp?.msg || "凭据无效（获取 token 失败）" }
+    const botResp = await httpsGet("https://open.feishu.cn/open-apis/bot/v3/info", { Authorization: `Bearer ${token}` })
+    const bot = botResp?.bot
+    if (!bot?.app_name) return { ok: false, error: botResp?.msg || "未获取到机器人信息（请确认已开启机器人能力）" }
+    return { ok: true, name: bot.app_name, openId: bot.open_id }
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "请求失败" }
+  }
+}
+
 async function larkSendTestMessage(channel: MessageChannel, receiveId: string): Promise<void> {
   if (!channel.larkAppId || !channel.larkAppSecret) throw new Error("飞书凭据未配置")
   const tokenResp = await httpsPost("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
@@ -1308,6 +1339,9 @@ export function initDaemonManager(): void {
     updateChannel(channelId, { mainUserEnabled: false, mainUserChatId: "" })
     return { ok: true }
   })
+
+  ipcMain.handle("feishu:app-info", (_e, appId: string, appSecret: string) =>
+    fetchLarkBotInfo(appId?.trim() ?? "", appSecret?.trim() ?? ""))
   ipcMain.handle("agent:stop-session", (_e, sessionKey: string) => { stopSessionAgent(sessionKey); return { ok: true } })
   ipcMain.handle("agent:stop-all-sessions", () => { stopAllSessionAgents(); return { ok: true } })
 
@@ -1363,7 +1397,7 @@ export function initDaemonManager(): void {
   // ── Feishu one-click app registration (OAuth Device Flow) ──
   let feishuRegisterAbort: AbortController | null = null
 
-  ipcMain.handle("feishu:register-app", async () => {
+  ipcMain.handle("feishu:register-app", async (_e, preset?: { name?: string; desc?: string }) => {
     if (feishuRegisterAbort) feishuRegisterAbort.abort()
     feishuRegisterAbort = new AbortController()
     const signal = feishuRegisterAbort.signal
@@ -1388,16 +1422,11 @@ export function initDaemonManager(): void {
           )
         },
         appPreset: {
-          name: "Cursor Claw",
-          desc: "Cursor AI 协作助手",
+          name: preset?.name?.trim() || "Cursor Claw",
+          desc: preset?.desc?.trim() || "Cursor AI 协作助手",
         },
       })
       feishuRegisterAbort = null
-      saveConfig({
-        larkAppId: result.client_id,
-        larkAppSecret: result.client_secret,
-        larkAppQuickCreated: true,
-      })
       return { ok: true, appId: result.client_id, appSecret: result.client_secret }
     } catch (err: unknown) {
       feishuRegisterAbort = null

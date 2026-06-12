@@ -17,6 +17,7 @@ export interface MessageChannel {
   larkAppId?: string
   larkAppSecret?: string
   larkAppQuickCreated?: boolean
+  larkBotName?: string
   wechatToken?: string
   wechatAccountId?: string
   agentResourceId: string
@@ -39,6 +40,7 @@ export interface ChannelStatusInfo {
   connected: boolean
   status: string
   mainUserBound: boolean
+  botName?: string
 }
 
 export interface AppConfig {
@@ -301,8 +303,10 @@ const api = {
     ipcRenderer.on("daemon:log", handler)
     return () => ipcRenderer.removeListener("daemon:log", handler)
   },
-  feishuRegisterApp: (): Promise<{ ok: boolean; appId?: string; appSecret?: string; error?: string }> =>
-    ipcRenderer.invoke("feishu:register-app"),
+  fetchFeishuAppInfo: (appId: string, appSecret: string): Promise<{ ok: boolean; name?: string; openId?: string; error?: string }> =>
+    ipcRenderer.invoke("feishu:app-info", appId, appSecret),
+  feishuRegisterApp: (preset?: { name?: string; desc?: string }): Promise<{ ok: boolean; appId?: string; appSecret?: string; error?: string }> =>
+    ipcRenderer.invoke("feishu:register-app", preset),
   feishuRegisterAppCancel: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("feishu:register-app-cancel"),
   onFeishuSetupQrCode: (cb: (url: string) => void) => {
     const handler = (_: unknown, url: string) => cb(url)

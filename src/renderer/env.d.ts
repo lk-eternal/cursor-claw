@@ -22,6 +22,7 @@ interface ChannelConfig {
   larkAppId?: string
   larkAppSecret?: string
   larkAppQuickCreated?: boolean
+  larkBotName?: string
   wechatToken?: string
   wechatAccountId?: string
   agentResourceId: string
@@ -44,6 +45,7 @@ interface ChannelStatusInfo {
   connected: boolean
   status: string
   mainUserBound: boolean
+  botName?: string
 }
 
 interface AppConfig {
@@ -262,11 +264,12 @@ interface ElectronAPI {
   onWorkflowInstanceUpdate(cb: (inst: WorkflowInstance) => void): () => void
 
   testBind(channelId?: string): Promise<{ ok: boolean; error?: string }>
+  fetchFeishuAppInfo(appId: string, appSecret: string): Promise<{ ok: boolean; name?: string; openId?: string; error?: string }>
   testWechat(): Promise<{ ok: boolean; error?: string }>
   startChannelBind(channelId: string): Promise<{ ok: boolean; chatId?: string; error?: string }>
   cancelChannelBind(channelId: string): Promise<{ ok: boolean }>
   unbindChannel(channelId: string): Promise<{ ok: boolean }>
-  feishuRegisterApp(): Promise<{ ok: boolean; appId?: string; appSecret?: string; error?: string }>
+  feishuRegisterApp(preset?: { name?: string; desc?: string }): Promise<{ ok: boolean; appId?: string; appSecret?: string; error?: string }>
   feishuRegisterAppCancel(): Promise<{ ok: boolean }>
   onFeishuSetupQrCode(cb: (url: string) => void): () => void
   onFeishuSetupStatus(cb: (status: string) => void): () => void

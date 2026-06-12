@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react"
 import {
   Plus, Pencil, Trash2, X, Loader2, CheckCircle2, ShieldAlert, Eye, EyeOff,
-  LogIn, MessageSquare, Bird, FolderOpen, RefreshCw, ChevronDown, ChevronRight,
+  LogIn, MessageSquare, Bird, FolderOpen, RefreshCw, ChevronDown, ChevronRight, ExternalLink,
 } from "lucide-react"
 import SearchableSelect from "./SearchableSelect"
 import useInlineModal from "./useInlineModal"
@@ -141,8 +141,24 @@ export default function ChannelPanel() {
                         {c.mainUserEnabled && c.mainUserChatId && <span className="shrink-0 rounded bg-blue-900/40 px-1.5 py-0.5 text-[10px] text-blue-400">主用户已绑定</span>}
                         {c.allowOthers && <span className="shrink-0 rounded bg-emerald-900/40 px-1.5 py-0.5 text-[10px] text-emerald-400">其他人可用</span>}
                       </div>
-                      <p className="truncate text-xs text-gray-500">
-                        {resource?.name ?? "Cursor CLI"} · 主模型 {c.model || "auto"}{c.othersModel ? ` · 其他人 ${c.othersModel}` : ""}{c.workspaceDir ? ` · 📁${c.workspaceDir.split(/[\\/]/).pop()}` : ""}
+                      <p className="flex items-center gap-1 truncate text-xs text-gray-500">
+                        {c.type === "feishu" && c.larkAppId && (
+                          <>
+                            <a
+                              href={`https://open.feishu.cn/app/${c.larkAppId}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              title={`打开飞书开发者后台 (${c.larkAppId})`}
+                              className="inline-flex shrink-0 items-center gap-0.5 text-blue-400/80 hover:text-blue-300 hover:underline"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              {st?.botName || c.larkBotName || c.larkAppId.slice(0, 12) + "…"}
+                              <ExternalLink size={10} />
+                            </a>
+                            <span className="text-gray-700">·</span>
+                          </>
+                        )}
+                        <span className="truncate">{resource?.name ?? "Cursor CLI"} · 主模型 {c.model || "auto"}{c.othersModel ? ` · 其他人 ${c.othersModel}` : ""}{c.workspaceDir ? ` · 📁${c.workspaceDir.split(/[\\/]/).pop()}` : ""}</span>
                       </p>
                     </div>
                   </div>
@@ -216,10 +232,16 @@ interface EditProps {
   showConfirm: (title: string, message: string) => Promise<boolean>
 }
 
+/** 通道名仍是默认占位（"飞书"/"飞书 2"…）时允许用解析出的应用名自动覆盖 */
+function isDefaultChannelName(name: string): boolean {
+  return !name.trim() || /^飞书( \d+)?$/.test(name.trim()) || /^微信( \d+)?$/.test(name.trim())
+}
+
 function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDraft, showAlert, showConfirm }: EditProps) {
   const [draft, setDraft] = useState<ChannelConfig>(channel)
   const [showSecret, setShowSecret] = useState(false)
   const [showAdvanced, setShowAdvanced] = useState(false)
+  const [appInfoState, setAppInfoState] = useState<{ checking: boolean; error?: string }>({ checking: false })
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([])
   const [loadingModels, setLoadingModels] = useState(false)
   const [binding, setBinding] = useState(false)
@@ -228,6 +250,7 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
   const [feishuQrUrl, setFeishuQrUrl] = useState("")
   const [feishuQrStatus, setFeishuQrStatus] = useState<"idle" | "loading" | "wait" | "error">("idle")
   const [feishuQrMsg, setFeishuQrMsg] = useState("")
+  const [registerForm, setRegisterForm] = useState<{ name: string; desc: string } | null>(null)
   // 微信扫码
   const [wechatQrUrl, setWechatQrUrl] = useState("")
   const [wechatQrStatus, setWechatQrStatus] = useState<"idle" | "loading" | "wait" | "scaned" | "error">("idle")
@@ -266,9 +289,42 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
     return () => { unsub1(); unsub2() }
   }, [])
 
-  const startFeishuRegister = async () => {
+  // 凭据齐全时自动解析应用名（防抖），默认通道名自动替换为应用名
+  const appId = draft.type === "feishu" ? (draft.larkAppId?.trim() ?? "") : ""
+  const appSecret = draft.type === "feishu" ? (draft.larkAppSecret?.trim() ?? "") : ""
+  useEffect(() => {
+    if (!appId || !appSecret) { setAppInfoState({ checking: false }); return }
+    let cancelled = false
+    const t = setTimeout(async () => {
+      setAppInfoState({ checking: true })
+      const r = await window.electronAPI.fetchFeishuAppInfo(appId, appSecret)
+      if (cancelled) return
+      if (r.ok && r.name) {
+        setAppInfoState({ checking: false })
+        setDraft((d) => ({
+          ...d,
+          larkBotName: r.name,
+          name: isDefaultChannelName(d.name) ? r.name! : d.name,
+        }))
+      } else {
+        setAppInfoState({ checking: false, error: r.error })
+        setDraft((d) => ({ ...d, larkBotName: "" }))
+      }
+    }, 600)
+    return () => { cancelled = true; clearTimeout(t) }
+  }, [appId, appSecret])
+
+  const openRegisterForm = () => {
+    setRegisterForm({
+      name: !isDefaultChannelName(draft.name) ? draft.name.trim() : "Cursor Claw",
+      desc: "Cursor AI 协作助手",
+    })
+  }
+
+  const startFeishuRegister = async (preset: { name: string; desc: string }) => {
+    setRegisterForm(null)
     setFeishuQrStatus("loading"); setFeishuQrUrl(""); setFeishuQrMsg("")
-    const r = await window.electronAPI.feishuRegisterApp()
+    const r = await window.electronAPI.feishuRegisterApp(preset)
     if (r.ok && r.appId && r.appSecret) {
       set({ larkAppId: r.appId, larkAppSecret: r.appSecret, larkAppQuickCreated: true })
       setFeishuQrStatus("idle"); setFeishuQrUrl("")
@@ -385,11 +441,36 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
             <div className="space-y-3 rounded-lg border border-gray-800 p-3">
               <div className="flex items-center justify-between">
                 <h4 className="text-xs font-medium text-gray-400">飞书凭据</h4>
-                <button type="button" onClick={() => void startFeishuRegister()} disabled={feishuQrStatus === "loading" || feishuQrStatus === "wait"}
-                  className="flex items-center gap-1 rounded-md border border-blue-600/50 bg-blue-600/10 px-2 py-1 text-xs text-blue-300 hover:bg-blue-600/20 disabled:opacity-50">
-                  <LogIn size={11} />一键创建应用
-                </button>
+                <div className="flex items-center gap-2">
+                  {draft.larkAppId?.trim() && (
+                    <a href={`https://open.feishu.cn/app/${draft.larkAppId.trim()}`} target="_blank" rel="noreferrer"
+                      className="flex items-center gap-1 text-xs text-gray-500 hover:text-blue-400">
+                      <ExternalLink size={11} />开发者后台
+                    </a>
+                  )}
+                  <button type="button" onClick={openRegisterForm} disabled={feishuQrStatus === "loading" || feishuQrStatus === "wait" || registerForm !== null}
+                    className="flex items-center gap-1 rounded-md border border-blue-600/50 bg-blue-600/10 px-2 py-1 text-xs text-blue-300 hover:bg-blue-600/20 disabled:opacity-50">
+                    <LogIn size={11} />一键创建应用
+                  </button>
+                </div>
               </div>
+              {registerForm && (
+                <div className="space-y-2 rounded-lg border border-blue-800/40 bg-blue-950/20 p-3">
+                  <p className="text-xs font-medium text-blue-200">新应用信息（创建页将预填，扫码后可修改）</p>
+                  <div>
+                    <label className="mb-1 block text-xs text-gray-500">应用名称（群内机器人显示名）</label>
+                    <input type="text" value={registerForm.name} onChange={(e) => setRegisterForm({ ...registerForm, name: e.target.value })} className={inputCls} placeholder="如：排课助手" />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs text-gray-500">应用描述</label>
+                    <input type="text" value={registerForm.desc} onChange={(e) => setRegisterForm({ ...registerForm, desc: e.target.value })} className={inputCls} placeholder="如：排课领域知识问答助手" />
+                  </div>
+                  <div className="flex justify-end gap-2 pt-1">
+                    <button onClick={() => setRegisterForm(null)} className="rounded-md px-3 py-1 text-xs text-gray-400 hover:bg-gray-800 hover:text-white">取消</button>
+                    <button onClick={() => void startFeishuRegister(registerForm)} disabled={!registerForm.name.trim()} className="rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-40">开始扫码创建</button>
+                  </div>
+                </div>
+              )}
               {(feishuQrStatus === "loading" || (feishuQrStatus === "wait" && feishuQrUrl)) && (
                 <div className="flex flex-col items-center gap-2 py-3">
                   {feishuQrStatus === "loading"
@@ -399,7 +480,7 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
                   <button onClick={async () => { await window.electronAPI.feishuRegisterAppCancel(); setFeishuQrStatus("idle"); setFeishuQrUrl("") }} className="text-xs text-gray-500 hover:text-red-400">取消</button>
                 </div>
               )}
-              {feishuQrStatus === "error" && <p className="text-xs text-red-400">{feishuQrMsg} <button onClick={() => void startFeishuRegister()} className="text-blue-400 hover:underline">重试</button></p>}
+              {feishuQrStatus === "error" && <p className="text-xs text-red-400">{feishuQrMsg} <button onClick={openRegisterForm} className="text-blue-400 hover:underline">重试</button></p>}
               <div className="grid grid-cols-2 gap-3">
                 <div><label className="mb-1 block text-xs text-gray-500">App ID</label><input type="text" value={draft.larkAppId ?? ""} onChange={(e) => set({ larkAppId: e.target.value })} className={inputCls} /></div>
                 <div><label className="mb-1 block text-xs text-gray-500">App Secret</label>
@@ -409,6 +490,9 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
                   </div>
                 </div>
               </div>
+              {appInfoState.checking && <p className="flex items-center gap-1.5 text-xs text-gray-500"><Loader2 size={11} className="animate-spin" />正在识别应用...</p>}
+              {!appInfoState.checking && draft.larkBotName && <p className="flex items-center gap-1.5 text-xs text-green-400"><CheckCircle2 size={12} />已识别应用：{draft.larkBotName}</p>}
+              {!appInfoState.checking && appInfoState.error && <p className="flex items-center gap-1.5 text-xs text-red-400"><ShieldAlert size={12} />{appInfoState.error}</p>}
             </div>
           ) : (
             <div className="space-y-3 rounded-lg border border-gray-800 p-3">

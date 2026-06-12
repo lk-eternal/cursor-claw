@@ -79,7 +79,8 @@ export class LarkSender {
       const msgType: string = item?.msg_type ?? "text";
       this.log("DEBUG", `fetchMessageContent(${messageId}) type=${msgType} content=${content.substring(0, 200)}`);
       const result = await this.processIncomingMessage(messageId, msgType, content);
-      return result || null;
+      // 引用消息无 mentions 上下文，清理残留的 @ 占位符
+      return result ? result.replace(/@_user_\d+\s?/g, "").trim() || null : null;
     } catch (e: any) {
       this.log("WARN", `拉取消息内容失败 (${messageId}): ${e?.message ?? e}`);
       return null;
@@ -419,6 +420,7 @@ export class LarkSender {
           try { text = LarkSender.parseMessageContent(messageId, messageType, rawContent).text || rawContent; } catch { /* use raw */ }
           const senderOpenId = senderObj?.sender_id?.open_id;
           const senderType: string = senderObj?.sender_type ?? "user";
+          this.log("DEBUG", `sender raw: ${JSON.stringify(senderObj)}`);
           const parentId: string = msg?.parent_id ?? "";
           const mentions: LarkMention[] = (msg?.mentions ?? []).map((m: any) => ({ key: m.key ?? "", id: m.id?.open_id ?? "", name: m.name ?? "" }));
           onMessage({ text, messageId, chatId, chatType, messageType, rawContent, senderOpenId, senderType, parentId: parentId || undefined, mentions });

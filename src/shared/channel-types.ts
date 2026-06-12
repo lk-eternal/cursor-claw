@@ -21,6 +21,8 @@ export interface MessageChannel {
   larkAppId?: string;
   larkAppSecret?: string;
   larkAppQuickCreated?: boolean;
+  /** 飞书机器人应用名缓存（凭据校验时解析，离线可显示） */
+  larkBotName?: string;
   // 微信凭据
   wechatToken?: string;
   wechatAccountId?: string;
@@ -67,6 +69,8 @@ export interface ChannelStatusInfo {
   /** wechat: disconnected/qr_pending/logging_in/connected/error；feishu: connected/connecting */
   status: string;
   mainUserBound: boolean;
+  /** 飞书机器人应用名（app_name，群内显示名） */
+  botName?: string;
 }
 
 // ── chatKey：全局唯一聊天标识 `${channelId}|${rawChatId}` ──

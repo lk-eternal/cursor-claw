@@ -152,6 +152,7 @@ function getChannelStatusList(): ChannelStatusInfo[] {
       ? (rt.wechat?.getStatus() ?? "disconnected")
       : (rt.feishuConnected ? "connected" : "connecting"),
     mainUserBound: !!(rt.cfg.mainUserEnabled && rt.cfg.mainUserChatId),
+    botName: rt.botName,
   }));
 }
 
@@ -400,8 +401,15 @@ function resolveRoutingKey(chatId?: string, replyMessageId?: string): string | u
   if (replyMessageId) {
     const sk = messageSessionMap.get(replyMessageId);
     if (sk) {
-      log("INFO", `路由命中 messageId 映射: ${replyMessageId} → ${sk}`);
-      return sk;
+      // 同一条消息（message_id 全局唯一）可能被多个通道分别接收（bot 协作 reply 链）。
+      // messageId 映射仅在通道一致时生效，否则会把 A 通道的消息错投进 B 通道的会话。
+      const skChannel = parseChatKey(sk.includes("::") ? sk.slice(0, sk.indexOf("::")) : sk).channelId;
+      const msgChannel = chatId ? parseChatKey(chatId).channelId : undefined;
+      if (!skChannel || !msgChannel || skChannel === msgChannel) {
+        log("INFO", `路由命中 messageId 映射: ${replyMessageId} → ${sk}`);
+        return sk;
+      }
+      log("INFO", `messageId 映射跨通道(${skChannel}→${msgChannel})，忽略: ${replyMessageId}`);
     }
   }
   if (!chatId) return undefined;
