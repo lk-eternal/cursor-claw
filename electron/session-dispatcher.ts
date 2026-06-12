@@ -1,13 +1,17 @@
 import * as path from "node:path"
 import * as fs from "node:fs"
 import { app } from "electron"
-import { getConfig, useSdkMode, type ModelScenario } from "./config-store"
+import {
+  getConfig, getChannel, getAgentResource, resolveChannelForSession,
+  resolveChannelModel, effectiveWorkspaceDir, mainChatScopeKey,
+  type MessageChannel, type ModelScenario,
+} from "./config-store"
+import { parseChatKey } from "../src/shared/channel-types"
 import { broadcastLog } from "./ui-logger"
 import { readLockFile, httpGet, httpPost, syncActiveSession, getCurrentActiveSession, drainSessionMessages } from "./daemon-client"
 import { reportCommandResult } from "./command-handler"
 import {
-  launchSessionAgent as _launchSessionAgent,
-  launchIndependentAgent as _launchIndependentAgentCli,
+  launchAgent as _launchCliAgent,
   stopSessionAgent as _stopCliSession, stopAllSessionAgents as _stopAllCliSessions,
   getSessionAgentList as getRawCliSessionList,
   isSessionAgentRunning as _isCliSessionRunning,
@@ -44,20 +48,20 @@ async function notifyChat(sessionKey: string, text: string): Promise<void> {
   }
 }
 
-// ── 内部工具 ──────────────────────────────────────────────
+// ── 内部工具（CLI 与 SDK 双运行时并存）────────────────────
 
 export function isSessionAgentRunning(key: string): boolean {
-  return useSdkMode() ? isSdkSessionRunning(key) : _isCliSessionRunning(key)
+  return _isCliSessionRunning(key) || isSdkSessionRunning(key)
 }
 
 export function stopSessionAgent(key: string): void {
-  if (useSdkMode()) stopSdkSession(key)
-  else _stopCliSession(key)
+  if (isSdkSessionRunning(key)) stopSdkSession(key)
+  if (_isCliSessionRunning(key)) _stopCliSession(key)
 }
 
 export function stopAllSessionAgents(): void {
-  if (useSdkMode()) stopAllSdkSessions()
-  else _stopAllCliSessions()
+  stopAllSdkSessions()
+  _stopAllCliSessions()
 }
 
 // ── Session 状态 ──────────────────────────────────────────
@@ -69,13 +73,13 @@ const CRASH_LOOP_WINDOW_MS = 5 * 60 * 1000
 
 // ── Session 工具 ──────────────────────────────────────────
 
+/** chatId 为 chatKey（`channelId|rawChatId`）；按所属通道的主用户绑定判断 */
 export function isMainUser(chatId?: string, chatType?: string): boolean {
-  if (chatType !== "p2p") return false
-  const cfg = getConfig()
-  if (cfg.larkReceiveId?.trim() && chatId === cfg.larkReceiveId.trim()) return true
-  if (cfg.wechatEnabled && !cfg.feishuEnabled) return true
-  if (cfg.wechatEnabled && cfg.wechatAccountId && chatId && !chatId.startsWith("oc_")) return true
-  return false
+  if (chatType !== "p2p" || !chatId) return false
+  const { channelId, chatId: raw } = parseChatKey(chatId)
+  const channel = getChannel(channelId)
+  if (!channel?.mainUserEnabled || !channel.mainUserChatId?.trim()) return false
+  return raw === channel.mainUserChatId.trim()
 }
 
 export function extractChatId(sessionKey: string): string {
@@ -273,54 +277,93 @@ interface LaunchAgentParams {
   senderOpenId?: string
   chatName?: string
   taskMessage?: string
-  modelScenario?: ModelScenario
+  /** 显式指定通道（定时任务/工作流）；缺省从 sessionKey 的 chatKey 前缀解析 */
+  channelId?: string
+  /** 显式模型覆盖（任务模型 / 工作流节点模型） */
   modelOverride?: string
+  modelParamsOverride?: string
   workingDirectory?: string
 }
 
 async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?: string }> {
   const { sessionKey, chatType, meta, senderOpenId, chatName, taskMessage } = p
   const useMain = p.useMainWorkspace ?? (chatType === "p2p")
-  const config = getConfig()
+
+  // 通道与 Agent 资源解析
+  const channel: MessageChannel | undefined = getChannel(p.channelId) ?? resolveChannelForSession(sessionKey)
+  const resource = getAgentResource(channel?.agentResourceId)
+
+  // 其他人会话需要通道显式开启
+  const isOwnTask = chatType === "task" || chatType === "temp" || chatType === "workflow"
+  if (!useMain && !isOwnTask && !channel?.allowOthers) {
+    return { ok: false, error: `通道「${channel?.name ?? "未知"}」未启用其他人使用` }
+  }
 
   let workDir: string
   if (p.workingDirectory) {
     workDir = p.workingDirectory
     if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true })
-  } else if (useMain) {
-    workDir = config.workspaceDir
+  } else if (useMain || isOwnTask) {
+    workDir = effectiveWorkspaceDir(channel)
   } else {
+    // 临时目录名含 chatKey 的通道前缀（ch_xxx_...），不同通道天然隔离
     const safeChatId = sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_")
     workDir = path.join(app.getPath("userData"), "workspaces", safeChatId)
     if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true })
   }
+  if (!workDir) return { ok: false, error: "工作目录未配置" }
 
   const skipIdentity = chatType === "workflow"
-  await injectWorkspaceToDir(workDir, useMain || skipIdentity)
+  await injectWorkspaceToDir(workDir, useMain || skipIdentity, channel?.digitalIdentity)
 
-  const scenario = p.modelScenario ?? (useMain ? "primary" : chatType === "task" || chatType === "temp" || chatType === "workflow" ? "task" : "others")
-
-  if (useSdkMode()) {
-    return launchSdkAgent({ sessionKey, chatType, meta, workspaceDir: workDir, useMainWorkspace: useMain, senderOpenId, chatName, taskMessage, modelScenario: scenario, modelOverride: p.modelOverride })
+  // 模型解析：显式覆盖 > 通道场景模型
+  let model: string
+  let modelParams: string
+  if (p.modelOverride?.trim()) {
+    model = p.modelOverride.trim()
+    modelParams = p.modelParamsOverride ?? ""
+  } else {
+    const scenario: ModelScenario = useMain || isOwnTask ? "primary" : "others"
+    const resolved = resolveChannelModel(channel, scenario)
+    model = resolved.model
+    modelParams = resolved.modelParams
   }
 
-  if (chatType === "task" || chatType === "temp" || chatType === "workflow") {
-    return _launchIndependentAgentCli(sessionKey, chatName ?? sessionKey, taskMessage ?? "", chatType, scenario, p.modelOverride)
+  if (resource.type === "sdk") {
+    return launchSdkAgent({
+      sessionKey, chatType, meta, workspaceDir: workDir, useMainWorkspace: useMain,
+      senderOpenId, chatName, taskMessage,
+      apiKey: resource.apiKey ?? "", model, modelParams,
+    })
   }
-  return _launchSessionAgent(sessionKey, chatType, undefined, meta, useMain, senderOpenId, scenario)
+
+  const needResume = chatType === "p2p" || chatType === "group"
+  return _launchCliAgent({
+    sessionKey, chatType, meta, useMainWorkspace: useMain,
+    senderOpenId, chatName, taskMessage,
+    workspaceDir: workDir, model,
+    resumeScope: needResume && channel ? mainChatScopeKey(channel.id, workDir) : undefined,
+    newSession: channel?.mainUserNewSession ?? false,
+  })
 }
 
 export async function launchSessionAgent(
   sessionKey: string, chatType: ChatType,
   meta?: import("./agent-launcher").LaunchMeta,
   useMainWorkspace?: boolean, senderOpenId?: string,
-  modelScenario?: ModelScenario,
 ): Promise<{ ok: boolean; error?: string }> {
-  return launchAgent({ sessionKey, chatType, meta, useMainWorkspace, senderOpenId, modelScenario })
+  return launchAgent({ sessionKey, chatType, meta, useMainWorkspace, senderOpenId })
 }
 
-export async function launchIndependentAgent(taskId: string, taskName: string, message: string, type: ChatType = "task", chatId?: string, modelScenario?: ModelScenario): Promise<{ ok: boolean; error?: string }> {
-  return launchAgent({ sessionKey: taskId, chatType: type, chatName: taskName, taskMessage: message, meta: { chatId: chatId ?? taskName, chatType: type }, modelScenario: modelScenario ?? "task" })
+export async function launchIndependentAgent(
+  taskId: string, taskName: string, message: string, type: ChatType = "task",
+  chatId?: string, channelId?: string, model?: string, modelParams?: string,
+): Promise<{ ok: boolean; error?: string }> {
+  return launchAgent({
+    sessionKey: taskId, chatType: type, chatName: taskName, taskMessage: message,
+    meta: { chatId: chatId ?? taskName, chatType: type },
+    channelId, modelOverride: model, modelParamsOverride: modelParams,
+  })
 }
 
 export async function launchWorkflowAgent(p: {
@@ -335,7 +378,7 @@ export async function launchWorkflowAgent(p: {
     taskMessage: p.prompt,
     workingDirectory: p.workingDirectory,
     meta: { chatId: p.notifyChatId || sessionKey, chatType: "workflow" },
-    modelScenario: "task",
+    channelId: p.notifyChatId ? parseChatKey(extractChatId(p.notifyChatId)).channelId : undefined,
     modelOverride: p.model,
   })
 }
@@ -353,9 +396,10 @@ export async function notifyWorkflowChat(chatId: string, text: string): Promise<
 // ── Session 列表 ──────────────────────────────────────────
 
 export function getSessionAgentList() {
-  const rawList = useSdkMode()
-    ? getSdkSessionList().map((s) => ({ ...s, pid: 0 }))
-    : getRawCliSessionList()
+  const rawList = [
+    ...getRawCliSessionList(),
+    ...getSdkSessionList().map((s) => ({ ...s, pid: 0 })),
+  ]
   return rawList.map((s) => {
     const chatId = s.sessionKey.includes("::") ? s.sessionKey.split("::")[0] : s.sessionKey
     const chatName = s.chatName || chatNameCache.get(chatId) || (s.senderOpenId ? chatNameCache.get(s.senderOpenId) : undefined)
@@ -501,7 +545,7 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
   const config = getConfig()
   const sessions = await getQueueSessions()
 
-  const feishuOn = !!config.feishuEnabled
+  const feishuOn = (config.channels ?? []).some((c) => c.enabled && c.type === "feishu")
   const groupKeys = sessions.filter((s) => s.chatType === "group").map((s) => extractChatId(s.sessionKey))
   if (groupKeys.length > 0 && feishuOn) await fetchChatNames(groupKeys)
 
@@ -534,8 +578,7 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
     await notifyChat(sessionKey, "正在启动Agent，请稍等...")
 
     const meta: import("./agent-launcher").LaunchMeta = { chatId, chatType: chatType as "p2p" | "group" }
-    const scenario: ModelScenario = mainUser ? "primary" : "others"
-    const result = await launchSessionAgent(sessionKey, chatType as "p2p" | "group", meta, mainUser, senderOpenId, scenario)
+    const result = await launchSessionAgent(sessionKey, chatType as "p2p" | "group", meta, mainUser, senderOpenId)
     if (result.ok && chatId !== sessionKey) {
       const lock = cachedLock()
       if (lock?.port) await syncActiveSession(lock.port, chatId, sessionKey)

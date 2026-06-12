@@ -3,7 +3,8 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { app } from "electron"
 import { LOCK_FILE_NAME } from "../src/shared/constants"
-import { getConfig } from "./config-store"
+import { getEnabledChannels } from "./config-store"
+import { makeChatKey } from "../src/shared/channel-types"
 
 export interface LockInfo { pid: number; port: number; version: string }
 
@@ -73,14 +74,16 @@ export async function drainSessionMessages(port: number, sessionKey: string): Pr
   } catch { return 0 }
 }
 
-export async function resolveMainChatId(port: number, preferredChatId?: string): Promise<string | undefined> {
+export async function resolveMainChatId(port: number, preferredChatId?: string, channelId?: string): Promise<string | undefined> {
   const preferred = preferredChatId?.trim()
   if (preferred) {
     return preferred
   }
-  const fromConfig = getConfig().larkReceiveId?.trim()
-  if (fromConfig) {
-    return fromConfig
+  const candidates = getEnabledChannels().filter((c) => !channelId || c.id === channelId)
+  for (const c of candidates) {
+    if (c.mainUserEnabled && c.mainUserChatId?.trim()) {
+      return makeChatKey(c.id, c.mainUserChatId.trim())
+    }
   }
   try {
     const res = (await httpGet(`http://127.0.0.1:${port}/api/active-sessions`)) as { sessions?: Record<string, string> }
@@ -92,9 +95,9 @@ export async function resolveMainChatId(port: number, preferredChatId?: string):
 }
 
 export async function enqueueToMainSession(
-  port: number, content: string, preferredChatId?: string,
+  port: number, content: string, preferredChatId?: string, channelId?: string,
 ): Promise<{ ok: boolean; error?: string }> {
-  const chatId = await resolveMainChatId(port, preferredChatId)
+  const chatId = await resolveMainChatId(port, preferredChatId, channelId)
   if (!chatId) {
     return { ok: false, error: "未绑定主用户且无活跃会话，无法入队" }
   }

@@ -41,6 +41,11 @@ export default defineConfig({
   renderer: {
     root: "src/renderer",
     plugins: [react(), tailwindcss()],
+    server: {
+      // 显式绑定 IPv4：Node 17+ 解析 localhost 可能优先 ::1，
+      // 导致 dev server 只监听 IPv6 而 Electron 按 127.0.0.1 连接失败（白屏）
+      host: "127.0.0.1",
+    },
     build: {
       rollupOptions: {
         input: resolve("src/renderer/index.html"),

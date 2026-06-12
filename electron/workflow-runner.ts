@@ -1,5 +1,6 @@
 import { BrowserWindow } from "electron"
-import { getConfig } from "./config-store"
+import { getEnabledChannels } from "./config-store"
+import { makeChatKey } from "../src/shared/channel-types"
 import { getDefinition } from "./workflow-file"
 import { createInstance, startWorkflow } from "../src/workflow-engine"
 import { getInstance } from "../src/workflow-store"
@@ -14,7 +15,9 @@ export async function runWorkflowDefinition(
     return { ok: false, error: "工作流不存在" }
   }
 
-  const notifyChatId = opts?.notifyChatId?.trim() || getConfig().larkReceiveId?.trim() || undefined
+  const mainUserChannel = getEnabledChannels().find((c) => c.mainUserEnabled && c.mainUserChatId?.trim())
+  const notifyChatId = opts?.notifyChatId?.trim()
+    || (mainUserChannel ? makeChatKey(mainUserChannel.id, mainUserChannel.mainUserChatId.trim()) : undefined)
   const inst = createInstance(def, {
     input: opts?.input?.trim() || undefined,
     workingDirectory: opts?.workingDirectory || def.workingDirectory,

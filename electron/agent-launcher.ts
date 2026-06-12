@@ -1,8 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process"
-import * as path from "node:path"
 import * as fs from "node:fs"
-import { app, BrowserWindow } from "electron"
-import { getConfig, saveConfig, resolveModel, type AppConfig, type ModelScenario } from "./config-store"
+import {
+  getConfig, type AppConfig,
+  getMainChatIdForScope, setMainChatIdForScope,
+} from "./config-store"
 import {
   resolveAgentBinary, getAgentPaths, applyProxyEnv, createAgentEnv,
   spawnAgentChild, execAgentSync, execAgentAsync, ensureAgentBinary, quoteArg,
@@ -163,33 +164,31 @@ function makeSpawnEnv(config: AppConfig, extras?: Record<string, string>): Recor
   return env
 }
 
-function buildAgentLaunchArgs(config: AppConfig, prompt: string, resumeChatId: string | false, scenario: ModelScenario = "primary", modelOverride?: string): string[] {
+function buildAgentLaunchArgs(workspaceDir: string, prompt: string, resumeChatId: string | false, model?: string): string[] {
   const args = [
     "--print", "--force",
     ...(resumeChatId ? ["--resume", resumeChatId] : []),
-    "--approve-mcps", "--workspace", config.workspaceDir, "--trust",
+    "--approve-mcps", "--workspace", workspaceDir, "--trust",
   ]
-  const model = modelOverride?.trim() || resolveModel(scenario).model
-  if (model && model !== "auto") args.push("--model", model)
+  const m = model?.trim()
+  if (m && m !== "auto") args.push("--model", m)
   args.push(prompt)
   return args
 }
 
-export function getMainChatId(config: AppConfig): string {
-  return (config.mainChatIds ?? {})[config.workspaceDir]?.trim() || ""
+/** scope = `${channelId}:${workspaceDir}`，主会话 resume 上下文按通道+目录隔离 */
+export function getMainChatId(scope: string): string {
+  return getMainChatIdForScope(scope)
 }
 
-export function setMainChatId(workspaceDir: string, chatId: string): void {
-  const config = getConfig()
-  const ids = { ...(config.mainChatIds ?? {}), [workspaceDir]: chatId }
-  if (!chatId) delete ids[workspaceDir]
-  saveConfig({ mainChatIds: ids })
+export function setMainChatId(scope: string, chatId: string): void {
+  setMainChatIdForScope(scope, chatId)
 }
 
-function createChatId(config: AppConfig, spawnEnv: Record<string, string>): string | null {
-  const ws = config.workspaceDir?.trim() || undefined
+function createChatId(workspaceDir: string, scope: string, spawnEnv: Record<string, string>): string | null {
+  const ws = workspaceDir?.trim() || undefined
   const r = execAgentSync(
-    ["create-chat", "--workspace", config.workspaceDir],
+    ["create-chat", "--workspace", workspaceDir],
     spawnEnv,
     { timeoutMs: 15_000, cwd: ws, logLabel: "create-chat" },
   )
@@ -202,13 +201,13 @@ function createChatId(config: AppConfig, spawnEnv: Record<string, string>): stri
     broadcastLog(`[Agent] create-chat 返回为空`, "ERROR")
     return null
   }
-  setMainChatId(config.workspaceDir, chatId)
-  broadcastLog(`[Agent] 创建主会话: ${chatId}`)
+  setMainChatIdForScope(scope, chatId)
+  broadcastLog(`[Agent] 创建主会话: ${chatId} (scope=${scope})`)
   return chatId
 }
 
-function ensureMainChatId(config: AppConfig, spawnEnv: Record<string, string>): string | null {
-  return getMainChatId(config) || createChatId(config, spawnEnv)
+function ensureMainChatId(workspaceDir: string, scope: string, spawnEnv: Record<string, string>): string | null {
+  return getMainChatIdForScope(scope) || createChatId(workspaceDir, scope, spawnEnv)
 }
 
 function spawnAgentWithLogs(args: string[], env: Record<string, string>, label: string, cwd?: string): ChildProcess {
@@ -237,33 +236,25 @@ function attachStreamLoggers(child: ChildProcess): void {
 export interface LaunchAgentOptions {
   sessionKey: string
   chatType: ChatType
-  injectWorkspaceFn?: (dir: string) => boolean | Promise<boolean>
   meta?: LaunchMeta
   useMainWorkspace?: boolean
   senderOpenId?: string
   chatName?: string
   taskMessage?: string
-  modelScenario?: ModelScenario
-  modelOverride?: string
-}
-
-export async function launchSessionAgent(
-  sessionKey: string,
-  chatType: "p2p" | "group",
-  injectWorkspaceFn?: (dir: string) => boolean | Promise<boolean>,
-  meta?: LaunchMeta,
-  useMainWorkspace?: boolean,
-  senderOpenId?: string,
-  modelScenario?: ModelScenario,
-): Promise<{ ok: boolean; error?: string }> {
-  return launchAgent({ sessionKey, chatType, injectWorkspaceFn, meta, useMainWorkspace, senderOpenId, modelScenario })
+  /** 调用方解析好的工作目录（必填，由 session-dispatcher 按通道计算） */
+  workspaceDir: string
+  /** 调用方解析好的模型（空 / auto = CLI 默认） */
+  model?: string
+  /** 主会话 resume 作用域（`channelId:workspaceDir`）；仅主用户会话传入 */
+  resumeScope?: string
+  /** 每次新建会话（不 resume），仅在 resumeScope 存在时有意义 */
+  newSession?: boolean
 }
 
 export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boolean; error?: string }> {
-  const { sessionKey, chatType, injectWorkspaceFn, meta, senderOpenId, chatName, taskMessage } = opts
-  const needResume = chatType === "p2p" || chatType === "group"
+  const { sessionKey, chatType, meta, senderOpenId, chatName, taskMessage } = opts
+  const needResume = (chatType === "p2p" || chatType === "group") && !!opts.resumeScope
   const useMainWorkspace = opts.useMainWorkspace ?? false
-  const scenario = opts.modelScenario ?? "primary"
 
   if (isSessionAgentRunning(sessionKey)) {
     const sa = sessionAgents.get(sessionKey)
@@ -274,38 +265,26 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
   pendingLaunches.add(sessionKey)
 
   const config = getConfig()
-  let workDir = config.workspaceDir
-
-  if (!useMainWorkspace) {
-    const isOwnTask = chatType === "task" || chatType === "temp" || chatType === "workflow"
-    if (!isOwnTask && !config.allowOthers) { pendingLaunches.delete(sessionKey); return { ok: false, error: "未启用其他人使用" } }
-    const safeChatId = sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_")
-    workDir = path.join(app.getPath("userData"), "workspaces", safeChatId)
-    if (!fs.existsSync(workDir)) {
-      fs.mkdirSync(workDir, { recursive: true })
-      broadcastLog(`[Agent] 创建临时工作目录: ${workDir}`)
-    }
-    if (injectWorkspaceFn) await injectWorkspaceFn(workDir)
-  }
+  const workDir = opts.workspaceDir
 
   if (!workDir) { pendingLaunches.delete(sessionKey); return { ok: false, error: "工作目录未配置" } }
+  if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true })
   if (!resolveAgentBinary()) { pendingLaunches.delete(sessionKey); return { ok: false, error: "Cursor CLI 未安装" } }
 
   const prompt = buildPrompt(meta, taskMessage, sessionKey, useMainWorkspace)
   const spawnEnv = makeSpawnEnv(config, { LARK_WORKSPACE_DIR: workDir })
-  const overrideConfig = { ...config, workspaceDir: workDir }
 
   let resumeChatId: string | false = false
-  if (needResume) {
-    if (config.agentNewSession) {
-      if (getMainChatId(overrideConfig)) setMainChatId(workDir, "")
+  if (needResume && opts.resumeScope) {
+    if (opts.newSession) {
+      if (getMainChatIdForScope(opts.resumeScope)) setMainChatIdForScope(opts.resumeScope, "")
     } else {
-      const cid = ensureMainChatId(overrideConfig, spawnEnv)
+      const cid = ensureMainChatId(workDir, opts.resumeScope, spawnEnv)
       if (cid) resumeChatId = cid
     }
   }
 
-  const args = buildAgentLaunchArgs(overrideConfig, prompt, resumeChatId, scenario, opts.modelOverride)
+  const args = buildAgentLaunchArgs(workDir, prompt, resumeChatId, opts.model)
 
   try {
     const ws = workDir.trim() || undefined
@@ -375,18 +354,6 @@ export function stopAllSessionAgents(): void {
   for (const [key] of sessionAgents) stopSessionAgent(key)
 }
 
-
-export async function launchIndependentAgent(taskId: string, taskName: string, message: string, type: ChatType = "task", modelScenario: ModelScenario = "task", modelOverride?: string): Promise<{ ok: boolean; error?: string }> {
-  return launchAgent({
-    sessionKey: taskId,
-    chatType: type,
-    chatName: taskName,
-    taskMessage: message,
-    meta: { chatId: taskName, chatType: type },
-    modelScenario,
-    modelOverride,
-  })
-}
 
 // ── CLI 登录 ────────────────────────────────────────
 

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, memo } from "react"
+import { useState, useEffect, useRef, useCallback, memo } from "react"
 import {
   Play,
   Square,
@@ -14,15 +14,29 @@ import {
   Download,
   LogIn,
   AlertTriangle,
+  CheckCircle2,
+  Circle,
+  ChevronRight,
+  FolderOpen,
+  Rocket,
 } from "lucide-react"
 import logoUrl from "../assets/logo.png"
 import TitleBar from "../components/TitleBar"
 
 interface Props {
-  onSettings: () => void
+  /** 打开设置页，可指定初始 Tab */
+  onSettings: (tab?: string) => void
+  /** 当前是否为可见页面（从设置页返回时立即刷新） */
+  active?: boolean
 }
 
-export default function Dashboard({ onSettings }: Props) {
+interface OnboardState {
+  workspaceReady: boolean
+  agentReady: boolean
+  channelReady: boolean
+}
+
+export default function Dashboard({ onSettings, active }: Props) {
   const [status, setStatus] = useState<DaemonStatus>({ running: false })
   const [logLines, setLogLines] = useState<string[]>([])
   const [starting, setStarting] = useState(false)
@@ -37,9 +51,28 @@ export default function Dashboard({ onSettings }: Props) {
   const [cliMessage, setCliMessage] = useState("")
   const [stoppingAgent, setStoppingAgent] = useState(false)
   const [clearingQueue, setClearingQueue] = useState(false)
-  const [configModel, setConfigModel] = useState("")
-  const [agentMode, setAgentMode] = useState<"cli" | "sdk">("cli")
   const [showSessions, setShowSessions] = useState(false)
+  const [onboard, setOnboard] = useState<OnboardState | null>(null)
+  const [onboardDismissed, setOnboardDismissed] = useState(false)
+
+  const refreshOnboard = useCallback(async () => {
+    const cfg = await window.electronAPI.getConfig()
+    const channels = cfg.channels ?? []
+    const channelReady = channels.some((c) => c.enabled && (c.type === "feishu"
+      ? !!(c.larkAppId?.trim() && c.larkAppSecret?.trim())
+      : !!c.wechatToken?.trim()))
+    const hasSdkKey = (cfg.agentResources ?? []).some((r) => r.type === "sdk" && r.apiKey?.trim())
+    setOnboard((prev) => ({
+      workspaceReady: !!cfg.workspaceDir?.trim(),
+      agentReady: hasSdkKey || (prev?.agentReady ?? false),
+      channelReady,
+    }))
+  }, [])
+
+  // 从设置页返回时立即刷新清单状态
+  useEffect(() => {
+    if (active) void refreshOnboard()
+  }, [active, refreshOnboard])
   const [sessionList, setSessionList] = useState<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string; workspaceDir?: string }[]>([])
   const logRef = useRef<HTMLPreElement>(null)
 
@@ -56,6 +89,7 @@ export default function Dashboard({ onSettings }: Props) {
       const s = await window.electronAPI.getDaemonStatus()
       setStatus(s)
       syncCliStatus(s)
+      await refreshOnboard()
       if (s.queueLength && s.queueLength > 0) {
         const msgs = await window.electronAPI.getQueueMessages()
         setQueueMessages(msgs)
@@ -83,9 +117,10 @@ export default function Dashboard({ onSettings }: Props) {
 
     let cancelCliSchedule: (() => void) | undefined
     window.electronAPI.getConfig().then((cfg) => {
-      setConfigModel(cfg.model?.trim() || "auto")
-      setAgentMode(cfg.agentMode ?? "cli")
-      if (cfg.agentMode === "sdk") {
+      // 仅当存在绑定 CLI 资源的通道时才提示 CLI 安装/登录
+      const cliInUse = (cfg.channels ?? []).some((c) => c.enabled && c.agentResourceId === "cli")
+        || (cfg.channels ?? []).length === 0
+      if (!cliInUse) {
         setCliStatus("installed")
         return
       }
@@ -127,6 +162,13 @@ export default function Dashboard({ onSettings }: Props) {
     }
   }, [logLines])
 
+  // CLI 已登录也视为 Agent 资源就绪
+  useEffect(() => {
+    if (cliStatus === "installed") {
+      setOnboard((prev) => (prev ? { ...prev, agentReady: true } : prev))
+    }
+  }, [cliStatus])
+
   const handleStart = async () => {
     setStarting(true)
     setActionError("")
@@ -137,9 +179,14 @@ export default function Dashboard({ onSettings }: Props) {
         setStatus(s)
       } else {
         setActionError(result.error ?? "启动失败")
+        // 启动失败大多因配置缺失，重新展示引导清单
+        setOnboardDismissed(false)
+        void refreshOnboard()
       }
     } catch (e: unknown) {
       setActionError(e instanceof Error ? e.message : String(e))
+      setOnboardDismissed(false)
+      void refreshOnboard()
     }
     setStarting(false)
   }
@@ -320,7 +367,7 @@ export default function Dashboard({ onSettings }: Props) {
               <RefreshCw size={16} />
             </button>
             <button
-              onClick={onSettings}
+              onClick={() => onSettings()}
               className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-800 hover:text-white"
               title="设置"
             >
@@ -372,32 +419,28 @@ export default function Dashboard({ onSettings }: Props) {
           )}
         />
         <StatusCard
-          icon={status.feishuConnected || status.wechatReady ? Wifi : WifiOff}
+          icon={(status.channels ?? []).some((c) => c.connected) ? Wifi : WifiOff}
           label="消息通道"
-          value={
-            status.feishuConnected && status.wechatReady ? "飞书 + 微信"
-            : status.feishuConnected ? "飞书已连接"
-            : status.wechatReady ? "微信已连接"
-            : status.wechatStatus === "connected" ? "微信等待首条消息"
-            : status.wechatStatus === "logging_in" || status.wechatStatus === "qr_pending" ? "微信连接中"
-            : status.wechatEnabled && status.running ? "微信连接中"
-            : "等待连接"
-          }
-          color={
-            status.feishuConnected || status.wechatReady ? "green"
-            : status.wechatStatus === "connected" ? "yellow"
-            : status.wechatStatus === "logging_in" || status.wechatStatus === "qr_pending" || (status.wechatEnabled && status.running) ? "yellow"
-            : "gray"
-          }
-          sub={
-            status.feishuConnected && status.wechatReady ? "双通道就绪"
-            : status.feishuConnected ? "飞书目标已就绪"
-            : status.wechatReady ? "微信已就绪"
-            : status.wechatStatus === "connected" ? "请给机器人发一条消息"
-            : status.wechatStatus === "logging_in" || status.wechatStatus === "qr_pending" ? "正在建立微信连接..."
-            : status.wechatEnabled && status.running ? "正在初始化微信通道..."
-            : "等待目标"
-          }
+          value={(() => {
+            const chs = status.channels ?? []
+            if (chs.length === 0) return status.running ? "未配置通道" : "等待连接"
+            const ok = chs.filter((c) => c.connected).length
+            if (ok === chs.length) return chs.length === 1 ? `${chs[0].name} 已连接` : `${ok}/${chs.length} 通道在线`
+            if (ok > 0) return `${ok}/${chs.length} 通道在线`
+            return status.running ? "通道连接中" : "等待连接"
+          })()}
+          color={(() => {
+            const chs = status.channels ?? []
+            const ok = chs.filter((c) => c.connected).length
+            if (ok > 0 && ok === chs.length) return "green"
+            if (ok > 0 || (status.running && chs.length > 0)) return "yellow"
+            return "gray"
+          })()}
+          sub={(() => {
+            const chs = status.channels ?? []
+            if (chs.length === 0) return "等待目标"
+            return chs.map((c) => `${c.name}${c.connected ? "✓" : c.status === "qr_pending" ? "(扫码)" : "…"}`).join(" · ")
+          })()}
         />
         <div onClick={async () => { if (sessionList.length > 0 || status.agentRunning) { const next = !showSessions; setShowSessions(next); if (next) { setShowQueue(false); await refreshQueueMessages() } } }} className={sessionList.length > 0 || status.agentRunning ? "cursor-pointer" : ""}>
           <StatusCard
@@ -409,7 +452,7 @@ export default function Dashboard({ onSettings }: Props) {
                 : status.agentRunning ? `会话中 PID:${status.agentPid}` : "空闲"
             }
             color={status.agentRunning || sessionList.length > 0 ? "blue" : "gray"}
-            sub={sessionList.length > 0 ? "点击查看详情" : `模型: ${status.model || configModel || "auto"}`}
+            sub={sessionList.length > 0 ? "点击查看详情" : "等待消息"}
             action={status.agentRunning || sessionList.length > 0 ? (
               <button
                 onClick={(e) => { e.stopPropagation(); handleStopAgent() }}
@@ -444,6 +487,54 @@ export default function Dashboard({ onSettings }: Props) {
           />
         </div>
       </div>
+
+      {/* Onboarding checklist */}
+      {onboard && !onboardDismissed && !(onboard.workspaceReady && onboard.agentReady && onboard.channelReady) && (
+        <div className="mx-6 mb-3 rounded-xl border border-blue-800/50 bg-blue-950/20 p-4">
+          <div className="mb-1 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Rocket size={15} className="text-blue-400" />
+              <span className="text-sm font-medium text-blue-200">开始使用 Cursor Claw</span>
+            </div>
+            <button onClick={() => setOnboardDismissed(true)} className="rounded px-1.5 py-0.5 text-xs text-gray-500 transition hover:bg-gray-800 hover:text-gray-300">暂时隐藏</button>
+          </div>
+          <p className="mb-3 text-xs text-gray-500">完成以下三步配置，即可通过飞书 / 微信与 AI Agent 协作。</p>
+          <div className="space-y-1.5">
+            {(() => {
+              const items = [
+                { done: onboard.workspaceReady, icon: FolderOpen, label: "选择主工作目录", desc: "Agent 在此目录中工作", tab: "general" },
+                { done: onboard.agentReady, icon: Bot, label: "配置 Agent 资源", desc: "登录 Cursor CLI 或添加 SDK Key", tab: "agent" },
+                { done: onboard.channelReady, icon: MessageSquare, label: "添加消息通道", desc: "接入飞书或微信并绑定 Agent 资源", tab: "channel" },
+              ]
+              const nextIdx = items.findIndex((it) => !it.done)
+              return items.map((item, i) => {
+                const isNext = i === nextIdx
+                return (
+                  <button
+                    key={item.tab}
+                    onClick={() => onSettings(item.tab)}
+                    className={`flex w-full items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition ${
+                      item.done ? "border-green-800/40 bg-green-950/20"
+                      : isNext ? "border-blue-500/70 bg-blue-950/30 hover:bg-blue-900/30"
+                      : "border-gray-700 hover:border-blue-500 hover:bg-gray-800/40"}`}
+                  >
+                    {item.done
+                      ? <CheckCircle2 size={16} className="shrink-0 text-green-400" />
+                      : <Circle size={16} className={`shrink-0 ${isNext ? "text-blue-400" : "text-gray-600"}`} />}
+                    <item.icon size={14} className={`shrink-0 ${item.done ? "text-green-400/70" : isNext ? "text-blue-300" : "text-gray-400"}`} />
+                    <div className="min-w-0 flex-1">
+                      <span className={`text-xs font-medium ${item.done ? "text-green-300/80" : isNext ? "text-blue-100" : "text-gray-200"}`}>{i + 1}. {item.label}</span>
+                      <span className="ml-2 text-xs text-gray-600">{item.desc}</span>
+                    </div>
+                    {isNext && <span className="shrink-0 rounded bg-blue-600/30 px-1.5 py-0.5 text-[10px] font-medium text-blue-300">下一步</span>}
+                    {!item.done && <ChevronRight size={14} className={`shrink-0 ${isNext ? "text-blue-400" : "text-gray-600"}`} />}
+                  </button>
+                )
+              })
+            })()}
+          </div>
+        </div>
+      )}
 
       {showSessions && sessionList.length > 0 && (
         <div className="mx-6 rounded-xl border border-gray-800 bg-gray-900/80 p-3">

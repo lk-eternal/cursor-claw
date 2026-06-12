@@ -93,7 +93,7 @@ export async function injectMcpGlobal(): Promise<boolean> {
 
 // ── Rules injection ────────────────────────────────────────────
 
-export function injectRulesToDir(wsDir: string, skipIdentity = false): boolean {
+export function injectRulesToDir(wsDir: string, skipIdentity = false, identityOverride?: string): boolean {
   try {
     const rulesDir = path.join(wsDir, ".cursor", "rules")
     if (!fs.existsSync(rulesDir)) fs.mkdirSync(rulesDir, { recursive: true })
@@ -112,7 +112,8 @@ export function injectRulesToDir(wsDir: string, skipIdentity = false): boolean {
     if (skipIdentity) {
       if (fs.existsSync(identityPath)) fs.unlinkSync(identityPath)
     } else {
-      const identity = getConfig().digitalIdentity?.trim()
+      // 优先使用通道级身份规则，未传入时回退全局旧字段
+      const identity = (identityOverride ?? getConfig().digitalIdentity)?.trim()
       if (identity) {
         const identityMdc = [
           "---",
@@ -191,12 +192,12 @@ function cleanProjectMcpStale(wsDir: string): void {
 
 // ── Composite: inject all into a directory ─────────────────────
 
-export async function injectWorkspaceToDir(dir: string, skipIdentity = false): Promise<boolean> {
+export async function injectWorkspaceToDir(dir: string, skipIdentity = false, identityOverride?: string): Promise<boolean> {
   const key = norm(dir)
   if (fullyInjectedDirs.has(key)) return true
 
   injectSkillsToDir(dir)
-  const ok = injectRulesToDir(dir, skipIdentity)
+  const ok = injectRulesToDir(dir, skipIdentity, identityOverride)
   if (ok) fullyInjectedDirs.add(key)
   return ok
 }

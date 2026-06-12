@@ -346,8 +346,8 @@ function registerIpcHandlers(): void {
     return { ok: true, models: parseListModelsStdout(run.stdout) }
   })
 
-  ipcMain.handle("sdk:check-api-key", () => checkSdkApiKey())
-  ipcMain.handle("sdk:list-models", () => listSdkModels())
+  ipcMain.handle("sdk:check-api-key", (_, apiKey: string) => checkSdkApiKey(apiKey))
+  ipcMain.handle("sdk:list-models", (_, apiKey: string, currentModel?: string, currentParams?: string) => listSdkModels(apiKey, currentModel, currentParams))
 }
 
 let isQuitting = false

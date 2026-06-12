@@ -11,13 +11,18 @@ const CATCHUP_MAX_MS = 30 * 60 * 1000;
 /** 单任务单次 tick 内最多向前迭代次数 */
 const MAX_FIRES_PER_TICK = 10_000;
 
-interface ScheduledTask {
+export interface ScheduledTask {
   id: string;
   name: string;
   cron: string;
   content: string;
   enabled?: boolean;
   independent?: boolean;
+  /** 所属消息通道；空 = 第一个可用通道 */
+  channelId?: string;
+  /** 任务模型，空 = 跟随通道主模型 */
+  model?: string;
+  modelParams?: string;
 }
 
 let scheduledTasksSnapshot: ScheduledTask[] = [];
@@ -110,8 +115,8 @@ function stopWatchdog(): void {
   lastWatchdogMs = 0;
 }
 interface SchedulerCallbacks {
-  enqueue: (content: string) => void;
-  launchIndependent?: (taskId: string, taskName: string, content: string) => void;
+  enqueue: (task: ScheduledTask, content: string) => void;
+  launchIndependent?: (task: ScheduledTask, content: string) => void;
 }
 
 /** 按时间窗口扫描应触发点；仅接受距今不超过 CATCHUP_MAX_MS 的槽位（过时即丢弃，避免睡眠唤醒后执行已失效任务）。 */
@@ -152,9 +157,9 @@ function runWatchdogTick(cb: SchedulerCallbacks): void {
       const message = `[定时任务: ${task.name}] (触发时间: ${nowStr})\n\n${task.content}`;
       log(`触发: ${task.name}${task.independent ? " [独立运行]" : ""}`);
       if (task.independent && cb.launchIndependent) {
-        cb.launchIndependent(task.id, task.name, message);
+        cb.launchIndependent(task, message);
       } else {
-        cb.enqueue(message);
+        cb.enqueue(task, message);
       }
     }
   }
@@ -223,7 +228,10 @@ function startFileWatcher(cb: SchedulerCallbacks): void {
   }
 }
 
-export function startDaemonScheduledTasks(enqueue: (content: string) => void, launchIndependent?: (taskId: string, taskName: string, content: string) => void): void {
+export function startDaemonScheduledTasks(
+  enqueue: (task: ScheduledTask, content: string) => void,
+  launchIndependent?: (task: ScheduledTask, content: string) => void,
+): void {
   const cb: SchedulerCallbacks = { enqueue, launchIndependent };
   reloadTasks(cb);
   startFileWatcher(cb);

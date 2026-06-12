@@ -6,7 +6,13 @@ import * as path from "node:path"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import { app, BrowserWindow, ipcMain, powerSaveBlocker } from "electron"
-import { getConfig, saveConfig, useSdkMode, type AppConfig } from "./config-store"
+import {
+  getConfig, saveConfig, type AppConfig,
+  getChannels, getEnabledChannels, getChannel,
+  updateChannel, migrateLegacyConfig, effectiveWorkspaceDir,
+  mainChatScopeKey, type MessageChannel,
+} from "./config-store"
+import { parseChatKey, type DaemonChannelConfig, type ChannelStatusInfo } from "../src/shared/channel-types"
 import { validateCron, readTasksFromFile, writeTasksToFile, previewCronNextRuns, getNextCronFireLabel } from "./cron-scheduler"
 import { seedBuiltins, listDefinitions, saveDefinition, deleteDefinition, listInstances, getInstance, saveInstance, deleteInstance } from "./workflow-file"
 import { runWorkflowDefinition } from "./workflow-runner"
@@ -52,31 +58,28 @@ export { getQueueMessages, clearMessageQueue, deleteQueueMessage } from "./sessi
 
 
 function isAgentRunning(): boolean {
-  return useSdkMode() ? getSdkSessionCount() > 0 : _isCliAgentRunning()
+  return _isCliAgentRunning() || getSdkSessionCount() > 0
 }
 
 function getRunningSessionCount(): number {
-  return useSdkMode() ? getSdkSessionCount() : _getCliRunningCount()
+  return _getCliRunningCount() + getSdkSessionCount()
 }
 
 function getSessionAgentCount(): number {
-  return useSdkMode() ? getSdkSessionCount() : _getCliSessionCount()
+  return _getCliSessionCount() + getSdkSessionCount()
 }
 
 function stopAgent(): void {
-  if (useSdkMode()) stopAllSdkSessions()
-  else _stopCliAgent()
+  stopAllSdkSessions()
+  _stopCliAgent()
 }
 
 function getIndependentTaskStatuses(): Record<string, { running: boolean; pid?: number; startedAt?: number }> {
-  if (useSdkMode()) {
-    const out: Record<string, { running: boolean; pid?: number; startedAt?: number }> = {}
-    for (const s of getSdkSessionList()) {
-      if (s.chatType === "task") out[s.sessionKey] = { running: true, startedAt: s.startedAt }
-    }
-    return out
+  const out: Record<string, { running: boolean; pid?: number; startedAt?: number }> = _getCliTaskStatuses()
+  for (const s of getSdkSessionList()) {
+    if (s.chatType === "task" || s.chatType === "temp") out[s.sessionKey] = { running: true, startedAt: s.startedAt }
   }
-  return _getCliTaskStatuses()
+  return out
 }
 
 
@@ -104,9 +107,9 @@ export interface DaemonStatus {
   sessionAgentCount?: number
   cliAvailable?: boolean
   error?: string
-  model?: string
   workspaceMismatch?: boolean
   daemonWorkspaceDir?: string
+  channels?: ChannelStatusInfo[]
   feishuEnabled?: boolean
   feishuConnected?: boolean
   wechatEnabled?: boolean
@@ -122,6 +125,64 @@ let activeDaemonWorkspaceDir: string | null = null
 
 let tempWsClient: import("@larksuiteoapi/node-sdk").WSClient | null = null
 let tempConnAbort: (() => void) | null = null
+
+// ── 主用户绑定等待器（daemon armed-bind 模式）──────────────
+let bindWaiter: { channelId: string; resolve: (chatId: string) => void } | null = null
+
+function resolveBindWaiter(channelId: string, chatId: string): void {
+  if (bindWaiter && bindWaiter.channelId === channelId) {
+    const w = bindWaiter
+    bindWaiter = null
+    w.resolve(chatId)
+  }
+}
+
+// ── 微信临时连接：等待首条消息（Daemon 未运行时的绑定兜底）──
+let wechatTempMgr: { stop: () => Promise<void> } | null = null
+
+async function wechatWaitFirstMessageImpl(token: string, accountId: string, channelId?: string): Promise<{ ok: boolean; chatId?: string; error?: string }> {
+  if (wechatTempMgr) { try { await wechatTempMgr.stop() } catch { /* ignore */ } wechatTempMgr = null }
+  const dataDir = channelId
+    ? path.join(app.getPath("userData"), "wechat-data", channelId)
+    : path.join(app.getPath("userData"), "wechat-data")
+  const { WeChatManager } = await import("../src/wechat-manager.js")
+
+  return new Promise<{ ok: boolean; chatId?: string; error?: string }>((resolve) => {
+    let done = false
+    const timer = setTimeout(() => {
+      if (done) return; done = true
+      wechatTempMgr?.stop().catch(() => {}); wechatTempMgr = null
+      resolve({ ok: false, error: "等待超时(5分钟)，请重试" })
+    }, 5 * 60_000)
+
+    const mgr = new WeChatManager({
+      dataDir,
+      log: (level: string, ...args: unknown[]) => console.log(`[main-wechat-temp] [${level}]`, ...args),
+      onMessage: (msg: { chatType: string; chatId: string }) => {
+        if (done) return
+        if (msg.chatType === "p2p" && msg.chatId) {
+          done = true; clearTimeout(timer)
+          const stateFile = path.join(dataDir, "state.json")
+          try {
+            let st: Record<string, unknown> = {}
+            if (fs.existsSync(stateFile)) st = JSON.parse(fs.readFileSync(stateFile, "utf-8"))
+            st.lastChatId = msg.chatId
+            if (!fs.existsSync(path.dirname(stateFile))) fs.mkdirSync(path.dirname(stateFile), { recursive: true })
+            fs.writeFileSync(stateFile, JSON.stringify(st))
+          } catch { /* ignore */ }
+          mgr.stop().then(() => { wechatTempMgr = null }).catch(() => { wechatTempMgr = null })
+          resolve({ ok: true, chatId: msg.chatId })
+        }
+      },
+    })
+    wechatTempMgr = mgr
+    mgr.start(token, accountId).catch((err: Error) => {
+      if (done) return; done = true; clearTimeout(timer)
+      wechatTempMgr = null
+      resolve({ ok: false, error: err?.message ?? "连接失败" })
+    })
+  })
+}
 
 function getDaemonEntryPath(): string {
   if (app.isPackaged) {
@@ -189,12 +250,11 @@ function httpsPost(url: string, body: object, headers: Record<string, string> = 
   })
 }
 
-async function larkSendTestMessage(receiveId: string): Promise<void> {
-  const cfg = getConfig()
-  if (!cfg.larkAppId || !cfg.larkAppSecret) throw new Error("飞书凭据未配置")
+async function larkSendTestMessage(channel: MessageChannel, receiveId: string): Promise<void> {
+  if (!channel.larkAppId || !channel.larkAppSecret) throw new Error("飞书凭据未配置")
   const tokenResp = await httpsPost("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
-    app_id: cfg.larkAppId,
-    app_secret: cfg.larkAppSecret,
+    app_id: channel.larkAppId,
+    app_secret: channel.larkAppSecret,
   })
   const token = tokenResp?.tenant_access_token
   if (!token) throw new Error("获取 access_token 失败")
@@ -206,14 +266,18 @@ async function larkSendTestMessage(receiveId: string): Promise<void> {
   if (sendResp?.code !== 0) throw new Error(sendResp?.msg || "发送失败")
 }
 
-async function wechatSendTestMessage(): Promise<void> {
-  const cfg = getConfig()
-  if (!cfg.wechatToken) throw new Error("微信 Token 未配置")
-  const dataDir = path.join(app.getPath("userData"), "wechat-data")
+async function wechatSendTestMessage(channel: MessageChannel): Promise<void> {
+  if (!channel.wechatToken) throw new Error("微信 Token 未配置")
+  const dataDir = path.join(app.getPath("userData"), "wechat-data", channel.id)
+  return wechatSendTestMessageRaw(channel.wechatToken, dataDir, channel.mainUserEnabled ? channel.mainUserChatId : "")
+}
+
+async function wechatSendTestMessageRaw(token: string, dataDir: string, preferredChatId?: string): Promise<void> {
+  if (!token?.trim()) throw new Error("微信 Token 未配置")
   const stateFile = path.join(dataDir, "state.json")
   if (!fs.existsSync(stateFile)) throw new Error("暂无微信交互记录，请先给机器人发一条消息")
   const state = JSON.parse(fs.readFileSync(stateFile, "utf-8"))
-  const chatId = state?.lastChatId as string | undefined
+  const chatId = preferredChatId?.trim() || (state?.lastChatId as string | undefined)
   if (!chatId) throw new Error("暂无微信交互记录，请先给机器人发一条消息")
   const ctFile = path.join(dataDir, "wechat-ctx-tokens.json")
   if (!fs.existsSync(ctFile)) throw new Error("无会话上下文，请先给机器人发一条消息")
@@ -236,7 +300,7 @@ async function wechatSendTestMessage(): Promise<void> {
     headers: {
       "Content-Type": "application/json",
       "AuthorizationType": "ilink_bot_token",
-      "Authorization": `Bearer ${cfg.wechatToken.trim()}`,
+      "Authorization": `Bearer ${token.trim()}`,
       "Content-Length": String(Buffer.byteLength(bodyStr, "utf-8")),
       "X-WECHAT-UIN": uin,
     },
@@ -261,7 +325,6 @@ export async function getDaemonStatus(): Promise<DaemonStatus> {
   const statusFromHealth = (port: number, health: Record<string, unknown>): DaemonStatus => {
     cachedPort = port
     setDaemonPort(port)
-    const cfgModel = config.model?.trim() || "auto"
     const status: DaemonStatus = {
       running: true,
       version: health.version as string,
@@ -271,12 +334,12 @@ export async function getDaemonStatus(): Promise<DaemonStatus> {
       agentRunning: isAgentRunning() || getSessionAgentCount() > 0,
       agentPid: getAgentChildPid(),
       sessionAgentCount: getRunningSessionCount(),
-      model: cfgModel,
+      channels: health.channels as ChannelStatusInfo[] | undefined,
       feishuEnabled: health.feishuEnabled as boolean | undefined,
       feishuConnected: health.feishuConnected as boolean | undefined,
       wechatEnabled: health.wechatEnabled as boolean | undefined,
       wechatStatus: health.wechatStatus as string | undefined,
-      wechatReady: !!(health.wechatStatus === "connected" && health.lastWechatChatId),
+      wechatReady: health.wechatReady as boolean | undefined,
     }
     return status
   }
@@ -346,12 +409,33 @@ function ensureCliConfig(): void {
   } catch { /* ignore */ }
 }
 
+/** 通道是否凭据齐全可下发给 Daemon */
+function channelReady(c: MessageChannel): boolean {
+  if (!c.enabled) return false
+  if (c.type === "feishu") return !!(c.larkAppId?.trim() && c.larkAppSecret?.trim())
+  return !!c.wechatToken?.trim()
+}
+
+function buildDaemonChannelConfigs(): DaemonChannelConfig[] {
+  return getChannels().filter(channelReady).map((c) => ({
+    id: c.id,
+    name: c.name || (c.type === "feishu" ? "飞书" : "微信"),
+    type: c.type,
+    appId: c.larkAppId?.trim(),
+    appSecret: c.larkAppSecret?.trim(),
+    wechatToken: c.wechatToken?.trim(),
+    wechatAccountId: c.wechatAccountId?.trim(),
+    mainUserEnabled: !!c.mainUserEnabled,
+    mainUserChatId: c.mainUserEnabled ? (c.mainUserChatId?.trim() ?? "") : "",
+    workspaceDir: c.workspaceDir?.trim() ?? "",
+  }))
+}
+
 export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
   const config = getConfig()
-  const feishuReady = !!(config.feishuEnabled && config.larkAppId && config.larkAppSecret)
-  const wechatReady = !!(config.wechatEnabled && config.wechatToken)
-  if (!feishuReady && !wechatReady) {
-    return { ok: false, error: "至少需要配置一个消息通道（飞书凭据或微信 Token）" }
+  const channelConfigs = buildDaemonChannelConfigs()
+  if (channelConfigs.length === 0) {
+    return { ok: false, error: "至少需要配置一个可用的消息通道（设置 → 消息通道）" }
   }
   if (!config.workspaceDir) {
     return { ok: false, error: "工作目录未配置" }
@@ -394,18 +478,8 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
       APP_DATA_DIR: app.getPath("userData"),
       CURSOR_CLAW_TEMPLATE_DIR: templateDir,
       NODE_USE_ENV_PROXY: "1",
+      CLAW_CHANNELS_JSON: JSON.stringify(channelConfigs),
       ...(config.daemonPort ? { LARK_DAEMON_PORT: String(config.daemonPort) } : {}),
-      ...(feishuReady ? {
-        FEISHU_ENABLED: "1",
-        LARK_APP_ID: config.larkAppId,
-        LARK_APP_SECRET: config.larkAppSecret,
-        LARK_RECEIVE_CHAT_ID: config.larkReceiveId,
-      } : {}),
-      ...(wechatReady ? {
-        WECHAT_ENABLED: "1",
-        WECHAT_TOKEN: config.wechatToken,
-        WECHAT_ACCOUNT_ID: config.wechatAccountId,
-      } : {}),
     }
     applyProxyEnv(env, config)
 
@@ -434,7 +508,10 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
             const payload = JSON.parse(line.slice("__IND_LAUNCH__:".length))
             const chatType = payload.chatType ?? "task"
             const chatId = payload.chatId as string | undefined
-            void launchIndependentAgent(payload.taskId, payload.taskName, payload.content, chatType, chatId).then(async (result) => {
+            void launchIndependentAgent(
+              payload.taskId, payload.taskName, payload.content, chatType, chatId,
+              payload.channelId, payload.model, payload.modelParams,
+            ).then(async (result) => {
               if (result.ok && chatId && cachedPort) {
                 const currentActive = await getCurrentActiveSession(cachedPort, chatId)
                 if (currentActive && currentActive !== payload.taskId) previousActiveSessionMap.set(payload.taskId, currentActive)
@@ -470,11 +547,13 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
         if (line.startsWith("__BIND_RESULT__:")) {
           try {
             const payload = JSON.parse(line.slice("__BIND_RESULT__:".length))
-            const chatId = payload.chatId
-            if (chatId) {
-              saveConfig({ larkReceiveId: chatId })
-              broadcastLog(`[Bind] 主用户绑定成功: chat_id=${chatId}`)
-              BrowserWindow.getAllWindows().forEach((w) => w.webContents.send("bind:result", { ok: true, value: chatId }))
+            const chatId = payload.chatId as string | undefined
+            const channelId = payload.channelId as string | undefined
+            if (chatId && channelId) {
+              updateChannel(channelId, { mainUserEnabled: true, mainUserChatId: chatId })
+              broadcastLog(`[Bind] 通道 ${channelId} 主用户绑定成功: chat_id=${chatId}`)
+              resolveBindWaiter(channelId, chatId)
+              BrowserWindow.getAllWindows().forEach((w) => w.webContents.send("bind:result", { ok: true, value: chatId, channelId }))
             }
           } catch { /* ignore */ }
           continue
@@ -487,13 +566,19 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
           continue
         }
         if (line.startsWith("__WECHAT_QR__:")) {
-          const dataUrl = line.slice("__WECHAT_QR__:".length)
-          BrowserWindow.getAllWindows().forEach((w) => w.webContents.send("wechat:qrcode", dataUrl))
+          const rest = line.slice("__WECHAT_QR__:".length)
+          const sep = rest.indexOf(":")
+          const channelId = sep > 0 ? rest.slice(0, sep) : ""
+          const dataUrl = sep > 0 ? rest.slice(sep + 1) : rest
+          BrowserWindow.getAllWindows().forEach((w) => w.webContents.send("wechat:qrcode", dataUrl, channelId))
           continue
         }
         if (line.startsWith("__WECHAT_STATUS__:")) {
-          const status = line.slice("__WECHAT_STATUS__:".length)
-          BrowserWindow.getAllWindows().forEach((w) => w.webContents.send("wechat:status", status))
+          const rest = line.slice("__WECHAT_STATUS__:".length)
+          const sep = rest.indexOf(":")
+          const channelId = sep > 0 ? rest.slice(0, sep) : ""
+          const status = sep > 0 ? rest.slice(sep + 1) : rest
+          BrowserWindow.getAllWindows().forEach((w) => w.webContents.send("wechat:status", status, channelId))
           continue
         }
         pushUiLog("Daemon", "INFO", line)
@@ -676,7 +761,7 @@ function startStatusPolling(): void {
       }
 
       const sessions = getSessionAgentList()
-      if (getConfig().feishuEnabled) {
+      if (getEnabledChannels().some((c) => c.type === "feishu")) {
         const uncachedGroups = sessions
           .filter((s) => s.chatType === "group" && !chatNameCache.has(s.sessionKey))
           .map((s) => s.sessionKey)
@@ -708,18 +793,19 @@ function stopStatusPolling(): void {
 
 function resolveCommandSessionKey(chatId?: string, chatType?: string): string | undefined {
   if (!chatId) return undefined
-  const cfg = getConfig()
-  if (chatType === "p2p" && isMainUser(chatId, chatType) && cfg.workspaceDir) {
-    return `${chatId}::${cfg.workspaceDir}`
+  if (chatType === "p2p" && isMainUser(chatId, chatType)) {
+    const channel = getChannel(parseChatKey(chatId).channelId)
+    const wsDir = effectiveWorkspaceDir(channel)
+    if (wsDir) return `${chatId}::${wsDir}`
   }
   return chatId
 }
 
 function resolveResetWorkspaceDir(sessionKey?: string, chatId?: string, chatType?: string): string | undefined {
   if (!sessionKey) return undefined
-  const cfg = getConfig()
   if (chatType === "p2p" && isMainUser(chatId, chatType)) {
-    return cfg.workspaceDir
+    const channel = getChannel(parseChatKey(chatId!).channelId)
+    return effectiveWorkspaceDir(channel)
   }
   return path.join(app.getPath("userData"), "workspaces", sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_"))
 }
@@ -788,7 +874,8 @@ async function checkAndExecutePendingCommands(): Promise<void> {
 
         case "/list": {
           const msgs = await getQueueMessages()
-          const filtered = isAdmin ? msgs : msgs.filter((m) => m.chatId === claimed!.chatId)
+          const filtered = isAdmin ? msgs : msgs.filter((m) =>
+            m.sessionKey === claimed!.chatId || m.sessionKey?.startsWith(claimed!.chatId + "::"))
           if (filtered.length === 0) {
             await reply(true, "📭 消息队列为空")
           } else {
@@ -802,7 +889,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           if (!isAdmin) { await denyNonAdmin(); break }
           await handleFeishuTaskCommand(
             lock.port, claimed.messageId, rawCmd,
-            (id, name, content) => launchIndependentAgent(id, name, content),
+            (task, content) => launchIndependentAgent(task.id, task.name, content, "task", undefined, task.channelId, task.model, task.modelParams),
             claimed.chatId,
             async (content, preferredChatId) => enqueueToMainSession(lock.port, content, preferredChatId ?? claimed.chatId),
           )
@@ -854,7 +941,8 @@ async function checkAndExecutePendingCommands(): Promise<void> {
             stopSessionAgent(sessionKey)
           }
           const wsDir = resolveResetWorkspaceDir(sessionKey, claimed.chatId, claimed.chatType)
-          if (wsDir) setMainChatId(wsDir, "")
+          const cmdChannelId = claimed.chatId ? parseChatKey(claimed.chatId).channelId : undefined
+          if (wsDir && cmdChannelId) setMainChatId(mainChatScopeKey(cmdChannelId, wsDir), "")
           broadcastLog(`[指令 /reset] 已重置会话 ${sessionKey ?? claimed.chatId ?? "unknown"}`, "INFO")
           await reply(true, "✅ 当前会话已重置, 请重新发消息开启新会话")
           break
@@ -983,16 +1071,29 @@ export async function applyWorkspaceSwitch(workspaceDir: string, stopOldSessions
 /**
  * 保存配置；若工作目录变更且旧目录有活跃会话，返回会话列表供渲染进程展示确认弹窗。
  */
+/** 通道中影响 Daemon 连接的字段子集（变更后才需要重启 Daemon） */
+function daemonRelevantChannelView(channels: MessageChannel[]): string {
+  return JSON.stringify(channels.map((c) => ({
+    id: c.id, type: c.type, enabled: c.enabled,
+    appId: c.larkAppId, appSecret: c.larkAppSecret,
+    token: c.wechatToken, account: c.wechatAccountId,
+    ws: c.workspaceDir,
+  })))
+}
+
 export async function saveAppConfigFromRenderer(partial: Partial<AppConfig>): Promise<ConfigSaveResult> {
   const current = getConfig()
   const oldW = (current.workspaceDir || "").trim()
   const nextW = partial.workspaceDir !== undefined ? partial.workspaceDir.trim() : oldW
   const workspaceChanging = partial.workspaceDir !== undefined && nextW !== oldW && oldW !== ""
+  const channelsChanging = partial.channels !== undefined
+    && daemonRelevantChannelView(partial.channels) !== daemonRelevantChannelView(current.channels ?? [])
 
   if (workspaceChanging) {
     const st = await getDaemonStatus()
-    if (st.running) {
-      const sessions = getSessionAgentList()
+    const sessions = st.running ? getSessionAgentList() : []
+    // 仅当存在活跃会话时才需要用户确认；无会话直接静默切换
+    if (st.running && sessions.length > 0) {
       const deferredSc = partial.setupComplete === true
       const rest: Partial<AppConfig> = { ...partial }
       delete (rest as Record<string, unknown>).workspaceDir
@@ -1008,6 +1109,17 @@ export async function saveAppConfigFromRenderer(partial: Partial<AppConfig>): Pr
         deferredSetupComplete: deferredSc,
       }
     }
+    if (st.running) {
+      const rest: Partial<AppConfig> = { ...partial }
+      delete (rest as Record<string, unknown>).workspaceDir
+      saveConfig(rest)
+      const r = await applyWorkspaceSwitch(nextW, false)
+      if (!r.ok) {
+        broadcastLog(`[Workspace] 切换失败: ${r.error}`, "ERROR")
+        return { ok: false }
+      }
+      return { ok: true, workspaceDirChanged: true }
+    }
   }
 
   const workspaceDirChanged = partial.workspaceDir !== undefined && nextW !== oldW
@@ -1017,54 +1129,184 @@ export async function saveAppConfigFromRenderer(partial: Partial<AppConfig>): Pr
   }
 
   saveConfig(partial)
+
+  // 通道配置变化：重启 Daemon 使新连接配置生效
+  if (channelsChanging) {
+    const st = await getDaemonStatus()
+    if (st.running) {
+      broadcastLog("[Channels] 通道配置已变更，正在重启 Daemon...")
+      void (async () => {
+        await stopDaemon()
+        await new Promise((r) => setTimeout(r, 800))
+        const result = await startDaemon()
+        if (!result.ok) broadcastLog(`[Channels] Daemon 重启失败: ${result.error}`, "ERROR")
+        broadcastStatus(await getDaemonStatus())
+      })()
+    }
+  }
+
   return { ok: true, ...(workspaceDirChanged ? { workspaceDirChanged: true } : {}) }
 }
 
 // ── 初始化 ───────────────────────────────────────────────
 
+/** 旧单通道配置 → channels 模型一次性迁移（应用启动时执行） */
+export function runLegacyConfigMigration(): void {
+  if (getConfig().channelsMigrated) return
+  const wechatBase = path.join(app.getPath("userData"), "wechat-data")
+  migrateLegacyConfig({
+    readWechatLastChatId: () => {
+      try {
+        return JSON.parse(fs.readFileSync(path.join(wechatBase, "state.json"), "utf-8"))?.lastChatId ?? ""
+      } catch { return "" }
+    },
+    moveWechatDataDir: (channelId: string) => {
+      try {
+        if (!fs.existsSync(wechatBase)) return
+        const dest = path.join(wechatBase, channelId)
+        if (fs.existsSync(dest)) return
+        fs.mkdirSync(dest, { recursive: true })
+        for (const f of fs.readdirSync(wechatBase, { withFileTypes: true })) {
+          if (f.isFile()) fs.renameSync(path.join(wechatBase, f.name), path.join(dest, f.name))
+        }
+        broadcastLog(`[Migrate] 微信数据目录已迁移到 wechat-data/${channelId}`)
+      } catch { /* ignore */ }
+    },
+    patchScheduledTasks: (patch) => {
+      const tasks = readTasksFromFile()
+      if (tasks.length > 0) writeTasksToFile(tasks.map(patch))
+    },
+  })
+}
+
 export function initDaemonManager(): void {
   process.env.APP_DATA_DIR = app.getPath("userData")
+  runLegacyConfigMigration()
   seedBuiltins()
   initSessionDispatcher()
   ipcMain.handle("config:apply-workspace-switch", (_, workspaceDir: string, stopOldSessions: boolean) => applyWorkspaceSwitch(workspaceDir, stopOldSessions))
   ipcMain.handle("daemon:get-log-buffer", () => getLogBuffer())
   ipcMain.handle("agent:stop", () => { stopAgent(); return { ok: true } })
   ipcMain.handle("agent:sessions", () => getSessionAgentList())
-  ipcMain.handle("bind:test", async () => {
-    const chatId = getConfig().larkReceiveId?.trim()
-    if (!chatId) return { ok: false, error: "未绑定主用户" }
-    try {
-      await larkSendTestMessage(chatId)
-      return { ok: true }
-    } catch (e: any) {
-      return { ok: false, error: e?.message ?? "发送失败" }
-    }
-  })
-  ipcMain.handle("bind:test-wechat", async () => {
-    try {
-      await wechatSendTestMessage()
-      return { ok: true }
-    } catch (e: any) {
-      return { ok: false, error: e?.message ?? "发送失败" }
-    }
-  })
-  ipcMain.handle("wechat:reload", async (_e, token: string, accountId: string) => {
-    const lock = readLockFile()
-    if (!lock?.port) return { ok: false, error: "Daemon 未运行" }
-    try {
-      const res = await httpPost(`http://127.0.0.1:${lock.port}/wechat-reload`, { token, accountId }) as { ok?: boolean; error?: string; message?: string }
-      if (res.ok) {
-        setTimeout(async () => {
-          try {
-            const status = await getDaemonStatus()
-            broadcastStatus(status)
-          } catch { /* ignore */ }
-        }, 2000)
+  ipcMain.handle("bind:test", async (_e, channelId?: string) => {
+    // Setup 向导（通道尚未创建）：用旧字段直接测试飞书
+    if (!channelId) {
+      const cfg = getConfig()
+      const chatId = cfg.larkReceiveId?.trim()
+      if (!chatId) return { ok: false, error: "未绑定主用户" }
+      try {
+        await larkSendTestMessage({ larkAppId: cfg.larkAppId, larkAppSecret: cfg.larkAppSecret } as MessageChannel, chatId)
+        return { ok: true }
+      } catch (e: any) {
+        return { ok: false, error: e?.message ?? "发送失败" }
       }
-      return res
-    } catch (e: any) {
-      return { ok: false, error: e?.message ?? "重载失败" }
     }
+    const channel = getChannel(channelId)
+    if (!channel) return { ok: false, error: "通道不存在" }
+    try {
+      // 优先走运行中的 Daemon（统一处理飞书/微信，含 lastP2pChatId 兜底）
+      const lock = readLockFile()
+      if (lock?.port) {
+        const st = await getDaemonStatus()
+        if (st.running && st.channels?.some((c) => c.id === channelId)) {
+          const res = await httpPost(`http://127.0.0.1:${lock.port}/channel-test`, { channelId }, 10_000) as { ok?: boolean; error?: string }
+          return res?.ok ? { ok: true } : { ok: false, error: res?.error ?? "发送失败" }
+        }
+      }
+      if (channel.type === "feishu") {
+        const chatId = channel.mainUserChatId?.trim()
+        if (!chatId) return { ok: false, error: "未绑定主用户" }
+        await larkSendTestMessage(channel, chatId)
+        return { ok: true }
+      }
+      await wechatSendTestMessage(channel)
+      return { ok: true }
+    } catch (e: any) {
+      return { ok: false, error: e?.message ?? "发送失败" }
+    }
+  })
+
+  ipcMain.handle("bind:test-wechat", async () => {
+    // Setup 向导（通道尚未创建）：旧字段 + 旧数据目录测试微信
+    const cfg = getConfig()
+    const wechatChannel = getChannels().find((c) => c.type === "wechat")
+    try {
+      if (wechatChannel?.wechatToken?.trim()) {
+        await wechatSendTestMessage(wechatChannel)
+      } else {
+        await wechatSendTestMessageRaw(cfg.wechatToken, path.join(app.getPath("userData"), "wechat-data"))
+      }
+      return { ok: true }
+    } catch (e: any) {
+      return { ok: false, error: e?.message ?? "发送失败" }
+    }
+  })
+
+  // ── 通道主用户绑定（Daemon armed-bind 优先，临时连接兜底）──
+  ipcMain.handle("channel:bind-start", async (_e, channelId: string) => {
+    const channel = getChannel(channelId)
+    if (!channel) return { ok: false, error: "通道不存在" }
+
+    const st = await getDaemonStatus()
+    const lock = readLockFile()
+    const viaDaemon = st.running && lock?.port && st.channels?.some((c) => c.id === channelId && c.connected)
+
+    if (viaDaemon) {
+      try {
+        await httpPost(`http://127.0.0.1:${lock!.port}/channel-bind`, { channelId, arm: true })
+      } catch (e: any) {
+        return { ok: false, error: e?.message ?? "绑定请求失败" }
+      }
+      return await new Promise<{ ok: boolean; chatId?: string; error?: string }>((resolve) => {
+        const timeout = setTimeout(() => {
+          bindWaiter = null
+          httpPost(`http://127.0.0.1:${lock!.port}/channel-bind`, { channelId, arm: false }).catch(() => {})
+          resolve({ ok: false, error: "绑定超时（90秒内未收到私聊消息）" })
+        }, 90_000)
+        bindWaiter = { channelId, resolve: (chatId) => { clearTimeout(timeout); resolve({ ok: true, chatId }) } }
+      })
+    }
+
+    // Daemon 未运行该通道：临时连接兜底
+    if (channel.type === "feishu") {
+      if (!channel.larkAppId?.trim() || !channel.larkAppSecret?.trim()) {
+        return { ok: false, error: "请先填写飞书 App ID 和 App Secret" }
+      }
+      try {
+        const result = await startTempConnection(channel.larkAppId.trim(), channel.larkAppSecret.trim())
+        if (result.chatId) {
+          updateChannel(channelId, { mainUserEnabled: true, mainUserChatId: result.chatId })
+          return { ok: true, chatId: result.chatId }
+        }
+        return { ok: false, error: "未收到绑定结果" }
+      } catch (err: any) {
+        return { ok: false, error: err?.message ?? String(err) }
+      }
+    }
+
+    // wechat：临时管理器等待首条消息（使用通道专属数据目录）
+    if (!channel.wechatToken?.trim()) return { ok: false, error: "请先扫码获取微信 Token" }
+    const r = await wechatWaitFirstMessageImpl(channel.wechatToken.trim(), channel.wechatAccountId?.trim() ?? "", channelId)
+    if (r.ok && r.chatId) {
+      updateChannel(channelId, { mainUserEnabled: true, mainUserChatId: r.chatId })
+    }
+    return r
+  })
+
+  ipcMain.handle("channel:bind-cancel", async (_e, channelId: string) => {
+    bindWaiter = null
+    stopTempConnection()
+    if (wechatTempMgr) { try { await wechatTempMgr.stop() } catch { /* ignore */ } wechatTempMgr = null }
+    const lock = readLockFile()
+    if (lock?.port) {
+      httpPost(`http://127.0.0.1:${lock.port}/channel-bind`, { channelId, arm: false }).catch(() => {})
+    }
+    return { ok: true }
+  })
+
+  ipcMain.handle("channel:unbind", (_e, channelId: string) => {
+    updateChannel(channelId, { mainUserEnabled: false, mainUserChatId: "" })
+    return { ok: true }
   })
   ipcMain.handle("agent:stop-session", (_e, sessionKey: string) => { stopSessionAgent(sessionKey); return { ok: true } })
   ipcMain.handle("agent:stop-all-sessions", () => { stopAllSessionAgents(); return { ok: true } })
@@ -1175,49 +1417,9 @@ export function initDaemonManager(): void {
   })
 
   // ── Wait for first WeChat message (runs in main process, no daemon) ──
-  let wechatTempMgr: any = null
 
-  ipcMain.handle("wechat:wait-first-message", async (_e, token: string, accountId: string) => {
-    if (wechatTempMgr) { try { await wechatTempMgr.stop() } catch {} wechatTempMgr = null }
-    const dataDir = path.join(app.getPath("userData"), "wechat-data")
-    const { WeChatManager } = await import("../src/wechat-manager.js")
-
-    return new Promise<{ ok: boolean; chatId?: string; error?: string }>((resolve) => {
-      let done = false
-      const timer = setTimeout(() => {
-        if (done) return; done = true
-        wechatTempMgr?.stop().catch(() => {}); wechatTempMgr = null
-        resolve({ ok: false, error: "等待超时(5分钟)，请重试" })
-      }, 5 * 60_000)
-
-      const mgr = new WeChatManager({
-        dataDir,
-        log: (level: string, ...args: unknown[]) => console.log(`[main-wechat-temp] [${level}]`, ...args),
-        onMessage: (msg: any) => {
-          if (done) return
-          if (msg.chatType === "p2p" && msg.chatId) {
-            done = true; clearTimeout(timer)
-            const stateFile = path.join(dataDir, "state.json")
-            try {
-              let st: any = {}
-              if (fs.existsSync(stateFile)) st = JSON.parse(fs.readFileSync(stateFile, "utf-8"))
-              st.lastChatId = msg.chatId
-              if (!fs.existsSync(path.dirname(stateFile))) fs.mkdirSync(path.dirname(stateFile), { recursive: true })
-              fs.writeFileSync(stateFile, JSON.stringify(st))
-            } catch {}
-            mgr.stop().then(() => { wechatTempMgr = null }).catch(() => { wechatTempMgr = null })
-            resolve({ ok: true, chatId: msg.chatId })
-          }
-        },
-      })
-      wechatTempMgr = mgr
-      mgr.start(token, accountId).catch((err: any) => {
-        if (done) return; done = true; clearTimeout(timer)
-        wechatTempMgr = null
-        resolve({ ok: false, error: err?.message ?? "连接失败" })
-      })
-    })
-  })
+  ipcMain.handle("wechat:wait-first-message", (_e, token: string, accountId: string, channelId?: string) =>
+    wechatWaitFirstMessageImpl(token, accountId, channelId))
 
   ipcMain.handle("wechat:cancel-wait-message", async () => {
     if (wechatTempMgr) { try { await wechatTempMgr.stop() } catch {} wechatTempMgr = null }
@@ -1243,11 +1445,11 @@ export function initDaemonManager(): void {
     const nowStr = new Date().toLocaleString("zh-CN")
     const content = `[定时任务: ${task.name}] (手动触发: ${nowStr})\n\n${task.content}`
     if (task.independent !== false) {
-      return launchIndependentAgent(task.id, task.name, content)
+      return launchIndependentAgent(task.id, task.name, content, "task", undefined, task.channelId, task.model, task.modelParams)
     }
     const lock = readLockFile()
     if (!lock?.port) return { ok: false, error: "守护进程未运行" }
-    const result = await enqueueToMainSession(lock.port, content)
+    const result = await enqueueToMainSession(lock.port, content, undefined, task.channelId)
     return result
   })
 

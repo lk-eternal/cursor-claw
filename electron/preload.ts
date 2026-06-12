@@ -1,27 +1,66 @@
 import { contextBridge, ipcRenderer } from "electron"
 import type { WorkflowDefinition, WorkflowInstance } from "../src/shared/workflow-types"
 
-export interface AppConfig {
-  larkAppId: string
-  larkAppSecret: string
-  larkAppQuickCreated: boolean
-  larkReceiveId: string
-  workspaceDir: string
-  allowOthers: boolean
+export interface AgentResource {
+  id: string
+  type: "cli" | "sdk"
+  name: string
+  apiKey?: string
+  email?: string
+}
+
+export interface MessageChannel {
+  id: string
+  name: string
+  enabled: boolean
+  type: "feishu" | "wechat"
+  larkAppId?: string
+  larkAppSecret?: string
+  larkAppQuickCreated?: boolean
+  wechatToken?: string
+  wechatAccountId?: string
+  agentResourceId: string
   model: string
   modelParams: string
   othersModel: string
   othersModelParams: string
-  taskModel: string
-  taskModelParams: string
+  mainUserEnabled: boolean
+  mainUserChatId: string
+  mainUserNewSession: boolean
+  allowOthers: boolean
+  digitalIdentity: string
+  workspaceDir: string
+}
+
+export interface ChannelStatusInfo {
+  id: string
+  name: string
+  type: "feishu" | "wechat"
+  connected: boolean
+  status: string
+  mainUserBound: boolean
+}
+
+export interface AppConfig {
+  agentResources: AgentResource[]
+  channels: MessageChannel[]
+  workspaceDir: string
+  allowOthers: boolean
   autoStart: boolean
   setupComplete: boolean
   httpProxy: string
   httpsProxy: string
   noProxy: string
-  agentNewSession: boolean
   closeWindowAction: "ask" | "minimize" | "quit"
   digitalIdentity: string
+  // 旧字段（Setup 向导兼容）
+  larkAppId: string
+  larkAppSecret: string
+  larkAppQuickCreated: boolean
+  larkReceiveId: string
+  model: string
+  modelParams: string
+  agentNewSession: boolean
   feishuEnabled: boolean
   wechatEnabled: boolean
   wechatToken: string
@@ -39,11 +78,11 @@ export interface DaemonStatus {
   sessionAgentCount?: number
   queueLength?: number
   hasChatId?: boolean
-  model?: string
   cliAvailable?: boolean
   error?: string
   workspaceMismatch?: boolean
   daemonWorkspaceDir?: string
+  channels?: ChannelStatusInfo[]
   feishuEnabled?: boolean
   feishuConnected?: boolean
   wechatEnabled?: boolean
@@ -68,6 +107,9 @@ export interface ScheduledTask {
   content: string
   enabled: boolean
   independent?: boolean
+  channelId?: string
+  model?: string
+  modelParams?: string
 }
 
 export interface InjectResult {
@@ -194,8 +236,8 @@ const api = {
   installCli: (): Promise<{ ok: boolean; output: string }> => ipcRenderer.invoke("cli:install"),
   loginCli: (): Promise<{ ok: boolean; output: string }> => ipcRenderer.invoke("cli:login"),
   listModels: (): Promise<{ ok: boolean; models: { id: string; label: string; current: boolean }[]; error?: string }> => ipcRenderer.invoke("models:list"),
-  checkSdkApiKey: (): Promise<{ ok: boolean; email?: string; error?: string }> => ipcRenderer.invoke("sdk:check-api-key"),
-  listSdkModels: (): Promise<{ ok: boolean; models: { id: string; label: string; params: string; current: boolean }[]; error?: string }> => ipcRenderer.invoke("sdk:list-models"),
+  checkSdkApiKey: (apiKey: string): Promise<{ ok: boolean; email?: string; error?: string }> => ipcRenderer.invoke("sdk:check-api-key", apiKey),
+  listSdkModels: (apiKey: string, currentModel?: string, currentParams?: string): Promise<{ ok: boolean; models: { id: string; label: string; params: string; current: boolean }[]; error?: string }> => ipcRenderer.invoke("sdk:list-models", apiKey, currentModel, currentParams),
   getScheduledTasks: (): Promise<ScheduledTask[]> => ipcRenderer.invoke("scheduled-tasks:get"),
   saveScheduledTasks: (tasks: ScheduledTask[]): Promise<{ ok: boolean }> => ipcRenderer.invoke("scheduled-tasks:save", tasks),
   validateCron: (expression: string): Promise<boolean> => ipcRenderer.invoke("scheduled-tasks:validate-cron", expression),
@@ -238,12 +280,14 @@ const api = {
   startTempConnection: (appId: string, appSecret: string): Promise<{ ok: boolean; chatId?: string; error?: string }> =>
     ipcRenderer.invoke("temp-conn:start", appId, appSecret),
   stopTempConnection: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("temp-conn:stop"),
-  testBind: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("bind:test"),
+  testBind: (channelId?: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("bind:test", channelId),
   testWechat: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("bind:test-wechat"),
-  reloadWechat: (token: string, accountId: string): Promise<{ ok: boolean; error?: string; message?: string }> =>
-    ipcRenderer.invoke("wechat:reload", token, accountId),
-  onBindResult: (cb: (data: { ok: boolean; value: string }) => void) => {
-    const handler = (_: unknown, data: { ok: boolean; value: string }) => cb(data)
+  startChannelBind: (channelId: string): Promise<{ ok: boolean; chatId?: string; error?: string }> =>
+    ipcRenderer.invoke("channel:bind-start", channelId),
+  cancelChannelBind: (channelId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("channel:bind-cancel", channelId),
+  unbindChannel: (channelId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("channel:unbind", channelId),
+  onBindResult: (cb: (data: { ok: boolean; value: string; channelId?: string }) => void) => {
+    const handler = (_: unknown, data: { ok: boolean; value: string; channelId?: string }) => cb(data)
     ipcRenderer.on("bind:result", handler)
     return () => ipcRenderer.removeListener("bind:result", handler)
   },
@@ -273,8 +317,8 @@ const api = {
   wechatQrLogin: (): Promise<{ ok: boolean; botToken?: string; accountId?: string; baseUrl?: string; error?: string }> =>
     ipcRenderer.invoke("wechat:qr-login"),
   wechatQrLoginCancel: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("wechat:qr-login-cancel"),
-  wechatWaitFirstMessage: (token: string, accountId: string): Promise<{ ok: boolean; chatId?: string; error?: string }> =>
-    ipcRenderer.invoke("wechat:wait-first-message", token, accountId),
+  wechatWaitFirstMessage: (token: string, accountId: string, channelId?: string): Promise<{ ok: boolean; chatId?: string; error?: string }> =>
+    ipcRenderer.invoke("wechat:wait-first-message", token, accountId, channelId),
   wechatCancelWaitMessage: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("wechat:cancel-wait-message"),
   onWechatSetupQrCode: (cb: (url: string) => void) => {
     const handler = (_: unknown, url: string) => cb(url)
@@ -286,13 +330,13 @@ const api = {
     ipcRenderer.on("wechat:setup-status", handler)
     return () => ipcRenderer.removeListener("wechat:setup-status", handler)
   },
-  onWechatStatus: (cb: (status: string) => void) => {
-    const handler = (_: unknown, status: string) => cb(status)
+  onWechatStatus: (cb: (status: string, channelId?: string) => void) => {
+    const handler = (_: unknown, status: string, channelId?: string) => cb(status, channelId)
     ipcRenderer.on("wechat:status", handler)
     return () => ipcRenderer.removeListener("wechat:status", handler)
   },
-  onWechatQrCode: (cb: (dataUrl: string) => void) => {
-    const handler = (_: unknown, dataUrl: string) => cb(dataUrl)
+  onWechatQrCode: (cb: (dataUrl: string, channelId?: string) => void) => {
+    const handler = (_: unknown, dataUrl: string, channelId?: string) => cb(dataUrl, channelId)
     ipcRenderer.on("wechat:qrcode", handler)
     return () => ipcRenderer.removeListener("wechat:qrcode", handler)
   },

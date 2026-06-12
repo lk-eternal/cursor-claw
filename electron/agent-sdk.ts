@@ -2,7 +2,6 @@ import { Agent, type SDKAgent, type Run, type SDKMessage } from "@cursor/sdk"
 import { resolve, join, dirname } from "node:path"
 import { existsSync } from "node:fs"
 import { createRequire } from "node:module"
-import { getConfig, resolveModel, type ModelScenario } from "./config-store"
 import { pushUiLog, broadcastLog, broadcastSessionStatus } from "./ui-logger"
 import { type ChatType, type LaunchMeta, buildPrompt } from "./agent-launcher"
 
@@ -151,8 +150,11 @@ export interface SdkLaunchOptions {
   senderOpenId?: string
   chatName?: string
   taskMessage?: string
-  modelScenario?: ModelScenario
-  modelOverride?: string
+  /** 该会话所属通道绑定的 SDK 资源 API Key */
+  apiKey: string
+  /** 调用方解析好的模型（空 = composer-2） */
+  model?: string
+  modelParams?: string
 }
 
 export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: boolean; error?: string }> {
@@ -172,10 +174,10 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
 
   pendingLaunches.add(sessionKey)
 
-  const config = getConfig()
-  const apiKey = config.cursorApiKey?.trim()
+  const apiKey = opts.apiKey?.trim()
   if (!apiKey) {
-    return { ok: false, error: "Cursor API Key 未配置（设置 → Agent 驱动模式）" }
+    pendingLaunches.delete(sessionKey)
+    return { ok: false, error: "通道绑定的 SDK 资源未配置 API Key（设置 → Agent）" }
   }
 
   const prompt = buildPrompt(meta, taskMessage, sessionKey, opts.useMainWorkspace)
@@ -183,13 +185,11 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
   try {
     ensureSdkBinaryPaths()
 
-    const scenario = opts.modelScenario ?? "primary"
-    const resolved = resolveModel(scenario)
-    const modelId = opts.modelOverride?.trim() || resolved.model?.trim() || "composer-2"
+    const modelId = opts.model?.trim() && opts.model.trim() !== "auto" ? opts.model.trim() : "composer-2"
     const modelSelection: { id: string; params?: { id: string; value: string }[] } = { id: modelId }
-    if (resolved.modelParams?.trim()) {
+    if (opts.modelParams?.trim()) {
       try {
-        modelSelection.params = JSON.parse(resolved.modelParams)
+        modelSelection.params = JSON.parse(opts.modelParams)
       } catch { /* ignore bad JSON */ }
     }
     pushUiLog("SDK", "INFO", `[${sessionKey}] 正在创建 SDK Agent (cwd=${workspaceDir}, model=${JSON.stringify(modelSelection)})`)
@@ -279,14 +279,13 @@ export function stopAllSdkSessions(): void {
   pendingLaunches.clear()
 }
 
-export async function checkSdkApiKey(): Promise<{ ok: boolean; email?: string; error?: string }> {
-  const config = getConfig()
-  const apiKey = config.cursorApiKey?.trim()
-  if (!apiKey) return { ok: false, error: "API Key 未配置" }
+export async function checkSdkApiKey(apiKey: string): Promise<{ ok: boolean; email?: string; error?: string }> {
+  const key = apiKey?.trim()
+  if (!key) return { ok: false, error: "API Key 未配置" }
 
   try {
     const { Cursor } = await import("@cursor/sdk")
-    const me = await Cursor.me({ apiKey })
+    const me = await Cursor.me({ apiKey: key })
     return { ok: true, email: me.userEmail }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e)
@@ -301,16 +300,15 @@ export interface SdkModelOption {
   current: boolean
 }
 
-export async function listSdkModels(): Promise<{ ok: boolean; models: SdkModelOption[]; error?: string }> {
-  const config = getConfig()
-  const apiKey = config.cursorApiKey?.trim()
-  if (!apiKey) return { ok: false, models: [], error: "API Key 未配置" }
+export async function listSdkModels(apiKey: string, currentModelId?: string, currentModelParams?: string): Promise<{ ok: boolean; models: SdkModelOption[]; error?: string }> {
+  const key = apiKey?.trim()
+  if (!key) return { ok: false, models: [], error: "API Key 未配置" }
 
   try {
     const { Cursor } = await import("@cursor/sdk")
-    const sdkModels = await Cursor.models.list({ apiKey })
-    const currentModel = config.model?.trim() || ""
-    const currentParams = config.modelParams?.trim() || ""
+    const sdkModels = await Cursor.models.list({ apiKey: key })
+    const currentModel = currentModelId?.trim() || ""
+    const currentParams = currentModelParams?.trim() || ""
 
     const models: SdkModelOption[] = []
     for (const m of sdkModels) {

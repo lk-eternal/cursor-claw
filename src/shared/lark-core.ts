@@ -86,8 +86,16 @@ export class LarkSender {
     }
   }
 
+  /** 文本中含 `<at user_id="ou_xxx">` 标签时需用 text 消息发送才能产生真实 mention（触发被 @ 机器人的事件推送） */
+  static containsAtTag(text: string): boolean {
+    return /<at\s+user_id=/.test(text);
+  }
+
   private formatForSend(text: string): { content: string; msgType: string } {
     const fullText = `${this.messagePrefix}${text}`;
+    if (LarkSender.containsAtTag(fullText)) {
+      return { content: JSON.stringify({ text: fullText }), msgType: "text" };
+    }
     const escaped = fullText.replace(/\\/g, "\\\\");
     return {
       content: JSON.stringify({
@@ -410,9 +418,10 @@ export class LarkSender {
           let text = rawContent;
           try { text = LarkSender.parseMessageContent(messageId, messageType, rawContent).text || rawContent; } catch { /* use raw */ }
           const senderOpenId = senderObj?.sender_id?.open_id;
+          const senderType: string = senderObj?.sender_type ?? "user";
           const parentId: string = msg?.parent_id ?? "";
           const mentions: LarkMention[] = (msg?.mentions ?? []).map((m: any) => ({ key: m.key ?? "", id: m.id?.open_id ?? "", name: m.name ?? "" }));
-          onMessage({ text, messageId, chatId, chatType, messageType, rawContent, senderOpenId, parentId: parentId || undefined, mentions });
+          onMessage({ text, messageId, chatId, chatType, messageType, rawContent, senderOpenId, senderType, parentId: parentId || undefined, mentions });
         } catch (e: any) {
           this.log("ERROR", `事件处理异常: ${e?.message ?? e}`);
         }
@@ -446,6 +455,8 @@ export interface LarkMessageEvent {
   messageType: string;
   rawContent: string;
   senderOpenId?: string;
+  /** "user" | "app"（app = 其他机器人发送） */
+  senderType?: string;
   parentId?: string;
   mentions: LarkMention[];
 }

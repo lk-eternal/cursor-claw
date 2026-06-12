@@ -1,5 +1,8 @@
 import { randomUUID } from "node:crypto"
-import { getConfig, saveConfig, useSdkMode, type ScheduledTask } from "./config-store"
+import {
+  getConfig, getEnabledChannels, getAgentResource, updateChannel,
+  resolveChannelForSession, type MessageChannel, type ScheduledTask,
+} from "./config-store"
 import { validateCron, readTasksFromFile, writeTasksToFile, previewCronNextRuns, getNextCronFireLabel } from "./cron-scheduler"
 import { broadcastLog } from "./ui-logger"
 import { applyProxyEnv, execAgentSync } from "./agent-cli"
@@ -31,7 +34,7 @@ const MODEL_SUBCMD_HELP =
   "🔹 /model info — 查看当前应用配置的模型\n" +
   "🔹 /model set <序号> — 按 /model ls 的 # 设置模型（写入配置，下次启动 Agent 生效）"
 
-export type ListedModel = { id: string; label: string; current: boolean }
+export type ListedModel = { id: string; label: string; current: boolean; params?: string }
 
 export function parseListModelsStdout(out: string): ListedModel[] {
   const cleaned = out.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/\r/g, "")
@@ -47,9 +50,10 @@ export function parseListModelsStdout(out: string): ListedModel[] {
   return models
 }
 
-async function listCursorModelsForCommands(): Promise<{ ok: true; models: ListedModel[] } | { ok: false; error: string }> {
-  if (useSdkMode()) {
-    const r = await listSdkModels()
+async function listCursorModelsForCommands(channel?: MessageChannel): Promise<{ ok: true; models: ListedModel[] } | { ok: false; error: string }> {
+  const resource = getAgentResource(channel?.agentResourceId)
+  if (resource.type === "sdk") {
+    const r = await listSdkModels(resource.apiKey ?? "", channel?.model, channel?.modelParams)
     if (!r.ok) return { ok: false, error: r.error || "SDK 获取模型列表失败" }
     return { ok: true, models: r.models }
   }
@@ -72,6 +76,12 @@ export async function handleFeishuModelCommand(port: number, messageId: string, 
   const parts = raw.trim().split(/\s+/).filter((p) => p.length > 0)
   const low = (s: string) => s.toLowerCase()
 
+  const channel = chatId ? resolveChannelForSession(chatId) : getEnabledChannels()[0]
+  if (!channel) {
+    await reportCommandResult(port, messageId, false, "❌ 未找到当前会话所属的消息通道")
+    return
+  }
+
   if (parts.length <= 1) {
     await reportCommandResult(port, messageId, true, MODEL_SUBCMD_HELP)
     return
@@ -84,12 +94,12 @@ export async function handleFeishuModelCommand(port: number, messageId: string, 
   }
 
   if (sub === "info") {
-    const cfgModel = getConfig().model?.trim() || "auto"
-    const lines: string[] = [`📝 应用配置 model: ${cfgModel}`]
+    const cfgModel = channel.model?.trim() || "auto"
+    const lines: string[] = [`📝 通道「${channel.name}」主模型: ${cfgModel}`]
     if (cfgModel === "auto") {
       lines.push("（auto：启动 Agent 时不传 --model，由 CLI 默认策略选择）")
     }
-    const lr = await listCursorModelsForCommands()
+    const lr = await listCursorModelsForCommands(channel)
     if (lr.ok) {
       const hit = lr.models.findIndex((m) => m.id === cfgModel)
       if (hit >= 0) {
@@ -110,14 +120,14 @@ export async function handleFeishuModelCommand(port: number, messageId: string, 
   }
 
   if (sub === "ls") {
-    const lr = await listCursorModelsForCommands()
+    const lr = await listCursorModelsForCommands(channel)
     if (!lr.ok) {
       await reportCommandResult(port, messageId, false, `❌ ${lr.error}`)
       return
     }
     const blocks = lr.models.map((m, i) => {
       const n = i + 1
-      const tag = m.current ? "  ⭐CLI current" : ""
+      const tag = m.current ? "  ⭐current" : ""
       return [`#${n}`, `\t id · ${m.id}`, `\t说明 · ${m.label}${tag}`].join("\n")
     })
     const body = [`🧠 模型列表（共 ${lr.models.length} 个）`, "", ...blocks, "", "💡 设置：/model set <序号>"].join("\n")
@@ -126,7 +136,7 @@ export async function handleFeishuModelCommand(port: number, messageId: string, 
   }
 
   if (sub === "set") {
-    const lr = await listCursorModelsForCommands()
+    const lr = await listCursorModelsForCommands(channel)
     if (!lr.ok) {
       await reportCommandResult(port, messageId, false, `❌ ${lr.error}`)
       return
@@ -141,9 +151,9 @@ export async function handleFeishuModelCommand(port: number, messageId: string, 
       return
     }
     const picked = lr.models[idx - 1]
-    saveConfig({ model: picked.id })
+    updateChannel(channel.id, { model: picked.id, modelParams: picked.params ?? "" })
     await reportCommandResult(port, messageId, true, [
-      `✅ 已保存模型（下次启动 Agent 生效）`,
+      `✅ 已保存通道「${channel.name}」主模型（下次启动 Agent 生效）`,
       ` # · ${idx}`,
       ` id · ${picked.id}`,
       `说明 · ${picked.label}`,
@@ -240,7 +250,7 @@ const TASK_PREVIEW_BULLETS = ["①", "②", "③", "④", "⑤"] as const
 function taskPreviewBullet(i: number): string { return TASK_PREVIEW_BULLETS[i] ?? `${i + 1}.` }
 function formatTaskStatusLine(enabled: boolean): string { return enabled ? "✅ 运行中" : "⏸️ 已停止" }
 
-export type TaskRunFn = (taskId: string, taskName: string, content: string) => Promise<{ ok: boolean; error?: string }>
+export type TaskRunFn = (task: ScheduledTask, content: string) => Promise<{ ok: boolean; error?: string }>
 export type TaskEnqueueFn = (content: string, chatId?: string) => Promise<{ ok: boolean; error?: string }>
 
 export async function handleFeishuTaskCommand(
@@ -307,7 +317,7 @@ export async function handleFeishuTaskCommand(
     const nowStr = new Date().toLocaleString("zh-CN")
     const content = `[定时任务: ${t.name}] (手动触发: ${nowStr})\n\n${t.content}`
     if (t.independent !== false) {
-      const result = await taskRunFn(t.id, t.name, content)
+      const result = await taskRunFn(t, content)
       if (result.ok) {
         await reportCommandResult(port, messageId, true, `🚀 已独立启动任务 #${idx} ${t.name}`)
       } else {
@@ -366,7 +376,8 @@ export async function handleFeishuTaskCommand(
   if (sub === "create") {
     const parsed = parseTaskCreateArgs(parts)
     if (!parsed.ok) { await reportCommandResult(port, messageId, false, parsed.error); return }
-    const newTask: ScheduledTask = { id: randomUUID(), name: parsed.name, cron: parsed.cron, content: parsed.content, enabled: true }
+    const taskChannel = chatId ? resolveChannelForSession(chatId) : getEnabledChannels()[0]
+    const newTask: ScheduledTask = { id: randomUUID(), name: parsed.name, cron: parsed.cron, content: parsed.content, enabled: true, channelId: taskChannel?.id }
     tasks = [...tasks, newTask]
     writeTasksToFile(tasks)
     const next = getNextCronFireLabel(parsed.cron)

@@ -28,6 +28,12 @@ import {
   type QueueMessage,
 } from "./file-queue.js";
 import { LOCK_FILE_NAME } from "./shared/constants.js";
+import {
+  makeChatKey,
+  parseChatKey,
+  type DaemonChannelConfig,
+  type ChannelStatusInfo,
+} from "./shared/channel-types.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -39,19 +45,24 @@ const PKG_VERSION: string = (_require("../package.json") as { version: string })
 
 // ── 环境变量 ──────────────────────────────────────────────
 
-const APP_ID = process.env.LARK_APP_ID ?? "";
-const APP_SECRET = process.env.LARK_APP_SECRET ?? "";
 const ENCRYPT_KEY = process.env.LARK_ENCRYPT_KEY ?? "";
-const RECEIVE_CHAT_ID = process.env.LARK_RECEIVE_CHAT_ID ?? "";
 const CONFIGURED_PORT = process.env.LARK_DAEMON_PORT ? Number(process.env.LARK_DAEMON_PORT) : 0;
 let WORKSPACE_DIR = process.env.LARK_WORKSPACE_DIR ?? process.cwd();
 const MESSAGE_PREFIX = process.env.LARK_MESSAGE_PREFIX ?? "";
 const APP_DATA_DIR = process.env.APP_DATA_DIR || "";
 
-let WECHAT_TOKEN = process.env.WECHAT_TOKEN ?? "";
-let WECHAT_ACCOUNT_ID = process.env.WECHAT_ACCOUNT_ID ?? "";
-let WECHAT_ENABLED = process.env.WECHAT_ENABLED === "1";
-const FEISHU_ENABLED = process.env.FEISHU_ENABLED === "1";
+function parseChannelConfigs(): DaemonChannelConfig[] {
+  try {
+    const raw = process.env.CLAW_CHANNELS_JSON ?? "";
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? (arr as DaemonChannelConfig[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+const CHANNEL_CONFIGS = parseChannelConfigs();
 
 const savedProxyKeys = stripProxyEnv();
 
@@ -101,17 +112,78 @@ function log(level: string, ...args: unknown[]): void {
   } catch { /* ignore */ }
 }
 
-// ── Lark ─────────────────────────────────────────────────
+// ── 通道运行时（多飞书 + 多微信）──────────────────────────
 
-const larkClient = FEISHU_ENABLED ? createLarkClient(APP_ID, APP_SECRET) : null;
-const sender = larkClient ? new LarkSender({ client: larkClient, chatId: RECEIVE_CHAT_ID, messagePrefix: MESSAGE_PREFIX, log }) : null;
-let botOpenId: string | undefined;
-let lastFeishuP2pChatId: string | null = null;
+interface ChannelRuntime {
+  cfg: DaemonChannelConfig;
+  // feishu
+  client?: ReturnType<typeof createLarkClient>;
+  sender?: LarkSender;
+  botOpenId?: string;
+  /** 机器人应用名（bot/v3/info 的 app_name），用于协作名册 */
+  botName?: string;
+  feishuConnected?: boolean;
+  // wechat
+  wechat?: WeChatManager;
+  /** 该通道最近一次私聊的原始 chatId */
+  lastP2pChatId: string | null;
+  /** 主用户绑定模式：下一条私聊消息绑定为主用户 */
+  bindArmed: boolean;
+}
 
-// ── WeChat ───────────────────────────────────────────────
+const channels = new Map<string, ChannelRuntime>();
 
-let wechatManager: WeChatManager | null = null;
-let lastWechatChatId: string | null = null;
+function channelWorkspaceDir(rt: ChannelRuntime): string {
+  return rt.cfg.workspaceDir?.trim() || WORKSPACE_DIR;
+}
+
+function isChannelConnected(rt: ChannelRuntime): boolean {
+  if (rt.cfg.type === "feishu") return !!rt.feishuConnected && !!rt.sender;
+  return rt.wechat?.isConnected() ?? false;
+}
+
+function getChannelStatusList(): ChannelStatusInfo[] {
+  return [...channels.values()].map((rt) => ({
+    id: rt.cfg.id,
+    name: rt.cfg.name,
+    type: rt.cfg.type,
+    connected: isChannelConnected(rt),
+    status: rt.cfg.type === "wechat"
+      ? (rt.wechat?.getStatus() ?? "disconnected")
+      : (rt.feishuConnected ? "connected" : "connecting"),
+    mainUserBound: !!(rt.cfg.mainUserEnabled && rt.cfg.mainUserChatId),
+  }));
+}
+
+/** 通道的默认私聊目标（主用户优先，其次最近私聊） */
+function channelDefaultChatId(rt: ChannelRuntime): string | null {
+  if (rt.cfg.mainUserEnabled && rt.cfg.mainUserChatId) return rt.cfg.mainUserChatId;
+  return rt.lastP2pChatId;
+}
+
+function pickChannel(channelId?: string): ChannelRuntime | null {
+  if (channelId) {
+    const rt = channels.get(channelId);
+    if (rt) return rt;
+  }
+  for (const rt of channels.values()) {
+    if (isChannelConnected(rt)) return rt;
+  }
+  return channels.values().next().value ?? null;
+}
+
+/** 主用户绑定（armed bind）命中：写回 Electron 并回执 */
+function completeBind(rt: ChannelRuntime, chatId: string, messageId?: string): void {
+  rt.bindArmed = false;
+  rt.cfg.mainUserEnabled = true;
+  rt.cfg.mainUserChatId = chatId;
+  if (rt.sender) rt.sender.chatId = chatId;
+  process.stdout.write(`__BIND_RESULT__:${JSON.stringify({ channelId: rt.cfg.id, chatId })}\n`);
+  log("INFO", `[Bind] 通道「${rt.cfg.name}」主用户绑定成功: ${chatId}`);
+  if (messageId) {
+    replyToMessage(messageId, "✅ 主用户绑定成功！", makeChatKey(rt.cfg.id, chatId)).catch(() => {});
+  }
+}
 
 function isWechatChatId(rawChatId?: string): rawChatId is string {
   if (!rawChatId) return false;
@@ -123,56 +195,71 @@ function isFeishuChatId(rawChatId?: string): rawChatId is string {
   return rawChatId.startsWith("oc_");
 }
 
-const WECHAT_STATE_FILE = path.join(APP_DATA_DIR, "wechat-data", "state.json");
+// ── WeChat 通道 ──────────────────────────────────────────
 
-function loadWechatState(): void {
+function wechatDataDir(channelId: string): string {
+  return path.join(APP_DATA_DIR, "wechat-data", channelId);
+}
+
+function wechatStateFile(channelId: string): string {
+  return path.join(wechatDataDir(channelId), "state.json");
+}
+
+function loadWechatState(rt: ChannelRuntime): void {
   try {
-    if (fs.existsSync(WECHAT_STATE_FILE)) {
-      const data = JSON.parse(fs.readFileSync(WECHAT_STATE_FILE, "utf-8"));
+    const file = wechatStateFile(rt.cfg.id);
+    if (fs.existsSync(file)) {
+      const data = JSON.parse(fs.readFileSync(file, "utf-8"));
       if (data.lastChatId) {
-        lastWechatChatId = data.lastChatId;
-        log("INFO", `[WeChat] 已恢复 context 绑定: chatId=${lastWechatChatId}`);
+        rt.lastP2pChatId = data.lastChatId;
+        log("INFO", `[WeChat:${rt.cfg.name}] 已恢复 context 绑定: chatId=${rt.lastP2pChatId}`);
       }
     }
   } catch { /* ignore */ }
 }
 
-function saveWechatState(): void {
+function saveWechatState(rt: ChannelRuntime): void {
   try {
-    const dir = path.dirname(WECHAT_STATE_FILE);
+    const file = wechatStateFile(rt.cfg.id);
+    const dir = path.dirname(file);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(WECHAT_STATE_FILE, JSON.stringify({ lastChatId: lastWechatChatId }));
+    fs.writeFileSync(file, JSON.stringify({ lastChatId: rt.lastP2pChatId }));
   } catch { /* ignore */ }
 }
 
-function initWeChatManager(): WeChatManager {
-  const dataDir = path.join(APP_DATA_DIR, "wechat-data");
+function initWeChatChannel(rt: ChannelRuntime): WeChatManager {
+  const channelId = rt.cfg.id;
   return new WeChatManager({
-    dataDir,
-    log,
+    dataDir: wechatDataDir(channelId),
+    log: (level: string, ...args: unknown[]) => log(level, `[${rt.cfg.name}]`, ...args),
     onMessage: (msg) => {
-      const firstMessage = !lastWechatChatId;
+      const chatKey = makeChatKey(channelId, msg.chatId);
+      const firstMessage = !rt.lastP2pChatId;
       if (msg.chatType === "p2p" && msg.chatId) {
-        lastWechatChatId = msg.chatId;
-        saveWechatState();
+        rt.lastP2pChatId = msg.chatId;
+        saveWechatState(rt);
+      }
+      if (rt.bindArmed && msg.chatType === "p2p" && msg.chatId) {
+        completeBind(rt, msg.chatId, msg.messageId);
+        return;
       }
       if (firstMessage) {
-        log(`[WeChat] 首条消息已收到，context_token 已绑定（chatId=${msg.chatId}），不入队`);
+        log("INFO", `[WeChat:${rt.cfg.name}] 首条消息已收到，context_token 已绑定（chatId=${msg.chatId}），不入队`);
         return;
       }
       if (isCommand(msg.text)) {
-        handleCommand(msg.text, msg.messageId, msg.chatId, msg.chatType).catch((e: any) =>
-          log("ERROR", `[WeChat] 指令处理失败: ${e?.message ?? e}`),
+        handleCommand(msg.text, msg.messageId, chatKey, msg.chatType).catch((e: any) =>
+          log("ERROR", `[WeChat:${rt.cfg.name}] 指令处理失败: ${e?.message ?? e}`),
         );
         return;
       }
-      pushMessage(msg.text, msg.messageId, msg.chatId, msg.chatType, msg.senderOpenId);
+      pushMessage(msg.text, msg.messageId, chatKey, msg.chatType, msg.senderOpenId);
     },
     onQrCode: (dataUrl) => {
-      process.stdout.write(`__WECHAT_QR__:${dataUrl}\n`);
+      process.stdout.write(`__WECHAT_QR__:${channelId}:${dataUrl}\n`);
     },
     onStatusChange: (status) => {
-      process.stdout.write(`__WECHAT_STATUS__:${status}\n`);
+      process.stdout.write(`__WECHAT_STATUS__:${channelId}:${status}\n`);
     },
   });
 }
@@ -196,6 +283,50 @@ const sessionToChatMap = new Map<string, string>();
 const MSG_SESSION_MAP_MAX = 5000;
 const sessionLastReplyAt = new Map<string, number>();
 
+// ── Agent-Poll 生命周期追踪 ─────────────────────────────────
+const activePollConnections = new Map<string, Set<http.ServerResponse>>();
+const pendingHeldMessages = new Map<string, string[]>();
+
+function registerPollConn(sessionKey: string, res: http.ServerResponse): void {
+  let set = activePollConnections.get(sessionKey);
+  if (!set) { set = new Set(); activePollConnections.set(sessionKey, set); }
+  set.add(res);
+}
+
+function unregisterPollConn(sessionKey: string, res: http.ServerResponse): void {
+  const set = activePollConnections.get(sessionKey);
+  if (set) { set.delete(res); if (set.size === 0) activePollConnections.delete(sessionKey); }
+}
+
+function terminateSession(sessionKey: string): void {
+  const conns = activePollConnections.get(sessionKey);
+  if (conns?.size) {
+    log("INFO", `终止会话Poll连接: session=${sessionKey} count=${conns.size}`);
+    for (const r of conns) { try { r.destroy(); } catch {} }
+    activePollConnections.delete(sessionKey);
+  }
+  const holdFiles = pendingHeldMessages.get(sessionKey);
+  if (holdFiles?.length) {
+    log("WARN", `释放待确认消息回队列: session=${sessionKey} count=${holdFiles.length}`);
+    releaseHeldMessages(holdFiles);
+  }
+  pendingHeldMessages.delete(sessionKey);
+}
+
+function terminateSessionsByChat(chatId: string): void {
+  for (const key of new Set([...activePollConnections.keys(), ...pendingHeldMessages.keys()])) {
+    if (key.startsWith(chatId + "::") || key === chatId) terminateSession(key);
+  }
+}
+
+function confirmPendingMessages(sessionKey: string): void {
+  const holdFiles = pendingHeldMessages.get(sessionKey);
+  if (holdFiles?.length) {
+    finalizeHeldMessages(holdFiles);
+    pendingHeldMessages.delete(sessionKey);
+  }
+}
+
 function setActiveSession(chatId: string, sessionKey: string): void {
   activeSessionMap.set(chatId, sessionKey);
   sessionToChatMap.set(sessionKey, chatId);
@@ -211,25 +342,47 @@ function resolveRawChatId(sessionKey?: string): string | undefined {
 }
 
 type ResolvedChannel =
-  | { type: "wechat"; chatId: string }
-  | { type: "feishu"; chatId?: string }
+  | { type: "wechat"; rt: ChannelRuntime; chatId: string }
+  | { type: "feishu"; rt: ChannelRuntime; chatId?: string }
   | { type: "error"; message: string };
 
 function resolveChannel(sessionKey?: string): ResolvedChannel {
-  const rawChatId = resolveRawChatId(sessionKey);
-  if (isWechatChatId(rawChatId)) {
-    return wechatManager?.isConnected()
-      ? { type: "wechat", chatId: rawChatId }
-      : { type: "error", message: "微信未连接" };
+  const rawKey = resolveRawChatId(sessionKey);
+
+  if (rawKey) {
+    const { channelId, chatId } = parseChatKey(rawKey);
+    if (channelId) {
+      const rt = channels.get(channelId);
+      if (rt) {
+        if (rt.cfg.type === "wechat") {
+          return rt.wechat?.isConnected()
+            ? { type: "wechat", rt, chatId }
+            : { type: "error", message: `微信通道「${rt.cfg.name}」未连接` };
+        }
+        if (rt.sender) return { type: "feishu", rt, chatId };
+        return { type: "error", message: `飞书通道「${rt.cfg.name}」未连接` };
+      }
+    }
+    // 旧格式（无通道前缀）：按 chatId 形态启发式匹配
+    for (const rt of channels.values()) {
+      if (rt.cfg.type === "wechat" && isWechatChatId(rawKey) && rt.wechat?.isConnected()) {
+        return { type: "wechat", rt, chatId: rawKey };
+      }
+      if (rt.cfg.type === "feishu" && isFeishuChatId(rawKey) && rt.sender) {
+        return { type: "feishu", rt, chatId: rawKey };
+      }
+    }
   }
-  if (isFeishuChatId(rawChatId) && sender) {
-    return { type: "feishu", chatId: rawChatId };
+
+  // 兜底：第一个有默认私聊目标的已连接通道
+  for (const rt of channels.values()) {
+    const target = channelDefaultChatId(rt);
+    if (!target || !isChannelConnected(rt)) continue;
+    if (rt.cfg.type === "wechat") return { type: "wechat", rt, chatId: target };
+    return { type: "feishu", rt, chatId: target };
   }
-  if (wechatManager?.isConnected() && lastWechatChatId) {
-    return { type: "wechat", chatId: lastWechatChatId };
-  }
-  if (sender) {
-    return { type: "feishu" };
+  for (const rt of channels.values()) {
+    if (rt.cfg.type === "feishu" && rt.sender) return { type: "feishu", rt };
   }
   return { type: "error", message: "无可用消息通道" };
 }
@@ -269,10 +422,15 @@ function pushMessage(content: string, messageId?: string, chatId?: string, chatT
     return;
   }
   let routedId = resolveRoutingKey(chatId, replyMessageId);
-  if (routedId && routedId === chatId && chatType === "p2p" && WORKSPACE_DIR && !routedId.includes("::")) {
-    const defaultSessionKey = `${chatId}::${WORKSPACE_DIR}`;
-    setActiveSession(chatId, defaultSessionKey);
-    routedId = defaultSessionKey;
+  if (routedId && routedId === chatId && chatType === "p2p" && !routedId.includes("::")) {
+    const { channelId } = parseChatKey(chatId!);
+    const rt = channelId ? channels.get(channelId) : undefined;
+    const wsDir = rt ? channelWorkspaceDir(rt) : WORKSPACE_DIR;
+    if (wsDir) {
+      const defaultSessionKey = `${chatId}::${wsDir}`;
+      setActiveSession(chatId!, defaultSessionKey);
+      routedId = defaultSessionKey;
+    }
   }
   const written = pushToFileQueue(content, messageId, `daemon-${process.pid}`, routedId, chatType, senderOpenId);
   if (written) {
@@ -296,63 +454,134 @@ function clearFileQueue(): number {
   } catch { return 0; }
 }
 
-// ── 飞书 WebSocket 长连接 ────────────────────────────────
+// ── 飞书 WebSocket 长连接（每通道一条）───────────────────
 
-function isBotMentioned(ev: LarkMessageEvent): boolean {
-  if (!botOpenId) return ev.mentions.length > 0;
-  return ev.mentions.some((m) => m.id === botOpenId || m.key === "@_all");
+function isBotMentioned(rt: ChannelRuntime, ev: LarkMessageEvent): boolean {
+  if (!rt.botOpenId) return ev.mentions.length > 0;
+  return ev.mentions.some((m) => m.id === rt.botOpenId || m.key === "@_all");
 }
 
-function stripMentionTags(text: string): string {
-  return text.replace(/@_user_\d+/g, "").replace(/\s{2,}/g, " ").trim();
+/**
+ * 将 `@_user_N` 占位符还原为可读形式：
+ * - @自己 → 删除（与旧行为一致）
+ * - @其他人/机器人 → `@名字(open_id=ou_xxx)`，Agent 可直接取 open_id 回 @
+ */
+function resolveMentionTags(text: string, mentions: LarkMessageEvent["mentions"], selfOpenId?: string): string {
+  let out = text;
+  for (const m of mentions) {
+    if (!m.key) continue;
+    const replacement = (selfOpenId && m.id === selfOpenId) || m.key === "@_all"
+      ? ""
+      : (m.id ? `@${m.name}(open_id=${m.id})` : `@${m.name}`);
+    out = out.split(m.key).join(replacement);
+  }
+  return out.replace(/@_user_\d+/g, "").replace(/\s{2,}/g, " ").trim();
 }
 
-function startLarkConnection(): void {
-  if (!sender || !APP_ID || !APP_SECRET) { log("ERROR", "飞书未启用或凭据未配置"); return; }
+/** 同实例其他飞书机器人名册（互相感知，供 Agent 按名字路由协作） */
+function buildBotRoster(self: ChannelRuntime): string {
+  const peers: string[] = [];
+  for (const rt of channels.values()) {
+    if (rt.cfg.type !== "feishu" || rt === self || !rt.botOpenId) continue;
+    peers.push(`${rt.botName ?? rt.cfg.name}=${rt.botOpenId}`);
+  }
+  return peers.join(", ");
+}
 
-  sender.startConnection(APP_ID, APP_SECRET, ENCRYPT_KEY, (ev) => {
-    const { text, messageId, chatId, chatType, messageType, rawContent, senderOpenId, parentId, mentions } = ev;
+/** 群聊消息附加协作元数据（发送者身份 + 机器人名册） */
+function appendCollabMeta(content: string, rt: ChannelRuntime, ev: LarkMessageEvent): string {
+  const lines: string[] = [content];
+  const senderKind = ev.senderType === "app" ? "机器人" : "用户";
+  lines.push("");
+  lines.push(`[发送者] ${ev.senderOpenId ?? "未知"} (${senderKind})`);
+  if (rt.botOpenId) {
+    lines.push(`[我是] ${rt.botName ?? rt.cfg.name}(open_id=${rt.botOpenId})`);
+  }
+  const roster = buildBotRoster(rt);
+  if (roster) {
+    lines.push(`[可协作机器人] ${roster}`);
+    lines.push(`[协作提示] 需要让其他机器人处理时，用 send_text 发送 <at user_id="ou_xxx">名字</at> 任务内容；收到机器人消息且无需继续协作时不要回 @，避免循环`);
+  }
+  return lines.join("\n");
+}
+
+async function startFeishuChannel(rt: ChannelRuntime): Promise<void> {
+  const { appId, appSecret } = rt.cfg;
+  if (!appId || !appSecret) { log("ERROR", `[${rt.cfg.name}] 飞书凭据未配置`); return; }
+
+  rt.client = createLarkClient(appId, appSecret);
+  rt.sender = new LarkSender({
+    client: rt.client,
+    chatId: rt.cfg.mainUserEnabled ? rt.cfg.mainUserChatId : "",
+    messagePrefix: MESSAGE_PREFIX,
+    log: (level: string, ...args: unknown[]) => log(level, `[${rt.cfg.name}]`, ...args),
+  });
+
+  try {
+    const botInfo = await rt.client.request({ method: "GET", url: "/open-apis/bot/v3/info" }) as any;
+    rt.botOpenId = botInfo?.bot?.open_id;
+    rt.botName = botInfo?.bot?.app_name || rt.cfg.name;
+    if (rt.botOpenId) log("INFO", `[${rt.cfg.name}] 机器人 open_id: ${rt.botOpenId} (${rt.botName})`);
+    else log("WARN", `[${rt.cfg.name}] 未能获取机器人 open_id，群消息过滤将使用宽松模式`);
+  } catch (e: any) {
+    log("WARN", `[${rt.cfg.name}] 获取机器人信息失败: ${e?.message ?? e}`);
+  }
+
+  const sender = rt.sender;
+  sender.startConnection(appId, appSecret, ENCRYPT_KEY, (ev) => {
+    rt.feishuConnected = true;
+    const { text, messageId, chatId, chatType, messageType, rawContent, senderOpenId, parentId } = ev;
+    const chatKey = makeChatKey(rt.cfg.id, chatId);
 
     if (chatType === "p2p" && chatId) {
-      lastFeishuP2pChatId = chatId;
-      if (!sender!.chatId) {
-        sender!.chatId = chatId;
-        log("INFO", `自动绑定主用户 chat_id: ${chatId}`);
+      rt.lastP2pChatId = chatId;
+      if (rt.bindArmed) {
+        completeBind(rt, chatId, messageId);
+        return;
+      }
+      if (!sender.chatId) {
+        sender.chatId = chatId;
+        log("INFO", `[${rt.cfg.name}] 自动绑定默认 chat_id: ${chatId}`);
       }
     }
 
-    if (chatType === "group" && !isBotMentioned(ev)) {
+    if (chatType === "group" && !isBotMentioned(rt, ev)) {
       return;
     }
 
-    const cleanText = chatType === "group" ? stripMentionTags(text) : text;
-    log("INFO", `收到消息 [${chatType}] chat=${chatId} sender=${senderOpenId ?? "?"}${parentId ? ` reply=${parentId}` : ""}: ${cleanText.slice(0, 100)}`);
+    const cleanText = chatType === "group" ? resolveMentionTags(text, ev.mentions, rt.botOpenId) : text;
+    log("INFO", `[${rt.cfg.name}] 收到消息 [${chatType}] chat=${chatId} sender=${senderOpenId ?? "?"}${ev.senderType === "app" ? "(bot)" : ""}${parentId ? ` reply=${parentId}` : ""}: ${cleanText.slice(0, 100)}`);
 
     if (messageType === "text" && isCommand(cleanText)) {
-      handleCommand(cleanText, messageId, chatId, chatType).catch((e: any) =>
+      handleCommand(cleanText, messageId, chatKey, chatType).catch((e: any) =>
         log("ERROR", `指令处理失败: ${e?.message ?? e}`),
       );
       return;
     }
 
     const enqueue = async (content: string) => {
-      if (parentId && sender) {
+      if (parentId) {
         const original = await sender.fetchMessageContent(parentId);
         if (original) {
           content = `[引用消息]: ${original}\n\n[回复]: ${content}`;
         }
       }
-      pushMessage(content, messageId, chatId, chatType, senderOpenId, parentId);
+      if (chatType === "group") {
+        content = appendCollabMeta(content, rt, ev);
+      }
+      pushMessage(content, messageId, chatKey, chatType, senderOpenId, parentId);
     };
 
     if (messageType === "text") {
       enqueue(cleanText);
     } else {
-      sender!.processIncomingMessage(messageId, messageType, rawContent)
+      sender.processIncomingMessage(messageId, messageType, rawContent)
         .then((result) => enqueue(result || cleanText))
         .catch(() => enqueue(cleanText));
     }
   });
+  // WSClient.start 为异步建立；这里乐观置位，错误会在日志中体现
+  rt.feishuConnected = true;
 }
 
 // ── 指令系统 ─────────────────────────────────────────────
@@ -380,16 +609,16 @@ function isCommand(text: string): boolean {
 }
 
 async function replyToMessage(messageId: string, text: string, chatId?: string): Promise<void> {
-  if (chatId && isWechatChatId(chatId)) {
-    if (!wechatManager) { log("WARN", "微信未启用，跳过回复"); return; }
-    try { await wechatManager.sendText(chatId, text); } catch (e: any) { log("WARN", `微信回复失败: ${e?.message}`); }
+  const ch = resolveChannel(chatId);
+  if (ch.type === "error") { log("WARN", `回复失败: ${ch.message}`); return; }
+  if (ch.type === "wechat") {
+    try { await ch.rt.wechat!.sendText(ch.chatId, text); } catch (e: any) { log("WARN", `微信回复失败: ${e?.message}`); }
     return;
   }
-  if (!sender) { log("WARN", "飞书未启用，跳过回复"); return; }
-  if (chatId && isFeishuChatId(chatId)) {
-    await sender.sendMessage(text, undefined, chatId);
+  if (ch.chatId) {
+    await ch.rt.sender!.sendMessage(text, undefined, ch.chatId);
   } else {
-    await sender.replyMessage(messageId, text);
+    await ch.rt.sender!.replyMessage(messageId, text);
   }
 }
 
@@ -473,6 +702,9 @@ function cleanExpiredCommands(): void {
 
 async function handleCommand(text: string, messageId: string, chatId?: string, chatType?: string): Promise<void> {
   const trimmed = text.trim();
+  if (chatId && ["/stop", "/restart"].includes(trimmed.toLowerCase())) {
+    terminateSessionsByChat(chatId);
+  }
   pushCommandToQueue(trimmed, messageId, `daemon-${process.pid}`, chatId, chatType);
 }
 
@@ -533,9 +765,9 @@ function createMcpServer(): McpServer {
 
   s.tool(
     "send_text",
-    "发送文本消息到飞书/微信。",
+    "发送文本消息到飞书/微信。飞书群聊中可 @ 其他成员或机器人：在 text 中使用 `<at user_id=\"ou_xxx\">名字</at>` 标签（open_id 可从收到消息的 @名字(open_id=ou_xxx) 内联标注或 [可协作机器人] 名册中获取），被 @ 的机器人会收到事件并响应。",
     {
-      text: z.string().describe("要发送给用户的消息内容"),
+      text: z.string().describe("要发送的消息内容；含 <at user_id=\"ou_xxx\">名字</at> 标签时自动以可触发 @ 通知的文本消息发送"),
       message_id: z.string().optional().describe("要回复的消息ID，传入后以回复模式发送"),
       session_key: z.string().optional().describe("目标会话的 sessionKey，用于精确投递"),
     },
@@ -619,17 +851,22 @@ function startHttpServer(): Promise<number> {
 
         if (method === "GET" && (pathname === "/health" || pathname === "/status")) {
           cleanExpiredCommands();
+          const channelList = getChannelStatusList();
+          const feishuList = channelList.filter((c) => c.type === "feishu");
+          const wechatList = channelList.filter((c) => c.type === "wechat");
           json(res, {
             status: "ok",
             version: PKG_VERSION,
             uptime: Math.floor(process.uptime()),
             queueLength: getFileQueueLength(),
-            hasChatId: !!sender?.chatId,
-            feishuEnabled: FEISHU_ENABLED,
-            feishuConnected: FEISHU_ENABLED && !!sender?.chatId,
-            wechatEnabled: WECHAT_ENABLED,
-            wechatStatus: wechatManager?.getStatus() ?? "disconnected",
-            lastWechatChatId: lastWechatChatId || null,
+            channels: channelList,
+            // 兼容字段（聚合视图）
+            hasChatId: channelList.some((c) => c.connected),
+            feishuEnabled: feishuList.length > 0,
+            feishuConnected: feishuList.some((c) => c.connected),
+            wechatEnabled: wechatList.length > 0,
+            wechatStatus: wechatList.some((c) => c.status === "connected") ? "connected" : (wechatList[0]?.status ?? "disconnected"),
+            wechatReady: wechatList.some((c) => c.connected),
           });
           return;
         }
@@ -659,38 +896,36 @@ function startHttpServer(): Promise<number> {
           return;
         }
 
-        if (method === "POST" && pathname === "/wechat-test") {
-          if (!wechatManager) { json(res, { ok: false, error: "微信未启用" }, 400); return; }
-          if (!wechatManager.isConnected()) { json(res, { ok: false, error: "微信未连接" }, 400); return; }
-          const chatId = lastWechatChatId;
-          if (!chatId) { json(res, { ok: false, error: "暂无微信交互记录，请先给机器人发一条消息" }, 400); return; }
+        if (method === "POST" && pathname === "/channel-test") {
+          const body = JSON.parse(await readBody(req));
+          const channelId = typeof body.channelId === "string" ? body.channelId : "";
+          const rt = channels.get(channelId);
+          if (!rt) { json(res, { ok: false, error: "通道不存在或未启用" }, 400); return; }
+          if (!isChannelConnected(rt)) { json(res, { ok: false, error: "通道未连接" }, 400); return; }
+          const chatId = channelDefaultChatId(rt);
+          if (!chatId) { json(res, { ok: false, error: "暂无私聊记录，请先绑定主用户或给机器人发一条消息" }, 400); return; }
           try {
-            const ok = await wechatManager.sendText(chatId, "🔗 微信测试成功！连接正常。");
-            json(res, { ok });
+            if (rt.cfg.type === "wechat") {
+              json(res, { ok: await rt.wechat!.sendText(chatId, "🔗 微信测试成功！连接正常。") });
+            } else {
+              const msgId = await rt.sender!.sendMessage("🔗 绑定测试成功！连接正常。", undefined, chatId);
+              json(res, { ok: !!msgId });
+            }
           } catch (e: any) {
             json(res, { ok: false, error: e?.message ?? "发送失败" }, 500);
           }
           return;
         }
 
-        if (method === "POST" && pathname === "/wechat-reload") {
+        if (method === "POST" && pathname === "/channel-bind") {
           const body = JSON.parse(await readBody(req));
-          const token = typeof body.token === "string" ? body.token : "";
-          const accountId = typeof body.accountId === "string" ? body.accountId : "";
-          if (wechatManager) { try { await wechatManager.stop(); } catch { /* ignore */ } wechatManager = null; }
-          WECHAT_TOKEN = token;
-          WECHAT_ACCOUNT_ID = accountId;
-          WECHAT_ENABLED = !!(token && accountId);
-          if (WECHAT_ENABLED) {
-            loadWechatState();
-            wechatManager = initWeChatManager();
-            wechatManager.start(WECHAT_TOKEN, WECHAT_ACCOUNT_ID).catch((e: any) => {
-              log("WARN", `[WeChat] 重载启动失败: ${e?.message ?? e}`);
-            });
-            json(res, { ok: true, message: "微信已重载" });
-          } else {
-            json(res, { ok: true, message: "微信已停止" });
-          }
+          const channelId = typeof body.channelId === "string" ? body.channelId : "";
+          const arm = body.arm !== false;
+          const rt = channels.get(channelId);
+          if (!rt) { json(res, { ok: false, error: "通道不存在或未启用" }, 400); return; }
+          rt.bindArmed = arm;
+          log("INFO", `[Bind] 通道「${rt.cfg.name}」绑定模式: ${arm ? "开启（等待私聊消息）" : "取消"}`);
+          json(res, { ok: true });
           return;
         }
 
@@ -815,7 +1050,10 @@ function writeJsonSafe(filePath: string, data: unknown): void {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
 }
 
-interface TaskEntry { id: string; name: string; cron: string; content: string; enabled: boolean; independent?: boolean }
+interface TaskEntry {
+  id: string; name: string; cron: string; content: string; enabled: boolean; independent?: boolean
+  channelId?: string; model?: string; modelParams?: string
+}
 
 function readTasks(): TaskEntry[] {
   const data = readJsonSafe(TASKS_FILE);
@@ -971,14 +1209,19 @@ async function handleTasksAdmin(method: string, req: http.IncomingMessage, res: 
   }
   if (method === "POST") {
     const body = JSON.parse(await readBody(req));
-    const { action, id, name, cron, content, enabled, independent } = body as {
+    const { action, id, name, cron, content, enabled, independent, channelId, model, modelParams } = body as {
       action: string; id?: string; name?: string; cron?: string; content?: string; enabled?: boolean; independent?: boolean
+      channelId?: string; model?: string; modelParams?: string
     };
     const tasks = readTasks();
 
     if (action === "add") {
       if (!name || !cron || !content) { json(res, { ok: false, error: "name, cron, content required" }, 400); return true; }
-      const newTask: TaskEntry = { id: crypto.randomUUID(), name: name.trim(), cron: cron.trim(), content, enabled: enabled ?? true, independent: independent ?? true };
+      const newTask: TaskEntry = {
+        id: crypto.randomUUID(), name: name.trim(), cron: cron.trim(), content,
+        enabled: enabled ?? true, independent: independent ?? true,
+        channelId: channelId || channels.keys().next().value, model, modelParams,
+      };
       tasks.push(newTask);
       writeTasks(tasks);
       json(res, { ok: true, task: newTask });
@@ -994,6 +1237,9 @@ async function handleTasksAdmin(method: string, req: http.IncomingMessage, res: 
       if (content !== undefined) tasks[idx].content = content;
       if (enabled !== undefined) tasks[idx].enabled = enabled;
       if (independent !== undefined) tasks[idx].independent = independent;
+      if (channelId !== undefined) tasks[idx].channelId = channelId;
+      if (model !== undefined) tasks[idx].model = model;
+      if (modelParams !== undefined) tasks[idx].modelParams = modelParams;
       writeTasks(tasks);
       json(res, { ok: true, task: tasks[idx] });
       return true;
@@ -1080,6 +1326,11 @@ async function handleAgentAdmin(_method: string, req: http.IncomingMessage, res:
     return true;
   }
   if (supportedActions.includes(action)) {
+    if (action === "stop" || action === "restart") {
+      for (const key of new Set([...activePollConnections.keys(), ...pendingHeldMessages.keys()])) {
+        terminateSession(key);
+      }
+    }
     const msgId = `api-${Date.now()}`;
     pushCommandToQueue(`/${action}`, msgId, `mcp-api`);
     json(res, { ok: true, message: `/${action} command queued` });
@@ -1100,6 +1351,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
   if (method === "GET" && pathname === "/api/status") {
     const tasks = readTasks();
     const recentlyActive = lastMcpRequestTime > 0 && (Date.now() - lastMcpRequestTime) < 120_000;
+    const channelList = getChannelStatusList();
     json(res, {
       daemon: {
         running: true, version: PKG_VERSION, uptime: Math.floor(process.uptime()), port: daemonPort,
@@ -1108,8 +1360,9 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       },
       queue: { length: getFileQueueLength() },
       tasks: { total: tasks.length, enabled: tasks.filter((t) => t.enabled).length },
-      feishu: { connected: FEISHU_ENABLED, hasChatId: !!sender?.chatId },
-      wechat: { enabled: WECHAT_ENABLED, status: wechatManager?.getStatus() ?? "disconnected" },
+      channels: channelList,
+      feishu: { connected: channelList.some((c) => c.type === "feishu" && c.connected), hasChatId: channelList.some((c) => c.type === "feishu" && c.mainUserBound) },
+      wechat: { enabled: channelList.some((c) => c.type === "wechat"), status: channelList.some((c) => c.type === "wechat" && c.status === "connected") ? "connected" : "disconnected" },
     });
     return true;
   }
@@ -1126,22 +1379,23 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const ch = resolveChannel(session_key);
     if (ch.type === "error") { json(res, { ok: false, error: ch.message }, 400); return true; }
     if (ch.type === "wechat") {
-      json(res, { ok: await wechatManager!.sendText(ch.chatId, text) });
+      json(res, { ok: await ch.rt.wechat!.sendText(ch.chatId, text) });
     } else {
+      const sender = ch.rt.sender!;
       let sentMsgId: string | undefined;
       if (message_id) {
-        sentMsgId = await sender!.sendMessage(text, message_id);
+        sentMsgId = await sender.sendMessage(text, message_id);
         if (!sentMsgId) {
           log("INFO", `回复退避: message_id=${message_id} → ${ch.chatId ? `chat_id=${ch.chatId}` : "默认发送"}`);
-          sentMsgId = await sender!.sendMessage(text, undefined, ch.chatId);
+          sentMsgId = await sender.sendMessage(text, undefined, ch.chatId);
         }
       } else {
-        sentMsgId = await sender!.sendMessage(text, undefined, ch.chatId);
+        sentMsgId = await sender.sendMessage(text, undefined, ch.chatId);
       }
       if (sentMsgId && session_key) trackMessageSession(sentMsgId, session_key);
       json(res, { ok: !!sentMsgId, message_id: sentMsgId });
     }
-    if (session_key) sessionLastReplyAt.set(session_key, Date.now());
+    if (session_key) { sessionLastReplyAt.set(session_key, Date.now()); confirmPendingMessages(session_key); }
     return true;
   }
 
@@ -1152,12 +1406,12 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const ch = resolveChannel(session_key);
     if (ch.type === "error") { json(res, { ok: false, error: ch.message }, 400); return true; }
     if (ch.type === "wechat") {
-      await wechatManager!.sendMedia(ch.chatId, image_path);
+      await ch.rt.wechat!.sendMedia(ch.chatId, image_path);
     } else {
-      await sender!.sendImage(image_path, message_id, ch.chatId);
+      await ch.rt.sender!.sendImage(image_path, message_id, ch.chatId);
     }
     json(res, { ok: true });
-    if (session_key) sessionLastReplyAt.set(session_key, Date.now());
+    if (session_key) { sessionLastReplyAt.set(session_key, Date.now()); confirmPendingMessages(session_key); }
     return true;
   }
 
@@ -1168,12 +1422,12 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const ch = resolveChannel(session_key);
     if (ch.type === "error") { json(res, { ok: false, error: ch.message }, 400); return true; }
     if (ch.type === "wechat") {
-      await wechatManager!.sendMedia(ch.chatId, file_path);
+      await ch.rt.wechat!.sendMedia(ch.chatId, file_path);
     } else {
-      await sender!.sendFile(file_path, message_id, ch.chatId);
+      await ch.rt.sender!.sendFile(file_path, message_id, ch.chatId);
     }
     json(res, { ok: true });
-    if (session_key) sessionLastReplyAt.set(session_key, Date.now());
+    if (session_key) { sessionLastReplyAt.set(session_key, Date.now()); confirmPendingMessages(session_key); }
     return true;
   }
 
@@ -1229,6 +1483,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     }
 
     if (!blocking) {
+      terminateSession(sessionKeyFilter);
       const heldList = await pollFileQueueHoldBatch(0, undefined, sessionKeyFilter);
       if (heldList.length === 0) {
         json(res, { messages: [] });
@@ -1244,10 +1499,16 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       return true;
     }
 
+    // blocking poll: 先确认上次的消息、终止旧连接
+    confirmPendingMessages(sessionKeyFilter);
+    terminateSession(sessionKeyFilter);
+
     let disconnected = false;
-    req.on("close", () => { disconnected = true; });
+    registerPollConn(sessionKeyFilter, res);
+    req.on("close", () => { disconnected = true; unregisterPollConn(sessionKeyFilter, res); });
     req.socket.setTimeout(0);
     const heldList = await pollFileQueueHoldBatch(-1, undefined, sessionKeyFilter, () => disconnected);
+    unregisterPollConn(sessionKeyFilter, res);
     if (disconnected) {
       if (heldList.length > 0) releaseHeldMessages(heldList.flatMap((h) => h.holdFiles));
       return true;
@@ -1268,7 +1529,10 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     }
     log("INFO", `队列消息已领取(poll): count=${messages.length} session=${sessionKeyFilter}`);
     json(res, { messages });
-    finalizeHeldMessages(heldList.flatMap((h) => h.holdFiles));
+
+    const holdFiles = heldList.flatMap((h) => h.holdFiles);
+    const existing = pendingHeldMessages.get(sessionKeyFilter) ?? [];
+    pendingHeldMessages.set(sessionKeyFilter, [...existing, ...holdFiles]);
     return true;
   }
 
@@ -1285,15 +1549,18 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     return true;
   }
 
-  // ── Chat 名称查询 ──
+  // ── Chat 名称查询（按 chatKey 路由到对应通道）──
   if (pathname === "/api/chat-names" && method === "POST") {
-    if (!larkClient) { json(res, { ok: false, error: "飞书未启用" }, 400); return true; }
     const body = JSON.parse(await readBody(req));
     const chatIds = Array.isArray(body.chatIds) ? body.chatIds as string[] : [];
     const names: Record<string, string> = {};
     for (const cid of chatIds) {
+      const { channelId, chatId } = parseChatKey(cid);
+      const rt = channelId ? channels.get(channelId) : [...channels.values()].find((c) => c.cfg.type === "feishu" && c.client);
+      const client = rt?.client;
+      if (!client) continue;
       try {
-        const r: any = await larkClient.im.chat.get({ path: { chat_id: cid } });
+        const r: any = await client.im.chat.get({ path: { chat_id: chatId } });
         const name = r?.data?.name || r?.data?.chat?.name;
         if (name) names[cid] = name;
       } catch { /* ignore */ }
@@ -1304,19 +1571,22 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
 
   // ── 用户名查询（通过 open_id 获取用户名）──
   if (pathname === "/api/user-names" && method === "POST") {
-    if (!larkClient) { json(res, { ok: false, error: "飞书未启用" }, 400); return true; }
     const body = JSON.parse(await readBody(req));
     const openIds = Array.isArray(body.openIds) ? body.openIds as string[] : [];
+    const clients = [...channels.values()].filter((c) => c.cfg.type === "feishu" && c.client).map((c) => c.client!);
+    if (clients.length === 0) { json(res, { ok: false, error: "飞书未启用" }, 400); return true; }
     const names: Record<string, string> = {};
     for (const oid of openIds) {
-      try {
-        const r: any = await larkClient.contact.user.get({
-          path: { user_id: oid },
-          params: { user_id_type: "open_id" },
-        });
-        const name = r?.data?.user?.name;
-        if (name) names[oid] = name;
-      } catch { /* ignore */ }
+      for (const client of clients) {
+        try {
+          const r: any = await client.contact.user.get({
+            path: { user_id: oid },
+            params: { user_id_type: "open_id" },
+          });
+          const name = r?.data?.user?.name;
+          if (name) { names[oid] = name; break; }
+        } catch { /* ignore */ }
+      }
     }
     json(res, { ok: true, names });
     return true;
@@ -1354,14 +1624,14 @@ function removeLockFile(): void {
 // ── 主函数 ───────────────────────────────────────────────
 
 export async function daemonMain(): Promise<void> {
-  if (!FEISHU_ENABLED && !WECHAT_ENABLED) {
-    log("ERROR", "未配置任何消息通道（飞书凭据或微信 Token），至少需要启用一个");
+  if (CHANNEL_CONFIGS.length === 0) {
+    log("ERROR", "未配置任何消息通道，至少需要启用一个（CLAW_CHANNELS_JSON 为空）");
     process.exit(1);
   }
 
   log("INFO", `Daemon v${PKG_VERSION} 启动`);
   log("INFO", `workspace: ${WORKSPACE_DIR}`);
-  log("INFO", `通道: ${[FEISHU_ENABLED && "飞书", WECHAT_ENABLED && "微信"].filter(Boolean).join(" + ")}`);
+  log("INFO", `通道(${CHANNEL_CONFIGS.length}): ${CHANNEL_CONFIGS.map((c) => `${c.name}[${c.type}]`).join(" + ")}`);
   log("INFO", `日志文件: ${LOG_FILE_PATH}`);
 
   const cleanup = () => {
@@ -1375,25 +1645,20 @@ export async function daemonMain(): Promise<void> {
 
   initQueue();
 
-  if (FEISHU_ENABLED && larkClient && sender) {
-    try {
-      const botInfo = await larkClient.request({ method: "GET", url: "/open-apis/bot/v3/info" }) as any;
-      botOpenId = botInfo?.bot?.open_id;
-      if (botOpenId) log("INFO", `机器人 open_id: ${botOpenId}`);
-      else log("WARN", "未能获取机器人 open_id，群消息过滤将使用宽松模式");
-    } catch (e: any) {
-      log("WARN", `获取机器人信息失败: ${e?.message ?? e}`);
+  for (const cfg of CHANNEL_CONFIGS) {
+    const rt: ChannelRuntime = { cfg, lastP2pChatId: null, bindArmed: false };
+    channels.set(cfg.id, rt);
+    if (cfg.type === "feishu") {
+      startFeishuChannel(rt).catch((e: any) => {
+        log("ERROR", `[${cfg.name}] 飞书通道启动失败: ${e?.message ?? e}`);
+      });
+    } else {
+      loadWechatState(rt);
+      rt.wechat = initWeChatChannel(rt);
+      rt.wechat.start(cfg.wechatToken, cfg.wechatAccountId).catch((e: any) => {
+        log("WARN", `[WeChat:${cfg.name}] 启动失败: ${e?.message ?? e}`);
+      });
     }
-
-    startLarkConnection();
-  }
-
-  if (WECHAT_ENABLED) {
-    loadWechatState();
-    wechatManager = initWeChatManager();
-    wechatManager.start(WECHAT_TOKEN, WECHAT_ACCOUNT_ID).catch((e: any) => {
-      log("WARN", `[WeChat] 启动失败: ${e?.message ?? e}`);
-    });
   }
 
   daemonPort = await startHttpServer();
@@ -1403,16 +1668,25 @@ export async function daemonMain(): Promise<void> {
 
   setDaemonSchedulerLogger((msg) => { log("INFO", msg); });
   startDaemonScheduledTasks(
-    (content) => {
-      const chatId = lastFeishuP2pChatId ?? lastWechatChatId ?? (RECEIVE_CHAT_ID || null);
-      if (chatId) {
-        pushMessage(content, undefined, chatId, "p2p");
+    (task, content) => {
+      const rt = pickChannel(task.channelId);
+      const target = rt ? channelDefaultChatId(rt) : null;
+      if (rt && target) {
+        pushMessage(content, undefined, makeChatKey(rt.cfg.id, target), "p2p");
       } else {
-        log("WARN", "定时任务消息无法入队: 无聊天上下文且未配置 larkReceiveId");
+        log("WARN", `定时任务「${task.name}」消息无法入队: 通道无主用户且无私聊记录`);
       }
     },
-    (taskId, taskName, content) => {
-      const payload = JSON.stringify({ taskId, taskName, content });
+    (task, content) => {
+      const rt = pickChannel(task.channelId);
+      const target = rt ? channelDefaultChatId(rt) : null;
+      const notifyChatKey = rt && target ? makeChatKey(rt.cfg.id, target) : undefined;
+      // 任务会话 → 通知目标映射，供 send_text(session_key=taskId) 精确回投
+      if (notifyChatKey) sessionToChatMap.set(task.id, notifyChatKey);
+      const payload = JSON.stringify({
+        taskId: task.id, taskName: task.name, content,
+        channelId: rt?.cfg.id, model: task.model, modelParams: task.modelParams,
+      });
       process.stdout.write(`__IND_LAUNCH__:${payload}\n`);
     },
   );
