@@ -727,9 +727,9 @@ export default function Dashboard({ onSettings, active }: Props) {
 
 const LOG_RE = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) \[(\w+)\] (\w+) (.*)$/
 
-/** 与主进程 escapeLogContentSingleLine 对应：展示时把字面量 \\n 还原为换行 */
+/** 与主进程 escapeLogContentSingleLine 对应：展示时把 ⏎ 标记还原为换行 */
 function displayLogMessageBody(msg: string): string {
-  return msg.replace(/\\n/g, "\n").replace(/\\r/g, "\r")
+  return msg.replace(/⏎/g, "\n")
 }
 
 const LEVEL_COLORS: Record<string, string> = {

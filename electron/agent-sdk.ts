@@ -45,9 +45,13 @@ function ensureSdkBinaryPaths(): void {
   }
 
   for (const p of candidates) {
-    if (existsSync(p)) {
-      process.env.CURSOR_RIPGREP_PATH = p
-      pushUiLog("SDK", "INFO", `Ripgrep 路径: ${p}`)
+    // asar 内的二进制无法 spawn（existsSync 对 asar 虚拟路径返回 true），需指向解包目录
+    const real = p.includes("app.asar") && !p.includes("app.asar.unpacked")
+      ? p.replace("app.asar", "app.asar.unpacked")
+      : p
+    if (existsSync(real)) {
+      process.env.CURSOR_RIPGREP_PATH = real
+      pushUiLog("SDK", "INFO", `Ripgrep 路径: ${real}`)
       return
     }
   }
@@ -243,6 +247,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       }
 
       pushUiLog("SDK", level, `[${sessionKey}] Agent 运行结束 (status=${run.status}${summary ? `, ${summary}` : ""})`)
+      try { session.agent.close() } catch { /* best-effort */ }
       sdkSessions.delete(sessionKey)
       broadcastSdkSessionStatus()
     })
@@ -253,6 +258,8 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     broadcastLog(`[SDK] 启动失败 ${sessionKey}: ${msg}`, "ERROR")
     failedCooldowns.set(sessionKey, Date.now() + FAIL_COOLDOWN_MS)
     pendingLaunches.delete(sessionKey)
+    const failed = sdkSessions.get(sessionKey)
+    if (failed) try { failed.agent.close() } catch { /* best-effort */ }
     sdkSessions.delete(sessionKey)
     broadcastSdkSessionStatus()
     return { ok: false, error: msg }

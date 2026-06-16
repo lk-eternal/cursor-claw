@@ -78,8 +78,9 @@ const LOG_ROTATE_CHECK_INTERVAL = 100;
 let logWriteCount = 0;
 let logDirEnsured = false;
 
+/** 换行用 ⏎ 标记（展示层还原），避免与 Windows 路径中 \n、\r 字面量冲突 */
 function escapeLogContentSingleLine(s: string): string {
-  return s.replace(/\r?\n/g, "\\n");
+  return s.replace(/\r?\n/g, "⏎");
 }
 
 function ensureLogDir(): void {
