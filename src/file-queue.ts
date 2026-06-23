@@ -1,10 +1,11 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as crypto from "node:crypto";
 
 const POLL_INTERVAL_MS = 400;
 const STALE_MESSAGE_MS = 5 * 60 * 1000;
-const BATCH_WAIT_MS = 800;  // 800ms 窗口期间内的文件变动视为同一批次，减少重复处理
-const MAX_TOTAL_WAIT = 5000; // 最多允许拼接等待 5 秒，防止被无限拉长的图片流卡死
+const BATCH_WAIT_MS = 800;
+const MAX_TOTAL_WAIT = 5000;
 
 let queueDir = "";
 
@@ -20,9 +21,33 @@ export function getQueueDir(): string {
   return queueDir;
 }
 
+function sanitizeSessionDir(sessionKey: string): string {
+  return crypto.createHash("md5").update(sessionKey).digest("hex").slice(0, 16);
+}
+
+function getSessionDir(sessionKey?: string): string {
+  if (!sessionKey) return queueDir;
+  const sub = path.join(queueDir, sanitizeSessionDir(sessionKey));
+  if (!fs.existsSync(sub)) fs.mkdirSync(sub, { recursive: true });
+  return sub;
+}
+
+function listSessionDirs(): string[] {
+  if (!queueDir) return [];
+  try {
+    return fs.readdirSync(queueDir)
+      .filter((d) => {
+        const full = path.join(queueDir, d);
+        return fs.statSync(full).isDirectory();
+      })
+      .map((d) => path.join(queueDir, d));
+  } catch { return []; }
+}
+
 export function pushToFileQueue(text: string, messageId?: string, source?: string, sessionKey?: string, chatType?: string, senderOpenId?: string, skipDedup?: boolean): boolean {
   if (!queueDir || !text?.trim()) return false;
 
+  const dir = getSessionDir(sessionKey);
   const ts = Date.now();
   const fileToken = messageId || `${ts}-${Math.random().toString(36).slice(2, 8)}`;
   const safeId = fileToken.replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -30,7 +55,7 @@ export function pushToFileQueue(text: string, messageId?: string, source?: strin
 
   if (messageId && !skipDedup) {
     try {
-      const existing = fs.readdirSync(queueDir);
+      const existing = fs.readdirSync(dir);
       if (existing.some((f) => {
         const base = f.replace(/\.\w+$/, "");
         return base.endsWith(`_${safeId}`);
@@ -47,8 +72,8 @@ export function pushToFileQueue(text: string, messageId?: string, source?: strin
       sessionKey: sessionKey || "", chatType: chatType || "",
       senderOpenId: senderOpenId || "",
     });
-    const tmpPath = path.join(queueDir, filename + ".tmp");
-    const finalPath = path.join(queueDir, filename);
+    const tmpPath = path.join(dir, filename + ".tmp");
+    const finalPath = path.join(dir, filename);
     fs.writeFileSync(tmpPath, data, "utf-8");
     fs.renameSync(tmpPath, finalPath);
     return true;
@@ -93,24 +118,16 @@ function parseHeldMessage(claimedPath: string): QueueMessage | null {
 function holdNextMessage(filterSessionKey?: string): HeldQueueMessage | null {
   if (!queueDir) return null;
 
+  const dir = getSessionDir(filterSessionKey);
   let files: string[];
   try {
-    files = fs.readdirSync(queueDir).filter((f) => f.endsWith(".qmsg")).sort();
+    files = fs.readdirSync(dir).filter((f) => f.endsWith(".qmsg")).sort();
   } catch {
     return null;
   }
 
   for (const file of files) {
-    const srcPath = path.join(queueDir, file);
-
-    if (filterSessionKey) {
-      try {
-        const raw = fs.readFileSync(srcPath, "utf-8");
-        const parsed = JSON.parse(raw);
-        if ((parsed.sessionKey || parsed.chatId || "") !== filterSessionKey) continue;
-      } catch { continue; }
-    }
-
+    const srcPath = path.join(dir, file);
     const claimedPath = srcPath.replace(/\.qmsg$/, ".claimed");
     try {
       fs.renameSync(srcPath, claimedPath);
@@ -222,28 +239,34 @@ export async function pollFileQueueHoldBatch(
 
 export function getEarliestMessageTime(filterSessionKey?: string): number | null {
   if (!queueDir) return null;
+  const dir = getSessionDir(filterSessionKey);
   try {
-    const files = fs.readdirSync(queueDir).filter((f) => f.endsWith(".qmsg")).sort();
-    for (const file of files) {
-      const filePath = path.join(queueDir, file);
-      try {
-        const raw = fs.readFileSync(filePath, "utf-8");
-        const parsed = JSON.parse(raw);
-        if (filterSessionKey && (parsed.sessionKey || parsed.chatId || "") !== filterSessionKey) continue;
-        return parsed.timestamp || parseInt(file.split("_")[0], 10) || null;
-      } catch { continue; }
-    }
+    const files = fs.readdirSync(dir).filter((f) => f.endsWith(".qmsg")).sort();
+    if (files.length === 0) return null;
+    const file = files[0];
+    try {
+      const raw = fs.readFileSync(path.join(dir, file), "utf-8");
+      const parsed = JSON.parse(raw);
+      return parsed.timestamp || parseInt(file.split("_")[0], 10) || null;
+    } catch { return null; }
   } catch { /* ignore */ }
   return null;
 }
 
-export function getQueueLength(): number {
+export function getQueueLength(filterSessionKey?: string): number {
   if (!queueDir) return 0;
-  try {
-    return fs.readdirSync(queueDir).filter((f) => f.endsWith(".qmsg")).length;
-  } catch {
-    return 0;
+  if (filterSessionKey) {
+    const dir = getSessionDir(filterSessionKey);
+    try { return fs.readdirSync(dir).filter((f) => f.endsWith(".qmsg")).length; } catch { return 0; }
   }
+  try {
+    let total = 0;
+    for (const sub of listSessionDirs()) {
+      try { total += fs.readdirSync(sub).filter((f) => f.endsWith(".qmsg")).length; } catch { /* ignore */ }
+    }
+    total += fs.readdirSync(queueDir).filter((f) => f.endsWith(".qmsg")).length;
+    return total;
+  } catch { return 0; }
 }
 
 export interface QueueMessageView {
@@ -256,44 +279,48 @@ export interface QueueMessageView {
   senderOpenId?: string;
 }
 
-export function getQueueMessages(): QueueMessageView[] {
+export function getQueueMessages(filterSessionKey?: string): QueueMessageView[] {
   if (!queueDir) return [];
-  try {
-    const files = fs.readdirSync(queueDir).filter((f) => f.endsWith(".qmsg")).sort();
-    return files.map((f, i) => {
-      try {
-        const filePath = path.join(queueDir, f);
-        const raw = fs.readFileSync(filePath, "utf-8");
-        const parsed = JSON.parse(raw);
-        const ts = parsed.timestamp || fs.statSync(filePath).mtimeMs;
-        return {
-          index: i, fileId: f,
-          preview: (parsed.text ?? "").slice(0, 200),
-          sessionKey: parsed.sessionKey || parsed.chatId || undefined,
-          chatType: parsed.chatType || undefined,
-          timestamp: Math.round(ts),
-          senderOpenId: parsed.senderOpenId || undefined,
-        };
-      } catch {
-        return { index: i, fileId: f, preview: "(unreadable)" };
+  const dirs = filterSessionKey ? [getSessionDir(filterSessionKey)] : [queueDir, ...listSessionDirs()];
+  const result: QueueMessageView[] = [];
+  for (const dir of dirs) {
+    try {
+      const files = fs.readdirSync(dir).filter((f) => f.endsWith(".qmsg")).sort();
+      for (const f of files) {
+        try {
+          const filePath = path.join(dir, f);
+          const raw = fs.readFileSync(filePath, "utf-8");
+          const parsed = JSON.parse(raw);
+          const ts = parsed.timestamp || fs.statSync(filePath).mtimeMs;
+          result.push({
+            index: result.length, fileId: f,
+            preview: (parsed.text ?? "").slice(0, 200),
+            sessionKey: parsed.sessionKey || parsed.chatId || undefined,
+            chatType: parsed.chatType || undefined,
+            timestamp: Math.round(ts),
+            senderOpenId: parsed.senderOpenId || undefined,
+          });
+        } catch {
+          result.push({ index: result.length, fileId: f, preview: "(unreadable)" });
+        }
       }
-    });
-  } catch {
-    return [];
+    } catch { /* ignore */ }
   }
+  return result;
 }
 
-export function deleteQueueMessage(fileId: string): boolean {
+export function deleteQueueMessage(fileId: string, filterSessionKey?: string): boolean {
   if (!queueDir || !fileId) return false;
   const basename = path.basename(fileId);
   if (basename !== fileId || !fileId.endsWith(".qmsg")) return false;
-  try {
-    const filePath = path.join(queueDir, basename);
-    if (fs.existsSync(filePath)) { fs.unlinkSync(filePath); return true; }
-    return false;
-  } catch {
-    return false;
+  const dirs = filterSessionKey ? [getSessionDir(filterSessionKey)] : [queueDir, ...listSessionDirs()];
+  for (const dir of dirs) {
+    try {
+      const filePath = path.join(dir, basename);
+      if (fs.existsSync(filePath)) { fs.unlinkSync(filePath); return true; }
+    } catch { /* ignore */ }
   }
+  return false;
 }
 
 export interface QueueSessionInfo {
@@ -305,19 +332,22 @@ export interface QueueSessionInfo {
 export function getDistinctSessions(): QueueSessionInfo[] {
   if (!queueDir) return [];
   const map = new Map<string, { chatType: string; senderOpenId?: string }>();
-  try {
-    const files = fs.readdirSync(queueDir).filter((f) => f.endsWith(".qmsg"));
-    for (const f of files) {
-      try {
-        const raw = fs.readFileSync(path.join(queueDir, f), "utf-8");
-        const parsed = JSON.parse(raw);
-        const key = parsed.sessionKey || parsed.chatId || "";
-        if (key && !map.has(key)) {
-          map.set(key, { chatType: parsed.chatType || "p2p", senderOpenId: parsed.senderOpenId || undefined });
-        }
-      } catch { /* ignore */ }
-    }
-  } catch { /* ignore */ }
+  const dirs = [queueDir, ...listSessionDirs()];
+  for (const dir of dirs) {
+    try {
+      const files = fs.readdirSync(dir).filter((f) => f.endsWith(".qmsg"));
+      for (const f of files) {
+        try {
+          const raw = fs.readFileSync(path.join(dir, f), "utf-8");
+          const parsed = JSON.parse(raw);
+          const key = parsed.sessionKey || parsed.chatId || "";
+          if (key && !map.has(key)) {
+            map.set(key, { chatType: parsed.chatType || "p2p", senderOpenId: parsed.senderOpenId || undefined });
+          }
+        } catch { /* ignore */ }
+      }
+    } catch { /* ignore */ }
+  }
   return [...map.entries()].map(([key, v]) => ({
     sessionKey: key,
     chatType: v.chatType,
@@ -328,21 +358,24 @@ export function getDistinctSessions(): QueueSessionInfo[] {
 export function cleanupStaleMessages(): void {
   if (!queueDir) return;
   const now = Date.now();
-  try {
-    for (const f of fs.readdirSync(queueDir)) {
-      if (!f.endsWith(".claimed") && !f.endsWith(".tmp") && !f.endsWith(".done")) continue;
-      const filePath = path.join(queueDir, f);
-      try {
-        const stat = fs.statSync(filePath);
-        if (now - stat.mtimeMs > STALE_MESSAGE_MS) {
-          if (f.endsWith(".claimed")) {
-            const qmsgPath = filePath.replace(/\.claimed$/, ".qmsg");
-            try { fs.renameSync(filePath, qmsgPath); } catch { fs.unlinkSync(filePath); }
-          } else {
-            fs.unlinkSync(filePath);
+  const dirs = [queueDir, ...listSessionDirs()];
+  for (const dir of dirs) {
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        if (!f.endsWith(".claimed") && !f.endsWith(".tmp") && !f.endsWith(".done")) continue;
+        const filePath = path.join(dir, f);
+        try {
+          const stat = fs.statSync(filePath);
+          if (now - stat.mtimeMs > STALE_MESSAGE_MS) {
+            if (f.endsWith(".claimed")) {
+              const qmsgPath = filePath.replace(/\.claimed$/, ".qmsg");
+              try { fs.renameSync(filePath, qmsgPath); } catch { fs.unlinkSync(filePath); }
+            } else {
+              fs.unlinkSync(filePath);
+            }
           }
-        }
-      } catch { /* ignore */ }
-    }
-  } catch { /* ignore */ }
+        } catch { /* ignore */ }
+      }
+    } catch { /* ignore */ }
+  }
 }

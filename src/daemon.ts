@@ -1537,7 +1537,8 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     registerPollConn(sessionKeyFilter, res);
     req.on("close", () => { disconnected = true; unregisterPollConn(sessionKeyFilter, res); });
     req.socket.setTimeout(0);
-    const heldList = await pollFileQueueHoldBatch(-1, undefined, sessionKeyFilter, () => disconnected);
+    const POLL_TIMEOUT_MS = 30 * 60 * 1000;
+    const heldList = await pollFileQueueHoldBatch(POLL_TIMEOUT_MS, undefined, sessionKeyFilter, () => disconnected);
     unregisterPollConn(sessionKeyFilter, res);
     if (disconnected) {
       if (heldList.length > 0) releaseHeldMessages(heldList.flatMap((h) => h.holdFiles));

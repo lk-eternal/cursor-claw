@@ -794,8 +794,12 @@ function startStatusPolling(): void {
       const sessions = getSessionAgentList()
       if (getEnabledChannels().some((c) => c.type === "feishu")) {
         const uncachedGroups = sessions
-          .filter((s) => s.chatType === "group" && !chatNameCache.has(s.sessionKey))
-          .map((s) => s.sessionKey)
+          .filter((s) => {
+            if (s.chatType !== "group") return false
+            const chatId = s.sessionKey.includes("::") ? s.sessionKey.split("::")[0] : s.sessionKey
+            return !chatNameCache.has(chatId)
+          })
+          .map((s) => s.sessionKey.includes("::") ? s.sessionKey.split("::")[0] : s.sessionKey)
         if (uncachedGroups.length > 0) await fetchChatNames(uncachedGroups)
 
         const uncachedP2pOpenIds = sessions
