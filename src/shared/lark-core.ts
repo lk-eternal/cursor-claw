@@ -92,25 +92,26 @@ export class LarkSender {
     return /<at\s+user_id=/.test(text);
   }
 
-  private formatForSend(text: string): { content: string; msgType: string } {
+  private formatForSend(text: string, title?: string): { content: string; msgType: string } {
     const fullText = `${this.messagePrefix}${text}`;
     if (LarkSender.containsAtTag(fullText)) {
       return { content: JSON.stringify({ text: fullText }), msgType: "text" };
     }
     const escaped = fullText.replace(/\\/g, "\\\\");
-    return {
-      content: JSON.stringify({
-        schema: "2.0",
-        config: { wide_screen_mode: true },
-        body: { elements: [{ tag: "markdown", content: escaped }] },
-      }),
-      msgType: "interactive",
+    const card: any = {
+      schema: "2.0",
+      config: { wide_screen_mode: true },
+      body: { elements: [{ tag: "markdown", content: escaped }] },
     };
+    if (title) {
+      card.header = { title: { tag: "plain_text", content: title }, template: "turquoise" };
+    }
+    return { content: JSON.stringify(card), msgType: "interactive" };
   }
 
-  async replyMessage(messageId: string, text: string): Promise<string | undefined> {
+  async replyMessage(messageId: string, text: string, title?: string): Promise<string | undefined> {
     try {
-      const { content, msgType } = this.formatForSend(text);
+      const { content, msgType } = this.formatForSend(text, title);
       const res = await this.client.im.message.reply({
         path: { message_id: messageId },
         data: { content, msg_type: msgType },
@@ -121,12 +122,12 @@ export class LarkSender {
     } catch (e: any) { this.log("ERROR", `飞书回复异常: ${e?.message ?? e}`); return undefined; }
   }
 
-  async sendMessage(text: string, replyMessageId?: string, chatId?: string): Promise<string | undefined> {
-    if (replyMessageId) { return this.replyMessage(replyMessageId, text); }
+  async sendMessage(text: string, replyMessageId?: string, chatId?: string, title?: string): Promise<string | undefined> {
+    if (replyMessageId) { return this.replyMessage(replyMessageId, text, title); }
     const targetChatId = chatId ?? this.chatId;
     if (!targetChatId) { this.log("WARN", "无发送目标"); return undefined; }
     try {
-      const { content, msgType } = this.formatForSend(text);
+      const { content, msgType } = this.formatForSend(text, title);
       const res = await this.client.im.message.create({
         params: { receive_id_type: "chat_id" as any },
         data: { receive_id: targetChatId, content, msg_type: msgType },
@@ -135,6 +136,21 @@ export class LarkSender {
       else this.log("ERROR", `飞书发送失败: code=${(res as any).code}, msg=${(res as any).msg}`);
       return (res as any)?.data?.message_id;
     } catch (e: any) { this.log("ERROR", `飞书发送异常: ${e?.message ?? e}`); return undefined; }
+  }
+
+  async addReaction(messageId: string, emojiType: string = "Get"): Promise<boolean> {
+    try {
+      const res = await this.client.im.messageReaction.create({
+        path: { message_id: messageId },
+        data: { reaction_type: { emoji_type: emojiType } },
+      });
+      if ((res as any).code === 0 || (res as any).code === undefined) return true;
+      this.log("WARN", `添加表情失败: code=${(res as any).code}`);
+      return false;
+    } catch (e: any) {
+      this.log("WARN", `添加表情异常: ${e?.message ?? e}`);
+      return false;
+    }
   }
 
   async sendImage(imagePath: string, replyMessageId?: string, chatId?: string): Promise<void> {

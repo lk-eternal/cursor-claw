@@ -343,6 +343,16 @@ function resolveRawChatId(sessionKey?: string): string | undefined {
   return idx > 0 ? sessionKey.slice(0, idx) : sessionKey;
 }
 
+function extractWorkspaceTitle(sessionKey?: string): string | undefined {
+  if (!sessionKey) return undefined;
+  const idx = sessionKey.indexOf("::");
+  if (idx < 0) return undefined;
+  const wsDir = sessionKey.slice(idx + 2);
+  if (!wsDir) return undefined;
+  const name = wsDir.replace(/\\/g, "/").split("/").filter(Boolean).pop();
+  return name || undefined;
+}
+
 type ResolvedChannel =
   | { type: "wechat"; rt: ChannelRuntime; chatId: string }
   | { type: "feishu"; rt: ChannelRuntime; chatId?: string }
@@ -396,6 +406,15 @@ function trackMessageSession(messageId: string, sessionKey: string): void {
     if (oldest) messageSessionMap.delete(oldest);
   }
   messageSessionMap.set(messageId, sessionKey);
+}
+
+function addReactionToClaimedMessages(messages: QueueMessage[], sessionKey: string): void {
+  const ch = resolveChannel(sessionKey);
+  if (ch.type !== "feishu" || !ch.rt.sender) return;
+  const sender = ch.rt.sender;
+  for (const m of messages) {
+    if (m.messageId) sender.addReaction(m.messageId).catch(() => {});
+  }
 }
 
 function resolveRoutingKey(chatId?: string, replyMessageId?: string): string | undefined {
@@ -1391,15 +1410,16 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       json(res, { ok: await ch.rt.wechat!.sendText(ch.chatId, text) });
     } else {
       const sender = ch.rt.sender!;
+      const title = extractWorkspaceTitle(session_key);
       let sentMsgId: string | undefined;
       if (message_id) {
-        sentMsgId = await sender.sendMessage(text, message_id);
+        sentMsgId = await sender.sendMessage(text, message_id, undefined, title);
         if (!sentMsgId) {
           log("INFO", `回复退避: message_id=${message_id} → ${ch.chatId ? `chat_id=${ch.chatId}` : "默认发送"}`);
-          sentMsgId = await sender.sendMessage(text, undefined, ch.chatId);
+          sentMsgId = await sender.sendMessage(text, undefined, ch.chatId, title);
         }
       } else {
-        sentMsgId = await sender.sendMessage(text, undefined, ch.chatId);
+        sentMsgId = await sender.sendMessage(text, undefined, ch.chatId, title);
       }
       if (sentMsgId && session_key) trackMessageSession(sentMsgId, session_key);
       json(res, { ok: !!sentMsgId, message_id: sentMsgId });
@@ -1505,6 +1525,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       log("INFO", `队列消息已领取(instant): count=${messages.length} session=${sessionKeyFilter}`);
       json(res, { messages });
       finalizeHeldMessages(heldList.flatMap((h) => h.holdFiles));
+      addReactionToClaimedMessages(messages, sessionKeyFilter);
       return true;
     }
 
@@ -1538,6 +1559,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     }
     log("INFO", `队列消息已领取(poll): count=${messages.length} session=${sessionKeyFilter}`);
     json(res, { messages });
+    addReactionToClaimedMessages(messages, sessionKeyFilter);
 
     const holdFiles = heldList.flatMap((h) => h.holdFiles);
     const existing = pendingHeldMessages.get(sessionKeyFilter) ?? [];

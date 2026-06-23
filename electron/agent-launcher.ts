@@ -68,7 +68,7 @@ function broadcastSessionStatus(): void {
       workspaceDir: s.workspaceDir,
     }
   })
-  broadcastSessionStatusToUi(list)
+  broadcastSessionStatusToUi(list, "cli")
 }
 
 // ── 状态查询 ──────────────────────────────────────────

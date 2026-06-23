@@ -69,7 +69,7 @@ function broadcastSdkSessionStatus(): void {
     chatName: s.chatName,
     workspaceDir: s.workspaceDir,
   }))
-  broadcastSessionStatus(list)
+  broadcastSessionStatus(list, "sdk")
 }
 
 // prompt 由 agent-launcher.buildPrompt 统一构建

@@ -86,13 +86,26 @@ export function flushAgentStreamChunk(
   }
 }
 
-export function broadcastSessionStatus(sessionData: { sessionKey: string; pid: number; startedAt: number; lastActivityAt: number; chatType: string; chatName?: string; workspaceDir?: string }[]): void {
+export type SessionSource = "cli" | "sdk"
+
+type SessionEntry = { sessionKey: string; pid: number; startedAt: number; lastActivityAt: number; chatType: string; chatName?: string; workspaceDir?: string; source?: SessionSource }
+
+const sessionPartitions = new Map<SessionSource, SessionEntry[]>()
+
+export function broadcastSessionStatus(sessionData: SessionEntry[], source?: SessionSource): void {
+  sessionPartitions.set(source || "cli", sessionData)
+
+  const merged: SessionEntry[] = []
+  for (const [src, entries] of sessionPartitions) {
+    for (const e of entries) merged.push({ ...e, source: src })
+  }
+
   const taskStatuses: Record<string, { running: boolean; pid?: number; startedAt?: number }> = {}
-  for (const s of sessionData) {
+  for (const s of merged) {
     if (s.chatType === "task") taskStatuses[s.sessionKey] = { running: true, pid: s.pid, startedAt: s.startedAt }
   }
   for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send("agent:sessions", sessionData)
+    win.webContents.send("agent:sessions", merged)
     win.webContents.send("scheduled-tasks:status", taskStatuses)
   }
 }
