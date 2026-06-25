@@ -1,9 +1,9 @@
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { WeChatClient, normalizeAccountId } from "./wechat/index.js";
 import type { WeixinMessage, MessageItem } from "./wechat/index.js";
+import { MEDIA_CACHE_DIR } from "./shared/lark-core.js";
 
 export interface WeChatIncomingMessage {
   text: string;
@@ -224,7 +224,7 @@ export class WeChatManager extends EventEmitter {
     }
   }
 
-  private static readonly MEDIA_DIR = path.join(os.tmpdir(), "cursor-claw-images");
+  private static readonly MEDIA_DIR = MEDIA_CACHE_DIR;
 
   private handleMessage(msg: WeixinMessage): void {
     this.opts.log("DEBUG", `[WeChat] RAW msg: mid=${msg.message_id} type=${msg.message_type} state=${msg.message_state} from=${msg.from_user_id} to=${msg.to_user_id} client_id=${msg.client_id}`);

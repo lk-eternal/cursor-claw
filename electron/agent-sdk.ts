@@ -17,6 +17,8 @@ interface SdkSessionAgent {
   senderOpenId?: string
   chatName?: string
   abortController: AbortController
+  /** 流式日志聚合缓冲：连续同类型(thinking/text)增量合并成一条打印 */
+  logAgg: { kind: "thinking" | "text" | null; buf: string }
 }
 
 const sdkSessions = new Map<string, SdkSessionAgent>()
@@ -74,14 +76,42 @@ function broadcastSdkSessionStatus(): void {
 
 // prompt 由 agent-launcher.buildPrompt 统一构建
 
+// stream() 发出的 thinking.text / assistant text 均为增量 delta，逐条打印会刷屏；
+// 这里按类型聚合，切换类型 / 超过阈值 / 遇到 tool·status·结束时才落一条日志
+const LOG_FLUSH_LEN = 400
+
+function flushSdkLog(session: SdkSessionAgent): void {
+  const agg = session.logAgg
+  const text = agg.buf.trim()
+  if (agg.kind && text) {
+    if (agg.kind === "thinking") {
+      pushUiLog("SDK", "DEBUG", `[${session.sessionKey}] [thinking] ${text}`)
+    } else {
+      pushUiLog("SDK", "INFO", `[${session.sessionKey}] ${text}`)
+    }
+  }
+  agg.kind = null
+  agg.buf = ""
+}
+
+function appendSdkLog(session: SdkSessionAgent, kind: "thinking" | "text", delta: string): void {
+  const agg = session.logAgg
+  if (agg.kind && agg.kind !== kind) flushSdkLog(session)
+  agg.kind = kind
+  agg.buf += delta
+  if (agg.buf.length >= LOG_FLUSH_LEN) flushSdkLog(session)
+}
+
 async function streamRunEvents(session: SdkSessionAgent, run: Run): Promise<void> {
   try {
     for await (const event of run.stream()) {
       if (session.abortController.signal.aborted) break
       session.lastActivityAt = Date.now()
-      handleSdkEvent(session.sessionKey, event)
+      handleSdkEvent(session, event)
     }
+    flushSdkLog(session)
   } catch (e: unknown) {
+    flushSdkLog(session)
     if (!session.abortController.signal.aborted) {
       const msg = e instanceof Error ? `[${e.constructor.name}] ${e.message}` : String(e)
       const stack = e instanceof Error ? e.stack?.split("\n").slice(0, 3).join(" | ") : ""
@@ -91,26 +121,24 @@ async function streamRunEvents(session: SdkSessionAgent, run: Run): Promise<void
   }
 }
 
-function handleSdkEvent(sessionKey: string, event: SDKMessage): void {
+function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
   switch (event.type) {
     case "assistant":
       for (const block of event.message.content) {
-        if (block.type === "text" && block.text.trim()) {
-          pushUiLog("SDK", "INFO", `[${sessionKey}] ${block.text.slice(0, 200)}`)
-        }
+        if (block.type === "text" && block.text) appendSdkLog(session, "text", block.text)
       }
       break
     case "thinking":
-      if (event.text.trim()) {
-        pushUiLog("SDK", "DEBUG", `[${sessionKey}] [thinking] ${event.text.slice(0, 120)}`)
-      }
+      if (event.text) appendSdkLog(session, "thinking", event.text)
       break
     case "tool_call":
-      pushUiLog("SDK", "INFO", `[${sessionKey}] [tool] ${event.name}: ${event.status}`)
+      flushSdkLog(session)
+      pushUiLog("SDK", "INFO", `[${session.sessionKey}] [tool] ${event.name}: ${event.status}`)
       break
     case "status": {
+      flushSdkLog(session)
       const lvl = event.status === "ERROR" ? "ERROR" as const : "INFO" as const
-      pushUiLog("SDK", lvl, `[${sessionKey}] [status] ${event.status}${event.message ? ` - ${event.message}` : ""}`)
+      pushUiLog("SDK", lvl, `[${session.sessionKey}] [status] ${event.status}${event.message ? ` - ${event.message}` : ""}`)
     }
       break
   }
@@ -221,6 +249,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       senderOpenId,
       chatName,
       abortController,
+      logAgg: { kind: null, buf: "" },
     }
 
     sdkSessions.set(sessionKey, session)

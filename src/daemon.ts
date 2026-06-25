@@ -8,7 +8,7 @@ import {
   stopDaemonScheduledTasks,
   setDaemonSchedulerLogger,
 } from "./daemon-scheduled-tasks.js";
-import { stripProxyEnv, localTimestamp, createLarkClient, LarkSender, LarkMessageEvent } from "./shared/lark-core.js";
+import { stripProxyEnv, localTimestamp, createLarkClient, LarkSender, LarkMessageEvent, cleanupMediaCache } from "./shared/lark-core.js";
 import { WeChatManager } from "./wechat-manager.js";
 import {
   initFileQueue,
@@ -456,6 +456,17 @@ function initQueue(): void {
   cleanupStaleMessages();
 }
 
+/** 媒体缓存清理：启动清一次 + 每 6 小时清一次，删除 24 小时前的旧文件 */
+function startMediaCacheCleanup(): void {
+  const MAX_AGE_MS = 24 * 60 * 60 * 1000;
+  const sweep = () => {
+    const n = cleanupMediaCache(MAX_AGE_MS);
+    if (n > 0) log("INFO", `媒体缓存已清理 ${n} 个过期文件`);
+  };
+  sweep();
+  setInterval(sweep, 6 * 60 * 60 * 1000).unref();
+}
+
 function pushMessage(content: string, messageId?: string, chatId?: string, chatType?: string, senderOpenId?: string, replyMessageId?: string, meta?: QueueMessageMeta): void {
   if (!content?.trim()) {
     log("WARN", `丢弃空消息 (messageId=${messageId})`);
@@ -837,8 +848,13 @@ function createMcpServer(): McpServer {
       session_key: z.string().optional().describe("目标会话的 sessionKey，用于精确投递"),
     },
     async ({ image_path, message_id, session_key }) => {
-      await httpJson(localDaemonUrl("/api/send-image"), { image_path, message_id, session_key });
-      return { content: [{ type: "text" as const, text: "图片已发送" }] };
+      try {
+        await httpJson(localDaemonUrl("/api/send-image"), { image_path, message_id, session_key });
+        return { content: [{ type: "text" as const, text: "图片已发送" }] };
+      } catch (e: any) {
+        log("ERROR", `send_image 异常: ${e?.message ?? e}`);
+        return { content: [{ type: "text" as const, text: `[error] ${e?.message ?? "unknown error"}` }] };
+      }
     },
   );
 
@@ -851,8 +867,13 @@ function createMcpServer(): McpServer {
       session_key: z.string().optional().describe("目标会话的 sessionKey，用于精确投递"),
     },
     async ({ file_path, message_id, session_key }) => {
-      await httpJson(localDaemonUrl("/api/send-file"), { file_path, message_id, session_key });
-      return { content: [{ type: "text" as const, text: "文件已发送" }] };
+      try {
+        await httpJson(localDaemonUrl("/api/send-file"), { file_path, message_id, session_key });
+        return { content: [{ type: "text" as const, text: "文件已发送" }] };
+      } catch (e: any) {
+        log("ERROR", `send_file 异常: ${e?.message ?? e}`);
+        return { content: [{ type: "text" as const, text: `[error] ${e?.message ?? "unknown error"}` }] };
+      }
     },
   );
 
@@ -1684,7 +1705,16 @@ export async function daemonMain(): Promise<void> {
   process.on("SIGTERM", cleanup);
   process.on("exit", removeLockFile);
 
+  // 全局兜底：消息桥接守护进程，掉线比带病更糟——漏网异步异常只记录不退出，避免飞书/微信整体掉线
+  process.on("uncaughtException", (e) => {
+    log("ERROR", `未捕获异常: ${e?.stack ?? e}`);
+  });
+  process.on("unhandledRejection", (reason) => {
+    log("ERROR", `未处理的 Promise 拒绝: ${reason instanceof Error ? (reason.stack ?? reason.message) : String(reason)}`);
+  });
+
   initQueue();
+  startMediaCacheCleanup();
 
   for (const cfg of CHANNEL_CONFIGS) {
     const rt: ChannelRuntime = { cfg, lastP2pChatId: null, bindArmed: false };

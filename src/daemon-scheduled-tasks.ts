@@ -81,8 +81,10 @@ function isValidCron(expression: string): boolean {
 
 function collectDueCronFires(expression: string, rangeStartExclusive: Date, rangeEndInclusive: Date): Date[] {
   const out: Date[] = [];
-  const startMs = rangeStartExclusive.getTime();
   const endMs = rangeEndInclusive.getTime();
+  // 扫描窗口封顶 CATCHUP_MAX_MS：更早的触发点本就会被 catchup 过滤丢弃；
+  // 避免长休眠唤醒后窗口过大、每秒迭代被 MAX_FIRES_PER_TICK 截断而漏扫近期槽位
+  const startMs = Math.max(rangeStartExclusive.getTime(), endMs - CATCHUP_MAX_MS);
   if (endMs <= startMs) {
     return out;
   }

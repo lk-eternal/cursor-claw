@@ -40,6 +40,13 @@ interface SessionAgent {
 const sessionAgents = new Map<string, SessionAgent>()
 const pendingLaunches = new Set<string>()
 
+/** 进程输出捕获上限：长会话只保留尾部，避免 stdout/stderr 无限累积撑爆内存 */
+const MAX_CAPTURE_BYTES = 64 * 1024
+function appendCapped(buf: string, chunk: string): string {
+  const s = buf + chunk
+  return s.length > MAX_CAPTURE_BYTES ? s.slice(s.length - MAX_CAPTURE_BYTES) : s
+}
+
 let chatNameResolver: ((chatId: string) => string | undefined) | null = null
 let sessionCloseHandler: ((sessionKey: string, chatType: ChatType, exitInfo?: SessionExitInfo) => void | Promise<void>) | null = null
 
@@ -213,7 +220,7 @@ function ensureMainChatId(workspaceDir: string, scope: string, spawnEnv: Record<
 function spawnAgentWithLogs(args: string[], env: Record<string, string>, label: string, cwd?: string): ChildProcess {
   logCursorAgentInvocation(label, args, cwd)
   const { agentNodePath, agentIndexPath } = getAgentPaths()
-  const spawnOpts = { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] as const, env, cwd }
+  const spawnOpts = { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] as ("ignore" | "pipe")[], env, cwd }
   if (agentNodePath && agentIndexPath) {
     return spawn(agentNodePath, [agentIndexPath, ...args], spawnOpts)
   }
@@ -300,8 +307,8 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
 
     let stderrChunks = ""
     let stdoutChunks = ""
-    child.stderr?.on("data", (d: Buffer) => { stderrChunks += d.toString(); sa.lastOutputAt = Date.now() })
-    child.stdout?.on("data", (d: Buffer) => { stdoutChunks += d.toString(); sa.lastOutputAt = Date.now() })
+    child.stderr?.on("data", (d: Buffer) => { stderrChunks = appendCapped(stderrChunks, d.toString()); sa.lastOutputAt = Date.now() })
+    child.stdout?.on("data", (d: Buffer) => { stdoutChunks = appendCapped(stdoutChunks, d.toString()); sa.lastOutputAt = Date.now() })
 
     child.on("close", (code, signal) => {
       const isCurrent = sessionAgents.get(sessionKey) === sa

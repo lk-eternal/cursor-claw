@@ -3,6 +3,27 @@ import * as path from "node:path";
 import * as os from "node:os";
 import * as Lark from "@larksuiteoapi/node-sdk";
 
+// ── 媒体缓存目录（飞书/微信下载的图片、文件、语音共用）─────
+
+export const MEDIA_CACHE_DIR = path.join(os.tmpdir(), "cursor-claw-images");
+
+/** 清理媒体缓存中 mtime 超过 maxAgeMs 的旧文件，返回删除数量（避免临时文件无限堆积） */
+export function cleanupMediaCache(maxAgeMs: number): number {
+  let removed = 0;
+  try {
+    if (!fs.existsSync(MEDIA_CACHE_DIR)) return 0;
+    const now = Date.now();
+    for (const name of fs.readdirSync(MEDIA_CACHE_DIR)) {
+      const full = path.join(MEDIA_CACHE_DIR, name);
+      try {
+        const st = fs.statSync(full);
+        if (st.isFile() && now - st.mtimeMs > maxAgeMs) { fs.unlinkSync(full); removed++; }
+      } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
+  return removed;
+}
+
 // ── 代理环境变量清理 ─────────────────────────────────────
 
 const PROXY_KEYS = [
@@ -204,7 +225,7 @@ export class LarkSender {
 
   // ── 图片下载 ───────────────────────────────────────────
 
-  private static readonly IMAGE_DIR = path.join(os.tmpdir(), "cursor-claw-images");
+  private static readonly IMAGE_DIR = MEDIA_CACHE_DIR;
 
   async downloadImage(messageId: string, imageKey: string): Promise<string | null> {
     try {

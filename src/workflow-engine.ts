@@ -327,13 +327,14 @@ export function handleReject(instanceId: string, payload: WorkflowRejectPayload)
 
   // 检查重试次数
   const retryCount = getNodeRetryCount(inst, targetNode.id);
-  if (retryCount >= targetNode.maxRetries) {
+  const maxRetries = targetNode.maxRetries ?? 2;
+  if (retryCount >= maxRetries) {
     inst.status = "failed";
     inst.updatedAt = Date.now();
     saveInstance(inst);
     return {
       failed: true,
-      message: `节点「${targetNode.name}」已达最大重试次数 (${targetNode.maxRetries})，工作流终止`,
+      message: `节点「${targetNode.name}」已达最大重试次数 (${maxRetries})，工作流终止`,
     };
   }
 
