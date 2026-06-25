@@ -85,6 +85,19 @@ function resolveIcon(): string {
   return path.join(dir, "icon.png")
 }
 
+/** 同步开机自启系统设置到配置值（开发模式跳过，避免把 electron.exe 注册为自启） */
+function applyLoginItemSetting(enabled: boolean): void {
+  if (!app.isPackaged) return
+  try {
+    app.setLoginItemSettings({
+      openAtLogin: enabled,
+      args: profileName ? [`--profile=${profileName}`] : [],
+    })
+  } catch (e) {
+    console.error("[main] 设置开机自启失败:", e)
+  }
+}
+
 function createWindow(): void {
   const iconPath = resolveIcon()
 
@@ -141,6 +154,11 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle("config:get", () => getConfig())
   ipcMain.handle("config:save", (_, config) => saveAppConfigFromRenderer(config))
+  ipcMain.handle("app:set-auto-start", (_, enabled: boolean) => {
+    saveConfig({ autoStart: enabled })
+    applyLoginItemSetting(enabled)
+    return { ok: true }
+  })
 
   ipcMain.handle(
     "window:close-confirm-result",
@@ -193,8 +211,9 @@ function registerIpcHandlers(): void {
     return { ok: true }
   })
   ipcMain.handle("mcp:delete", (_, name: string) => {
-    deleteMcpServer(name)
-    return { ok: true }
+    const server = getMcpServerList().find((s) => s.name === name)
+    if (!server) return { ok: false, error: "MCP 服务器不存在" }
+    return deleteMcpServer(name, server.source)
   })
   ipcMain.handle("mcp:login", (_, name: string) => loginMcpServer(name))
   ipcMain.handle("mcp:toggle", (_, name: string, enabled: boolean) => toggleMcpServer(name, enabled))
@@ -372,6 +391,7 @@ app.on("before-quit", () => {
 
 app.whenReady().then(() => {
   registerIpcHandlers()
+  applyLoginItemSetting(getConfig().autoStart)
   createWindow()
   initAppUpdater(() => mainWindow)
   initTray()

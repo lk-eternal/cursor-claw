@@ -210,6 +210,7 @@ const api = {
   },
   getConfig: (): Promise<AppConfig> => ipcRenderer.invoke("config:get"),
   saveConfig: (config: Partial<AppConfig>): Promise<ConfigSaveResult> => ipcRenderer.invoke("config:save", config),
+  setAutoStart: (enabled: boolean): Promise<{ ok: boolean }> => ipcRenderer.invoke("app:set-auto-start", enabled),
   applyWorkspaceSwitch: (workspaceDir: string, stopOldSessions: boolean): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke("config:apply-workspace-switch", workspaceDir, stopOldSessions),
   respondWindowClose: (payload: { action: "minimize" | "quit" | "cancel"; remember: boolean }): Promise<void> =>

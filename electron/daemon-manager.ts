@@ -123,6 +123,37 @@ let cachedPort: number | null = null
 /** 本次由本应用启动成功时 Daemon 所绑定的工作目录（用于目录切换后的状态判断） */
 let activeDaemonWorkspaceDir: string | null = null
 
+/** 期望 Daemon 处于运行态：true 时若进程意外退出则自动重启；主动停止/退出应用置 false */
+let daemonShouldRun = false
+let daemonRestartTimer: NodeJS.Timeout | null = null
+let daemonRestartCount = 0
+let lastDaemonStartAt = 0
+const DAEMON_AUTO_RESTART_DELAY_MS = 3_000
+const DAEMON_RESTART_WINDOW_MS = 60_000
+const DAEMON_RESTART_MAX = 5
+
+/** 运行期意外退出的自愈重启：带 crash-loop 退避（窗口内超限即停手报警，等待人工介入） */
+function scheduleDaemonAutoRestart(exitCode: number | null): void {
+  if (!daemonShouldRun) return
+  if (daemonRestartTimer) { clearTimeout(daemonRestartTimer); daemonRestartTimer = null }
+  const now = Date.now()
+  if (now - lastDaemonStartAt > DAEMON_RESTART_WINDOW_MS) daemonRestartCount = 0
+  if (daemonRestartCount >= DAEMON_RESTART_MAX) {
+    daemonShouldRun = false
+    broadcastLog(`[Daemon] 短时间内异常退出 ${daemonRestartCount} 次，已停止自动重启，请检查后在主页手动启动`, "ERROR")
+    return
+  }
+  daemonRestartCount++
+  broadcastLog(`[Daemon] 异常退出 (code=${exitCode})，${DAEMON_AUTO_RESTART_DELAY_MS / 1000}s 后自动重启 (第 ${daemonRestartCount}/${DAEMON_RESTART_MAX} 次)`, "WARN")
+  daemonRestartTimer = setTimeout(() => {
+    daemonRestartTimer = null
+    if (!daemonShouldRun) return
+    void startDaemon().then((r) => {
+      if (!r.ok) broadcastLog(`[Daemon] 自动重启失败: ${r.error}`, "ERROR")
+    })
+  }, DAEMON_AUTO_RESTART_DELAY_MS)
+}
+
 let tempWsClient: import("@larksuiteoapi/node-sdk").WSClient | null = null
 let tempConnAbort: (() => void) | null = null
 
@@ -463,6 +494,7 @@ function buildDaemonChannelConfigs(): DaemonChannelConfig[] {
 }
 
 export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
+  if (daemonRestartTimer) { clearTimeout(daemonRestartTimer); daemonRestartTimer = null }
   const config = getConfig()
   const channelConfigs = buildDaemonChannelConfigs()
   if (channelConfigs.length === 0) {
@@ -634,10 +666,16 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
       setDaemonPort(null)
       activeDaemonWorkspaceDir = null
       broadcastStatus({ running: false, error: `Daemon 退出 (code=${code})` })
+      if (daemonShouldRun) scheduleDaemonAutoRestart(code)
     })
 
     const lock = await waitForLockFile(15_000, daemonProcess?.pid)
     if (!lock) {
+      // 启动失败：清理可能僵死的进程，避免端口/资源泄漏（earlyExit 已退出则无需 kill）
+      if (earlyExit === null && daemonProcess && !daemonProcess.killed) {
+        try { daemonProcess.kill("SIGKILL") } catch { /* ignore */ }
+        daemonProcess = null
+      }
       if (earlyExit !== null) {
         return { ok: false, error: `Daemon 进程已退出 (code=${earlyExit})。输出:\n${earlyOutput.slice(-500)}` }
       }
@@ -647,6 +685,8 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
     cachedPort = lock.port
     setDaemonPort(lock.port)
     activeDaemonWorkspaceDir = config.workspaceDir.trim() || null
+    daemonShouldRun = true
+    lastDaemonStartAt = Date.now()
     startStatusPolling()
     await injectWorkspaceMcpAndRules()
     return { ok: true }
@@ -657,6 +697,8 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
 }
 
 export async function stopDaemon(): Promise<void> {
+  daemonShouldRun = false
+  if (daemonRestartTimer) { clearTimeout(daemonRestartTimer); daemonRestartTimer = null }
   stopStatusPolling()
   stopAgent()
   clearLogBuffer()
@@ -1214,6 +1256,24 @@ export function runLegacyConfigMigration(): void {
   })
 }
 
+/** 应用启动后自动拉起 Daemon（配置就绪时免手动点击）；已在运行则仅接管状态轮询与自愈 */
+async function autoStartDaemonOnLaunch(): Promise<void> {
+  const status = await getDaemonStatus()
+  if (status.running) {
+    daemonShouldRun = true
+    lastDaemonStartAt = Date.now()
+    startStatusPolling()
+    return
+  }
+  const config = getConfig()
+  if (!config.setupComplete || !config.workspaceDir?.trim() || buildDaemonChannelConfigs().length === 0) {
+    return
+  }
+  broadcastLog("[Daemon] 应用启动，自动拉起 Daemon…")
+  const r = await startDaemon()
+  if (!r.ok) broadcastLog(`[Daemon] 自动启动失败: ${r.error}`, "WARN")
+}
+
 export function initDaemonManager(): void {
   process.env.APP_DATA_DIR = app.getPath("userData")
   runLegacyConfigMigration()
@@ -1502,14 +1562,12 @@ export function initDaemonManager(): void {
     return runWorkflowDefinition(workflowId.trim(), { input: input?.trim() || undefined })
   })
 
-  getDaemonStatus().then((status) => {
-    if (status.running) {
-      startStatusPolling()
-    }
-  })
+  void autoStartDaemonOnLaunch()
 }
 
 export function cleanupDaemonManager(): void {
+  daemonShouldRun = false
+  if (daemonRestartTimer) { clearTimeout(daemonRestartTimer); daemonRestartTimer = null }
   stopStatusPolling()
   stopAgent()
   if (daemonProcess) {

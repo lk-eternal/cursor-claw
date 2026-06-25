@@ -4,8 +4,10 @@ import * as path from "node:path"
 import { getConfig } from "./config-store"
 
 const LOG_BUFFER_MAX = 300
+const LOG_FILE_MAX_BYTES = 5 * 1024 * 1024
 const logBuffer: string[] = []
 let logFilePath: string | null = null
+let logWriteCount = 0
 
 export function resetLogFilePath(): void {
   logFilePath = null
@@ -17,12 +19,24 @@ function getOrCreateLogFilePath(): string {
   const dir = config.workspaceDir ? path.join(config.workspaceDir, ".cursor") : path.join(app.getPath("userData"), "logs")
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
   logFilePath = path.join(dir, "daemon.log")
+  rotateLogIfNeeded(logFilePath)
   return logFilePath
+}
+
+/** 日志文件超过上限时滚动保留一个 .old，避免无限追加占满磁盘 */
+function rotateLogIfNeeded(p: string): void {
+  try {
+    if (fs.statSync(p).size <= LOG_FILE_MAX_BYTES) return
+    const old = `${p}.old`
+    try { fs.rmSync(old, { force: true }) } catch { /* ignore */ }
+    fs.renameSync(p, old)
+  } catch { /* ignore (文件不存在等) */ }
 }
 
 function appendToLogFile(line: string): void {
   try {
     const p = getOrCreateLogFilePath()
+    if (++logWriteCount % 100 === 0) rotateLogIfNeeded(p)
     fs.appendFileSync(p, line + "\n", "utf-8")
   } catch { /* ignore */ }
 }

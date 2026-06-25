@@ -185,6 +185,7 @@ interface ElectronAPI {
   onUpdaterStatus(cb: (payload: { kind: "available" } | { kind: "downloaded"; version: string } | { kind: "downloading" }) => void): () => void
   getConfig(): Promise<AppConfig>
   saveConfig(config: Partial<AppConfig>): Promise<ConfigSaveResult>
+  setAutoStart(enabled: boolean): Promise<{ ok: boolean }>
   applyWorkspaceSwitch(workspaceDir: string, stopOldSessions: boolean): Promise<{ ok: boolean; error?: string }>
   respondWindowClose(payload: { action: "minimize" | "quit" | "cancel"; remember: boolean }): Promise<void>
   selectDirectory(): Promise<string | null>

@@ -424,6 +424,12 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
 
   const selectDir = async () => { const d = await window.electronAPI.selectDirectory(); if (d) setWorkspaceDir(d) }
 
+  const handleAutoLaunchToggle = async () => {
+    const next = !autoLaunch
+    setAutoLaunch(next)
+    await window.electronAPI.setAutoStart(next)
+  }
+
   // ── MCP ──
   const handleMcpToggle = async (name: string, enabled: boolean) => {
     setMcpServers((prev) => prev.map((s) => s.name === name ? { ...s, enabled } : s))
@@ -637,6 +643,24 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
                     <FolderOpen size={18} className="text-blue-400" /><span className="truncate text-sm">{workspaceDir || "点击选择..."}</span>
                   </div>
                   <p className="mt-1 text-xs text-gray-600">主用户私聊时使用此目录，群聊和其他用户使用自动创建的临时目录</p>
+                </div>
+              </section>
+              <section className="space-y-3">
+                <h3 className="text-sm font-medium text-gray-300">启动</h3>
+                <div className="flex items-center justify-between rounded-lg border border-gray-700 px-4 py-3">
+                  <div className="min-w-0 pr-3">
+                    <p className="text-sm font-medium">开机自启</p>
+                    <p className="text-xs text-gray-500">系统登录后自动启动 Cursor Claw；应用启动后自动拉起 Daemon 并连接消息通道</p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={autoLaunch}
+                    onClick={handleAutoLaunchToggle}
+                    className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors duration-200 ${autoLaunch ? "bg-green-500" : "bg-gray-600"}`}
+                  >
+                    <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform duration-200 ${autoLaunch ? "translate-x-[18px]" : "translate-x-[3px]"}`} />
+                  </button>
                 </div>
               </section>
               <section className="space-y-3">
