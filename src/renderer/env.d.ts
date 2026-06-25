@@ -116,6 +116,7 @@ interface McpServerEntry {
 
 interface DaemonStatus {
   running: boolean
+  starting?: boolean
   version?: string
   uptime?: number
   queueLength?: number

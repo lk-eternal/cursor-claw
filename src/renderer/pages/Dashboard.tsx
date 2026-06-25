@@ -348,6 +348,8 @@ export default function Dashboard({ onSettings, active }: Props) {
     return h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${s}s` : `${s}s`
   }
 
+  const isStarting = starting || !!status.starting
+
   return (
     <div className="flex h-screen flex-col">
       <TitleBar>
@@ -385,8 +387,8 @@ export default function Dashboard({ onSettings, active }: Props) {
         <StatusCard
           icon={status.running ? Wifi : WifiOff}
           label="Daemon"
-          value={status.running ? "运行中" : "已停止"}
-          color={status.running ? "green" : "red"}
+          value={status.running ? "运行中" : isStarting ? "启动中" : "已停止"}
+          color={status.running ? "green" : isStarting ? "yellow" : "red"}
           sub={
             status.running
               ? [
@@ -409,6 +411,11 @@ export default function Dashboard({ onSettings, active }: Props) {
               {stopping ? <Loader2 size={10} className="animate-spin" /> : <Square size={10} />}
               停止
             </button>
+          ) : isStarting ? (
+            <span className="flex items-center gap-1 px-1.5 py-0.5 text-xs text-yellow-400" title="正在启动 Daemon">
+              <Loader2 size={10} className="animate-spin" />
+              启动中
+            </span>
           ) : (
             <button
               onClick={handleStart}

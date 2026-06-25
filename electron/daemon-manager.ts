@@ -98,6 +98,8 @@ function pushDaemonStderrLine(rawLine: string): void {
 
 export interface DaemonStatus {
   running: boolean
+  /** 正在启动中（spawn 到就绪期间），UI 据此显示"启动中"并禁用启动按钮 */
+  starting?: boolean
   version?: string
   uptime?: number
   queueLength?: number
@@ -125,6 +127,8 @@ let activeDaemonWorkspaceDir: string | null = null
 
 /** 期望 Daemon 处于运行态：true 时若进程意外退出则自动重启；主动停止/退出应用置 false */
 let daemonShouldRun = false
+/** 启动进行中（含自动启动/自愈重启），用于向 UI 暴露"启动中"状态 */
+let daemonStarting = false
 let daemonRestartTimer: NodeJS.Timeout | null = null
 let daemonRestartCount = 0
 let lastDaemonStartAt = 0
@@ -447,7 +451,7 @@ export async function getDaemonStatus(): Promise<DaemonStatus> {
     }
   }
 
-  return { running: false, error: "Daemon 未运行" }
+  return { running: false, starting: daemonStarting, error: daemonStarting ? undefined : "Daemon 未运行" }
 }
 
 function ensureCliConfig(): void {
@@ -529,6 +533,9 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
   if (!fs.existsSync(entryPath)) {
     return { ok: false, error: `Daemon 入口文件不存在: ${entryPath}` }
   }
+
+  daemonStarting = true
+  broadcastStatus({ running: false, starting: true })
 
   try {
     const templateDir = app.isPackaged
@@ -693,6 +700,8 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e)
     return { ok: false, error: `启动失败: ${msg}` }
+  } finally {
+    daemonStarting = false
   }
 }
 
@@ -1272,6 +1281,7 @@ async function autoStartDaemonOnLaunch(): Promise<void> {
   broadcastLog("[Daemon] 应用启动，自动拉起 Daemon…")
   const r = await startDaemon()
   if (!r.ok) broadcastLog(`[Daemon] 自动启动失败: ${r.error}`, "WARN")
+  broadcastStatus(await getDaemonStatus())
 }
 
 export function initDaemonManager(): void {
