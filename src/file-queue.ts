@@ -3,9 +3,7 @@ import * as path from "node:path";
 import * as crypto from "node:crypto";
 
 const POLL_INTERVAL_MS = 400;
-const STALE_MESSAGE_MS = 5 * 60 * 1000;
-const BATCH_WAIT_MS = 800;
-const MAX_TOTAL_WAIT = 5000;
+const STALE_TMP_MS = 5 * 60 * 1000;
 
 let queueDir = "";
 
@@ -44,7 +42,7 @@ function listSessionDirs(): string[] {
   } catch { return []; }
 }
 
-export function pushToFileQueue(text: string, messageId?: string, source?: string, sessionKey?: string, chatType?: string, senderOpenId?: string, skipDedup?: boolean): boolean {
+export function pushToFileQueue(text: string, messageId?: string, source?: string, sessionKey?: string, skipDedup?: boolean, meta?: QueueMessageMeta): boolean {
   if (!queueDir || !text?.trim()) return false;
 
   const dir = getSessionDir(sessionKey);
@@ -56,10 +54,7 @@ export function pushToFileQueue(text: string, messageId?: string, source?: strin
   if (messageId && !skipDedup) {
     try {
       const existing = fs.readdirSync(dir);
-      if (existing.some((f) => {
-        const base = f.replace(/\.\w+$/, "");
-        return base.endsWith(`_${safeId}`);
-      })) {
+      if (existing.some((f) => (f.endsWith(".qmsg") || f.endsWith(".claimed")) && matchesSafeId(f, safeId))) {
         return false;
       }
     } catch { /* ignore */ }
@@ -69,8 +64,8 @@ export function pushToFileQueue(text: string, messageId?: string, source?: strin
     const data = JSON.stringify({
       text, messageId: messageId || "", timestamp: ts,
       source: source || `pid-${process.pid}`,
-      sessionKey: sessionKey || "", chatType: chatType || "",
-      senderOpenId: senderOpenId || "",
+      sessionKey: sessionKey || "",
+      ...(meta && Object.keys(meta).length > 0 ? { meta } : {}),
     });
     const tmpPath = path.join(dir, filename + ".tmp");
     const finalPath = path.join(dir, filename);
@@ -82,40 +77,64 @@ export function pushToFileQueue(text: string, messageId?: string, source?: strin
   }
 }
 
+export interface QueueMessageMeta {
+  chatType?: string;
+  senderOpenId?: string;
+  senderType?: string;
+  botOpenId?: string;
+  botName?: string;
+  botRoster?: string;
+  quotedContent?: string;
+}
+
 export interface QueueMessage {
   text: string;
   messageId: string;
   sessionKey: string;
-  chatType: string;
-  senderOpenId: string;
+  /** 入队时间戳（毫秒），按此升序投递；Agent 合并回复时取最大者确认整批 */
+  timestamp: number;
+  /** 消息上下文：会话类型、发送者、机器人身份/名册、引用原文 */
+  meta?: QueueMessageMeta;
 }
 
-export interface HeldQueueMessage extends QueueMessage {
-  holdFiles: string[];
+function fileTimestamp(file: string): number {
+  const ts = parseInt(path.basename(file).split("_")[0], 10);
+  return Number.isNaN(ts) ? 0 : ts;
 }
 
-export function toPublicQueueMessage(held: HeldQueueMessage): QueueMessage {
-  const { holdFiles: _h, ...msg } = held;
-  return msg;
+/** 文件名 `${ts}_${safeId}.ext` 是否精确对应该 safeId（避免 endsWith 的后缀歧义） */
+function matchesSafeId(filename: string, safeId: string): boolean {
+  const base = filename.replace(/\.\w+$/, "");
+  const idx = base.indexOf("_");
+  return idx >= 0 && base.slice(idx + 1) === safeId;
 }
 
-function parseHeldMessage(claimedPath: string): QueueMessage | null {
+function parseMessageFile(filePath: string): QueueMessage | null {
   try {
-    const raw = fs.readFileSync(claimedPath, "utf-8");
+    const raw = fs.readFileSync(filePath, "utf-8");
     const parsed = JSON.parse(raw);
+    const meta: QueueMessageMeta = { ...(parsed.meta || {}) };
+    // 兼容旧格式：顶层 chatType/senderOpenId 收进 meta
+    if (parsed.chatType && !meta.chatType) meta.chatType = parsed.chatType;
+    if (parsed.senderOpenId && !meta.senderOpenId) meta.senderOpenId = parsed.senderOpenId;
     return {
       text: typeof parsed.text === "string" ? parsed.text : raw,
       messageId: parsed.messageId || "",
       sessionKey: parsed.sessionKey || parsed.chatId || "",
-      chatType: parsed.chatType || "",
-      senderOpenId: parsed.senderOpenId || "",
+      timestamp: parsed.timestamp || fileTimestamp(filePath),
+      ...(Object.keys(meta).length > 0 ? { meta } : {}),
     };
   } catch {
     return null;
   }
 }
 
-function holdNextMessage(filterSessionKey?: string): HeldQueueMessage | null {
+/**
+ * 领取并消费下一条消息：rename 原子占用 → 读取 → 立即删除。
+ * 领取即消费，不可恢复。仅用于 drain/dequeue-all（electron 本地 CLI 调度）场景；
+ * poll-message 路径请用 claimSessionMessages（领取不删，靠回复确认）。
+ */
+export function claimNextMessage(filterSessionKey?: string): QueueMessage | null {
   if (!queueDir) return null;
 
   const dir = getSessionDir(filterSessionKey);
@@ -129,112 +148,135 @@ function holdNextMessage(filterSessionKey?: string): HeldQueueMessage | null {
   for (const file of files) {
     const srcPath = path.join(dir, file);
     const claimedPath = srcPath.replace(/\.qmsg$/, ".claimed");
+    // rename 是原子操作：并发领取时只有一个进程/请求能成功占用
     try {
       fs.renameSync(srcPath, claimedPath);
     } catch {
       continue;
     }
-
-    const parsed = parseHeldMessage(claimedPath);
-    if (!parsed) {
-      try { fs.unlinkSync(claimedPath); } catch { /* ignore */ }
-      continue;
-    }
-
-    return { ...parsed, holdFiles: [claimedPath] };
+    const parsed = parseMessageFile(claimedPath);
+    try { fs.unlinkSync(claimedPath); } catch { /* ignore */ }
+    if (parsed) return parsed;
   }
   return null;
 }
 
-export function finalizeHeldMessages(holdFiles: string[]): void {
-  for (const claimedPath of holdFiles) {
-    const donePath = claimedPath.replace(/\.claimed$/, ".done");
-    try {
-      fs.renameSync(claimedPath, donePath);
-    } catch {
-      // 响应已发出，不可回滚为 .qmsg（会导致重复投递）；交给 cleanupStaleMessages 清理残留
-      try { fs.unlinkSync(claimedPath); } catch { /* ignore */ }
-    }
+/** 会话目录下是否存在未确认消息（.qmsg 待投递 或 .claimed 已投递待回复确认） */
+function hasPendingMessages(dir: string): boolean {
+  try {
+    return fs.readdirSync(dir).some((f) => f.endsWith(".qmsg") || f.endsWith(".claimed"));
+  } catch {
+    return false;
   }
 }
 
-export function releaseHeldMessages(holdFiles: string[]): void {
-  for (const claimedPath of holdFiles) {
-    const qmsgPath = claimedPath.replace(/\.claimed$/, ".qmsg");
-    try {
-      fs.renameSync(claimedPath, qmsgPath);
-    } catch { /* ignore */ }
+/**
+ * 领取该会话所有未确认消息（不删除）：
+ * 1. 把所有 .qmsg 改名为 .claimed（标记"已投递、待回复确认"）；
+ * 2. 返回该会话全部 .claimed（含本次新投递的 + 历史未确认的），按 timestamp 升序。
+ *
+ * 消息只有在 Agent 通过 send-xxx 回复（ackMessages）后才删除；未确认则下次 poll 重新投递，
+ * 因此幽灵连接领走也不会丢——这是"至少一次"投递的核心。
+ */
+export function claimSessionMessages(filterSessionKey?: string): QueueMessage[] {
+  if (!queueDir) return [];
+  const dir = getSessionDir(filterSessionKey);
+
+  let files: string[];
+  try {
+    files = fs.readdirSync(dir);
+  } catch {
+    return [];
   }
+
+  for (const f of files) {
+    if (!f.endsWith(".qmsg")) continue;
+    const src = path.join(dir, f);
+    try {
+      fs.renameSync(src, src.replace(/\.qmsg$/, ".claimed"));
+    } catch { /* 并发已被领取，忽略 */ }
+  }
+
+  let claimed: string[];
+  try {
+    claimed = fs.readdirSync(dir).filter((f) => f.endsWith(".claimed")).sort();
+  } catch {
+    return [];
+  }
+
+  const items: QueueMessage[] = [];
+  for (const f of claimed) {
+    const parsed = parseMessageFile(path.join(dir, f));
+    if (parsed) items.push(parsed);
+  }
+  items.sort((a, b) => a.timestamp - b.timestamp);
+  return items;
 }
 
-/** 立即消费（dequeue-all 等场景）：hold 后马上 finalize */
-export function claimNextMessage(filterSessionKey?: string): QueueMessage | null {
-  const held = holdNextMessage(filterSessionKey);
-  if (!held) return null;
-  finalizeHeldMessages(held.holdFiles);
-  return toPublicQueueMessage(held);
-}
-
-function pollFileQueueHold(
+/**
+ * 阻塞领取：有未确认消息（.qmsg 或 .claimed）立即返回；全空则挂起等待新消息。
+ * timeoutMs: 0=不等待立即返回；<0=无限阻塞；>0=超时毫秒。
+ */
+export function waitForSessionMessages(
   timeoutMs: number,
   intervalMs = POLL_INTERVAL_MS,
   filterSessionKey?: string,
   isCancelled?: () => boolean,
-): Promise<HeldQueueMessage | null> {
+): Promise<QueueMessage[]> {
   return new Promise((resolve) => {
-    const immediate = holdNextMessage(filterSessionKey);
-    if (immediate !== null) { resolve(immediate); return; }
-
-    // 0=不等待；<0=无限阻塞；>0=超时毫秒
-    if (timeoutMs === 0) { resolve(null); return; }
+    const dir = getSessionDir(filterSessionKey);
+    if (hasPendingMessages(dir)) { resolve(claimSessionMessages(filterSessionKey)); return; }
+    if (timeoutMs === 0) { resolve([]); return; }
 
     const infinite = timeoutMs < 0;
     const deadline = infinite ? Number.POSITIVE_INFINITY : Date.now() + timeoutMs;
     const timer = setInterval(() => {
-      if (isCancelled?.()) { clearInterval(timer); resolve(null); return; }
-      const msg = holdNextMessage(filterSessionKey);
-      if (msg !== null) { clearInterval(timer); resolve(msg); return; }
-      if (!infinite && Date.now() >= deadline) { clearInterval(timer); resolve(null); }
+      if (isCancelled?.()) { clearInterval(timer); resolve([]); return; }
+      if (hasPendingMessages(dir)) { clearInterval(timer); resolve(claimSessionMessages(filterSessionKey)); return; }
+      if (!infinite && Date.now() >= deadline) { clearInterval(timer); resolve([]); }
     }, intervalMs);
     timer.unref();
   });
 }
 
-export async function pollFileQueueHoldBatch(
-  timeoutMs: number,
-  intervalMs = POLL_INTERVAL_MS,
-  filterSessionKey?: string,
-  isCancelled?: () => boolean,
-): Promise<HeldQueueMessage[]> {
-  const first = await pollFileQueueHold(timeoutMs, intervalMs, filterSessionKey, isCancelled);
-  if (first === null) return [];
+/**
+ * 回复确认（ack）：Agent 回复某条 message_id 即视为该消息及更早的全部已处理。
+ * 删除该会话中「时间戳 ≤ 目标消息」的所有 .claimed/.qmsg，返回被确认消息的 messageId（用于打表情）。
+ * 找不到目标消息（已被确认过）返回空数组。session_key 缺省时遍历所有会话兜底。
+ */
+export function ackMessages(messageId: string, filterSessionKey?: string): string[] {
+  if (!queueDir || !messageId) return [];
+  const safeId = messageId.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const dirs = filterSessionKey ? [getSessionDir(filterSessionKey)] : [queueDir, ...listSessionDirs()];
 
-  const items: HeldQueueMessage[] = [first];
-
-  if (timeoutMs === 0) {
-    let extra = holdNextMessage(filterSessionKey);
-    while (extra !== null) {
-      items.push(extra);
-      extra = holdNextMessage(filterSessionKey);
+  for (const dir of dirs) {
+    let files: string[];
+    try {
+      files = fs.readdirSync(dir).filter((f) => f.endsWith(".claimed") || f.endsWith(".qmsg"));
+    } catch {
+      continue;
     }
-    return items;
-  }
 
-  const startTime = Date.now();
-  while (Date.now() - startTime < MAX_TOTAL_WAIT) {
-    if (isCancelled?.()) break;
+    const target = files.find((f) => matchesSafeId(f, safeId));
+    if (!target) continue;
+    const cutoff = fileTimestamp(target);
 
-    const maxWait = Math.min(BATCH_WAIT_MS, MAX_TOTAL_WAIT - (Date.now() - startTime));
-    const nextMsg = await pollFileQueueHold(maxWait, intervalMs, filterSessionKey, isCancelled);
-
-    if (nextMsg !== null) {
-      items.push(nextMsg);
-    } else {
-      break;
+    const acked: string[] = [];
+    for (const f of files) {
+      if (fileTimestamp(f) > cutoff) continue;
+      const filePath = path.join(dir, f);
+      let mid = "";
+      try {
+        mid = JSON.parse(fs.readFileSync(filePath, "utf-8")).messageId || "";
+      } catch { /* ignore */ }
+      try {
+        fs.unlinkSync(filePath);
+        if (mid) acked.push(mid);
+      } catch { /* ignore */ }
     }
+    return acked;
   }
-
-  return items;
+  return [];
 }
 
 export function getEarliestMessageTime(filterSessionKey?: string): number | null {
@@ -296,9 +338,9 @@ export function getQueueMessages(filterSessionKey?: string): QueueMessageView[] 
             index: result.length, fileId: f,
             preview: (parsed.text ?? "").slice(0, 200),
             sessionKey: parsed.sessionKey || parsed.chatId || undefined,
-            chatType: parsed.chatType || undefined,
+            chatType: parsed.meta?.chatType || parsed.chatType || undefined,
             timestamp: Math.round(ts),
-            senderOpenId: parsed.senderOpenId || undefined,
+            senderOpenId: parsed.meta?.senderOpenId || parsed.senderOpenId || undefined,
           });
         } catch {
           result.push({ index: result.length, fileId: f, preview: "(unreadable)" });
@@ -342,7 +384,7 @@ export function getDistinctSessions(): QueueSessionInfo[] {
           const parsed = JSON.parse(raw);
           const key = parsed.sessionKey || parsed.chatId || "";
           if (key && !map.has(key)) {
-            map.set(key, { chatType: parsed.chatType || "p2p", senderOpenId: parsed.senderOpenId || undefined });
+            map.set(key, { chatType: parsed.meta?.chatType || parsed.chatType || "p2p", senderOpenId: parsed.meta?.senderOpenId || parsed.senderOpenId || undefined });
           }
         } catch { /* ignore */ }
       }
@@ -355,6 +397,7 @@ export function getDistinctSessions(): QueueSessionInfo[] {
   }));
 }
 
+/** 仅清理写入中断遗留的 .tmp 孤儿文件；.claimed 不超时删除（靠 Agent 回复确认） */
 export function cleanupStaleMessages(): void {
   if (!queueDir) return;
   const now = Date.now();
@@ -362,17 +405,11 @@ export function cleanupStaleMessages(): void {
   for (const dir of dirs) {
     try {
       for (const f of fs.readdirSync(dir)) {
-        if (!f.endsWith(".claimed") && !f.endsWith(".tmp") && !f.endsWith(".done")) continue;
+        if (!f.endsWith(".tmp")) continue;
         const filePath = path.join(dir, f);
         try {
-          const stat = fs.statSync(filePath);
-          if (now - stat.mtimeMs > STALE_MESSAGE_MS) {
-            if (f.endsWith(".claimed")) {
-              const qmsgPath = filePath.replace(/\.claimed$/, ".qmsg");
-              try { fs.renameSync(filePath, qmsgPath); } catch { fs.unlinkSync(filePath); }
-            } else {
-              fs.unlinkSync(filePath);
-            }
+          if (now - fs.statSync(filePath).mtimeMs > STALE_TMP_MS) {
+            fs.unlinkSync(filePath);
           }
         } catch { /* ignore */ }
       }

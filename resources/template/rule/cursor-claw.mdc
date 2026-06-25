@@ -16,12 +16,12 @@ alwaysApply: true
 | 参数 | 必填 | 说明 |
 |------|------|------|
 | `text` | 是 | 要发送的消息内容 |
-| `message_id` | 否 | 回复模式的消息 ID |
-| `session_key` | 否 | 目标会话 sessionKey |
+| `message_id` | 回复时必填 | 被回复消息的 ID；合并回复多条时传**最新一条**的 id |
+| `session_key` | 回复时必填 | 目标会话 sessionKey，**不可省略** |
 
 #### 群内 @ 协作（飞书）
 
-- 群聊消息中的 @ 会以 `@名字(open_id=ou_xxx)` 内联呈现；消息尾部附 `[发送者]`（用户/机器人）、`[我是]`（你的身份）与 `[可协作机器人]` 名册。
+- 群聊消息中的 @ 会以 `@名字(open_id=ou_xxx)` 内联呈现在 `text` 正文里；发送者身份、你的身份、可协作机器人名册等信息统一放在 poll-message 返回的 `meta` 字段（见下方字段说明）。
 - 需要把任务路由给其他机器人时，在 `text` 中使用 `<at user_id="ou_xxx">名字</at> 任务内容`（user_id 必须是 ou_ 开头的 open_id）。
 - ⚠️ 防循环：仅在明确需要对方处理时才 @ 机器人；收到机器人消息后若无需继续协作，正常回复文字即可，**不要**回 @ 对方；禁止两个机器人间无目的的往复 @。
 
@@ -31,8 +31,8 @@ alwaysApply: true
 
 | 模式 | 调用方式 | 行为 |
 |------|----------|------|
-| 非阻塞（冷启动） | `GET .../api/poll-message?sessionKey={key}&wait=false` | 立即返回，有消息则消费，无消息返回 `{messages:[]}` |
-| 阻塞（保活轮询） | `GET .../api/poll-message?sessionKey={key}` | 无限挂起直到有新消息 |
+| 非阻塞（冷启动） | `GET .../api/poll-message?sessionKey={key}&wait=false` | 立即返回当前待处理消息，无则返回 `{messages:[]}` |
+| 阻塞（保活轮询） | `GET .../api/poll-message?sessionKey={key}` | 有待处理消息立即返回，否则无限挂起直到有新消息 |
 
 ⚠️ 无论哪种模式调 shell 时, 必须在前台调用(禁止后台异步调用), 参数除 command 外，把「阻塞时长」设成 86400000(24小时)，参数名可能叫 timeout 或 block_until_ms，按 schema 实际字段填；并强调这不是 curl 的超时，不要给 curl 加 --max-time。
 
@@ -43,7 +43,20 @@ curl -G -s "http://127.0.0.1:{{DAEMON_PORT}}/api/poll-message" --data-urlencode 
 curl -G -s "http://127.0.0.1:{{DAEMON_PORT}}/api/poll-message" --data-urlencode "sessionKey=YOUR_SESSION_KEY"
 ```
 
-返回 JSON 中 `messages` 为数组，每项包含 `text` / `messageId` / `sessionKey` / `chatType` / `senderOpenId`。多条消息时逐条处理，回复时使用对应项的 `messageId`。
+返回 JSON 中 `messages` 为数组，**按时间升序排列（数组最后一条最新）**，每项包含：
+- `text`：消息正文
+- `messageId` / `sessionKey`：回复标识与路由
+- `timestamp`：入队时间戳（毫秒），数值最大者即最新一条
+- `meta`：消息上下文
+  - `chatType`：`p2p`（私聊）/ `group`（群聊）
+  - `senderOpenId`：发送者 open_id
+  - `senderType`：`user` 或 `bot`（发送者是用户还是机器人）
+  - `botOpenId` / `botName`：你自己的 open_id 与名字
+  - `botRoster`：可协作机器人名册，格式 `名字=ou_xxx, 名字=ou_xxx`
+  - `quotedContent`：被引用消息的原文
+
+多条消息时逐条处理。需要群内 @ 协作时，从 `meta.botRoster` 取目标 open_id。
+⚠️ 每条消息都必须回复（带上对应的 `message_id` + `session_key`），详见下方「消息回复规则」。
 
 ### 🔌 HTTP API 退避方案 (MCP Fallback)
 
@@ -115,13 +128,13 @@ Agent 收到 Prompt 后，识别会话类型(chat_type)
 
 ---
 
-## 🏷 消息路由与元数据 (Message Routing)
+## 🏷 消息回复规则 (Reply Rules)
 
-当 poll-message 返回用户消息时，请记住每条消息的 `messageId` 和 `sessionKey`。
-回复某条消息时，**必须**在 `send_text` / `send_file` / `send_image` 中传入该条对应的 `message_id`。
-若一次 poll 返回多条，处理最后一条或当前正在回复的那条时，用其 `messageId` 覆盖当前记忆中的 `message_id`。
-如果 `messageId` 为空，则继续使用当前记忆中的 `message_id`。
-如果从未获取到过 `messageId`，则不传 `message_id` 参数。
+`send_text` / `send_image` / `send_file` 每次都必须带 `message_id` + `session_key`：
+- **每条消息都必须回复**，不能静默吞掉。
+- **一次 poll 返回多条、合并成一条回复时**：`message_id` 传**最新一条**（数组最后一条 / `timestamp` 最大）的 id；若要逐条处理，则分别用各自的 `message_id` 回复。
+- `session_key` 任何时候都不可省略。
+- 若某条 `messageId` 为空（如系统消息或定时任务消息），沿用当前记忆中的 `message_id`；从未获取到则不传。
 
 ---
 
@@ -132,7 +145,7 @@ Agent 收到 Prompt 后，识别会话类型(chat_type)
 3. **禁止发呆退出**: 如果不知道下一步该做什么了，请进入保活轮询阶段，等待用户下一步指示。
 4. **必须遵守系统指令**: 如果 poll-message 返回的是系统指令，必须严格按照指令要求的动作执行，不得自行解释或绕过。
 5. **指令优先级**: 如果收到多个系统指令, 优先遵守 poll-message 返回的系统指令。
-6. **积极响应：** 禁止静默吞消息，每条用户消息必须有对应回复。
+6. **积极响应：** 每条用户消息必须有对应回复（带上 `message_id` + `session_key`）。禁止静默吞消息。
 
 ---
 

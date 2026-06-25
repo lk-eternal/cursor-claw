@@ -180,7 +180,7 @@ export async function fetchUserNames(openIds: string[]): Promise<void> {
 
 // ── 消息队列 ──────────────────────────────────────────────
 
-interface DequeuedMessage { text: string; messageId: string; chatId: string; chatType: string; senderOpenId?: string }
+interface DequeuedMessage { text: string; messageId: string; sessionKey?: string; meta?: { chatType?: string; senderOpenId?: string } }
 interface MergedMessages { text: string; count: number; chatType?: string; messageIds: string[]; chatId?: string; senderOpenId?: string }
 
 export async function pullMergedMessagesFromQueue(chatId?: string): Promise<MergedMessages | null> {
@@ -195,19 +195,19 @@ export async function pullMergedMessagesFromQueue(chatId?: string): Promise<Merg
     if (msgs.length === 0) return null
 
     const parsed: DequeuedMessage[] = msgs
-      .map((m) => (typeof m === "string" ? { text: m, messageId: "", chatId: "", chatType: "" } : m))
+      .map((m) => (typeof m === "string" ? { text: m, messageId: "" } : m))
       .filter((m) => m.text?.trim())
 
     if (parsed.length === 0) return null
 
-    const chatType = parsed[0].chatType || undefined
+    const chatType = parsed[0].meta?.chatType || undefined
     const messageIds = parsed.map((m) => m.messageId).filter(Boolean)
 
     const text = parsed.length === 1
       ? parsed[0].text.trim()
       : parsed.map((m, i) => `【消息 ${i + 1}】\n${m.text.trim()}`).join("\n\n")
 
-    return { text, count: parsed.length, chatType, messageIds, chatId: parsed[0].chatId || chatId, senderOpenId: parsed[0].senderOpenId || undefined }
+    return { text, count: parsed.length, chatType, messageIds, chatId, senderOpenId: parsed[0].meta?.senderOpenId || undefined }
   } catch {
     return null
   }
