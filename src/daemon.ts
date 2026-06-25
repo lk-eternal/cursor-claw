@@ -1569,7 +1569,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     registerPollConn(sessionKeyFilter, res);
     req.on("close", () => { disconnected = true; unregisterPollConn(sessionKeyFilter, res); });
     req.socket.setTimeout(0);
-    const POLL_TIMEOUT_MS = 30 * 60 * 1000;
+    const POLL_TIMEOUT_MS = 25 * 60 * 1000;
     const messages = await waitForSessionMessages(POLL_TIMEOUT_MS, undefined, sessionKeyFilter, () => disconnected);
     unregisterPollConn(sessionKeyFilter, res);
 
