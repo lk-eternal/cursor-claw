@@ -7,6 +7,7 @@ import {
   Wifi,
   WifiOff,
   Bot,
+  Bird,
   MessageSquare,
   Clock,
   Loader2,
@@ -44,6 +45,7 @@ export default function Dashboard({ onSettings, active }: Props) {
   const [actionError, setActionError] = useState("")
   const [queueMessages, setQueueMessages] = useState<{ index: number; fileId: string; preview: string; sessionKey?: string; chatType?: string; timestamp?: number; senderOpenId?: string }[]>([])
   const [showQueue, setShowQueue] = useState(false)
+  const [showChannels, setShowChannels] = useState(false)
   const [expandedSession, setExpandedSession] = useState<string | null>(null)
   const [cliStatus, setCliStatus] = useState<"checking" | "installed" | "missing" | "need-login">("checking")
   const [cliInstalling, setCliInstalling] = useState(false)
@@ -290,6 +292,7 @@ export default function Dashboard({ onSettings, active }: Props) {
     if (!showQueue) {
       await refreshQueueMessages()
       setShowSessions(false)
+      setShowChannels(false)
     }
     setShowQueue(!showQueue)
   }
@@ -418,31 +421,36 @@ export default function Dashboard({ onSettings, active }: Props) {
             </button>
           )}
         />
-        <StatusCard
-          icon={(status.channels ?? []).some((c) => c.connected) ? Wifi : WifiOff}
-          label="消息通道"
-          value={(() => {
-            const chs = status.channels ?? []
-            if (chs.length === 0) return status.running ? "未配置通道" : "等待连接"
-            const ok = chs.filter((c) => c.connected).length
-            if (ok === chs.length) return chs.length === 1 ? `${chs[0].name} 已连接` : `${ok}/${chs.length} 通道在线`
-            if (ok > 0) return `${ok}/${chs.length} 通道在线`
-            return status.running ? "通道连接中" : "等待连接"
-          })()}
-          color={(() => {
-            const chs = status.channels ?? []
-            const ok = chs.filter((c) => c.connected).length
-            if (ok > 0 && ok === chs.length) return "green"
-            if (ok > 0 || (status.running && chs.length > 0)) return "yellow"
-            return "gray"
-          })()}
-          sub={(() => {
-            const chs = status.channels ?? []
-            if (chs.length === 0) return "等待目标"
-            return chs.map((c) => `${c.name}${c.connected ? "✓" : c.status === "qr_pending" ? "(扫码)" : "…"}`).join(" · ")
-          })()}
-        />
-        <div onClick={async () => { if (sessionList.length > 0 || status.agentRunning) { const next = !showSessions; setShowSessions(next); if (next) { setShowQueue(false); await refreshQueueMessages() } } }} className={sessionList.length > 0 || status.agentRunning ? "cursor-pointer" : ""}>
+        <div
+          onClick={() => { if ((status.channels ?? []).length > 0) { const next = !showChannels; setShowChannels(next); if (next) { setShowQueue(false); setShowSessions(false) } } }}
+          className={(status.channels ?? []).length > 0 ? "cursor-pointer" : ""}
+        >
+          <StatusCard
+            icon={(status.channels ?? []).some((c) => c.connected) ? Wifi : WifiOff}
+            label="消息通道"
+            value={(() => {
+              const chs = status.channels ?? []
+              if (chs.length === 0) return status.running ? "未配置通道" : "等待连接"
+              const ok = chs.filter((c) => c.connected).length
+              if (ok === chs.length) return chs.length === 1 ? `${chs[0].name} 已连接` : `${ok}/${chs.length} 通道在线`
+              if (ok > 0) return `${ok}/${chs.length} 通道在线`
+              return status.running ? "通道连接中" : "等待连接"
+            })()}
+            color={(() => {
+              const chs = status.channels ?? []
+              const ok = chs.filter((c) => c.connected).length
+              if (ok > 0 && ok === chs.length) return "green"
+              if (ok > 0 || (status.running && chs.length > 0)) return "yellow"
+              return "gray"
+            })()}
+            sub={(() => {
+              const chs = status.channels ?? []
+              if (chs.length === 0) return "等待目标"
+              return chs.map((c) => `${c.name}${c.connected ? "✓" : c.status === "qr_pending" ? "(扫码)" : "…"}`).join(" · ")
+            })()}
+          />
+        </div>
+        <div onClick={async () => { if (sessionList.length > 0 || status.agentRunning) { const next = !showSessions; setShowSessions(next); if (next) { setShowQueue(false); setShowChannels(false); await refreshQueueMessages() } } }} className={sessionList.length > 0 || status.agentRunning ? "cursor-pointer" : ""}>
           <StatusCard
             icon={Bot}
             label="Agent"
@@ -532,6 +540,31 @@ export default function Dashboard({ onSettings, active }: Props) {
                 )
               })
             })()}
+          </div>
+        </div>
+      )}
+
+      {showChannels && (status.channels ?? []).length > 0 && (
+        <div className="mx-6 rounded-xl border border-gray-800 bg-gray-900/80 p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-xs font-medium text-gray-400">消息通道详情</span>
+            <button onClick={() => onSettings("channel")} className="text-xs text-blue-400 hover:text-blue-300">管理通道</button>
+          </div>
+          <div className="space-y-1.5">
+            {(status.channels ?? []).map((c) => (
+              <div key={c.id} className="flex items-center justify-between gap-2 rounded-lg bg-gray-800/60 px-3 py-2">
+                <div className="flex min-w-0 items-center gap-2">
+                  {c.type === "feishu" ? <Bird size={14} className="shrink-0 text-blue-400" /> : <MessageSquare size={14} className="shrink-0 text-green-400" />}
+                  <span className="truncate text-xs text-gray-300">{c.name}</span>
+                  {c.botName && <span className="truncate text-[10px] text-gray-500">{c.botName}</span>}
+                  {c.mainUserBound && <span className="shrink-0 rounded bg-blue-900/40 px-1.5 py-0.5 text-[10px] text-blue-400">主用户</span>}
+                </div>
+                <span className={`inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] ${c.connected ? "bg-green-900/40 text-green-400" : c.status === "error" ? "bg-red-900/40 text-red-400" : "bg-yellow-900/40 text-yellow-400"}`}>
+                  <span className={`h-1.5 w-1.5 rounded-full ${c.connected ? "bg-green-400" : c.status === "error" ? "bg-red-400" : "bg-yellow-400"}`} />
+                  {c.connected ? "在线" : (CHANNEL_STATUS_TEXT[c.status] ?? c.status ?? "未连接")}
+                </span>
+              </div>
+            ))}
           </div>
         </div>
       )}
@@ -744,6 +777,15 @@ const PROCESS_COLORS: Record<string, string> = {
   Agent: "text-cyan-400",
   Electron: "text-orange-400",
   Scheduler: "text-teal-400",
+}
+
+const CHANNEL_STATUS_TEXT: Record<string, string> = {
+  connected: "在线",
+  connecting: "连接中",
+  qr_pending: "待扫码",
+  logging_in: "登录中",
+  disconnected: "已断开",
+  error: "错误",
 }
 
 const LogLine = memo(function LogLine({ line }: { line: string }) {
