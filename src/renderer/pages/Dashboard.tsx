@@ -91,6 +91,7 @@ export default function Dashboard({ onSettings, active }: Props) {
       const s = await window.electronAPI.getDaemonStatus()
       setStatus(s)
       syncCliStatus(s)
+      window.electronAPI.getSessionAgents().then(setSessionList).catch(() => {})
       await refreshOnboard()
       if (s.queueLength && s.queueLength > 0) {
         const msgs = await window.electronAPI.getQueueMessages()

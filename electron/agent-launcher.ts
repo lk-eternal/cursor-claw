@@ -65,16 +65,20 @@ export function setSessionCloseHandler(fn: (sessionKey: string, chatType: ChatTy
   sessionCloseHandler = fn
 }
 
+/** 广播时实时解析会话名：优先用会话自带名，否则按 chatId / senderOpenId 查缓存（群名异步解析后自愈） */
+export function resolveSessionChatName(sessionKey: string, chatName?: string, senderOpenId?: string): string | undefined {
+  if (chatName) return chatName
+  const chatId = sessionKey.includes("::") ? sessionKey.split("::")[0] : sessionKey
+  return chatNameResolver?.(chatId) || (senderOpenId ? chatNameResolver?.(senderOpenId) : undefined)
+}
+
 function broadcastSessionStatus(): void {
-  const list = [...sessionAgents.values()].map((s) => {
-    const chatId = s.sessionKey.includes("::") ? s.sessionKey.split("::")[0] : s.sessionKey
-    return {
-      sessionKey: s.sessionKey, pid: s.pid, startedAt: s.startedAt,
-      lastActivityAt: s.lastActivityAt, chatType: s.chatType as string,
-      chatName: s.chatName || chatNameResolver?.(chatId) || (s.senderOpenId && chatNameResolver?.(s.senderOpenId)),
-      workspaceDir: s.workspaceDir,
-    }
-  })
+  const list = [...sessionAgents.values()].map((s) => ({
+    sessionKey: s.sessionKey, pid: s.pid, startedAt: s.startedAt,
+    lastActivityAt: s.lastActivityAt, chatType: s.chatType as string,
+    chatName: resolveSessionChatName(s.sessionKey, s.chatName, s.senderOpenId),
+    workspaceDir: s.workspaceDir,
+  }))
   broadcastSessionStatusToUi(list, "cli")
 }
 

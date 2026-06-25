@@ -3,7 +3,7 @@ import { resolve, join, dirname } from "node:path"
 import { existsSync } from "node:fs"
 import { createRequire } from "node:module"
 import { pushUiLog, broadcastLog, broadcastSessionStatus } from "./ui-logger"
-import { type ChatType, type LaunchMeta, buildPrompt } from "./agent-launcher"
+import { type ChatType, type LaunchMeta, buildPrompt, resolveSessionChatName } from "./agent-launcher"
 
 interface SdkSessionAgent {
   sessionKey: string
@@ -68,7 +68,7 @@ function broadcastSdkSessionStatus(): void {
     startedAt: s.startedAt,
     lastActivityAt: s.lastActivityAt,
     chatType: s.chatType as string,
-    chatName: s.chatName,
+    chatName: resolveSessionChatName(s.sessionKey, s.chatName, s.senderOpenId),
     workspaceDir: s.workspaceDir,
   }))
   broadcastSessionStatus(list, "sdk")
