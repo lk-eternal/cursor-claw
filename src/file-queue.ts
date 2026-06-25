@@ -241,7 +241,8 @@ export function waitForSessionMessages(
 
 /**
  * 回复确认（ack）：Agent 回复某条 message_id 即视为该消息及更早的全部已处理。
- * 删除该会话中「时间戳 ≤ 目标消息」的所有 .claimed/.qmsg，返回被确认消息的 messageId（用于打表情）。
+ * 删除该会话中「时间戳 ≤ 目标消息」的所有 .claimed（仅已投递的；未投递的 .qmsg 不动，
+ * 防止时钟乱序误删新消息），返回被确认消息的 messageId（用于打表情）。
  * 找不到目标消息（已被确认过）返回空数组。session_key 缺省时遍历所有会话兜底。
  */
 export function ackMessages(messageId: string, filterSessionKey?: string): string[] {
@@ -252,7 +253,7 @@ export function ackMessages(messageId: string, filterSessionKey?: string): strin
   for (const dir of dirs) {
     let files: string[];
     try {
-      files = fs.readdirSync(dir).filter((f) => f.endsWith(".claimed") || f.endsWith(".qmsg"));
+      files = fs.readdirSync(dir).filter((f) => f.endsWith(".claimed"));
     } catch {
       continue;
     }

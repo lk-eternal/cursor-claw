@@ -394,6 +394,17 @@ function trackMessageSession(messageId: string, sessionKey: string): void {
   messageSessionMap.set(messageId, sessionKey);
 }
 
+/** 记录消息归属会话，并返回首次投递（之前未见过）的 messageId——只对新消息打 Get，避免重投时重复打表情 */
+function collectFreshAndTrack(messages: QueueMessage[], sessionKey: string): string[] {
+  const fresh: string[] = [];
+  for (const m of messages) {
+    if (!m.messageId) continue;
+    if (!messageSessionMap.has(m.messageId)) fresh.push(m.messageId);
+    trackMessageSession(m.messageId, sessionKey);
+  }
+  return fresh;
+}
+
 function addReactionToMessages(messageIds: string[], sessionKey: string, emojiType = "Get"): void {
   const ch = resolveChannel(sessionKey);
   if (ch.type !== "feishu" || !ch.rt.sender) return;
@@ -1525,11 +1536,9 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     if (!blocking) {
       const messages = claimSessionMessages(sessionKeyFilter);
       if (messages.length > 0) {
-        for (const m of messages) {
-          if (m.messageId) trackMessageSession(m.messageId, sessionKeyFilter);
-        }
+        const freshIds = collectFreshAndTrack(messages, sessionKeyFilter);
         log("INFO", `消息已投递(instant): count=${messages.length} session=${sessionKeyFilter}`);
-        addReactionToMessages(messages.map((m) => m.messageId), sessionKeyFilter, "Get");
+        addReactionToMessages(freshIds, sessionKeyFilter, "Get");
       }
       json(res, { messages });
       return true;
@@ -1561,12 +1570,10 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       return true;
     }
 
-    for (const m of messages) {
-      if (m.messageId) trackMessageSession(m.messageId, sessionKeyFilter);
-    }
+    const freshIds = collectFreshAndTrack(messages, sessionKeyFilter);
     log("INFO", `消息已投递(poll): count=${messages.length} session=${sessionKeyFilter}`);
     json(res, { messages });
-    addReactionToMessages(messages.map((m) => m.messageId), sessionKeyFilter, "Get");
+    addReactionToMessages(freshIds, sessionKeyFilter, "Get");
     return true;
   }
 
