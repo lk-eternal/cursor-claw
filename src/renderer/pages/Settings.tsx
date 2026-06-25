@@ -94,6 +94,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
   const [proxy, setProxy] = useState("")
   const [noProxy, setNoProxy] = useState("localhost,127.0.0.1,feishu.cn")
   const [closeWindowAction, setCloseWindowAction] = useState<CloseWindowAction>("ask")
+  const [autoLaunch, setAutoLaunch] = useState(false)
   const [wsSwitch, setWsSwitch] = useState<{ old: string; new: string; sessions: SessionEntry[] } | null>(null)
   /** 帮助引导页飞书控制台链接用 */
   const [firstFeishuAppId, setFirstFeishuAppId] = useState("")
@@ -276,6 +277,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
       setProxy(config.httpProxy || config.httpsProxy || "")
       setNoProxy(config.noProxy || "localhost,127.0.0.1,feishu.cn")
       setCloseWindowAction(config.closeWindowAction ?? "ask")
+      setAutoLaunch(config.autoStart ?? false)
       setFirstFeishuAppId(config.channels?.find((c) => c.type === "feishu")?.larkAppId ?? config.larkAppId ?? "")
       loaded.current = true
     })
