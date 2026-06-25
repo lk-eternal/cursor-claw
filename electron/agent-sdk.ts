@@ -19,6 +19,8 @@ interface SdkSessionAgent {
   abortController: AbortController
   /** 流式日志聚合缓冲：连续同类型(thinking/text)增量合并成一条打印 */
   logAgg: { kind: "thinking" | "text" | null; buf: string }
+  /** 最近一次终态状态事件（ERROR/EXPIRED/CANCELLED），用于结束时还原真实错误原因 */
+  lastStatus?: { status: string; message?: string }
 }
 
 const sdkSessions = new Map<string, SdkSessionAgent>()
@@ -137,7 +139,11 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
       break
     case "status": {
       flushSdkLog(session)
-      const lvl = event.status === "ERROR" ? "ERROR" as const : "INFO" as const
+      const isErr = event.status === "ERROR" || event.status === "EXPIRED"
+      if (isErr || event.status === "CANCELLED") {
+        session.lastStatus = { status: event.status, message: event.message }
+      }
+      const lvl = isErr ? "ERROR" as const : "INFO" as const
       pushUiLog("SDK", lvl, `[${session.sessionKey}] [status] ${event.status}${event.message ? ` - ${event.message}` : ""}`)
     }
       break
@@ -262,19 +268,21 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
 
     streamRunEvents(session, run).then(async () => {
       const level = run.status === "error" ? "ERROR" : "INFO"
+
+      if (run.status === "error") {
+        // wait() 返回 RunResult 对象（出错时也不抛），真实原因藏在 RunResult.result / 终态状态事件里
+        const wr = await run.wait().catch((e: unknown) => e)
+        const detail = wr instanceof Error ? `${wr.constructor.name}: ${wr.message}` : JSON.stringify(wr)
+        const last = session.lastStatus
+        const lastStr = last ? `lastStatus=${last.status}${last.message ? ` msg=${last.message}` : ""} ` : ""
+        pushUiLog("SDK", "ERROR", `[${sessionKey}] 运行错误详情: ${lastStr}waitResult=${detail}`)
+        failedCooldowns.set(sessionKey, Date.now() + FAIL_COOLDOWN_MS)
+      }
+
       const summary = [
         run.result && `result=${run.result}`,
         run.durationMs != null && `duration=${run.durationMs}ms`,
       ].filter(Boolean).join(", ")
-
-      if (run.status === "error") {
-        try {
-          const wr = await run.wait().catch((e: unknown) => e)
-          if (wr instanceof Error) pushUiLog("SDK", "ERROR", `[${sessionKey}] wait error: ${wr.message}`)
-        } catch { /* ignore */ }
-        failedCooldowns.set(sessionKey, Date.now() + FAIL_COOLDOWN_MS)
-      }
-
       pushUiLog("SDK", level, `[${sessionKey}] Agent 运行结束 (status=${run.status}${summary ? `, ${summary}` : ""})`)
       try { session.agent.close() } catch { /* best-effort */ }
       sdkSessions.delete(sessionKey)
