@@ -134,7 +134,7 @@ Agent 收到 Prompt 后，识别会话类型(chat_type)
 - **每条消息都必须回复**，不能静默吞掉。
 - **一次 poll 返回多条、合并成一条回复时**：`message_id` 传**最新一条**（数组最后一条 / `timestamp` 最大）的 id；若要逐条处理，则分别用各自的 `message_id` 回复。
 - `session_key` 任何时候都不可省略。
-- 若某条 `messageId` 为空（如系统消息或定时任务消息），沿用当前记忆中的 `message_id`；从未获取到则不传。
+- 若某条 `messageId` 为空（如系统消息），沿用当前记忆中的 `message_id`；从未获取到则不传。
 
 ---
 

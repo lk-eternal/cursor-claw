@@ -144,7 +144,7 @@ export class LarkSender {
   }
 
   async sendMessage(text: string, replyMessageId?: string, chatId?: string, title?: string): Promise<string | undefined> {
-    if (replyMessageId) { return this.replyMessage(replyMessageId, text, title); }
+    if (replyMessageId && !replyMessageId.startsWith("internal_")) { return this.replyMessage(replyMessageId, text, title); }
     const targetChatId = chatId ?? this.chatId;
     if (!targetChatId) { this.log("WARN", "无发送目标"); return undefined; }
     try {
@@ -183,7 +183,7 @@ export class LarkSender {
       if (!imageKey) { this.log("ERROR", `图片上传失败`); return; }
       const content = JSON.stringify({ image_key: imageKey });
       let sent = false;
-      if (replyMessageId) {
+      if (replyMessageId && !replyMessageId.startsWith("internal_")) {
         try {
           await this.client.im.message.reply({ path: { message_id: replyMessageId }, data: { content, msg_type: "image" } });
           sent = true;
@@ -208,7 +208,7 @@ export class LarkSender {
       if (!fileKey) { this.log("ERROR", `文件上传失败`); return; }
       const content = JSON.stringify({ file_key: fileKey, file_name: fileName });
       let sent = false;
-      if (replyMessageId) {
+      if (replyMessageId && !replyMessageId.startsWith("internal_")) {
         try {
           await this.client.im.message.reply({ path: { message_id: replyMessageId }, data: { content, msg_type: "file" } });
           sent = true;

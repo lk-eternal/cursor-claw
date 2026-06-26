@@ -285,6 +285,28 @@ const sessionToChatMap = new Map<string, string>();
 const MSG_SESSION_MAP_MAX = 5000;
 const sessionLastReplyAt = new Map<string, number>();
 
+// ── 延迟 DONE 表情队列（等 Agent 下次 poll 时再打，标志任务真正完成）──
+const pendingDoneReactions = new Map<string, Map<string, number>>();
+const PENDING_DONE_TIMEOUT_MS = 10 * 60 * 1000;
+
+function enqueuePendingDone(sessionKey: string, messageIds: string[]): void {
+  const now = Date.now();
+  let map = pendingDoneReactions.get(sessionKey);
+  if (!map) { map = new Map(); pendingDoneReactions.set(sessionKey, map); }
+  for (const mid of messageIds) {
+    if (mid && !mid.startsWith("internal_")) map.set(mid, now);
+  }
+}
+
+function flushPendingDone(sessionKey: string): void {
+  const map = pendingDoneReactions.get(sessionKey);
+  if (!map || map.size === 0) return;
+  const ids = [...map.keys()];
+  map.clear();
+  addReactionToMessages(ids, sessionKey, "DONE");
+  log("INFO", `延迟打 DONE 表情: ${ids.length} 条, session=${sessionKey}`);
+}
+
 // ── Agent-Poll 生命周期追踪 ─────────────────────────────────
 const activePollConnections = new Map<string, Set<http.ServerResponse>>();
 
@@ -415,8 +437,9 @@ function addReactionToMessages(messageIds: string[], sessionKey: string, emojiTy
 }
 
 /**
- * Agent 回复确认（ack）：删除该 message_id 及更早的未确认消息，并对被确认消息打 DONE 表情（处理完成）。
- * 领取时已打 Get（已读）；回复后再打 DONE（已处理完）。
+ * Agent 回复确认（ack）：删除该 message_id 及更早的未确认消息。
+ * DONE 表情不在此处打 —— 而是延迟到 Agent 下次 poll-message 时才打，
+ * 这样 "DONE" 代表 "任务真正完成"，而非 "Agent 刚收到就标记完成"。
  */
 function ackOnReply(messageId?: string, sessionKey?: string): void {
   if (!messageId) return;
@@ -424,7 +447,7 @@ function ackOnReply(messageId?: string, sessionKey?: string): void {
   if (acked.length === 0) return;
   log("INFO", `回复确认 ${acked.length} 条消息: session=${sessionKey ?? "?"} (via ${messageId})`);
   if (sessionKey) {
-    addReactionToMessages(acked, sessionKey, "DONE");
+    enqueuePendingDone(sessionKey, acked);
     broadcastQueueEvent(sessionKey);
   }
 }
@@ -998,10 +1021,11 @@ function startHttpServer(): Promise<number> {
           if (!content) { json(res, { error: "content is required" }, 400); return; }
           const chatId = typeof body.chatId === "string" ? body.chatId.trim() : "";
           const chatType = typeof body.chatType === "string" ? body.chatType : "p2p";
+          const internalMsgId = `internal_enqueue_${Date.now()}`;
           if (chatId) {
-            pushMessage(content, undefined, chatId, chatType);
+            pushMessage(content, internalMsgId, chatId, chatType);
           } else {
-            pushMessage(content);
+            pushMessage(content, internalMsgId);
           }
           json(res, { ok: true, queueLength: getFileQueueLength() });
           return;
@@ -1552,6 +1576,9 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     // 新一轮 poll 开始：销毁该会话残留的旧挂起连接，避免同会话多连接竞争
     terminateSession(sessionKeyFilter);
 
+    // 上一轮 Agent 回复后积攒的 DONE 表情，此时批量打出（代表任务真正完成）
+    flushPendingDone(sessionKeyFilter);
+
     // 领取不删：.qmsg→.claimed，返回该会话全部未确认消息（含历史未回复的，按时间升序）。
     // 消息只有 Agent 回复（ackOnReply）后才删除；未确认下次 poll 重投，幽灵连接领走也不丢。
     if (!blocking) {
@@ -1716,6 +1743,19 @@ export async function daemonMain(): Promise<void> {
   initQueue();
   startMediaCacheCleanup();
 
+  // 超时兜底：Agent 崩溃不再 poll 时，超过 10 分钟的 pendingDone 自动打出
+  setInterval(() => {
+    const now = Date.now();
+    for (const [sk, map] of pendingDoneReactions) {
+      const expired = [...map.entries()].filter(([, t]) => now - t > PENDING_DONE_TIMEOUT_MS);
+      if (expired.length === 0) continue;
+      for (const [mid] of expired) map.delete(mid);
+      addReactionToMessages(expired.map(([mid]) => mid), sk, "DONE");
+      log("INFO", `超时自动打 DONE 表情: ${expired.length} 条, session=${sk}`);
+      if (map.size === 0) pendingDoneReactions.delete(sk);
+    }
+  }, 60_000).unref();
+
   for (const cfg of CHANNEL_CONFIGS) {
     const rt: ChannelRuntime = { cfg, lastP2pChatId: null, bindArmed: false };
     channels.set(cfg.id, rt);
@@ -1743,7 +1783,7 @@ export async function daemonMain(): Promise<void> {
       const rt = pickChannel(task.channelId);
       const target = rt ? channelDefaultChatId(rt) : null;
       if (rt && target) {
-        pushMessage(content, undefined, makeChatKey(rt.cfg.id, target), "p2p");
+        pushMessage(content, `internal_${task.id}_${Date.now()}`, makeChatKey(rt.cfg.id, target), "p2p");
       } else {
         log("WARN", `定时任务「${task.name}」消息无法入队: 通道无主用户且无私聊记录`);
       }
