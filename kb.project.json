@@ -1,0 +1,32 @@
+{
+  "projectName": "cursor-claw",
+  "knowledgeRoot": "knowledge",
+  "changeDirs": {
+    "active": "knowledge/变更/进行中",
+    "archived": "knowledge/变更/归档"
+  },
+  "codeRoots": [
+    {
+      "name": "应用源码",
+      "path": "src/",
+      "kind": "client"
+    },
+    {
+      "name": "Electron 主进程",
+      "path": "electron/",
+      "kind": "server"
+    },
+    {
+      "name": "资源模板",
+      "path": "resources/",
+      "kind": "config"
+    }
+  ],
+  "engineeringPlatforms": [],
+  "feishu": {
+    "enabled": true,
+    "envPath": ".cursor/hooks/feishu.env"
+  },
+  "scriptsDir": ".cursor/kb/scripts",
+  "manifestSchema": ".cursor/kb-manifest.schema.json"
+}
