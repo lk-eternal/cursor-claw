@@ -1,0 +1,5 @@
+{
+  "version": "1.6.1",
+  "date": "2026-06-27",
+  "changes": ["飞书群聊中仅展示 shell 工具执行卡片与 thinking 过程卡，抑制 read/grep 等非 shell 工具卡，减少卡片轰炸；主用户私聊行为不变"]
+}

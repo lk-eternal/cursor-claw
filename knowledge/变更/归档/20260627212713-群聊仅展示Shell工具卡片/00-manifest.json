@@ -1,0 +1,76 @@
+{
+  "name": "群聊仅展示Shell工具卡片",
+  "flow": "lite",
+  "stage": "archived",
+  "source": "kb-lite",
+  "workflow_version": "v2.6",
+  "archived_at": "2026-06-27T21:30:41+0800",
+  "tasks": [
+    {
+      "id": "LITE-01",
+      "title": "群聊 Presentation 保留 shell 工具与 thinking CardKit，抑制非 shell 工具",
+      "status": "done",
+      "files": [
+        "electron/agent-sdk.ts",
+        "src/daemon.ts",
+        "src/shared/tool-presentation.ts",
+        "src/shared/lark-core.ts",
+        "electron/AGENTS.md",
+        "src/AGENTS.md"
+      ]
+    }
+  ],
+  "reviews": [],
+  "revisions": [],
+  "files": [
+    {
+      "path": "electron/agent-sdk.ts",
+      "kind": "code"
+    },
+    {
+      "path": "src/daemon.ts",
+      "kind": "code"
+    },
+    {
+      "path": "src/shared/tool-presentation.ts",
+      "kind": "code"
+    },
+    {
+      "path": "src/shared/lark-core.ts",
+      "kind": "code"
+    },
+    {
+      "path": "electron/AGENTS.md",
+      "kind": "agents"
+    },
+    {
+      "path": "src/AGENTS.md",
+      "kind": "agents"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627212713-群聊仅展示Shell工具卡片/01-proposal.md",
+      "kind": "change_doc"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627212713-群聊仅展示Shell工具卡片/00-manifest.json",
+      "kind": "change_doc"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627212713-群聊仅展示Shell工具卡片/05-summary.md",
+      "kind": "change_doc"
+    },
+    {
+      "path": "knowledge/业务域/消息桥接/02-飞书通道.md",
+      "kind": "knowledge"
+    },
+    {
+      "path": "package.json",
+      "kind": "config"
+    },
+    {
+      "path": "changelog/1.6.1.json",
+      "kind": "changelog"
+    }
+  ],
+  "updated_at": "2026-06-27T21:33:38+0800"
+}

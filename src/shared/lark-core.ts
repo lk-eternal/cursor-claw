@@ -3,6 +3,10 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { randomUUID } from "node:crypto";
 import * as Lark from "@larksuiteoapi/node-sdk";
+import {
+  buildShellToolCardMarkdown,
+  type ShellToolDetail,
+} from "./tool-presentation.js";
 
 const STREAM_ELEMENT_ID = "stream_content";
 const MERGE_BATCH_ELEMENT_ID = "merge_body";
@@ -26,6 +30,20 @@ function formatToolStatusLabel(status: "started" | "completed" | "failed"): stri
   if (status === "completed") return "已完成";
   if (status === "failed") return "失败";
   return "执行中…";
+}
+
+/** 工具 CardKit markdown：shell 用 ```shell 展示命令与输出 */
+function formatToolProgressCardMarkdown(
+  toolName: string,
+  status: "started" | "completed" | "failed",
+  shellDetail?: ShellToolDetail,
+): string {
+  if (toolName === "shell" && shellDetail?.command) {
+    return buildShellToolCardMarkdown(status, shellDetail);
+  }
+  const escapedName = toolName.replace(/\\/g, "\\\\");
+  const statusLabel = formatToolStatusLabel(status);
+  return `🔧 **${escapedName}**\n状态：${statusLabel}`;
 }
 
 export interface MergeBatchCardView {
@@ -435,10 +453,10 @@ export class LarkSender {
   async createToolProgressCardEntity(
     toolName: string,
     status: "started" | "completed" | "failed",
+    shellDetail?: ShellToolDetail,
   ): Promise<{ cardId: string; elementId: string } | null> {
     try {
-      const escapedName = toolName.replace(/\\/g, "\\\\");
-      const statusLabel = formatToolStatusLabel(status);
+      const content = formatToolProgressCardMarkdown(toolName, status, shellDetail);
       const card: Record<string, unknown> = {
         schema: "2.0",
         config: { ...PATCHABLE_CARD_CONFIG },
@@ -447,7 +465,7 @@ export class LarkSender {
           elements: [{
             tag: "markdown",
             element_id: TOOL_PROGRESS_ELEMENT_ID,
-            content: `🔧 **${escapedName}**\n状态：${statusLabel}`,
+            content,
           }],
         },
       };
@@ -479,11 +497,10 @@ export class LarkSender {
     toolName: string,
     status: "started" | "completed" | "failed",
     sequence: number,
+    shellDetail?: ShellToolDetail,
   ): Promise<boolean> {
     try {
-      const escapedName = toolName.replace(/\\/g, "\\\\");
-      const statusLabel = formatToolStatusLabel(status);
-      const content = `🔧 **${escapedName}**\n状态：${statusLabel}`;
+      const content = formatToolProgressCardMarkdown(toolName, status, shellDetail);
       const res = await this.client.request({
         method: "PUT",
         url: `/open-apis/cardkit/v1/cards/${cardId}/elements/${elementId}/content`,
@@ -510,11 +527,12 @@ export class LarkSender {
     status: "started" | "completed" | "failed",
     existing?: PresentationCardState,
     replyMessageId?: string,
+    shellDetail?: ShellToolDetail,
   ): Promise<PresentationCardState | null> {
     if (existing?.cardEntityId && existing.cardMessageId) {
       const seq = (existing.cardSequence ?? 0) + 1;
       const ok = await this.updateToolProgressCardBody(
-        existing.cardEntityId, TOOL_PROGRESS_ELEMENT_ID, toolName, status, seq,
+        existing.cardEntityId, TOOL_PROGRESS_ELEMENT_ID, toolName, status, seq, shellDetail,
       );
       if (ok) {
         let cardSequence = seq;
@@ -528,7 +546,7 @@ export class LarkSender {
       this.log("WARN", "工具 CardKit PATCH 失败，保留旧卡状态");
       return existing;
     }
-    const entity = await this.createToolProgressCardEntity(toolName, status);
+    const entity = await this.createToolProgressCardEntity(toolName, status, shellDetail);
     if (!entity) return null;
     const msgId = await this.sendStreamingCardMessage(chatId, entity.cardId, replyMessageId);
     if (!msgId) return null;

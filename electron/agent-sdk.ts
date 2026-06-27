@@ -7,6 +7,10 @@ import { app } from "electron"
 import { readLockFile, httpPost, reportSessionAgentPhase } from "./daemon-client"
 import { getChannel, getAgentResource, resolveChannelForSession, resolveChannelModel, effectiveWorkspaceDir, type MessageChannel, type ModelScenario } from "./config-store"
 import { parseChatKey } from "../src/shared/channel-types"
+import {
+  extractShellPresentationFields,
+  formatToolCallLogSuffix,
+} from "../src/shared/tool-presentation"
 import { pushUiLog, broadcastLog, broadcastSessionStatus } from "./ui-logger"
 import { type ChatType, type LaunchMeta, buildPrompt, resolveSessionChatName } from "./agent-launcher"
 
@@ -195,6 +199,10 @@ export interface PresentationEvent {
   delta?: string
   tool_name?: string
   tool_status?: "started" | "completed" | "failed"
+  /** shell 工具：具体命令（CardKit ```shell 渲染） */
+  tool_shell_command?: string
+  tool_shell_cwd?: string
+  tool_shell_output?: string
   final?: boolean
   outbound_message_id?: string
 }
@@ -205,10 +213,22 @@ function mapToolPresentationStatus(status: "running" | "completed" | "error"): P
   return "failed"
 }
 
+/** 群聊 Presentation 门控：仅 shell 工具卡可 POST；thinking 保留，非 shell 工具抑制 */
+function isGroupChatPresentationEventAllowed(
+  chatType: ChatType,
+  event: Omit<PresentationEvent, "session_key">,
+): boolean {
+  if (chatType !== "group") return true
+  if (event.kind !== "tool") return true
+  return event.tool_name === "shell"
+}
+
 async function postPresentationEvent(
   session: SdkSessionAgent,
   event: Omit<PresentationEvent, "session_key">,
 ): Promise<void> {
+  // 群聊降噪：非 shell 工具不 POST；thinking 与私聊行为不变
+  if (!isGroupChatPresentationEventAllowed(session.chatType, event)) return
   const lock = readLockFile()
   if (!lock?.port) return
   const payload: PresentationEvent = {
@@ -584,7 +604,8 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
       flushSdkLog(session)
       closeThinkingIfOpen(session)
       session.lastTool = { name: event.name, status: event.status }
-      pushUiLog("SDK", "INFO", `[${session.sessionKey}] [tool] ${event.name}: ${event.status}`)
+      const toolDetail = formatToolCallLogSuffix(event.status, event.args, event.result, event.truncated)
+      pushUiLog("SDK", "INFO", `[${session.sessionKey}] [tool] ${event.name}: ${event.status}${toolDetail}`)
       markProcessEventSeen(session)
       if (event.status === "running") session.toolPresentationOutboundIds?.delete(event.name)
       void postPresentationEvent(session, {
@@ -592,6 +613,7 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
         tool_name: event.name,
         tool_status: mapToolPresentationStatus(event.status),
         final: event.status !== "running",
+        ...extractShellPresentationFields(event.name, event.status, event.args, event.result),
       })
       if (event.status !== "running") {
         maybeReleaseDeferredAssistant(session)

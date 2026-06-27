@@ -10,6 +10,7 @@ import {
   setDaemonSchedulerLogger,
 } from "./daemon-scheduled-tasks.js";
 import { stripProxyEnv, localTimestamp, createLarkClient, LarkSender, LarkMessageEvent, cleanupMediaCache, type MergeBatchCardView, type MergeBatchCardState, type PresentationCardState } from "./shared/lark-core.js";
+import { mergeShellToolDetail } from "./shared/tool-presentation.js";
 import { WeChatManager } from "./wechat-manager.js";
 import {
   initFileQueue,
@@ -314,7 +315,7 @@ interface SessionProgressState {
   /** 已对 inbound 消息打过 Get 的 id（poll 去重，独立于 typing 生命周期） */
   getReactedMessageIds?: Set<string>;
   /** 工具进度 CardKit（按 tool_name 分卡，支持并发工具） */
-  toolCards?: Map<string, PresentationCardState>;
+  toolCards?: Map<string, ToolProgressCardState>;
   /** 思考摘要 CardKit */
   thinkingCardEntityId?: string;
   thinkingCardMessageId?: string;
@@ -429,6 +430,17 @@ function isStreamTextEligible(sessionKey: string): boolean {
 
 function isPresentationEligible(sessionKey: string): boolean {
   return isStreamTextEligible(sessionKey);
+}
+
+/** 群聊判定：resolveSessionChatType === "group" */
+function isGroupChatSession(sessionKey: string): boolean {
+  return resolveSessionChatType(sessionKey) === "group";
+}
+
+/** 群聊 Presentation 门控：仅 shell 工具卡可渲染，私聊全部工具保留 */
+function isGroupChatPresentationToolAllowed(sessionKey: string, toolName: string): boolean {
+  if (!isGroupChatSession(sessionKey)) return true;
+  return toolName === "shell";
 }
 
 /** NF2：活跃合并批次时 stream/tool/thinking 首包 reply 到首条 inbound */
@@ -810,12 +822,22 @@ interface MergeBatch {
 
 type PresentationKind = "assistant" | "thinking" | "tool" | "diff" | "merge_batch";
 
+/** 工具卡状态：缓存 shell 命令供 completed PATCH */
+interface ToolProgressCardState extends PresentationCardState {
+  shellCommand?: string;
+  shellCwd?: string;
+  shellOutput?: string;
+}
+
 interface PresentationEvent {
   session_key: string;
   kind: PresentationKind;
   delta?: string;
   tool_name?: string;
   tool_status?: "started" | "completed" | "failed";
+  tool_shell_command?: string;
+  tool_shell_cwd?: string;
+  tool_shell_output?: string;
   final?: boolean;
   outbound_message_id?: string;
 }
@@ -1305,6 +1327,11 @@ async function handleToolPresentationEvent(
   if (!isPresentationEligible(sessionKey)) {
     return { ok: false, error: "presentation not supported for this session" };
   }
+  const toolName = event.tool_name.trim();
+  // 群聊降噪：非 shell 工具静默跳过，不渲染 CardKit
+  if (!isGroupChatPresentationToolAllowed(sessionKey, toolName)) {
+    return { ok: true };
+  }
 
   const ch = resolveChannel(sessionKey);
   if (ch.type !== "feishu" || !ch.rt.sender || !ch.chatId) {
@@ -1320,7 +1347,6 @@ async function handleToolPresentationEvent(
     sessionProgressMap.set(sessionKey, state);
   }
 
-  const toolName = event.tool_name.trim();
   if (!state.toolCards) state.toolCards = new Map();
 
   const ordering = presentationOrderingEnabled(sessionKey);
@@ -1348,6 +1374,23 @@ async function handleToolPresentationEvent(
 
   const replyAnchor = existing ? undefined : getPresentationReplyAnchor(sessionKey);
 
+  const shellDetail = mergeShellToolDetail(
+    event.tool_shell_command
+      ? {
+        tool_shell_command: event.tool_shell_command,
+        tool_shell_cwd: event.tool_shell_cwd,
+        tool_shell_output: event.tool_shell_output,
+      }
+      : undefined,
+    toolCard
+      ? {
+        command: toolCard.shellCommand,
+        cwd: toolCard.shellCwd,
+        output: toolCard.shellOutput,
+      }
+      : undefined,
+  );
+
   try {
     const result = await ch.rt.sender.renderToolProgressCard(
       ch.chatId,
@@ -1355,6 +1398,7 @@ async function handleToolPresentationEvent(
       status,
       existing,
       replyAnchor,
+      shellDetail,
     );
     if (!result) {
       logPresentationFailed(sessionKey, "tool", "CardKit render failed");
@@ -1370,7 +1414,12 @@ async function handleToolPresentationEvent(
         orderingEnabled: ordering,
       });
     }
-    state.toolCards.set(toolName, result);
+    state.toolCards.set(toolName, {
+      ...result,
+      shellCommand: shellDetail?.command,
+      shellCwd: shellDetail?.cwd,
+      shellOutput: shellDetail?.output,
+    });
     if (status === "completed" || status === "failed") {
       state.toolCards.delete(toolName);
     }
@@ -1395,7 +1444,6 @@ async function handleThinkingPresentationEvent(
   if (!isPresentationEligible(sessionKey)) {
     return { ok: false, error: "presentation not supported for this session" };
   }
-
   const ch = resolveChannel(sessionKey);
   if (ch.type !== "feishu" || !ch.rt.sender || !ch.chatId) {
     logPresentationFailed(sessionKey, "thinking", "feishu channel unavailable");
