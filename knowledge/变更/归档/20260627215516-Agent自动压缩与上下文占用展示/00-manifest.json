@@ -1,0 +1,143 @@
+{
+  "name": "Agent自动压缩与上下文占用展示",
+  "flow": "standard",
+  "stage": "archived",
+  "source": "kb-propose",
+  "workflow_version": "v2.6",
+  "external": {
+    "figma_confirmed": true,
+    "figma_decision": "auto-none",
+    "task_type": "功能增强",
+    "priority": "P2"
+  },
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "上下文占用 helper 模块（context-usage.ts）",
+      "status": "done",
+      "files": [
+        "electron/context-usage.ts"
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "T2",
+      "title": "自动压缩验证与 onDelta 订阅骨架",
+      "status": "done",
+      "files": [
+        "electron/agent-sdk.ts"
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "T3",
+      "title": "Session 用量累积与模型上限缓存",
+      "status": "done",
+      "files": [
+        "electron/agent-sdk.ts",
+        "electron/context-usage.ts"
+      ],
+      "depends_on": ["T1", "T2"]
+    },
+    {
+      "id": "T4",
+      "title": "终态回复 append 上下文 footer",
+      "status": "done",
+      "files": [
+        "electron/agent-sdk.ts"
+      ],
+      "depends_on": ["T3"]
+    },
+    {
+      "id": "T5",
+      "title": "更新 electron/AGENTS.md 回复约定",
+      "status": "done",
+      "files": [
+        "electron/AGENTS.md"
+      ],
+      "depends_on": ["T4"]
+    },
+    {
+      "id": "T6",
+      "title": "静态验收与联调记录",
+      "status": "done",
+      "files": [
+        "knowledge/变更/归档/20260627215516-Agent自动压缩与上下文占用展示/06-automation-test.md"
+      ],
+      "depends_on": ["T5"],
+      "note": "tsc 通过；06 七段式已写；E1–E8 飞书/SDK E2E 待真实 Run 联调"
+    }
+  ],
+  "reviews": [
+    {
+      "id": "apply-focused",
+      "type": "focused-review",
+      "date": "2026-06-27",
+      "scope": "T1-T6",
+      "verdict": "passed",
+      "status": "fixed",
+      "blocking_issues": 0,
+      "warnings": 2,
+      "file": "knowledge/变更/归档/20260627215516-Agent自动压缩与上下文占用展示/04-review.md",
+      "summary": "focused-review 通过：T1–T5 与 02/03 一致；build/tsc 通过；无 ≥75 阻断项；§3 两则警告与 §7 债务不阻断 archive",
+      "resolution": "04-review.md §9"
+    }
+  ],
+  "revisions": [],
+  "files": [
+    {
+      "path": "electron/context-usage.ts",
+      "kind": "code"
+    },
+    {
+      "path": "electron/agent-sdk.ts",
+      "kind": "code"
+    },
+    {
+      "path": "electron/AGENTS.md",
+      "kind": "agents"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627215516-Agent自动压缩与上下文占用展示/01-proposal.md",
+      "kind": "change_doc"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627215516-Agent自动压缩与上下文占用展示/02-design.md",
+      "kind": "change_doc"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627215516-Agent自动压缩与上下文占用展示/03-tasks.md",
+      "kind": "change_doc"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627215516-Agent自动压缩与上下文占用展示/04-review.md",
+      "kind": "change_doc"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627215516-Agent自动压缩与上下文占用展示/00-manifest.json",
+      "kind": "change_doc"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627215516-Agent自动压缩与上下文占用展示/06-automation-test.md",
+      "kind": "change_doc"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627215516-Agent自动压缩与上下文占用展示/05-summary.md",
+      "kind": "change_doc"
+    },
+    {
+      "path": "package.json",
+      "kind": "config"
+    },
+    {
+      "path": "changelog/1.7.0.json",
+      "kind": "config"
+    },
+    {
+      "path": "knowledge/业务域/消息桥接/02-飞书通道.md",
+      "kind": "knowledge"
+    }
+  ],
+  "archived_at": "2026-06-27T22:09:38+08:00",
+  "updated_at": "2026-06-27T22:09:38+08:00"
+}

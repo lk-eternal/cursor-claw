@@ -15,6 +15,14 @@ import {
   formatToolCallLogSuffix,
 } from "../src/shared/tool-presentation"
 import { pushUiLog, broadcastLog, broadcastSessionStatus } from "./ui-logger"
+import {
+  ZERO_CONTEXT_USAGE,
+  type ContextUsageState,
+  appendContextFooter,
+  createAgentSendOptions,
+  formatContextFooter,
+  resolveContextLimitForSession,
+} from "./context-usage"
 import { type ChatType, type LaunchMeta, buildPrompt, resolveSessionChatName } from "./agent-launcher"
 
 interface SdkSessionAgent {
@@ -59,6 +67,14 @@ interface SdkSessionAgent {
   seenProcessEvent?: boolean
   /** 本 Run thinking 过程尚未 final */
   thinkingOpen?: boolean
+  /** Run 内累积 token 用量（onDelta turn-ended merge） */
+  contextUsage: ContextUsageState
+  /** 模型上下文上限（session 级缓存，跨 Run 复用） */
+  contextLimitTokens?: number
+  /** 当前模型 id，供 resolveModelContextLimit */
+  modelId?: string
+  /** 通道 SDK API Key，供 models.list */
+  apiKey?: string
 }
 
 const sdkSessions = new Map<string, SdkSessionAgent>()
@@ -93,6 +109,7 @@ function resetSdkRunPresentationState(session: SdkSessionAgent): void {
   session.presentationDeferStream = false
   session.seenProcessEvent = false
   session.thinkingOpen = false
+  session.contextUsage = { ...ZERO_CONTEXT_USAGE }
   session.abortController = new AbortController()
 }
 
@@ -174,10 +191,12 @@ async function notifySdkFailure(session: SdkSessionAgent, override?: string, run
   if (session.errorNotified || session.abortController.signal.aborted) return
   session.errorNotified = true
   const last = session.lastStatus
-  const text = override ?? formatSdkStreamFailure(last?.status, last?.message, {
+  let text = override ?? formatSdkStreamFailure(last?.status, last?.message, {
     lastTool: session.lastTool,
     durationMs: resolveRunDurationMs(session, run),
   })
+  const footer = formatContextFooter(session.contextUsage, session.contextLimitTokens ?? null)
+  text = appendContextFooter(text, footer)
   await notifySessionChat(session.sessionKey, text, true)
 }
 
@@ -307,6 +326,7 @@ async function doFlushStreamPost(session: SdkSessionAgent, final: boolean): Prom
   clearStreamPostTimer(session)
   if (!session.f41Stream) return
   if (!final && shouldDeferAssistantPost(session)) return
+  if (final) applyContextFooterToBuffer(session)
   const text = session.streamBuffer
   if (!text.trim() && !final) return
 
@@ -412,6 +432,13 @@ function maybeReleaseDeferredAssistant(session: SdkSessionAgent): void {
   if (!presentationOrderingEligible(session)) return
   if (!session.seenProcessEvent) return
   void flushDeferredStreamPost(session)
+}
+
+/** final flush 前将上下文 footer 写入 streamBuffer（幂等） */
+function applyContextFooterToBuffer(session: SdkSessionAgent): void {
+  const footer = formatContextFooter(session.contextUsage, session.contextLimitTokens ?? null)
+  if (!footer) return
+  session.streamBuffer = appendContextFooter(session.streamBuffer, footer)
 }
 
 async function notifySessionChat(sessionKey: string, text: string, stopProgress = false): Promise<void> {
@@ -746,6 +773,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     }
     pushUiLog("SDK", "INFO", `[${sessionKey}] 正在创建 SDK Agent (cwd=${workspaceDir}, model=${JSON.stringify(modelSelection)})`)
 
+    // 自动压缩：SDK LocalAgentOptions / SendOptions 无 autoCompress 字段；接近上限时由 harness 默认 summarization（onDelta summary-* 可观测）
     const agent = await Agent.create({
       apiKey,
       model: modelSelection,
@@ -777,6 +805,9 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       presentationDeferStream: false,
       seenProcessEvent: false,
       thinkingOpen: false,
+      contextUsage: { ...ZERO_CONTEXT_USAGE },
+      modelId,
+      apiKey,
     }
 
     sdkSessions.set(sessionKey, session)
@@ -784,7 +815,8 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     broadcastLog(`[SDK] 会话 ${sessionKey} 已创建, agentId=${agent.agentId}`)
     broadcastSdkSessionStatus()
 
-    const run = await agent.send(prompt)
+    await resolveContextLimitForSession(session)
+    const run = await agent.send(prompt, createAgentSendOptions(session, pushUiLog))
     await startSdkRun(session, run)
 
     return { ok: true }
@@ -819,7 +851,8 @@ export async function dispatchToSdkAgent(sessionKey: string, taskText: string): 
   session.pendingDispatch = true
   try {
     resetSdkRunPresentationState(session)
-    const run = await session.agent.send(text)
+    await resolveContextLimitForSession(session)
+    const run = await session.agent.send(text, createAgentSendOptions(session, pushUiLog))
     session.pendingDispatch = false
     await startSdkRun(session, run)
     return { ok: true }
