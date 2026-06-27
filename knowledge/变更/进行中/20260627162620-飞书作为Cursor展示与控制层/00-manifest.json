@@ -1,0 +1,30 @@
+{
+  "name": "飞书作为Cursor展示与控制层",
+  "flow": "standard",
+  "stage": "proposed",
+  "source": "kb-propose",
+  "workflow_version": "v2.6",
+  "tasks": [],
+  "reviews": [],
+  "revisions": [],
+  "external": {
+    "figma_confirmed": true,
+    "figma_decision": "auto-none",
+    "task_type": "架构演进/体验+能力",
+    "priority": "P1"
+  },
+  "files": [
+    {
+      "path": "knowledge/变更/进行中/20260627162620-飞书作为Cursor展示与控制层/00-manifest.json",
+      "role": "manifest",
+      "status": "active"
+    },
+    {
+      "path": "knowledge/变更/进行中/20260627162620-飞书作为Cursor展示与控制层/01-proposal.md",
+      "role": "proposal",
+      "kind": "change_doc",
+      "status": "changed"
+    }
+  ],
+  "updated_at": "2026-06-27T16:26:20+0800"
+}
