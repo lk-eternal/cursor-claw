@@ -1,0 +1,23 @@
+{
+  "name": "消息通道即时响应与流式输出",
+  "flow": "standard",
+  "stage": "proposed",
+  "source": "kb-propose",
+  "tasks": [],
+  "reviews": [],
+  "revisions": [],
+  "files": [
+    {
+      "path": "knowledge/变更/进行中/20260627113111-消息通道即时响应与流式输出/00-manifest.json",
+      "role": "manifest",
+      "status": "active"
+    },
+    {
+      "path": "knowledge/变更/进行中/20260627113111-消息通道即时响应与流式输出/01-proposal.md",
+      "role": "proposal",
+      "kind": "change_doc",
+      "status": "changed"
+    }
+  ],
+  "updated_at": "2026-06-27T11:46:40+0800"
+}
