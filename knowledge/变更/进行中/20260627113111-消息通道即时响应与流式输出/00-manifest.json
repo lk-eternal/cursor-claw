@@ -1,9 +1,8 @@
 {
   "name": "消息通道即时响应与流式输出",
   "flow": "standard",
-  "stage": "archived",
+  "stage": "acceptance_reopened",
   "source": "kb-propose",
-  "archived_at": "2026-06-27T14:34:23+0800",
   "tasks": [
     {
       "id": "T1",
@@ -161,54 +160,54 @@
   ],
   "files": [
     {
-      "path": "knowledge/变更/归档/20260627113111-消息通道即时响应与流式输出/00-manifest.json",
+      "path": "knowledge/变更/进行中/20260627113111-消息通道即时响应与流式输出/00-manifest.json",
       "role": "manifest",
       "status": "active"
     },
     {
-      "path": "knowledge/变更/归档/20260627113111-消息通道即时响应与流式输出/01-proposal.md",
+      "path": "knowledge/变更/进行中/20260627113111-消息通道即时响应与流式输出/01-proposal.md",
       "role": "proposal",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/归档/20260627113111-消息通道即时响应与流式输出/02-design.md",
+      "path": "knowledge/变更/进行中/20260627113111-消息通道即时响应与流式输出/02-design.md",
       "role": "design",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/归档/20260627113111-消息通道即时响应与流式输出/03-tasks.md",
+      "path": "knowledge/变更/进行中/20260627113111-消息通道即时响应与流式输出/03-tasks.md",
       "role": "tasks",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/归档/20260627113111-消息通道即时响应与流式输出/04-review.md",
+      "path": "knowledge/变更/进行中/20260627113111-消息通道即时响应与流式输出/04-review.md",
       "role": "review",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/归档/20260627113111-消息通道即时响应与流式输出/05-summary.md",
+      "path": "knowledge/变更/进行中/20260627113111-消息通道即时响应与流式输出/05-summary.md",
       "role": "summary",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/归档/20260627113111-消息通道即时响应与流式输出/06-automation-test.md",
+      "path": "knowledge/变更/进行中/20260627113111-消息通道即时响应与流式输出/06-automation-test.md",
       "role": "automation_test",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/归档/20260627113111-消息通道即时响应与流式输出/07-prd-revisions.md",
+      "path": "knowledge/变更/进行中/20260627113111-消息通道即时响应与流式输出/07-prd-revisions.md",
       "role": "prd_revisions",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/归档/20260627113111-消息通道即时响应与流式输出/08-verify-issue.md",
+      "path": "knowledge/变更/进行中/20260627113111-消息通道即时响应与流式输出/08-verify-issue.md",
       "role": "verify_issue",
       "kind": "change_doc",
       "status": "changed"
@@ -288,7 +287,7 @@
       "status": "changed"
     }
   ],
-  "updated_at": "2026-06-27T14:34:23+0800",
+  "updated_at": "2026-06-27T15:30:00+0800",
   "external": {
     "figma_confirmed": true,
     "figma_decision": "auto-none",
@@ -300,6 +299,12 @@
           "round": 1,
           "feedback": "飞书+SDK 主用户私聊流式输出时，Agent 工作期间持续收到多条半幅递增消息（如「按」→「按 cursor-cl」→「按 cursor-claw 工作」），未在同一条消息持续更新，违反 F4.2/NF6 不刷屏预期。",
           "created_at": "2026-06-27T14:00:00+0800"
+        },
+        {
+          "round": 2,
+          "feedback": "应用重启后会话队列目录残留 stale .claimed 文件；再次发消息可能触发冷启动 orphan 回收或重复投递。根因 T-FIX-04 债务：doFlushStreamPost(final=true) 未向 stream-text 传 inbound message_id，主路径未闭环 ack。",
+          "reason": "code",
+          "created_at": "2026-06-27T15:30:00+0800"
         }
       ]
     }
