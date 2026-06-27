@@ -24,6 +24,7 @@ import {
   resolveContextLimitForSession,
 } from "./context-usage"
 import { type ChatType, type LaunchMeta, buildPrompt, resolveSessionChatName } from "./agent-launcher"
+import { appendInlineMcpToSendOptions, loadInlineMcpServers } from "./mcp-sdk-loader"
 
 interface SdkSessionAgent {
   sessionKey: string
@@ -799,6 +800,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     const agent = await Agent.create({
       apiKey,
       model: modelSelection,
+      mcpServers: loadInlineMcpServers(workspaceDir),
       local: {
         cwd: workspaceDir,
         settingSources: ["project", "user"],
@@ -839,7 +841,10 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     broadcastSdkSessionStatus()
 
     await resolveContextLimitForSession(session)
-    const run = await agent.send(prompt, createAgentSendOptions(session, pushUiLog, makeCompressionNotify(session)))
+    const run = await agent.send(
+      prompt,
+      appendInlineMcpToSendOptions(createAgentSendOptions(session, pushUiLog, makeCompressionNotify(session)), workspaceDir),
+    )
     await startSdkRun(session, run)
 
     return { ok: true }
@@ -882,7 +887,10 @@ export async function dispatchToSdkAgent(
   try {
     resetSdkRunPresentationState(session)
     await resolveContextLimitForSession(session)
-    const run = await session.agent.send(text, createAgentSendOptions(session, pushUiLog, makeCompressionNotify(session)))
+    const run = await session.agent.send(
+      text,
+      appendInlineMcpToSendOptions(createAgentSendOptions(session, pushUiLog, makeCompressionNotify(session)), session.workspaceDir),
+    )
     session.pendingDispatch = false
     await startSdkRun(session, run)
     return { ok: true }

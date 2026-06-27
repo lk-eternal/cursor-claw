@@ -377,14 +377,17 @@ function extractParams(schema: any): McpToolInfo["params"] {
   }))
 }
 
-function queryToolsViaProtocol(cmd: string, args: string[], envOverride?: Record<string, string>): Promise<{ ok: boolean; tools: McpToolInfo[]; error?: string }> {
+/** stdio MCP 直连探测；cwd 用于 npx/相对路径/项目根 env 等依赖工作目录的场景 */
+function queryToolsViaProtocol(cmd: string, args: string[], envOverride?: Record<string, string>, cwd?: string): Promise<{ ok: boolean; tools: McpToolInfo[]; error?: string }> {
   return new Promise((resolve) => {
     const env: Record<string, string> = { ...process.env as Record<string, string>, ...(envOverride ?? {}) }
     if (!env.PATH && env.Path) env.PATH = env.Path
 
     let child: ReturnType<typeof spawn>
     try {
-      child = spawn(quoteArg(cmd), args.map(quoteArg), { env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, shell: true })
+      const spawnOpts: Parameters<typeof spawn>[2] = { env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, shell: true }
+      if (cwd) spawnOpts.cwd = cwd
+      child = spawn(quoteArg(cmd), args.map(quoteArg), spawnOpts)
     } catch (e: any) {
       resolve({ ok: false, tools: [], error: `启动失败: ${e.message}` })
       return
@@ -425,7 +428,11 @@ function queryToolsViaProtocol(cmd: string, args: string[], envOverride?: Record
     })
 
     child.on("error", (err) => finish({ ok: false, tools: [], error: `启动失败: ${err.message}` }))
-    child.on("close", () => finish(phase === "init" ? { ok: false, tools: [], error: "进程退出，未获取到工具" } : { ok: true, tools: [] }))
+    child.on("close", () => {
+      if (phase === "done") return
+      // init：未握手；list：已 initialize 但未收到 tools/list 响应，均视为失败
+      finish({ ok: false, tools: [], error: phase === "list" ? "进程退出，未获取到工具列表" : "进程退出，未获取到工具" })
+    })
 
     child.stdin?.write(JSON.stringify({
       jsonrpc: "2.0", id: 1, method: "initialize",
@@ -501,16 +508,32 @@ export async function getMcpServerTools(serverName: string): Promise<{ ok: boole
   const server = servers.find((s) => s.name === serverName)
   if (!server) return { ok: false, tools: [], error: "MCP 服务器未找到" }
 
+  const config = getConfig()
+  const workspaceCwd = (config.workspaceDir || "").trim()
+  let fallback: { ok: boolean; tools: McpToolInfo[]; error?: string } | undefined
+
+  // CLI 优先：agent mcp list-tools 在 workspace 上下文中解析 MCP，复用 Cursor CLI 运行时，比直连 stdio 更可靠
+  if (workspaceCwd) {
+    const cliResult = await queryToolsViaCli(serverName)
+    if (cliResult.ok && cliResult.tools.length > 0) return cliResult
+    fallback = cliResult
+  }
+
+  // CLI 失败或未配置 workspace 时，回退 HTTP / stdio 直连探测
   if (server.type === "url" && server.url) {
     const headers = server.rawConfig?.headers as Record<string, string> | undefined
     const result = await queryToolsViaHttp(server.url, headers)
     if (result.ok && result.tools.length > 0) return result
+    fallback = result
   }
 
   if (server.type === "command" && server.command) {
-    const result = await queryToolsViaProtocol(server.command, server.args ?? [], server.env)
+    // stdio spawn 传入 workspace cwd，与 spawnAsync/loginMcpServer 保持一致
+    const result = await queryToolsViaProtocol(server.command, server.args ?? [], server.env, workspaceCwd || undefined)
     if (result.ok && result.tools.length > 0) return result
+    fallback = result
   }
 
-  return queryToolsViaCli(serverName)
+  // 直连也失败：有 workspace 时已尝试过 CLI（fallback 保留最后一次错误）；无 workspace 时最后再试 CLI
+  return fallback ?? queryToolsViaCli(serverName)
 }

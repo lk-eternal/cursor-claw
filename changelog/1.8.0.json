@@ -1,0 +1,8 @@
+{
+  "version": "1.8.0",
+  "date": "2026-06-27",
+  "changes": [
+    "Settings 页 stdio MCP 工具列表探测更可靠：workspace 下传入 cwd、CLI 优先探测，修复进程正常退出时的误报",
+    "SDK Agent 会话内联 stdio MCP：合并 project/global mcp.json，resident 模式每次 send 自动重传 inline MCP"
+  ]
+}
