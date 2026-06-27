@@ -49,7 +49,7 @@ flowchart TD
 | S8 | Agent 冷启动期间展示「正在启动」 | 改动 | `electron/session-dispatcher.ts` L578 替换「正在启动Agent，请稍等...」 | F3.2、F5.2、验收 3 |
 | S9 | Agent 真正进入处理后发送「Agent 处理中…」 | 新增/改动 | `electron/session-dispatcher.ts` `launchSessionAgent` 成功回调；`electron/agent-sdk.ts` `launchSdkAgent` 启动后 | F3.3、F5.2、验收 3–4 |
 | S10 | Agent poll 领取消息；飞书 Get 表情时序调整 | 改动 | `src/daemon.ts` `/api/poll-message`、`addReactionToMessages`；文本状态优先于表情 F5.3 | F5.3、验收 5 |
-| S11 | SDK 主用户私聊流式输出 | 新增 | `electron/agent-sdk.ts` `handleSdkEvent` → `/api/stream-text`；`src/daemon.ts` 新端点 | F4.1–F4.3、NF2/NF6、验收 6–7 |
+| S11 | SDK 主用户私聊流式输出 | 新增/改动（Rev1） | 飞书：CardKit 流式卡片（`streaming_mode` + `card_id` + 流式更新文本）；`electron/agent-sdk.ts` → `/api/stream-text`；`src/shared/lark-core.ts` CardKit 封装 | F4.1–F4.3、NF2/NF6、验收 6–7 |
 | S11b | CLI/群聊不实现单条流式 | 不改流式 | 沿用 `/api/send-text` 一次性发送 | F4.4、验收 8 |
 | S12 | 任务完成或异常：停止进行中指示、确认队列 | 改动 | `src/daemon.ts` `ackOnReply`；`src/wechat-manager.ts` 解耦 `sendText` 内 `cancelTyping`；SDK 错误 `notifyChat` | F2.2、F3.5、NF3、验收 9 |
 
@@ -67,7 +67,7 @@ flowchart TD
 
 - `getSessionPendingCount(sessionKey)`：统计 `.qmsg` + `.claimed` 待处理条数（S6）
 - `SessionProgressState` 内存 Map：会话级进度与 outbound 消息 ID 追踪（S7/S11）
-- `POST /api/stream-text`：流式/分段更新 outbound 消息（S11）
+- `POST /api/stream-text`：流式更新 outbound 消息（S11）；飞书首包走 CardKit 流式卡片，PATCH/分段为 fallback（Rev1）
 - `agent-sdk.ts`：`handleSdkEvent` assistant delta 桥接到 stream API（S11）
 - SDK 流处理异常时 `notifyChat` 用户可见失败说明（S12）
 
@@ -84,6 +84,8 @@ flowchart TD
 
 **方案要点**：在既有 `pushMessage` 写入成功分支挂入队确认；用会话级内存状态机驱动三态 + 原生指示；SDK assistant delta 经新 `/api/stream-text` 更新 outbound 消息；冷启动/处理中文案分层，避免双条近义通知。
 
+**Rev1 补充（飞书 CardKit 流式）**：验收第 1 轮表明 `im.message.patch` + 分段降级不稳定，易出现多条半幅递增消息。飞书通道改为官方 CardKit 流式卡片路线：创建卡片实体（`streaming_mode: true`，固定 `element_id`）→ 发消息引用 `card_id` → 流式更新文本 API（`sequence` 递增）→ `final` 关闭 `streaming_mode`；现有 PATCH/分段降为 CardKit 失败时的 fallback。需应用权限 `cardkit:card:write`。
+
 **与 01 追溯**：F1→S5/S6；F2→S7；F3→S8/S9；F4→S11；F5→S8/S9/S10。
 
 **Ponytail 最小方案三问**：
@@ -98,7 +100,7 @@ flowchart TD
 |----|------|------|
 | 端点层 | HTTP API：send-text（既有）、stream-text（新增）、poll-message（时序调整） | `src/daemon.ts` |
 | 服务层 | 入队确认、进度状态机、流式桥接、Agent 生命周期通知 | `src/daemon.ts`、`electron/session-dispatcher.ts`、`electron/agent-sdk.ts` |
-| 通道适配层 | 飞书表情/消息、微信 typing 独立控制 | `src/shared/lark-core.ts`、`src/wechat-manager.ts` |
+| 通道适配层 | 飞书表情/消息、CardKit 流式卡片（Rev1）、微信 typing 独立控制 | `src/shared/lark-core.ts`、`src/wechat-manager.ts` |
 | 数据层 | 文件队列读写、会话待处理计数 | `src/file-queue.ts` |
 
 ```mermaid
@@ -145,7 +147,18 @@ flowchart LR
 | `outbound_message_id` | string | 否 | 首包创建后回传，后续更新同一条 |
 | `final` | boolean | 否 | true 时标记流结束，停止进行中指示 |
 
-响应 `{ ok, stream_id?, outbound_message_id? }`；通道不支持 PATCH 时按段落 + 节流分段 `sendMessage`（F4.3）；400 缺参；通道不可达返回 `{ ok: false, error }`。
+响应 `{ ok, stream_id?, outbound_message_id? }`；400 缺参；通道不可达返回 `{ ok: false, error }`。
+
+**飞书 CardKit 流式（Rev1，首选）**：
+
+1. **创建卡片实体**：`POST /open-apis/cardkit/v1/cards`，`data.type=card_json`，卡片 JSON 含 `config.streaming_mode: true` 与固定 `element_id`（如 `stream_content`）的 markdown 元素；返回 `card_id`。
+2. **发消息引用 card_id**：`im.message.create`，`msg_type=interactive`，content 引用上步 `card_id`；记录 outbound `message_id`。
+3. **流式更新文本**：`PUT /open-apis/cardkit/v1/cards/{card_id}/elements/{element_id}/content`，body 含 `content`（全文）与递增 `sequence`（从 1 起）；实现打字机效果。
+4. **关闭流式**：`final: true` 时 PATCH 卡片实体 `streaming_mode: false`（或 CardKit 关闭流式 API），再停止进行中指示。
+5. **降级**：CardKit 任一步失败（返回 false）→ fallback 现有 `updateMessageContent` PATCH 或段落分段 + 节流（F4.3）。
+6. **权限**：飞书应用须开通 `cardkit:card:write`；SDK 可能无 cardkit 模块，经 `client.request` 直调 OpenAPI。
+
+**微信**：仍走首包 `sendText` + 后续全文覆盖或分段，逻辑不变。
 
 **POST /api/send-text（既有，不变）**：CLI/群聊最终回复、三态文本通知（「正在启动」「Agent 处理中…」继续使用；`message_id` 可选用于 reply 链。
 
@@ -158,8 +171,12 @@ flowchart LR
 ```typescript
 interface SessionProgressState {
   typingActive: boolean;
-  outboundMessageId?: string;  // 流式首选 outbound
+  outboundMessageId?: string;  // 流式 outbound message_id
   streamId?: string;
+  // Rev1 飞书 CardKit
+  cardId?: string;
+  elementId?: string;       // 固定如 'stream_content'
+  cardSequence?: number;    // 流式更新 sequence，递增
 }
 // Map<sessionKey, SessionProgressState>
 ```
@@ -180,8 +197,8 @@ interface SessionProgressState {
 2. **S5/S7 入队确认**：`pushMessage` 在 `written===true` 分支发送确认；过滤 `internal_*`；启动 `SessionProgressState` 与微信 typing / 飞书进行中反馈。
 3. **S8/S9 文案整合**：`session-dispatcher.ts` L578 改为「正在启动」；`launchSessionAgent`/`launchSdkAgent` 成功入口发送「Agent 处理中…」；启动失败走 `notifyChat` 错误文案。
 4. **S10 Get 时序**：评估 poll 时 `addReactionToMessages(Get)` 与三态文本并存；必要时延后或仅对新消息打 Get，文本状态优先（F5.3）。
-5. **S11 流式 API**：daemon 新增 `/api/stream-text`；实现 Feishu PATCH POC 与分段降级 + 节流配置项。
-6. **S11 SDK 桥接**：`handleSdkEvent` assistant text delta 在 `f41Eligible`（`isMainUser && p2p && resource.type==='sdk'`）时 POST stream-text；首包创建 outbound，后续带 `outbound_message_id`。
+5. **S11 流式 API**：daemon 新增 `/api/stream-text`；飞书首包 CardKit 流式卡片，更新走流式更新文本 API，`final` 关闭 streaming_mode；CardKit 失败降级 PATCH/分段 + 节流（Rev1）。
+6. **S11 SDK 桥接**：`handleSdkEvent` assistant text delta 在 `f41Eligible` 时 POST stream-text；`flushStreamPost` 串行 await，避免并发 isFirst（Rev1）；首包创建 outbound/card，后续带 `outbound_message_id`。
 7. **S12 完成/异常**：`ackOnReply` 与 stream `final` 时停止进行中指示；微信 `sendText` 解耦自动 `cancelTyping`，改由进度状态机统一 stop；SDK `streamRunEvents` catch 与 status ERROR 时 `notifyChat`（对齐 `handleSessionClosed`）。
 8. **验收**：按 01 验收 1–10 与 §八·（二）工程补充项执行。
 
@@ -213,15 +230,17 @@ interface SessionProgressState {
 - **session-dispatcher**：冷启动/处理中文案、启动失败通知。
 - **agent-sdk**：handleSdkEvent 流式桥接、错误 notify。
 - **wechat-manager**：typing 生命周期 API 暴露（start/stop 独立于 sendText）。
-- **lark-core / LarkSender**：stream-text 内 PATCH 或分段发送。
+- **lark-core / LarkSender**：CardKit 流式卡片封装（Rev1 首选）；PATCH/分段为 fallback；需 `cardkit:card:write`。
+- **agent-sdk**：`flushStreamPost` 串行化（Rev1），避免并发首包。
 - **无 DB / proto / Electron UI** 变更。
 
 ### （二）工程补充验收项
 
-1. **Feishu PATCH POC**：验证单条消息 content PATCH 可行性与限流；不可行则确认 F4.3 分段策略默认开启。
-2. **WeChat GENERATING probe**：确认 `MessageState.GENERATING` 与独立 typing ticket 生命周期；完成/异常 5s 内 cancel。
-3. **节流配置**：流式更新间隔可配置（建议默认 500–1500ms），NF6 不刷屏。
-4. **SDK error notify**：模拟 stream 异常与 status ERROR，用户收到可理解说明且进行中指示停止（对齐 handleSessionClosed）。
+1. **Feishu CardKit 流式（Rev1）**：验证 CardKit 创建→发消息→流式更新→关闭 streaming 全链路；单条消息打字机效果；失败正确降级 PATCH/分段。应用须已开通 `cardkit:card:write`。
+2. **Feishu PATCH fallback**：CardKit 不可用时 PATCH/分段降级仍可用（原 POC 结论保留为 fallback）。
+3. **WeChat GENERATING probe**：确认 `MessageState.GENERATING` 与独立 typing ticket 生命周期；完成/异常 5s 内 cancel。
+4. **节流配置**：流式更新间隔可配置（建议默认 500–1500ms），NF6 不刷屏；SDK 侧串行推送后可略调节流间隔。
+5. **SDK error notify**：模拟 stream 异常与 status ERROR，用户收到可理解说明且进行中指示停止（对齐 handleSessionClosed）。
 
 ## 九、知识库影响
 

@@ -29,6 +29,8 @@ interface SdkSessionAgent {
   streamId?: string
   streamLastPostAt?: number
   streamPostTimer?: ReturnType<typeof setTimeout>
+  /** stream-text POST 串行链，避免并发首包 */
+  streamPostChain?: Promise<void>
   errorNotified?: boolean
   /** 最近一次终态状态事件（ERROR/EXPIRED/CANCELLED），用于结束时还原真实错误原因 */
   lastStatus?: { status: string; message?: string }
@@ -110,7 +112,12 @@ function clearStreamPostTimer(session: SdkSessionAgent): void {
   }
 }
 
-async function flushStreamPost(session: SdkSessionAgent, final: boolean): Promise<void> {
+function resetStreamPostChain(session: SdkSessionAgent): void {
+  clearStreamPostTimer(session)
+  session.streamPostChain = undefined
+}
+
+async function doFlushStreamPost(session: SdkSessionAgent, final: boolean): Promise<void> {
   clearStreamPostTimer(session)
   if (!session.f41Stream) return
   const text = session.streamBuffer
@@ -128,22 +135,31 @@ async function flushStreamPost(session: SdkSessionAgent, final: boolean): Promis
   session.streamLastPostAt = Date.now()
 }
 
+function flushStreamPost(session: SdkSessionAgent, final: boolean): Promise<void> {
+  session.streamPostChain = (session.streamPostChain ?? Promise.resolve())
+    .then(() => doFlushStreamPost(session, final))
+    .catch((e: unknown) => {
+      pushUiLog("SDK", "WARN", `[${session.sessionKey}] stream-post chain 错误: ${e instanceof Error ? e.message : String(e)}`)
+    })
+  return session.streamPostChain
+}
+
 function scheduleStreamPost(session: SdkSessionAgent, final: boolean): void {
   if (!session.f41Stream) return
   if (final) {
-    void flushStreamPost(session, true)
+    flushStreamPost(session, true)
     return
   }
   const now = Date.now()
   const elapsed = session.streamLastPostAt != null ? now - session.streamLastPostAt : STREAM_POST_INTERVAL_MS
   if (elapsed >= STREAM_POST_INTERVAL_MS) {
-    void flushStreamPost(session, false)
+    flushStreamPost(session, false)
     return
   }
   if (session.streamPostTimer) return
   session.streamPostTimer = setTimeout(() => {
     session.streamPostTimer = undefined
-    void flushStreamPost(session, false)
+    flushStreamPost(session, false)
   }, STREAM_POST_INTERVAL_MS - elapsed)
 }
 
@@ -439,7 +455,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
         run.durationMs != null && `duration=${run.durationMs}ms`,
       ].filter(Boolean).join(", ")
       pushUiLog("SDK", level, `[${sessionKey}] Agent 运行结束 (status=${run.status}${summary ? `, ${summary}` : ""})`)
-      clearStreamPostTimer(session)
+      resetStreamPostChain(session)
       try { session.agent.close() } catch { /* best-effort */ }
       sdkSessions.delete(sessionKey)
       broadcastSdkSessionStatus()
@@ -463,7 +479,7 @@ export function stopSdkSession(sessionKey: string): void {
   const s = sdkSessions.get(sessionKey)
   if (!s) return
   s.abortController.abort()
-  clearStreamPostTimer(s)
+  resetStreamPostChain(s)
   if (s.run) {
     s.run.cancel().catch(() => {})
   }

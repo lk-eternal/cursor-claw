@@ -10,9 +10,13 @@
 T1 ──→ T4 ──→ T5
 T2 ──→ T4 ──→ T6 ──→ T7 ──→ T8
 T3（独立，走既有 notifyChat → /api/send-text）
+
+Rev1（验收打回修复）：
+T-Rev1-01 ──→ T-Rev1-02
+T-Rev1-03（可与 T-Rev1-01 并行，与 T-Rev1-02 联调）
 ```
 
-**文件冲突说明**：T4/T5/T6/T8 均修改 `src/daemon.ts`，须严格按轮次串行，不得并行。
+**文件冲突说明**：T4/T5/T6/T8 均修改 `src/daemon.ts`，须严格按轮次串行，不得并行。Rev1 任务 T-Rev1-02 亦改 `src/daemon.ts`，须与 T-Rev1-01 串行后再联调 T-Rev1-03。
 
 ### 1.2 分组调度
 
@@ -22,6 +26,11 @@ T3（独立，走既有 notifyChat → /api/send-text）
 - **第四轮**：T6（stream-text 端点 + 飞书通道）
 - **第五轮**：T7（SDK 流式桥接 + 错误 notify）
 - **第六轮**：T8（完成/异常停止进行中指示）
+
+**Rev1 修复轮（`/kb-revise-apply`）**：
+
+- **Rev1-第一轮（可并行）**：T-Rev1-01、T-Rev1-03
+- **Rev1-第二轮**：T-Rev1-02（依赖 T-Rev1-01 CardKit 封装；与 T-Rev1-03 联调验收）
 
 ## 2、任务清单
 
@@ -359,3 +368,128 @@ T3（独立，走既有 notifyChat → /api/send-text）
 
 - 前置任务: T2、T4、T6、T7
 - 后续任务: 无
+
+---
+
+## T-Rev1-01: 飞书 CardKit 流式 API 封装
+
+### 背景
+
+Rev1：验收第 1 轮飞书+SDK 流式出现多条半幅递增消息，根因 `im.message.patch` + 分段不稳定。改为飞书官方 CardKit 流式卡片（`streaming_mode` + `card_id` + 流式更新文本 API），在 `lark-core` 封装 OpenAPI 调用供 daemon 使用。
+
+### 上下文文件
+
+- 必读: `src/shared/lark-core.ts` — 现有 `LarkSender`、`updateMessageContent`（PATCH fallback 保留）
+- 必读: `02-design.md` §四 CardKit 流式六步、`07-prd-revisions.md` Rev1
+- 参考: 飞书 CardKit OpenAPI — 创建卡片、发 interactive 消息、流式更新元素、`cardkit:card:write` 权限
+
+### 实现范围
+
+- 修改: `src/shared/lark-core.ts`
+  - `createStreamingCardEntity(): Promise<{ cardId: string; elementId: string } | null>` — 创建 `streaming_mode: true` 卡片，固定 `element_id`（如 `stream_content`）
+  - `sendStreamingCardMessage(chatId, cardId): Promise<string | null>` — `im.message.create` 引用 `card_id`，返回 `message_id`
+  - `updateStreamingCardText(cardId, elementId, text, sequence): Promise<boolean>` — 流式更新文本 API，`sequence` 递增
+  - `closeStreamingCardMode(cardId): Promise<boolean>` — `final` 时关闭 `streaming_mode`
+  - 经 `client.request` 直调 CardKit OpenAPI（SDK 可能无 cardkit 模块）
+  - 任一步失败返回 `false`/`null`，供上层降级 PATCH/分段
+
+### 接口契约
+
+- `createStreamingCardEntity(): Promise<{ cardId: string; elementId: string } | null>`
+- `sendStreamingCardMessage(chatId: string, cardId: string): Promise<string | null>` — outbound `message_id`
+- `updateStreamingCardText(cardId: string, elementId: string, text: string, sequence: number): Promise<boolean>`
+- `closeStreamingCardMode(cardId: string): Promise<boolean>`
+
+### 验收标准
+
+- [ ] 飞书应用已开通 `cardkit:card:write`；CardKit 四步 API 可独立调用
+- [ ] 单条消息 + 打字机效果：创建→发消息→多次 sequence 更新→关闭 streaming 后内容完整
+- [ ] 任一步 API 失败返回 false/null，不抛未捕获异常，便于 daemon 降级
+- [ ] 无 `02`/`03` 未要求的抽象层或未批准的新依赖
+
+### 依赖
+
+- 前置任务: 无（Rev1 独立修复）
+- 后续任务: T-Rev1-02
+
+---
+
+## T-Rev1-02: daemon stream-text 接入 CardKit
+
+### 背景
+
+Rev1：将 `/api/stream-text` 飞书路径从 PATCH 首选改为 CardKit 流式卡片首选；扩展 `SessionProgressState` 追踪 `cardId`/`elementId`/`cardSequence`；CardKit 失败降级现有 PATCH/分段；微信路径不变。
+
+### 上下文文件
+
+- 必读: `src/daemon.ts` — `handleStreamText`、`SessionProgressState`、`sessionProgressMap`
+- 必读: T-Rev1-01 产出的 CardKit 四函数
+- 必读: `src/AGENTS.md` — stream-text 与进度状态说明（须同步 CardKit 路径）
+- 参考: `02-design.md` §四 CardKit 流式、`§五` SessionProgressState 扩展
+
+### 实现范围
+
+- 修改: `src/daemon.ts`
+  - `SessionProgressState` 增 `cardId?`、`elementId?`、`cardSequence?`
+  - 飞书首包：调用 `createStreamingCardEntity` → `sendStreamingCardMessage`，写入 state
+  - 后续包：`updateStreamingCardText`，`cardSequence` 递增
+  - `final: true`：`closeStreamingCardMode` + 停止进行中指示（与 T8 衔接）
+  - CardKit 任一步失败 → fallback `updateMessageContent` PATCH 或 `sendStreamSegments` 分段
+- 修改: `src/AGENTS.md` — 文档化 CardKit 首选与 fallback 行为
+
+### 接口契约
+
+- `SessionProgressState` 扩展字段见设计 §五
+- `POST /api/stream-text` 行为不变（入参/出参契约不变）；飞书内部实现切换为 CardKit 首选
+
+### 验收标准
+
+- [ ] 飞书 SDK 主用户私聊长回复：单条消息持续更新，无多条半幅递增刷屏（复验 08-verify-issue 第 1 轮场景）
+- [ ] CardKit 全链路打字机效果；`final` 后 streaming 关闭、内容完整（F4.2、F4.5）
+- [ ] 模拟 CardKit 失败（如权限缺失）：正确降级 PATCH/分段，10 秒内首段可见（F4.3）
+- [ ] 微信路径行为与 Rev1 前一致，无回归
+- [ ] `src/AGENTS.md` 与实现一致
+
+### 依赖
+
+- 前置任务: T-Rev1-01
+- 后续任务: 无（联调 T-Rev1-03）
+
+---
+
+## T-Rev1-03: SDK 流式推送串行化
+
+### 背景
+
+Rev1：验收归因指出 `flushStreamPost` 使用 `void flushStreamPost` 未串行，并发 stream-text 请求均命中 `isFirst` 导致多条 outbound。须 in-flight chain 串行 await，可选略调节流间隔。
+
+### 上下文文件
+
+- 必读: `electron/agent-sdk.ts` — `scheduleStreamPost`、`flushStreamPost`、`appendStreamDelta`
+- 必读: `08-verify-issue.md` 第 1 轮「实现链路」归因
+- 必读: `electron/AGENTS.md` — SDK 流式桥接说明（须同步串行化语义）
+
+### 实现范围
+
+- 修改: `electron/agent-sdk.ts`
+  - `flushStreamPost` 改为 in-flight promise chain：每次 POST 前 await 上一包完成，避免并发首包
+  - `scheduleStreamPost` 调度仍节流，但 flush 须串行；可选将默认间隔从 400ms 略调（如 500–800ms）配合 NF6
+  - 确保 `final: true` 在 chain 末尾发出，不与其他包并发
+- 修改: `electron/AGENTS.md` — 文档化串行推送与节流策略
+
+### 接口契约
+
+- 内部：`streamPostChain: Promise<void>` 或等价 in-flight 链；无新增公开 API
+
+### 验收标准
+
+- [ ] 快速 delta 场景下仅一条 outbound 首包（配合 T-Rev1-02 CardKit 或 PATCH fallback）
+- [ ] `final` 包在最后一次更新之后发出，无乱序
+- [ ] CLI/群聊非 f41Eligible 路径无行为变化
+- [ ] `electron/AGENTS.md` 与实现一致
+
+### 依赖
+
+- 前置任务: 无（可与 T-Rev1-01 并行；验收联调依赖 T-Rev1-02）
+- 后续任务: 无
+

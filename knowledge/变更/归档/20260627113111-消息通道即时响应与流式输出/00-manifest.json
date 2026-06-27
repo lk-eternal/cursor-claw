@@ -1,8 +1,9 @@
 {
   "name": "消息通道即时响应与流式输出",
   "flow": "standard",
-  "stage": "acceptance_reopened",
+  "stage": "archived",
   "source": "kb-propose",
+  "archived_at": "2026-06-27T14:34:23+0800",
   "tasks": [
     {
       "id": "T1",
@@ -88,6 +89,27 @@
       "status": "done",
       "files": ["src/daemon.ts", "src/AGENTS.md"],
       "depends_on": ["T-FIX-01"]
+    },
+    {
+      "id": "T-Rev1-01",
+      "title": "飞书 CardKit 流式 API 封装",
+      "status": "done",
+      "files": ["src/shared/lark-core.ts"],
+      "depends_on": []
+    },
+    {
+      "id": "T-Rev1-02",
+      "title": "daemon stream-text 接入 CardKit",
+      "status": "done",
+      "files": ["src/daemon.ts", "src/AGENTS.md"],
+      "depends_on": ["T-Rev1-01"]
+    },
+    {
+      "id": "T-Rev1-03",
+      "title": "SDK 流式推送串行化",
+      "status": "done",
+      "files": ["electron/agent-sdk.ts", "electron/AGENTS.md"],
+      "depends_on": []
     }
   ],
   "reviews": [
@@ -128,40 +150,66 @@
       "resolution": "复评确认：src/AGENTS.md 与 T8/三态文案边界一致"
     }
   ],
-  "revisions": [],
+  "revisions": [
+    {
+      "id": "Rev1",
+      "status": "done",
+      "date": "2026-06-27",
+      "summary": "飞书 SDK 流式改 CardKit 流式卡片",
+      "task_ids": ["T-Rev1-01", "T-Rev1-02", "T-Rev1-03"]
+    }
+  ],
   "files": [
     {
-      "path": "knowledge/变更/进行中/20260627113111-消息通道即时响应与流式输出/00-manifest.json",
+      "path": "knowledge/变更/归档/20260627113111-消息通道即时响应与流式输出/00-manifest.json",
       "role": "manifest",
       "status": "active"
     },
     {
-      "path": "knowledge/变更/进行中/20260627113111-消息通道即时响应与流式输出/01-proposal.md",
+      "path": "knowledge/变更/归档/20260627113111-消息通道即时响应与流式输出/01-proposal.md",
       "role": "proposal",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/进行中/20260627113111-消息通道即时响应与流式输出/02-design.md",
+      "path": "knowledge/变更/归档/20260627113111-消息通道即时响应与流式输出/02-design.md",
       "role": "design",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/进行中/20260627113111-消息通道即时响应与流式输出/03-tasks.md",
+      "path": "knowledge/变更/归档/20260627113111-消息通道即时响应与流式输出/03-tasks.md",
       "role": "tasks",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/进行中/20260627113111-消息通道即时响应与流式输出/04-review.md",
+      "path": "knowledge/变更/归档/20260627113111-消息通道即时响应与流式输出/04-review.md",
       "role": "review",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/进行中/20260627113111-消息通道即时响应与流式输出/05-summary.md",
+      "path": "knowledge/变更/归档/20260627113111-消息通道即时响应与流式输出/05-summary.md",
       "role": "summary",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627113111-消息通道即时响应与流式输出/06-automation-test.md",
+      "role": "automation_test",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627113111-消息通道即时响应与流式输出/07-prd-revisions.md",
+      "role": "prd_revisions",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627113111-消息通道即时响应与流式输出/08-verify-issue.md",
+      "role": "verify_issue",
       "kind": "change_doc",
       "status": "changed"
     },
@@ -187,18 +235,6 @@
       "path": "knowledge/业务域/消息桥接/04-消息队列与路由.md",
       "role": "knowledge",
       "kind": "domain",
-      "status": "changed"
-    },
-    {
-      "path": "knowledge/变更/进行中/20260627113111-消息通道即时响应与流式输出/06-automation-test.md",
-      "role": "automation_test",
-      "kind": "change_doc",
-      "status": "changed"
-    },
-    {
-      "path": "knowledge/变更/进行中/20260627113111-消息通道即时响应与流式输出/08-verify-issue.md",
-      "role": "verify_issue",
-      "kind": "change_doc",
       "status": "changed"
     },
     {
@@ -240,9 +276,19 @@
       "path": "electron/AGENTS.md",
       "role": "agents",
       "status": "changed"
+    },
+    {
+      "path": "package.json",
+      "role": "version",
+      "status": "changed"
+    },
+    {
+      "path": "changelog/1.4.0.json",
+      "role": "changelog",
+      "status": "changed"
     }
   ],
-  "updated_at": "2026-06-27T14:00:00+0800",
+  "updated_at": "2026-06-27T14:34:23+0800",
   "external": {
     "figma_confirmed": true,
     "figma_decision": "auto-none",

@@ -10,5 +10,5 @@
 
 - `session-dispatcher`：队列调度、`launchAgent` 资源分流（CLI vs SDK）；不直接依赖 SDK 流式细节。
 - `agent-sdk`：SDK 生命周期与事件流；通知 daemon 时用 `daemon-client.httpPost`，避免与 `session-dispatcher` 循环 import。
-- **SDK 流式桥接（f41Eligible）**：主用户私聊 + SDK 资源时，`handleSdkEvent` assistant delta → `POST /api/stream-text`（累积全文、400ms 节流）；首包不带 `outbound_message_id`，后续回传 daemon 返回值。非 f41Eligible 仍走 `appendSdkLog`，不调 stream-text。
+- **SDK 流式桥接（f41Eligible）**：主用户私聊 + SDK 资源时，`handleSdkEvent` assistant delta → `POST /api/stream-text`（累积全文、400ms 节流）；首包不带 `outbound_message_id`，后续回传 daemon 返回值。`flushStreamPost` 经 `session.streamPostChain` 串行 in-flight：每次 POST 入链并 await 上一包完成后再发，避免并发首包；`final` 包同样入链末尾。会话结束或 `stopSdkSession` 时 `resetStreamPostChain` 清 timer 与链。非 f41Eligible 仍走 `appendSdkLog`，不调 stream-text。
 - **SDK 错误 notify**：`streamRunEvents` catch、`status` ERROR/EXPIRED/CANCELLED、`run.status === "error"` 经 `notifySessionChat` 下发用户可理解文案；stack/tool 名仅写 UI 日志。用户主动 `stopSdkSession`（aborted）不 notify。
