@@ -1,0 +1,67 @@
+{
+  "name": "上下文占用统计修复",
+  "flow": "lite",
+  "stage": "archived",
+  "source": "kb-lite",
+  "workflow_version": "v2.6",
+  "tasks": [
+    {
+      "id": "LITE-01",
+      "title": "修复 context-usage turn-ended replace 与 totalContextTokens prompt 口径",
+      "status": "done",
+      "files": ["electron/context-usage.ts", "electron/AGENTS.md"]
+    },
+    {
+      "id": "LITE-02",
+      "title": "Run 结束 finalizeRunContextUsage：run.usage 对照日志与 footer usedOverride",
+      "status": "done",
+      "files": ["electron/context-usage-run-end.ts", "electron/agent-sdk.ts"]
+    }
+  ],
+  "reviews": [],
+  "revisions": [],
+  "files": [
+    {
+      "path": "electron/context-usage.ts",
+      "kind": "code"
+    },
+    {
+      "path": "electron/context-usage-run-end.ts",
+      "kind": "code"
+    },
+    {
+      "path": "electron/agent-sdk.ts",
+      "kind": "code"
+    },
+    {
+      "path": "electron/AGENTS.md",
+      "kind": "code_doc"
+    },
+    {
+      "path": "package.json",
+      "kind": "config"
+    },
+    {
+      "path": "changelog/1.8.1.json",
+      "kind": "changelog"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627231201-上下文占用统计修复/01-proposal.md",
+      "kind": "change_doc"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627231201-上下文占用统计修复/05-summary.md",
+      "kind": "change_doc"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627231201-上下文占用统计修复/06-automation-test.md",
+      "kind": "change_doc"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627231201-上下文占用统计修复/00-manifest.json",
+      "kind": "change_doc"
+    }
+  ],
+  "archived_at": "2026-06-27T23:33:52+08:00",
+  "updated_at": "2026-06-27T23:33:52+08:00"
+}

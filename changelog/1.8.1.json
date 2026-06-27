@@ -1,0 +1,9 @@
+{
+  "version": "1.8.1",
+  "date": "2026-06-27",
+  "changes": [
+    "修复飞书 Agent 回复 footer 上下文占用虚高（多轮 tool turn 累加导致显示 100%）",
+    "上下文占用改为每轮替换统计，用量口径收窄为 prompt 侧（不含 output），同 session 跨 Run 保持 peak 一致",
+    "Run 结束时 footer 优先采用 SDK run.usage 总量，并输出 turn-ended 与 run.usage 对照日志便于联调"
+  ]
+}

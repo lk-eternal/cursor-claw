@@ -23,6 +23,7 @@ import {
   formatContextFooter,
   resolveContextLimitForSession,
 } from "./context-usage"
+import { finalizeContextUsageAtRunEnd } from "./context-usage-run-end"
 import { type ChatType, type LaunchMeta, buildPrompt, resolveSessionChatName } from "./agent-launcher"
 import { appendInlineMcpToSendOptions, loadInlineMcpServers } from "./mcp-sdk-loader"
 
@@ -72,6 +73,10 @@ interface SdkSessionAgent {
   contextUsage: ContextUsageState
   /** session 级 prompt 侧 peak（跨 Run 保留；压缩后清零；footer 取 max(peak, 当前)） */
   contextUsagePeakTokens?: number
+  /** Run 结束时 run.usage.totalTokens，footer 优先使用 */
+  contextUsageFromRunTotal?: number
+  /** 本 Run 是否已从 run.usage finalize */
+  contextUsageFinalized?: boolean
   /** 模型上下文上限（session 级缓存，跨 Run 复用） */
   contextLimitTokens?: number
   /** 当前模型 id，供 resolveModelContextLimit */
@@ -118,6 +123,8 @@ function resetSdkRunPresentationState(session: SdkSessionAgent): void {
   session.seenProcessEvent = false
   session.thinkingOpen = false
   session.contextUsage = { ...ZERO_CONTEXT_USAGE }
+  session.contextUsageFromRunTotal = undefined
+  session.contextUsageFinalized = false
   // contextUsagePeakTokens 跨 Run 保留，保证同 session 多轮 footer 可比
   session.compressionNotified = false
   session.abortController = new AbortController()
@@ -209,6 +216,7 @@ async function notifySdkFailure(session: SdkSessionAgent, override?: string, run
     session.contextUsage,
     session.contextLimitTokens ?? null,
     session.contextUsagePeakTokens,
+    session.contextUsageFromRunTotal,
   )
   text = appendContextFooter(text, footer)
   await notifySessionChat(session.sessionKey, text, true)
@@ -461,9 +469,25 @@ function applyContextFooterToBuffer(session: SdkSessionAgent): void {
     session.contextUsage,
     session.contextLimitTokens ?? null,
     session.contextUsagePeakTokens,
+    session.contextUsageFromRunTotal,
   )
   if (!footer) return
   session.streamBuffer = appendContextFooter(session.streamBuffer, footer)
+}
+
+/** Run 结束：读 run.usage（必要时 wait），对照 turn-ended 打日志并写入 footer 源 */
+async function finalizeRunContextUsage(session: SdkSessionAgent, run: Run): Promise<void> {
+  if (session.contextUsageFinalized) return
+  let runUsage = run.usage
+  if (!runUsage) {
+    try {
+      const result = await run.wait()
+      runUsage = result.usage
+    } catch {
+      // wait 失败仍用 turn-ended 快照
+    }
+  }
+  finalizeContextUsageAtRunEnd(session, runUsage, pushUiLog)
 }
 
 async function notifySessionChat(sessionKey: string, text: string, stopProgress = false): Promise<void> {
@@ -575,6 +599,7 @@ async function streamRunEvents(session: SdkSessionAgent, run: Run): Promise<void
     if (presentationOrderingEligible(session) && session.seenProcessEvent) {
       await flushDeferredStreamPost(session)
     }
+    await finalizeRunContextUsage(session, run)
     if (session.f41Stream && (session.streamBuffer.trim() || session.outboundMessageId)) {
       await flushStreamPost(session, true)
     }
@@ -585,6 +610,7 @@ async function streamRunEvents(session: SdkSessionAgent, run: Run): Promise<void
       const stack = e instanceof Error ? e.stack?.split("\n").slice(0, 3).join(" | ") : ""
       const cause = e instanceof Error && "cause" in e && e.cause ? JSON.stringify(e.cause) : ""
       pushUiLog("SDK", "ERROR", `[${session.sessionKey}] 流处理异常: ${msg}${stack ? ` stack=${stack}` : ""}${cause ? ` cause=${cause}` : ""}`)
+      await finalizeRunContextUsage(session, run)
       await notifySdkFailure(session)
     }
   }
