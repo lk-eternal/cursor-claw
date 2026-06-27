@@ -12,3 +12,5 @@
 - `agent-sdk`：SDK 生命周期与事件流；通知 daemon 时用 `daemon-client.httpPost`，避免与 `session-dispatcher` 循环 import。
 - **SDK 流式桥接（f41Eligible）**：主用户私聊 + SDK 资源时，`handleSdkEvent` assistant delta → `POST /api/stream-text`（累积全文、400ms 节流）；首包不带 `outbound_message_id`，后续回传 daemon 返回值。`flushStreamPost` 经 `session.streamPostChain` 串行 in-flight：每次 POST 入链并 await 上一包完成后再发，避免并发首包；`final` 包同样入链末尾。会话结束或 `stopSdkSession` 时 `resetStreamPostChain` 清 timer 与链。非 f41Eligible 仍走 `appendSdkLog`，不调 stream-text。
 - **SDK 错误 notify**：`streamRunEvents` catch、`status` ERROR/EXPIRED/CANCELLED、`run.status === "error"` 经 `notifySessionChat` 下发用户可理解文案；stack/tool 名仅写 UI 日志。用户主动 `stopSdkSession`（aborted）不 notify。
+- **SDK error 可观测性**：`handleSdkEvent` 在 `tool_call` 时写入 `session.lastTool`；`run.status === "error"` 时 UI 日志单行 `运行错误详情:` 含 `sessionKey`、`agentId`、`durationMs`、`lastTool`、`run.result`、`errorCode`、`waitResult` 等结构化字段。
+- **保活失败文案（F3.2）**：`formatSdkStreamFailure` 在末次 tool 为 `shell:running` 且 `durationMs ≥ 20min` 且 SDK message 不安全（空/stack/路径）时，notify「会话在等待下一条消息时已结束（等待超时）…」；其它 tool 失败仍走通用文案。CANCELLED/EXPIRED 分支不变。

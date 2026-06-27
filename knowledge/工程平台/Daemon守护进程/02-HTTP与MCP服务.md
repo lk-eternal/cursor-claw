@@ -9,7 +9,9 @@ Daemon 内 HTTP Server（`src/daemon.ts` `startHttpServer`）与两套 Streamabl
 - **StreamableHTTP 每请求新建 McpServer**：简化会话，连接关闭即释放（依据：daemon.ts `/mcp` handler）。
 - **Agent MCP 工具转调本地 HTTP**：`send_text` 等内部 POST `/api/send-text`，避免重复实现发送逻辑。
 - **manage_* 在 server-admin.ts 注册**：通过 lock 文件读 port，HTTP 调 Daemon 管理路由（依据：`src/server-admin.ts`）。
-- **阻塞 poll 25 分钟超时**：返回 SYSTEM OVERRIDE 占位消息，驱动 Agent 继续 poll（依据：daemon.ts `/api/poll-message`）。
+- **poll 双模式**（依据：`src/daemon.ts` `/api/poll-message`）：
+  - **`wait=false` / `wait=0`（非阻塞）**：立即 `claimSessionMessages` 并返回 `{ messages }`；无消息则空数组。SDK 保活规则用此模式 + Shell `sleep 5` 短循环，避免单次长挂起触发 Run 超时。
+  - **默认 blocking（无 wait 或 wait≠false）**：长连接挂起最多 **25 分钟**；超时且无新消息时返回 **SYSTEM OVERRIDE** 占位指令，驱动 Agent 再次 blocking poll。CLI/legacy 保活仍可用此路径。
 
 ## 三、服务端规则
 
@@ -53,7 +55,7 @@ flowchart LR
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | /health | 健康检查 |
-| GET | /api/poll-message | 拉消息 |
+| GET | /api/poll-message | 拉消息；`wait=false` 非阻塞即时返回，默认 blocking 最长 25min 可返 SYSTEM OVERRIDE |
 | POST | /enqueue | 入队 |
 | POST | /channel-bind | 绑定 |
 | GET/POST | /api/mcp 等 | 管理 CRUD |
@@ -67,7 +69,7 @@ flowchart LR
 
 ## 七、非功能与可观测
 
-- poll 长连接 25min；SSE `/api/queue-events`。
+- blocking poll 最长 25min 后 SYSTEM OVERRIDE；非阻塞 poll 无长连接；SSE `/api/queue-events`。
 - MCP 连接数影响 agentRunning。
 
 ## 八、推送
@@ -81,4 +83,5 @@ SSE 队列事件；stdout 特殊行 `__WECHAT_QR__`、`__BIND_RESULT__` 供 Elec
 
 ## 十、变更记录
 
+- 2026-06-27：poll `wait=false` 与 blocking SYSTEM OVERRIDE 适用场景（SDK 保活兼容）
 - 2026-06-27：kb-sync 初始建立

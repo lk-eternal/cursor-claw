@@ -34,6 +34,8 @@ interface SdkSessionAgent {
   errorNotified?: boolean
   /** 最近一次终态状态事件（ERROR/EXPIRED/CANCELLED），用于结束时还原真实错误原因 */
   lastStatus?: { status: string; message?: string }
+  /** 末次 tool 事件快照，供 error 日志与保活失败分类 */
+  lastTool?: { name: string; status: string }
 }
 
 const sdkSessions = new Map<string, SdkSessionAgent>()
@@ -42,6 +44,19 @@ const failedCooldowns = new Map<string, number>()
 const FAIL_COOLDOWN_MS = 30_000
 const NOTIFY_PROCESSING = "Agent 处理中…"
 const STREAM_POST_INTERVAL_MS = 400
+/** 观测约 23min 档 Run 超时；低于此阈值的 shell+running 不误判为保活失败 */
+const KEEPALIVE_TIMEOUT_MS = 20 * 60 * 1000
+
+function isUnsafeSdkMessage(msg?: string): boolean {
+  const t = msg?.trim()
+  return !t || /[/\\]|\.ts:|at |stack|Error:|ENOENT|spawn|EACCES|EPERM/i.test(t)
+}
+
+function extractErrorCode(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined
+  const code = (value as { errorCode?: unknown }).errorCode
+  return code != null && String(code).trim() ? String(code) : undefined
+}
 
 function extractChatId(sessionKey: string): string {
   const idx = sessionKey.indexOf("::")
@@ -58,12 +73,25 @@ function f41Eligible(sessionKey: string, chatType: ChatType): boolean {
   return raw === channel.mainUserChatId.trim()
 }
 
-function formatSdkStreamFailure(status?: string, message?: string): string {
+function formatSdkStreamFailure(
+  status?: string,
+  message?: string,
+  ctx?: { lastTool?: { name: string; status: string }; durationMs?: number },
+): string {
   const st = status?.toUpperCase()
   if (st === "CANCELLED") return "Agent 任务已取消。"
   if (st === "EXPIRED") return "Agent 会话已过期，请重新发送消息。"
+  const lt = ctx?.lastTool
+  const isKeepaliveTimeout =
+    lt?.name === "shell" &&
+    lt.status.toLowerCase() === "running" &&
+    ctx?.durationMs != null &&
+    ctx.durationMs >= KEEPALIVE_TIMEOUT_MS
+  if (isKeepaliveTimeout && isUnsafeSdkMessage(message)) {
+    return "会话在等待下一条消息时已结束（等待超时）。请重新发送消息，我会继续为你处理。"
+  }
   const msg = message?.trim()
-  if (msg && !/[/\\]|\.ts:|at |stack|Error:|ENOENT|spawn|EACCES|EPERM/i.test(msg)) {
+  if (msg && !isUnsafeSdkMessage(msg)) {
     return `⚠️ Agent 处理失败：${msg}`
   }
   return "⚠️ Agent 处理失败，请稍后重试。"
@@ -73,7 +101,10 @@ async function notifySdkFailure(session: SdkSessionAgent, override?: string): Pr
   if (session.errorNotified || session.abortController.signal.aborted) return
   session.errorNotified = true
   const last = session.lastStatus
-  const text = override ?? formatSdkStreamFailure(last?.status, last?.message)
+  const text = override ?? formatSdkStreamFailure(last?.status, last?.message, {
+    lastTool: session.lastTool,
+    durationMs: session.run?.durationMs ?? undefined,
+  })
   await notifySessionChat(session.sessionKey, text, true)
 }
 
@@ -297,6 +328,7 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
       break
     case "tool_call":
       flushSdkLog(session)
+      session.lastTool = { name: event.name, status: event.status }
       pushUiLog("SDK", "INFO", `[${session.sessionKey}] [tool] ${event.name}: ${event.status}`)
       break
     case "status": {
@@ -442,8 +474,19 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
         const wr = await run.wait().catch((e: unknown) => e)
         const detail = wr instanceof Error ? `${wr.constructor.name}: ${wr.message}` : JSON.stringify(wr)
         const last = session.lastStatus
-        const lastStr = last ? `lastStatus=${last.status}${last.message ? ` msg=${last.message}` : ""} ` : ""
-        pushUiLog("SDK", "ERROR", `[${sessionKey}] 运行错误详情: ${lastStr}waitResult=${detail}`)
+        const lt = session.lastTool
+        const errorCode = extractErrorCode(wr) ?? extractErrorCode(last)
+        const parts = [
+          `sessionKey=${sessionKey}`,
+          `agentId=${session.agentId}`,
+          last && `lastStatus=${last.status}${last.message ? ` msg=${last.message}` : ""}`,
+          run.result && `run.result=${run.result}`,
+          run.durationMs != null && `durationMs=${run.durationMs}`,
+          errorCode && `errorCode=${errorCode}`,
+          lt && `lastTool=${lt.name}:${lt.status}`,
+          `waitResult=${detail}`,
+        ].filter(Boolean)
+        pushUiLog("SDK", "ERROR", `[${sessionKey}] 运行错误详情: ${parts.join(" ")}`)
         failedCooldowns.set(sessionKey, Date.now() + FAIL_COOLDOWN_MS)
         if (!session.errorNotified) {
           await notifySdkFailure(session)

@@ -1,0 +1,187 @@
+{
+  "name": "SDK保活与Run生命周期兼容",
+  "flow": "standard",
+  "stage": "archived",
+  "source": "kb-propose",
+  "workflow_version": "v2.6",
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "SDK 可观测性与保活失败文案（agent-sdk.ts）",
+      "status": "done",
+      "files": ["electron/agent-sdk.ts"],
+      "depends_on": ["T3"],
+      "summary": "lastTool 跟踪、error 终态日志增强、formatSdkStreamFailure F3.2 保活分类"
+    },
+    {
+      "id": "T2",
+      "title": "阶段 4 非阻塞保活规则（cursor-claw.mdc）",
+      "status": "done",
+      "files": ["resources/template/rule/cursor-claw.mdc"],
+      "depends_on": [],
+      "summary": "wait=false poll + sleep 5s 循环；保留 SYSTEM OVERRIDE 与 Loop 禁令；archive 同步前文 poll 表"
+    },
+    {
+      "id": "T3",
+      "title": "@cursor/sdk 依赖升级确认（package.json / package-lock.json）",
+      "status": "done",
+      "files": ["package.json", "package-lock.json"],
+      "depends_on": [],
+      "summary": "确认 @cursor/sdk ^1.0.22 与 lockfile、build 通过"
+    }
+  ],
+  "reviews": [
+    {
+      "id": "R1",
+      "severity": "warning",
+      "status": "resolved",
+      "file": "resources/template/rule/cursor-claw.mdc",
+      "summary": "前文 poll 模式表与§156仍描述 blocking 无限挂起为保活，与阶段4非阻塞循环不一致",
+      "task_id": "T-FIX-01",
+      "resolution": "archive 时统一 mdc 前文 poll 表与异常恢复表述"
+    },
+    {
+      "id": "R2",
+      "severity": "warning",
+      "status": "open",
+      "file": "electron/agent-sdk.ts",
+      "summary": "F3.2 分类需 shell:running+20min，非阻塞保活 SDK 终止时 lastTool 可能为 completed，兜底文案可能不触发",
+      "task_id": "T-FIX-02",
+      "resolution": "联调≥25min 后若仍见通用失败文案再放宽分类；非阻断 archive"
+    },
+    {
+      "id": "R3",
+      "severity": "info",
+      "status": "resolved",
+      "file": "electron/AGENTS.md",
+      "summary": "未同步 lastTool 与保活失败 F3.2 文案约定",
+      "task_id": null,
+      "resolution": "kb-archive 已更新 electron/AGENTS.md"
+    },
+    {
+      "id": "R-summary",
+      "severity": "info",
+      "status": "passed",
+      "file": null,
+      "summary": "full-review 通过：F1/F2/F3 核心实现对齐 01/02/03；4 文件最小 diff；无飞书回归；可 kb-archive",
+      "task_id": null,
+      "resolution": "04-review.md §9"
+    }
+  ],
+  "revisions": [],
+  "external": {
+    "figma_confirmed": true,
+    "figma_decision": "auto-none",
+    "task_type": "稳定性",
+    "priority": "P1"
+  },
+  "files": [
+    {
+      "path": "knowledge/变更/归档/20260627150751-SDK保活与Run生命周期兼容/00-manifest.json",
+      "role": "manifest",
+      "kind": "change_doc",
+      "source": "archive",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627150751-SDK保活与Run生命周期兼容/01-proposal.md",
+      "role": "proposal",
+      "kind": "change_doc",
+      "source": "apply",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627150751-SDK保活与Run生命周期兼容/02-design.md",
+      "role": "design",
+      "kind": "change_doc",
+      "source": "apply",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627150751-SDK保活与Run生命周期兼容/03-tasks.md",
+      "role": "tasks",
+      "kind": "change_doc",
+      "source": "apply",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627150751-SDK保活与Run生命周期兼容/04-review.md",
+      "role": "review",
+      "kind": "change_doc",
+      "source": "review",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627150751-SDK保活与Run生命周期兼容/05-summary.md",
+      "role": "summary",
+      "kind": "change_doc",
+      "source": "archive",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627150751-SDK保活与Run生命周期兼容/06-automation-test.md",
+      "role": "automation_test",
+      "kind": "change_doc",
+      "source": "test",
+      "status": "changed"
+    },
+    {
+      "path": "electron/agent-sdk.ts",
+      "role": "implementation",
+      "kind": "code",
+      "source": "apply",
+      "status": "changed"
+    },
+    {
+      "path": "resources/template/rule/cursor-claw.mdc",
+      "role": "implementation",
+      "kind": "code",
+      "source": "apply",
+      "status": "changed"
+    },
+    {
+      "path": "package.json",
+      "role": "config",
+      "kind": "config",
+      "source": "apply",
+      "status": "changed"
+    },
+    {
+      "path": "package-lock.json",
+      "role": "config",
+      "kind": "config",
+      "source": "apply",
+      "status": "changed"
+    },
+    {
+      "path": "changelog/1.4.1.json",
+      "role": "changelog",
+      "kind": "config",
+      "source": "archive",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/工程平台/Daemon守护进程/02-HTTP与MCP服务.md",
+      "role": "knowledge",
+      "kind": "knowledge",
+      "source": "archive",
+      "status": "changed"
+    },
+    {
+      "path": "electron/AGENTS.md",
+      "role": "knowledge",
+      "kind": "knowledge",
+      "source": "archive",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/业务域/Agent调度/03-启动与自动重连.md",
+      "role": "knowledge",
+      "kind": "knowledge",
+      "source": "archive",
+      "status": "changed"
+    }
+  ],
+  "archived_at": "2026-06-27T20:30:00+0800",
+  "updated_at": "2026-06-27T20:30:00+0800"
+}
