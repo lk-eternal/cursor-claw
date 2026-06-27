@@ -1,10 +1,9 @@
 {
   "name": "飞书排队消息状态反馈与合并预览",
   "flow": "standard",
-  "stage": "archived_with_debt",
+  "stage": "acceptance_reopened",
   "source": "kb-propose",
   "workflow_version": "v2.6",
-  "archived_at": "2026-06-27T17:50:16+0800",
   "tasks": [
     {
       "id": "T1",
@@ -91,47 +90,63 @@
     "figma_confirmed": true,
     "figma_decision": "auto-none",
     "task_type": "体验优化",
-    "priority": "P1"
+    "priority": "P1",
+    "acceptance": {
+      "rounds": [
+        {
+          "round": 1,
+          "feedback": "配置界面未体现合并预览等新能力；飞书私聊连发 3×「1」+「2」+3 条后无合并预览，daemon 日志 instant poll count=5 后用户侧无进展，体验卡住",
+          "created_at": "2026-06-27T18:15:00+0800",
+          "reason": "code"
+        }
+      ]
+    }
   },
   "files": [
     {
-      "path": "knowledge/变更/归档/20260627150041-飞书排队消息状态反馈与合并预览/00-manifest.json",
+      "path": "knowledge/变更/进行中/20260627150041-飞书排队消息状态反馈与合并预览/00-manifest.json",
       "role": "manifest",
       "status": "active"
     },
     {
-      "path": "knowledge/变更/归档/20260627150041-飞书排队消息状态反馈与合并预览/01-proposal.md",
+      "path": "knowledge/变更/进行中/20260627150041-飞书排队消息状态反馈与合并预览/01-proposal.md",
       "role": "proposal",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/归档/20260627150041-飞书排队消息状态反馈与合并预览/02-design.md",
+      "path": "knowledge/变更/进行中/20260627150041-飞书排队消息状态反馈与合并预览/02-design.md",
       "role": "design",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/归档/20260627150041-飞书排队消息状态反馈与合并预览/03-tasks.md",
+      "path": "knowledge/变更/进行中/20260627150041-飞书排队消息状态反馈与合并预览/03-tasks.md",
       "role": "tasks",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/归档/20260627150041-飞书排队消息状态反馈与合并预览/04-review.md",
+      "path": "knowledge/变更/进行中/20260627150041-飞书排队消息状态反馈与合并预览/04-review.md",
       "role": "review",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/归档/20260627150041-飞书排队消息状态反馈与合并预览/05-summary.md",
+      "path": "knowledge/变更/进行中/20260627150041-飞书排队消息状态反馈与合并预览/05-summary.md",
       "role": "summary",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/归档/20260627150041-飞书排队消息状态反馈与合并预览/06-automation-test.md",
+      "path": "knowledge/变更/进行中/20260627150041-飞书排队消息状态反馈与合并预览/06-automation-test.md",
       "role": "automation_test",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/进行中/20260627150041-飞书排队消息状态反馈与合并预览/08-verify-issue.md",
+      "role": "verify_issue",
       "kind": "change_doc",
       "status": "changed"
     },
@@ -206,5 +221,5 @@
       "status": "changed"
     }
   ],
-  "updated_at": "2026-06-27T17:50:16+0800"
+  "updated_at": "2026-06-27T18:15:00+0800"
 }
