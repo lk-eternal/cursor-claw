@@ -6,6 +6,7 @@ import { BrowserWindow } from "electron"
 import { getConfig } from "./config-store"
 import { broadcastLog, logCursorAgentInvocation, logCursorAgentResponse } from "./ui-logger"
 import { resolveAgentBinary, applyProxyEnv, quoteArg, getAgentPaths } from "./agent-cli"
+import { findCursorProjectDir } from "./mcp-project-dir"
 
 // ── Types ────────────────────────────────────────────────
 
@@ -72,24 +73,8 @@ function spawnAsync(args: string[], cwd: string, env: Record<string, string>): P
 
 // ── OAuth & Project helpers ──────────────────────────────
 
-function findProjectDir(workspaceDir: string): string | null {
-  const projectsBase = path.join(os.homedir(), ".cursor", "projects")
-  if (!fs.existsSync(projectsBase)) return null
-
-  const expected = workspaceDir.replace(/\\/g, "-").replace(/\//g, "-").replace(/:/g, "")
-  const exactPath = path.join(projectsBase, expected)
-  if (fs.existsSync(exactPath)) return exactPath
-
-  try {
-    const lower = expected.toLowerCase()
-    const match = fs.readdirSync(projectsBase).find((d) => d.toLowerCase() === lower)
-    if (match) return path.join(projectsBase, match)
-  } catch { /* ignore */ }
-  return null
-}
-
 function readApprovedServers(workspaceDir: string): Set<string> {
-  const dir = findProjectDir(workspaceDir)
+  const dir = findCursorProjectDir(workspaceDir)
   if (!dir) return new Set()
   const approvalPath = path.join(dir, "mcp-approvals.json")
   try {

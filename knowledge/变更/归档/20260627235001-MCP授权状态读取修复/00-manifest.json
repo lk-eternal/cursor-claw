@@ -1,0 +1,26 @@
+{
+  "name": "MCP授权状态读取修复",
+  "flow": "lite",
+  "stage": "archived",
+  "workflow_version": "v1.2",
+  "tasks": [
+    { "id": "LITE-01", "title": "findProjectDir 路径归一化", "status": "done" },
+    { "id": "LITE-02", "title": "SDK HTTP MCP 内联 + OAuth 合并", "status": "done" }
+  ],
+  "reviews": [],
+  "revisions": [],
+  "files": [
+    { "path": "electron/mcp-project-dir.ts", "kind": "code", "source": "lite", "status": "changed" },
+    { "path": "electron/mcp-sdk-loader.ts", "kind": "code", "source": "lite", "status": "changed" },
+    { "path": "electron/mcp-manager.ts", "kind": "code", "source": "lite", "status": "changed" },
+    { "path": "electron/AGENTS.md", "kind": "code", "source": "lite", "status": "changed" },
+    { "path": "package.json", "kind": "config", "source": "lite", "status": "changed" },
+    { "path": "changelog/1.8.2.json", "kind": "config", "source": "lite", "status": "changed" },
+    { "path": "changelog/1.8.3.json", "kind": "config", "source": "lite", "status": "changed" },
+    { "path": "knowledge/变更/归档/20260627235001-MCP授权状态读取修复/00-manifest.json", "kind": "change_doc", "source": "archive", "status": "archived" },
+    { "path": "knowledge/变更/归档/20260627235001-MCP授权状态读取修复/01-proposal.md", "kind": "change_doc", "source": "archive", "status": "archived" },
+    { "path": "knowledge/变更/归档/20260627235001-MCP授权状态读取修复/05-summary.md", "kind": "change_doc", "source": "archive", "status": "archived" },
+    { "path": "knowledge/变更/归档/20260627235001-MCP授权状态读取修复/06-automation-test.md", "kind": "change_doc", "source": "archive", "status": "archived" }
+  ],
+  "updated_at": "2026-06-28T00:30:00+08:00"
+}

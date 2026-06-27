@@ -1,0 +1,7 @@
+{
+  "version": "1.8.2",
+  "date": "2026-06-27",
+  "changes": [
+    "修复 Settings → MCP 刷新后 HTTP MCP 反复提示需授权：正确匹配 Cursor projects 目录与 mcp-approvals.json"
+  ]
+}

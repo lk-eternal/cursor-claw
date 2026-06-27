@@ -1,0 +1,8 @@
+{
+  "version": "1.8.3",
+  "date": "2026-06-27",
+  "changes": [
+    "SDK Agent 会话内联 HTTP MCP：context7 / figma / ZEGO 等 url 型服务随 Agent.create 与每次 send 注入，OAuth 令牌从 mcp-auth.json 合并",
+    "修复 Settings → MCP 刷新后 HTTP MCP 反复提示需授权"
+  ]
+}
