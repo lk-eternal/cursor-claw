@@ -9,7 +9,7 @@ import {
   stopDaemonScheduledTasks,
   setDaemonSchedulerLogger,
 } from "./daemon-scheduled-tasks.js";
-import { stripProxyEnv, localTimestamp, createLarkClient, LarkSender, LarkMessageEvent, cleanupMediaCache, type MergeBatchCardView, type MergeBatchCardState } from "./shared/lark-core.js";
+import { stripProxyEnv, localTimestamp, createLarkClient, LarkSender, LarkMessageEvent, cleanupMediaCache, type MergeBatchCardView, type MergeBatchCardState, type PresentationCardState } from "./shared/lark-core.js";
 import { WeChatManager } from "./wechat-manager.js";
 import {
   initFileQueue,
@@ -313,10 +313,8 @@ interface SessionProgressState {
   streamCardKitMode?: boolean;
   /** 已对 inbound 消息打过 Get 的 id（poll 去重，独立于 typing 生命周期） */
   getReactedMessageIds?: Set<string>;
-  /** 工具进度 CardKit */
-  toolCardEntityId?: string;
-  toolCardMessageId?: string;
-  toolCardSequence?: number;
+  /** 工具进度 CardKit（按 tool_name 分卡，支持并发工具） */
+  toolCards?: Map<string, PresentationCardState>;
   /** 思考摘要 CardKit */
   thinkingCardEntityId?: string;
   thinkingCardMessageId?: string;
@@ -1155,27 +1153,25 @@ async function handleToolPresentationEvent(
     sessionProgressMap.set(sessionKey, state);
   }
 
+  const toolName = event.tool_name.trim();
+  if (!state.toolCards) state.toolCards = new Map();
+
   if (status === "started") {
-    state.toolCardEntityId = undefined;
-    state.toolCardMessageId = undefined;
-    state.toolCardSequence = undefined;
+    state.toolCards.delete(toolName);
   }
 
-  const outHint = event.outbound_message_id ?? state.toolCardMessageId;
+  const toolCard = status !== "started" ? state.toolCards.get(toolName) : undefined;
+  const outHint = event.outbound_message_id ?? toolCard?.cardMessageId;
   const existing =
-    status !== "started" && state.toolCardEntityId && outHint
-      ? {
-          cardEntityId: state.toolCardEntityId,
-          cardMessageId: outHint,
-          cardSequence: state.toolCardSequence ?? 0,
-        }
+    toolCard && outHint
+      ? { ...toolCard, cardMessageId: outHint }
       : undefined;
   const replyAnchor = existing ? undefined : getPresentationReplyAnchor(sessionKey);
 
   try {
     const result = await ch.rt.sender.renderToolProgressCard(
       ch.chatId,
-      event.tool_name.trim(),
+      toolName,
       status,
       existing,
       replyAnchor,
@@ -1184,9 +1180,10 @@ async function handleToolPresentationEvent(
       logPresentationFailed(sessionKey, "tool", "CardKit render failed");
       return { ok: false, error: "tool card render failed" };
     }
-    state.toolCardEntityId = result.cardEntityId;
-    state.toolCardMessageId = result.cardMessageId;
-    state.toolCardSequence = result.cardSequence;
+    state.toolCards.set(toolName, result);
+    if (status === "completed" || status === "failed") {
+      state.toolCards.delete(toolName);
+    }
     trackMessageSession(result.cardMessageId, sessionKey);
     return { ok: true, outbound_message_id: result.cardMessageId };
   } catch (e: unknown) {
@@ -1246,6 +1243,7 @@ async function handleThinkingPresentationEvent(
       summary,
       existing,
       replyAnchor,
+      event.final,
     );
     if (!result) {
       logPresentationFailed(sessionKey, "thinking", "CardKit render failed");
@@ -2689,6 +2687,8 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
           });
         }
         void flushReadyMergeBatches(session_key);
+        // processing 期间入队的消息当时无法 claim；idle 后须重调度（含单条 unclaimed，非仅 merge ready）
+        scheduleAgentDispatch(session_key);
       } else {
         sessionAgentPhaseMap.set(session_key, phase);
         const batch = mergeBatchBySession.get(session_key);

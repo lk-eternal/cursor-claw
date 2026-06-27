@@ -28,8 +28,8 @@ interface SdkSessionAgent {
   f41Stream: boolean
   streamBuffer: string
   outboundMessageId?: string
-  /** 工具进度 CardKit message_id（presentation-event 回传，供 PATCH） */
-  presentationOutboundId?: string
+  /** 工具进度 CardKit message_id（按 tool_name，供并发工具各自 PATCH） */
+  toolPresentationOutboundIds?: Map<string, string>
   streamId?: string
   streamLastPostAt?: number
   streamPostTimer?: ReturnType<typeof setTimeout>
@@ -73,7 +73,7 @@ function resetSdkRunPresentationState(session: SdkSessionAgent): void {
   session.runStartedAt = undefined
   session.streamBuffer = ""
   session.outboundMessageId = undefined
-  session.presentationOutboundId = undefined
+  session.toolPresentationOutboundIds = undefined
   session.streamId = undefined
   session.streamLastPostAt = undefined
   session.logAgg = { kind: null, buf: "" }
@@ -194,8 +194,9 @@ async function postPresentationEvent(
     session_key: session.sessionKey,
     ...event,
   }
-  if (session.presentationOutboundId && !payload.outbound_message_id) {
-    payload.outbound_message_id = session.presentationOutboundId
+  if (payload.kind === "tool" && payload.tool_name && !payload.outbound_message_id) {
+    const id = session.toolPresentationOutboundIds?.get(payload.tool_name)
+    if (id) payload.outbound_message_id = id
   }
   try {
     const res = (await httpPost(`http://127.0.0.1:${lock.port}/api/presentation-event`, payload, 5000)) as {
@@ -203,7 +204,10 @@ async function postPresentationEvent(
       outbound_message_id?: string
       error?: string
     }
-    if (res?.outbound_message_id) session.presentationOutboundId = res.outbound_message_id
+    if (res?.outbound_message_id && payload.kind === "tool" && payload.tool_name) {
+      if (!session.toolPresentationOutboundIds) session.toolPresentationOutboundIds = new Map()
+      session.toolPresentationOutboundIds.set(payload.tool_name, res.outbound_message_id)
+    }
     if (res?.ok === false && res.error) {
       pushUiLog("SDK", "WARN", `[${session.sessionKey}] presentation-event 拒绝: ${res.error}`)
     }
@@ -487,7 +491,7 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
       flushSdkLog(session)
       session.lastTool = { name: event.name, status: event.status }
       pushUiLog("SDK", "INFO", `[${session.sessionKey}] [tool] ${event.name}: ${event.status}`)
-      if (event.status === "running") session.presentationOutboundId = undefined
+      if (event.status === "running") session.toolPresentationOutboundIds?.delete(event.name)
       void postPresentationEvent(session, {
         kind: "tool",
         tool_name: event.name,

@@ -9,6 +9,13 @@ const MERGE_BATCH_ELEMENT_ID = "merge_body";
 const TOOL_PROGRESS_ELEMENT_ID = "tool_progress";
 const THINKING_ELEMENT_ID = "thinking_summary";
 
+/** 工具/思考/合并卡 PATCH 正文：elements/content PUT 要求 streaming_mode 为 true */
+const PATCHABLE_CARD_CONFIG = {
+  wide_screen_mode: true,
+  update_multi: true,
+  streaming_mode: true,
+} as const;
+
 export interface PresentationCardState {
   cardEntityId: string;
   cardMessageId: string;
@@ -303,14 +310,14 @@ export class LarkSender {
     }
   }
 
-  /** 合并批次 CardKit：创建非流式可 PATCH 卡片实体（含按钮占位） */
+  /** 合并批次 CardKit：创建 streaming_mode 可 PATCH 卡片实体（含按钮占位） */
   async createMergeBatchCardEntity(view: MergeBatchCardView): Promise<{ cardId: string; elementId: string } | null> {
     try {
       const escapedBody = view.bodyMarkdown.replace(/\\/g, "\\\\");
       const escapedFooter = view.footerText.replace(/\\/g, "\\\\");
       const card: Record<string, unknown> = {
         schema: "2.0",
-        config: { wide_screen_mode: true, update_multi: true },
+        config: { ...PATCHABLE_CARD_CONFIG },
         header: { title: { tag: "plain_text", content: view.title }, template: "blue" },
         body: {
           elements: [
@@ -434,7 +441,7 @@ export class LarkSender {
       const statusLabel = formatToolStatusLabel(status);
       const card: Record<string, unknown> = {
         schema: "2.0",
-        config: { wide_screen_mode: true, update_multi: true },
+        config: { ...PATCHABLE_CARD_CONFIG },
         header: { title: { tag: "plain_text", content: "工具执行" }, template: "wathet" },
         body: {
           elements: [{
@@ -509,7 +516,15 @@ export class LarkSender {
       const ok = await this.updateToolProgressCardBody(
         existing.cardEntityId, TOOL_PROGRESS_ELEMENT_ID, toolName, status, seq,
       );
-      if (ok) return { ...existing, cardSequence: seq };
+      if (ok) {
+        let cardSequence = seq;
+        if (status === "completed" || status === "failed") {
+          if (await this.closeStreamingCardMode(existing.cardEntityId, seq + 1)) {
+            cardSequence = seq + 1;
+          }
+        }
+        return { ...existing, cardSequence };
+      }
       this.log("WARN", "工具 CardKit PATCH 失败，保留旧卡状态");
       return existing;
     }
@@ -517,7 +532,13 @@ export class LarkSender {
     if (!entity) return null;
     const msgId = await this.sendStreamingCardMessage(chatId, entity.cardId, replyMessageId);
     if (!msgId) return null;
-    return { cardEntityId: entity.cardId, cardMessageId: msgId, cardSequence: 1 };
+    let cardSequence = 1;
+    if (status === "completed" || status === "failed") {
+      if (await this.closeStreamingCardMode(entity.cardId, 2)) {
+        cardSequence = 2;
+      }
+    }
+    return { cardEntityId: entity.cardId, cardMessageId: msgId, cardSequence };
   }
 
   /** 思考摘要 CardKit：创建可 PATCH 卡片实体 */
@@ -526,7 +547,7 @@ export class LarkSender {
       const escaped = summary.replace(/\\/g, "\\\\");
       const card: Record<string, unknown> = {
         schema: "2.0",
-        config: { wide_screen_mode: true, update_multi: true },
+        config: { ...PATCHABLE_CARD_CONFIG },
         header: { title: { tag: "plain_text", content: "思考中" }, template: "grey" },
         body: {
           elements: [{
@@ -588,11 +609,18 @@ export class LarkSender {
     summary: string,
     existing?: PresentationCardState,
     replyMessageId?: string,
+    final?: boolean,
   ): Promise<PresentationCardState | null> {
     if (existing?.cardEntityId && existing.cardMessageId) {
       const seq = (existing.cardSequence ?? 0) + 1;
       const ok = await this.updateThinkingCardBody(existing.cardEntityId, THINKING_ELEMENT_ID, summary, seq);
-      if (ok) return { ...existing, cardSequence: seq };
+      if (ok) {
+        let cardSequence = seq;
+        if (final && await this.closeStreamingCardMode(existing.cardEntityId, seq + 1)) {
+          cardSequence = seq + 1;
+        }
+        return { ...existing, cardSequence };
+      }
       this.log("WARN", "思考 CardKit PATCH 失败，保留旧卡状态");
       return existing;
     }
@@ -600,7 +628,11 @@ export class LarkSender {
     if (!entity) return null;
     const msgId = await this.sendStreamingCardMessage(chatId, entity.cardId, replyMessageId);
     if (!msgId) return null;
-    return { cardEntityId: entity.cardId, cardMessageId: msgId, cardSequence: 1 };
+    let cardSequence = 1;
+    if (final && await this.closeStreamingCardMode(entity.cardId, 2)) {
+      cardSequence = 2;
+    }
+    return { cardEntityId: entity.cardId, cardMessageId: msgId, cardSequence };
   }
 
   /** CardKit 流式：关闭 streaming_mode（final 时调用） */
@@ -940,6 +972,8 @@ export class LarkSender {
     onMessage: (event: LarkMessageEvent) => void,
   ): void {
     const eventDispatcher = new Lark.EventDispatcher(encryptKey ? { encryptKey } : {}).register({
+      // 入队 Get 表情会触发 reaction 回推；空 handler 避免 SDK 打 no handle WARN
+      "im.message.reaction.created_v1": () => { /* ignore */ },
       "im.message.receive_v1": (data) => {
         try {
           const msg = (data as any)?.message;

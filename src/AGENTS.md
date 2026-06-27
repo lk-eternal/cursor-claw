@@ -19,7 +19,7 @@
 ## 合并预览与 Agent 阶段（daemon 内存）
 
 - **Agent 阶段**：`sessionAgentPhaseMap` 由 electron `reportSessionAgentPhase`（`daemon-client.ts`）写入；`idle` 即 delete 条目。与 `sessionProgressMap`（流式/typing）职责分离。
-- **idle 补偿**：`POST /api/session-agent-phase` 转 `idle` 后刷新合并卡并 `flushReadyMergeBatches`；processing 时 ready 卡脚本文案「当前任务完成后发送」。
+- **idle 补偿**：`POST /api/session-agent-phase` 转 `idle` 后刷新合并卡、`flushReadyMergeBatches`，并 **`scheduleAgentDispatch`**（processing 期间入队的 unclaimed 当时无法 claim，idle 后须重跑 dispatch）。
 
 ## 合并批次 CardKit（MergeBatch，daemon 内存）
 
@@ -40,4 +40,4 @@
 - **飞书首选 CardKit**：首包 `createStreamingCardEntity` → `sendStreamingCardMessage`，`SessionProgressState` 记 `cardId`/`elementId`/`cardSequence`/`streamCardKitMode`；后续 `updateStreamingCardText`（`cardSequence` 递增）；`final: true` 时 `closeStreamingCardMode(cardSequence+1)` 再 stop/ack。
 - **CardKit 降级**：创建/发卡片任一步失败 → 回退 `sendStreamMessage`（`streamPatchMode`）；流式更新失败 → `streamCardKitMode=false`，再 PATCH 或 `sendStreamSegments` 分段。
 - **节流**：`streamTextThrottleMs()`（500–1500ms）对 CardKit 更新同样生效；`isFirst`/`final` 不受节流跳过。
-- **工具/思考 CardKit**：`lark-core.renderToolProgressCard` / `renderThinkingCard`；`SessionProgressState` 记 tool/thinking 卡 id 与 sequence；工具 `started` 重置卡状态并发新卡。
+- **工具/思考 CardKit**：`lark-core.renderToolProgressCard` / `renderThinkingCard`；`SessionProgressState.toolCards` 按 `tool_name` 分卡（并发工具各自 PATCH/关闭 streaming）；`started` 仅清该工具条目并发新卡。
