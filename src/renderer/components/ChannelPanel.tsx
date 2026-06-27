@@ -28,6 +28,8 @@ function emptyChannel(type: "feishu" | "wechat", defaultName: string): ChannelCo
     mainUserChatId: "",
     mainUserNewSession: false,
     allowOthers: false,
+    othersWorkspaceMode: "isolated",
+    othersWorkspaceDir: "",
     digitalIdentity: "",
     workspaceDir: "",
   }
@@ -50,6 +52,8 @@ export default function ChannelPanel() {
     setChannels((cfg.channels ?? []).map((c) => ({
       ...c,
       allowOthers: c.allowOthers ?? cfg.allowOthers ?? false,
+      othersWorkspaceMode: c.othersWorkspaceMode ?? "isolated",
+      othersWorkspaceDir: c.othersWorkspaceDir ?? "",
       digitalIdentity: c.digitalIdentity ?? cfg.digitalIdentity ?? "",
     })))
     const list = cfg.agentResources ?? []
@@ -410,6 +414,11 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
     if (d) set({ workspaceDir: d })
   }
 
+  const selectOthersWorkDir = async () => {
+    const d = await window.electronAPI.selectDirectory()
+    if (d) set({ othersWorkspaceDir: d })
+  }
+
   const credOk = draft.type === "feishu" ? !!(draft.larkAppId?.trim() && draft.larkAppSecret?.trim()) : !!draft.wechatToken?.trim()
 
   const modelKey = (id: string, params: string) => id + (params ? "\0" + params : "")
@@ -606,6 +615,9 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
                       </>}
               </div>
             )}
+            <p className="text-xs text-gray-600">
+              创建临时会话：<span className="font-mono text-gray-500">/chat new &lt;任务描述&gt; [-dir &lt;路径&gt;]</span>；省略 <span className="font-mono text-gray-500">-dir</span> 时使用当前主会话目录（本通道工作目录留空则用全局默认）；无效目录不会创建临时会话。
+            </p>
           </div>
 
           {/* ── 其他人使用 ── */}
@@ -613,7 +625,13 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
             <div className="flex items-center justify-between">
               <div>
                 <h4 className="text-xs font-medium text-gray-400">允许其他人使用</h4>
-                <p className="text-xs text-gray-600">开启后该通道响应其他人私聊及群聊 @消息（在按通道隔离的临时目录中运行）</p>
+                <p className="text-xs text-gray-600">
+                  {draft.allowOthers
+                    ? draft.othersWorkspaceMode === "specified"
+                      ? "开启后该通道响应其他人私聊及群聊 @消息（使用下方指定目录；留空则与主会话目录一致）"
+                      : "开启后该通道响应其他人私聊及群聊 @消息（每个私聊/群聊在独立临时目录中运行）"
+                    : "开启后该通道响应其他人私聊及群聊 @消息"}
+                </p>
               </div>
               <button onClick={() => set({ allowOthers: !draft.allowOthers })}
                 className={`relative h-5 w-9 shrink-0 rounded-full transition ${draft.allowOthers ? "bg-blue-600" : "bg-gray-600"}`}>
@@ -621,11 +639,45 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
               </button>
             </div>
             {draft.allowOthers && (
-              <div>
-                <label className="mb-1 block text-xs text-gray-500">对外身份规则</label>
-                <textarea value={draft.digitalIdentity} onChange={(e) => set({ digitalIdentity: e.target.value })} rows={5} placeholder="定义 Agent 面向该通道其他用户时的角色、职责与行为规范...&#10;留空则不注入" className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-blue-500 focus:outline-none" />
-                <p className="mt-1 text-xs text-gray-600">该通道其他人触发的会话启动时，将此内容作为 Agent 身份规则注入</p>
-              </div>
+              <>
+                <div>
+                  <label className="mb-1.5 block text-xs text-gray-500">工作目录模式</label>
+                  <div className="flex gap-2">
+                    <button type="button"
+                      onClick={() => set({ othersWorkspaceMode: "isolated", othersWorkspaceDir: "" })}
+                      className={`flex-1 rounded-lg border px-2 py-1.5 text-xs transition ${draft.othersWorkspaceMode !== "specified" ? "border-blue-500 bg-blue-900/30 text-blue-300" : "border-gray-700 text-gray-400 hover:border-gray-600"}`}>
+                      临时目录
+                    </button>
+                    <button type="button"
+                      onClick={() => set({ othersWorkspaceMode: "specified" })}
+                      className={`flex-1 rounded-lg border px-2 py-1.5 text-xs transition ${draft.othersWorkspaceMode === "specified" ? "border-blue-500 bg-blue-900/30 text-blue-300" : "border-gray-700 text-gray-400 hover:border-gray-600"}`}>
+                      指定目录
+                    </button>
+                  </div>
+                  <p className="mt-1 text-xs text-gray-600">
+                    {draft.othersWorkspaceMode === "specified"
+                      ? "使用下方路径；留空则与主会话目录一致（通道工作目录或全局默认）"
+                      : "按会话隔离，每个私聊/群聊使用独立临时目录"}
+                  </p>
+                </div>
+                {draft.othersWorkspaceMode === "specified" && (
+                  <div>
+                    <label className="mb-1 block text-xs text-gray-500">指定目录路径</label>
+                    <div className="flex items-center gap-2">
+                      <div onClick={() => void selectOthersWorkDir()} className="flex flex-1 cursor-pointer items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 transition hover:border-blue-500">
+                        <FolderOpen size={14} className="text-blue-400" />
+                        <span className="truncate text-xs">{draft.othersWorkspaceDir || "（与主会话目录一致）"}</span>
+                      </div>
+                      {draft.othersWorkspaceDir && <button onClick={() => set({ othersWorkspaceDir: "" })} className="text-xs text-gray-500 hover:text-red-400">清除</button>}
+                    </div>
+                  </div>
+                )}
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">对外身份规则</label>
+                  <textarea value={draft.digitalIdentity} onChange={(e) => set({ digitalIdentity: e.target.value })} rows={5} placeholder="定义 Agent 面向该通道其他用户时的角色、职责与行为规范...&#10;留空则不注入" className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-blue-500 focus:outline-none" />
+                  <p className="mt-1 text-xs text-gray-600">该通道其他人触发的会话启动时，将此内容作为 Agent 身份规则注入</p>
+                </div>
+              </>
             )}
           </div>
 
@@ -646,6 +698,7 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
                     </div>
                     {draft.workspaceDir && <button onClick={() => set({ workspaceDir: "" })} className="text-xs text-gray-500 hover:text-red-400">清除</button>}
                   </div>
+                  <p className="mt-1 text-xs text-gray-600">主用户私聊、临时会话默认目录及他人「指定目录」留空时的回退来源</p>
                 </div>
                 <div className="flex items-center justify-between">
                   <div>

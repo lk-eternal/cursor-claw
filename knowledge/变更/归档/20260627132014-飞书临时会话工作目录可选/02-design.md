@@ -245,3 +245,118 @@ CodeGraph（`projectPath: /Users/kiki/github/cursor-claw`）命中符号与路�
 - `knowledge/工程平台/` 各端文档（无 UI/打包变更）
 - 群聊、微信、工作流子模块正文（行为边界外）
 - `knowledge/变更/归档/` 历史变更
+
+---
+
+## Rev1 增量设计（通道配置页与他人目录模式）
+
+> **追溯**：`07-prd-revisions.md` Rev1；验收 08 第 1 轮 code 归因；产品澄清 2026-06-27。
+
+### Rev1·（一）配置字段设计（CodeGraph 核对结论）
+
+**现有字段（不改语义）**
+
+| 字段 | 类型 | 位置 | 用途 |
+|------|------|------|------|
+| `workspaceDir` | `string` | `MessageChannel`（`src/shared/channel-types.ts:45`） | 通道级主工作目录；**留空** → `effectiveWorkspaceDir` 回退全局 `AppConfig.workspaceDir`（`config-store.ts:207`） |
+| `allowOthers` | `boolean` | 同上 | 是否响应他人私聊/群聊 |
+| `digitalIdentity` | `string` | 同上 | 注入他人隔离/指定目录下的身份规则 |
+
+**新增字段（Rev1）**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `othersWorkspaceMode` | `"isolated" \| "specified"` | `"isolated"` | 他人/群聊工作目录策略：`isolated`=临时目录按会话隔离；`specified`=指定目录 |
+| `othersWorkspaceDir` | `string` | `""` | 仅 `othersWorkspaceMode === "specified"` 时生效；**留空** → 等同 `effectiveWorkspaceDir(channel)`；有值时须存在且可读（启动前校验，口径对齐 `validateWorkspacePath`） |
+
+**字段关系说明**
+
+- **不复用** `workspaceDir` 作为他人指定目录：该字段已绑定主用户 / temp 默认 / `effectiveWorkspaceDir`，混用会导致主会话与「他人指定目录」无法独立配置。
+- `getChannels` 迁移兜底（`config-store.ts:139`）：旧通道缺省 `othersWorkspaceMode: "isolated"`、`othersWorkspaceDir: ""`，保证现网行为不变。
+- 同步更新：`src/shared/channel-types.ts`、`electron/preload.ts` `MessageChannel`、`src/renderer/env.d.ts` `ChannelConfig`；`ChannelPanel.emptyChannel` 默认值。
+
+### Rev1·（二）`launchAgent` 他人分支改动对照
+
+**现网（CodeGraph：`session-dispatcher.ts:324–328`）**
+
+```
+else if (useMain || isOwnTask) → effectiveWorkspaceDir(channel)
+else → userData/workspaces/{safeChatId}  // 固定临时隔离
+```
+
+**Rev1 目标**
+
+| 条件 | 工作目录 |
+|------|----------|
+| `useMain \|\| isOwnTask`（含 temp + 显式 `workingDirectory`） | **不改**：沿用已实现逻辑 |
+| `!useMain && !isOwnTask && allowOthers` 且 `othersWorkspaceMode === "isolated"` | `path.join(userData, "workspaces", safeChatId)` + 必要时 `mkdirSync`（**现网行为**） |
+| 同上且 `othersWorkspaceMode === "specified"` 且 `othersWorkspaceDir` 非空 | 使用规范化后的 `othersWorkspaceDir`；**不**自动 mkdir（须已存在且可读） |
+| 同上且 `othersWorkspaceMode === "specified"` 且 `othersWorkspaceDir` 留空 | `effectiveWorkspaceDir(channel)` |
+
+**对照表（流程 B1 扩展）**
+
+| 步骤 | 现网 | Rev1 |
+|------|------|------|
+| B1 他人/群聊目录解析 | 固定 `workspaces/{safeKey}` | 读通道 `othersWorkspaceMode` / `othersWorkspaceDir` 三分支 |
+| B1 身份注入 | `injectWorkspaceToDir(workDir, false, digitalIdentity)` | 不改 |
+| temp `/chat new -dir` | 主用户路径，不经 B1 | 不改 |
+
+建议抽取内联函数 `resolveOthersWorkspaceDir(channel, sessionKey): string`（或 `{ ok, workDir, error }` 含校验失败），供 `launchAgent` else 分支调用；校验失败返回用户可理解错误，不启动 Agent。
+
+### Rev1·（三）ChannelPanel UI 布局
+
+**落点**：`src/renderer/components/ChannelPanel.tsx`（现 L611–630「允许其他人使用」、L572–609「主用户绑定」、L638–649 高级设置「通道工作目录」）。
+
+**1. 主用户区 — 临时会话 `-dir` 说明（新增帮助块）**
+
+- 位置：「主用户绑定」卡片内，`mainUserEnabled` 区块下方或卡片底部 `text-xs text-gray-600` 说明。
+- 文案要点：
+  - 创建临时会话：`/chat new <任务描述> [-dir <路径>]`
+  - 省略 `-dir` = 当前主会话目录（本通道工作目录留空则用全局默认）
+  - 无效目录不创建临时会话
+- 与 T4 已落地的 Daemon `/help` 语义一致，不要求重复实现指令，仅**可见说明**。
+
+**2. 允许其他人使用区 — 模式 + 路径（扩展 L623–629）**
+
+在 `draft.allowOthers` 为 true 时，于「对外身份规则」**之上**增加：
+
+```
+[ 工作目录模式 ]
+  ( ) 临时目录 — 按会话隔离（每个私聊/群聊独立目录）
+  ( ) 指定目录 — 使用下方路径；留空则与主会话目录一致
+
+[ 指定目录路径 ]  （仅 mode=specified 时显示）
+  [ FolderOpen + 路径 / （与主会话目录一致） ] [清除]
+  说明：留空时等同「通道工作目录」或全局主工作目录
+```
+
+- 「临时目录」选中时隐藏路径输入，helper 文案替换现 L616 单句（保留隔离语义）。
+- 「指定目录」选中且路径非空：可选启动前校验（与 T-Rev1-01 调度层一致）；保存配置时不强制 blocking 校验，避免离线路径误拦（若产品要求保存时校验，在 03 任务验收中明确）。
+
+**3. 高级设置「通道工作目录」**
+
+- 保留现布局；helper 补充一句：「主用户私聊、临时会话默认目录及他人『指定目录』留空时的回退来源」。
+
+### Rev1·（四）数据结构变更摘要
+
+| 层级 | 变更 |
+|------|------|
+| 持久化 | `electron-store` 内 `channels[]` 增两字段；无独立 migration 脚本，靠 `getChannels` 读时兜底 |
+| Daemon 下发 | `DaemonChannelConfig` **暂不**扩展（他人目录由 Electron `launchAgent` 解析）；若 Daemon 侧未来独立启动他人 Agent 再同步 |
+| 运行时 | 他人 `SessionAgent.workspaceDir` 按新模式写入，与 temp 指定目录机制独立 |
+
+### Rev1·（五）技术影响补充
+
+- **风险**：指定目录模式下多人/多群共用同一路径，须在产品文案中提示并发写冲突可能；临时目录模式无此问题。
+- **工程补充验收（Rev1）**：
+  - [ ] 配置页切换模式保存后重启仍生效
+  - [ ] `isolated` 下两 chatKey 目录路径不同
+  - [ ] `specified` 留空与他人会话 `workspaceDir === effectiveWorkspaceDir`
+  - [ ] `specified` 填 B 后他人会话在 B 运行
+  - [ ] 主用户 `/chat new -dir` 说明在配置页可见（不要求 Settings 全局页改动）
+
+### Rev1·（六）知识库影响（archive 时）
+
+- `knowledge/业务域/Agent调度/02-多会话模型.md` — 他人/群聊目录规则补充模式说明
+- 通道配置相关工程文档（若有）— 新增字段说明
+

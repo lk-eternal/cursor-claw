@@ -273,3 +273,158 @@ T4 ────────────────→ T5
 
 - 前置任务: T3、T4
 - 后续任务: 无（通过后进入 `/kb-archive`）
+
+---
+
+## Rev1 任务（`/kb-revise`，2026-06-27）
+
+> 来源：`07-prd-revisions.md` Rev1；实现请用 `/kb-revise-apply`。
+
+### （一）依赖图
+
+```
+T-Rev1-01 ──→ T-Rev1-02
+T-Rev1-01 ──→ T-Rev1-03
+T-Rev1-02 ──→ T-Rev1-03
+```
+
+### （二）分组调度
+
+- **第一轮**：T-Rev1-01（类型 + 调度分支，阻塞 UI）
+- **第二轮**：T-Rev1-02（ChannelPanel）
+- **第三轮**：T-Rev1-03（贯通验收与文案对齐）
+
+---
+
+## T-Rev1-01: 配置字段与 `launchAgent` 他人目录分支
+
+### 背景
+
+Rev1 要求「允许其他人使用」开启时可选择临时目录（现网隔离）或指定目录（留空=主会话目录）。需在 `MessageChannel` 持久化新字段，并在 `launchAgent` 他人/群聊分支按模式解析工作目录，替代当前固定 `userData/workspaces/{safeKey}` 逻辑。
+
+### 上下文文件
+
+- CodeGraph: `launchAgent`（`session-dispatcher.ts:303`）他人分支 L324–328；`effectiveWorkspaceDir`（`config-store.ts:207`）；`MessageChannel`（`channel-types.ts:15`）；`getChannels` 迁移兜底（`config-store.ts:139`）
+- 必读: `electron/session-dispatcher.ts` — `launchAgent` else 分支；`validateWorkspacePath`（T1 已实现）
+- 必读: `src/shared/channel-types.ts`、`electron/preload.ts`、`src/renderer/env.d.ts`
+- 必读: `electron/config-store.ts` — `getChannels`、`saveChannel`
+- 参考: `02-design.md` Rev1·（一）（二）
+
+### 实现范围
+
+- **新增** `MessageChannel.othersWorkspaceMode: "isolated" | "specified"`（默认 `"isolated"`）
+- **新增** `MessageChannel.othersWorkspaceDir: string`（默认 `""`）
+- `getChannels` 读时兜底上述默认值（旧通道兼容现网）
+- 同步 `preload.ts` `MessageChannel`、`env.d.ts` `ChannelConfig`
+- **改动** `launchAgent`：`!useMain && !isOwnTask` 分支按 Rev1·（二）三分支解析；`specified` + 非空路径须校验存在可读且不自动 mkdir；建议内联 `resolveOthersWorkspaceDir`
+- 不改：temp `/chat new -dir`、主用户 `effectiveWorkspaceDir`、workflow mkdir 行为
+
+### 接口契约
+
+- `othersWorkspaceMode: "isolated"` → `path.join(app.getPath("userData"), "workspaces", safeChatId)`（可 mkdir）
+- `othersWorkspaceMode: "specified"` + `othersWorkspaceDir.trim() === ""` → `effectiveWorkspaceDir(channel)`
+- `othersWorkspaceMode: "specified"` + 非空路径 → `validateWorkspacePath` 通过后使用 resolved 路径
+- 校验失败 → `{ ok: false, error: 用户可理解中文 }`，不启动 Agent
+
+### 验收标准
+
+- [ ] 旧配置无新字段时行为与现网一致（isolated + 隔离目录）
+- [ ] isolated 模式下两不同 chatKey 的 `workspaceDir` 路径不同
+- [ ] specified + 留空：他人会话目录等于 `effectiveWorkspaceDir(通道)`
+- [ ] specified + 有效路径 B：他人会话在 B 运行
+- [ ] specified + 无效路径：友好错误，不启动
+- [ ] temp `/chat new -dir` 与主用户目录逻辑无回归（01 验收 1–5）
+- [ ] 无 `02`/`03` 未要求的抽象层或未批准的新依赖
+
+### 依赖
+
+- 前置任务: 无（T1–T5 已完成）
+- 后续任务: T-Rev1-02、T-Rev1-03
+
+---
+
+## T-Rev1-02: ChannelPanel 配置页 UI
+
+### 背景
+
+08 验收第 1 轮：桌面端通道配置页未体现 `-dir` 说明，且「允许其他人使用」区缺少工作目录模式配置。本任务在 `ChannelPanel` 补充主用户临时会话说明与他人目录模式 UI，并绑定 Rev1 新配置字段。
+
+### 上下文文件
+
+- CodeGraph: `ChannelPanel`（`ChannelPanel.tsx:38`）；现「允许其他人使用」L611–630；「主用户绑定」L572–609；高级「通道工作目录」L638–649
+- 必读: `src/renderer/components/ChannelPanel.tsx` — `emptyChannel`、`persistChannels`、编辑 draft 状态
+- 必读: `02-design.md` Rev1·（三）UI 布局
+- 参考: T4 文案 — `/chat new` 语法与三要点
+
+### 实现范围
+
+- **主用户区**：新增 `text-xs` 帮助块，说明 `/chat new [-dir]`、省略 `-dir` 默认、无效不创建
+- **允许其他人使用区**（`allowOthers` 为 true）：
+  - 单选/分段：临时目录 vs 指定目录 → 绑定 `othersWorkspaceMode`
+  - 指定目录模式下路径选择器 + 清除 → 绑定 `othersWorkspaceDir`；留空展示「与主会话目录一致」
+  - 更新 L616 helper：区分两种模式语义
+- **高级设置**：通道工作目录 helper 补充与主会话/他人留空回退的关系（一句）
+- 保存经既有 `persistChannels` → `saveAppConfigFromRenderer` 写入 store
+- 不改：全局 Settings 主工作目录选择器结构
+
+### 接口契约
+
+- UI 字段与 `MessageChannel` Rev1 字段一一对应
+- 临时目录模式：不展示路径输入，`othersWorkspaceDir` 保存时可清空或忽略
+- 文案简体中文，与 Daemon `/help` 无矛盾
+
+### 验收标准
+
+- [ ] 配置页可见 `/chat new -dir` 说明及默认规则（01 验收 8 / Rev1 验收 6）
+- [ ] `allowOthers` 开启后可切换临时目录/指定目录并保存持久化
+- [ ] 指定目录留空时 UI 明示等同主会话目录
+- [ ] 切换模式后重启应用配置仍正确
+- [ ] 全局 Settings 主工作目录页无结构性改动
+- [ ] 无 `02`/`03` 未要求的抽象层或未批准的新依赖
+
+### 依赖
+
+- 前置任务: T-Rev1-01（类型字段已定义）
+- 后续任务: T-Rev1-03
+
+---
+
+## T-Rev1-03: 类型贯通、文案对齐与 Rev1 验收回归
+
+### 背景
+
+Rev1 涉及 Electron 主进程、渲染进程与共享类型三处字段一致；需在 T-Rev1-01/02 完成后做端到端回归，闭合 08 验收打回项，并确认 Daemon 帮助与配置页文案一致。
+
+### 上下文文件
+
+- 必读: `07-prd-revisions.md` Rev1；`01-proposal.md` 验收 6–9
+- 必读: `02-design.md` Rev1·（五）工程补充验收
+- 必读: T-Rev1-01、T-Rev1-02 验收标准
+- 参考: `src/daemon.ts` `COMMANDS["/chat"]`；`08-verify-issue.md` 第 1 轮
+
+### 实现范围
+
+- 核对并补漏：`ChannelPanel` reload 迁移兜底（`allowOthers` 同级兜底 `othersWorkspaceMode`/`othersWorkspaceDir`）
+- 若 T-Rev1-02 未覆盖：`emptyChannel` 默认值
+- **无必须代码**时可仅验证；发现缺口则在本任务内小 patch（限 Rev1 范围）
+- 手动回归：01 验收 1–5 无回归 + Rev1 验收 6–9 + 02 Rev1·（五）四项
+
+### 接口契约
+
+- 三处类型定义字段名与类型一致
+- 配置页与 `/help` 关于 `-dir`、他人模式的三要点语义一致
+
+### 验收标准
+
+- [ ] 01 验收 1–5、8（Daemon 帮助）仍通过
+- [ ] 01 验收 6–9（配置页与他人模式）通过
+- [ ] 08 第 1 轮问题闭合：配置页可找到 `-dir` 说明
+- [ ] isolated / specified 留空 / specified 填路径 三种他人场景可观察验证
+- [ ] `02-design` Rev1·（五）四项工程补充项通过
+- [ ] 无 `02`/`03` 未要求的抽象层或未批准的新依赖
+
+### 依赖
+
+- 前置任务: T-Rev1-01、T-Rev1-02
+- 后续任务: 无（通过后重新 `/kb-test` → 验收）
+

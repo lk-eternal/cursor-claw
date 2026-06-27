@@ -1,0 +1,292 @@
+{
+  "name": "飞书临时会话工作目录可选",
+  "flow": "standard",
+  "stage": "archived",
+  "source": "kb-propose",
+  "workflow_version": "v2.3",
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "/chat new 参数解析与目录校验函数",
+      "status": "done",
+      "files": [
+        "electron/session-dispatcher.ts"
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "T2",
+      "title": "调度层透传工作目录并修正 temp mkdir 行为",
+      "status": "done",
+      "files": [
+        "electron/session-dispatcher.ts"
+      ],
+      "depends_on": [
+        "T1"
+      ]
+    },
+    {
+      "id": "T3",
+      "title": "handleChatCommand /chat new 分支集成与成功反馈",
+      "status": "done",
+      "files": [
+        "electron/session-dispatcher.ts"
+      ],
+      "depends_on": [
+        "T1",
+        "T2"
+      ]
+    },
+    {
+      "id": "T4",
+      "title": "指令帮助文案补充可选 -dir",
+      "status": "done",
+      "files": [
+        "src/daemon.ts",
+        "electron/daemon-manager.ts"
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "T5",
+      "title": "端到端回归与范围确认",
+      "status": "done",
+      "files": [],
+      "depends_on": [
+        "T3",
+        "T4"
+      ]
+    },
+    {
+      "id": "T-Rev1-01",
+      "title": "配置字段与 launchAgent 他人目录分支",
+      "status": "done",
+      "files": [
+        "electron/session-dispatcher.ts",
+        "electron/config-store.ts",
+        "src/shared/channel-types.ts",
+        "electron/preload.ts",
+        "src/renderer/env.d.ts"
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "T-Rev1-02",
+      "title": "ChannelPanel 配置页 UI",
+      "status": "done",
+      "files": [
+        "src/renderer/components/ChannelPanel.tsx"
+      ],
+      "depends_on": [
+        "T-Rev1-01"
+      ]
+    },
+    {
+      "id": "T-Rev1-03",
+      "title": "类型贯通与 Rev1 验收回归",
+      "status": "done",
+      "files": [
+        "src/renderer/components/ChannelPanel.tsx"
+      ],
+      "depends_on": [
+        "T-Rev1-01",
+        "T-Rev1-02"
+      ]
+    }
+  ],
+  "reviews": [
+    {
+      "id": "apply-focused",
+      "type": "focused-review",
+      "date": "2026-06-27",
+      "scope": "T1-T5",
+      "verdict": "passed",
+      "blocking_issues": 0,
+      "warnings": 0,
+      "summary": "parseChatNewArgs/validateWorkspacePath、temp mkdir、帮助文案；§4 边缘 -dir 置首空格路径记债务"
+    },
+    {
+      "id": "Rev1-focused",
+      "type": "focused-review",
+      "date": "2026-06-27",
+      "scope": "T-Rev1-01~03",
+      "verdict": "passed",
+      "blocking_issues": 0,
+      "warnings": 1,
+      "summary": "他人目录模式字段+resolveOthersWorkspaceDir+ChannelPanel UI 闭合 08 打回；指定目录并发提示可选补"
+    }
+  ],
+  "revisions": [
+    {
+      "id": "Rev1",
+      "status": "completed",
+      "date": "2026-06-27",
+      "summary": "通道配置页 -dir 说明与他人/群聊工作目录模式（临时目录 vs 指定目录，留空=主会话目录）",
+      "task_ids": [
+        "T-Rev1-01",
+        "T-Rev1-02",
+        "T-Rev1-03"
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "knowledge/变更/归档/20260627132014-飞书临时会话工作目录可选/00-manifest.json",
+      "role": "manifest",
+      "status": "active"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627132014-飞书临时会话工作目录可选/01-proposal.md",
+      "role": "proposal",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627132014-飞书临时会话工作目录可选/02-design.md",
+      "role": "design",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627132014-飞书临时会话工作目录可选/03-tasks.md",
+      "role": "tasks",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627132014-飞书临时会话工作目录可选/04-review.md",
+      "role": "review",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627132014-飞书临时会话工作目录可选/05-summary.md",
+      "role": "summary",
+      "kind": "change_doc",
+      "source": "archive",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627132014-飞书临时会话工作目录可选/06-automation-test.md",
+      "role": "automation_test",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627132014-飞书临时会话工作目录可选/07-prd-revisions.md",
+      "role": "prd_revisions",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627132014-飞书临时会话工作目录可选/08-verify-issue.md",
+      "role": "verify_issue",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "src/renderer/components/ChannelPanel.tsx",
+      "role": "implementation",
+      "kind": "code",
+      "source": "revise-apply",
+      "status": "changed"
+    },
+    {
+      "path": "electron/session-dispatcher.ts",
+      "role": "implementation",
+      "kind": "code",
+      "source": "revise-apply",
+      "status": "changed"
+    },
+    {
+      "path": "electron/config-store.ts",
+      "role": "implementation",
+      "kind": "code",
+      "source": "revise-apply",
+      "status": "changed"
+    },
+    {
+      "path": "src/shared/channel-types.ts",
+      "role": "implementation",
+      "kind": "code",
+      "source": "revise-apply",
+      "status": "changed"
+    },
+    {
+      "path": "electron/preload.ts",
+      "role": "implementation",
+      "kind": "code",
+      "source": "revise-apply",
+      "status": "changed"
+    },
+    {
+      "path": "src/renderer/env.d.ts",
+      "role": "implementation",
+      "kind": "code",
+      "source": "revise-apply",
+      "status": "changed"
+    },
+    {
+      "path": "src/daemon.ts",
+      "role": "implementation",
+      "kind": "code",
+      "source": "apply",
+      "status": "changed"
+    },
+    {
+      "path": "electron/daemon-manager.ts",
+      "role": "implementation",
+      "kind": "code",
+      "source": "apply",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/业务域/Agent调度/02-多会话模型.md",
+      "role": "knowledge",
+      "kind": "knowledge",
+      "source": "archive",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/业务域/Agent调度/04-远程指令.md",
+      "role": "knowledge",
+      "kind": "knowledge",
+      "source": "archive",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/业务域/Agent调度/01-概览.md",
+      "role": "knowledge",
+      "kind": "knowledge",
+      "source": "archive",
+      "status": "changed"
+    },
+    {
+      "path": "package.json",
+      "role": "config",
+      "kind": "config",
+      "source": "archive",
+      "status": "changed"
+    },
+    {
+      "path": "changelog/1.4.3.json",
+      "role": "changelog",
+      "kind": "config",
+      "source": "archive",
+      "status": "changed"
+    }
+  ],
+  "updated_at": "2026-06-27T18:30:00+0800",
+  "external": {
+    "acceptance": {
+      "rounds": [
+        {
+          "round": 1,
+          "feedback": "桌面端通道配置页未体现管理员创建临时会话时可选 -dir 工作目录说明；配置界面仅显示「允许其他人使用」相关文案，用户找不到 -dir 能力说明。",
+          "created_at": "2026-06-27T16:47:55+0800",
+          "reason": "code"
+        }
+      ]
+    }
+  }
+}

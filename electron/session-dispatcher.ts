@@ -322,10 +322,9 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
   } else if (useMain || isOwnTask) {
     workDir = effectiveWorkspaceDir(channel)
   } else {
-    // 临时目录名含 chatKey 的通道前缀（ch_xxx_...），不同通道天然隔离
-    const safeChatId = sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_")
-    workDir = path.join(app.getPath("userData"), "workspaces", safeChatId)
-    if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true })
+    const resolved = resolveOthersWorkspaceDir(channel, sessionKey)
+    if (!resolved.ok) return { ok: false, error: resolved.error }
+    workDir = resolved.workDir
   }
   if (!workDir) return { ok: false, error: "工作目录未配置" }
 
@@ -483,6 +482,30 @@ function validateWorkspacePath(dir: string):
     return { ok: false, error: "无法访问该目录，请检查权限或改用其他路径" }
   }
   return { ok: true, resolved }
+}
+
+function resolveOthersWorkspaceDir(
+  channel: MessageChannel | undefined,
+  sessionKey: string,
+): { ok: true; workDir: string } | { ok: false; error: string } {
+  const mode = channel?.othersWorkspaceMode ?? "isolated"
+  if (mode === "isolated") {
+    const safeChatId = sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_")
+    const workDir = path.join(app.getPath("userData"), "workspaces", safeChatId)
+    if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true })
+    return { ok: true, workDir }
+  }
+  const dir = channel?.othersWorkspaceDir?.trim() ?? ""
+  if (!dir) {
+    const workDir = effectiveWorkspaceDir(channel)
+    if (!workDir.trim()) {
+      return { ok: false, error: "工作目录未配置，请先在设置中配置主工作目录" }
+    }
+    return { ok: true, workDir }
+  }
+  const check = validateWorkspacePath(dir)
+  if (!check.ok) return check
+  return { ok: true, workDir: check.resolved }
 }
 
 // ── /chat 命令处理 ────────────────────────────────────────

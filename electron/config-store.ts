@@ -142,6 +142,8 @@ export function getChannels(): MessageChannel[] {
   return (cfg.channels ?? []).map((c) => ({
     ...c,
     allowOthers: c.allowOthers ?? cfg.allowOthers ?? false,
+    othersWorkspaceMode: c.othersWorkspaceMode ?? "isolated",
+    othersWorkspaceDir: c.othersWorkspaceDir ?? "",
     digitalIdentity: c.digitalIdentity ?? cfg.digitalIdentity ?? "",
   }))
 }

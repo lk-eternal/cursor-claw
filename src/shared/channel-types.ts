@@ -39,6 +39,10 @@ export interface MessageChannel {
   mainUserNewSession: boolean;
   // 其他人使用（通道级）
   allowOthers: boolean;
+  /** 他人/群聊工作目录策略：isolated=按会话隔离临时目录；specified=指定目录 */
+  othersWorkspaceMode: "isolated" | "specified";
+  /** 仅 othersWorkspaceMode=specified 时生效；留空 = effectiveWorkspaceDir */
+  othersWorkspaceDir: string;
   /** 对外身份规则，注入到其他人会话的临时工作目录 */
   digitalIdentity: string;
   // 工作目录，空 = 使用全局主工作目录

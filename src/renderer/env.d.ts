@@ -34,6 +34,8 @@ interface ChannelConfig {
   mainUserChatId: string
   mainUserNewSession: boolean
   allowOthers: boolean
+  othersWorkspaceMode: "isolated" | "specified"
+  othersWorkspaceDir: string
   digitalIdentity: string
   workspaceDir: string
 }
