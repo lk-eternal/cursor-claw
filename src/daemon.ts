@@ -1034,7 +1034,7 @@ const COMMANDS: Record<string, string> = {
   "/model": "Cursor CLI 模型（/model ls | info | set <序号>）",
   "/mcp": "MCP 服务器管理（/mcp ls | info | enable | disable | delete | add）",
   "/workspace": "切换工作目录（/workspace 查看当前 | /workspace set <路径>）",
-  "/chat": "会话管理（/chat ls | /chat <序号> | /chat stop <序号> | /chat new <描述>）",
+  "/chat": "会话管理（/chat ls | /chat <序号> | /chat stop <序号> | /chat new <描述> [-dir <路径>]；省略 -dir 用当前主会话目录，无效目录不创建）",
   "/clean": "清空消息队列",
   "/reset": "下次拉起 Agent 时不使用 --continue（新 CLI 会话），不删除本地文件",
   "/restart": "停止 Agent + 清空队列 + 重启 Daemon",

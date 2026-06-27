@@ -1084,7 +1084,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
             "🔹 /model 模型设置",
             "🔹 /mcp MCP服务器管理",
             "🔹 /workspace 切换工作目录",
-            "🔹 /chat 会话管理",
+            "🔹 /chat 会话管理（new 可选 -dir <路径>，省略则用主会话目录，无效目录不创建）",
           ]
           const lines = isAdmin
             ? ["💡 可用指令（管理员）：", ...common, ...adminOnly]

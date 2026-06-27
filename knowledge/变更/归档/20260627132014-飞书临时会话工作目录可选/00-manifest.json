@@ -1,0 +1,165 @@
+{
+  "name": "飞书临时会话工作目录可选",
+  "flow": "standard",
+  "stage": "archived",
+  "source": "kb-propose",
+  "workflow_version": "v2.3",
+  "archived_at": "2026-06-27T16:37:34+0800",
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "/chat new 参数解析与目录校验函数",
+      "status": "done",
+      "files": [
+        "electron/session-dispatcher.ts"
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "T2",
+      "title": "调度层透传工作目录并修正 temp mkdir 行为",
+      "status": "done",
+      "files": [
+        "electron/session-dispatcher.ts"
+      ],
+      "depends_on": [
+        "T1"
+      ]
+    },
+    {
+      "id": "T3",
+      "title": "handleChatCommand /chat new 分支集成与成功反馈",
+      "status": "done",
+      "files": [
+        "electron/session-dispatcher.ts"
+      ],
+      "depends_on": [
+        "T1",
+        "T2"
+      ]
+    },
+    {
+      "id": "T4",
+      "title": "指令帮助文案补充可选 -dir",
+      "status": "done",
+      "files": [
+        "src/daemon.ts",
+        "electron/daemon-manager.ts"
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "T5",
+      "title": "端到端回归与范围确认",
+      "status": "done",
+      "files": [],
+      "depends_on": [
+        "T3",
+        "T4"
+      ]
+    }
+  ],
+  "reviews": [],
+  "revisions": [],
+  "files": [
+    {
+      "path": "knowledge/变更/归档/20260627132014-飞书临时会话工作目录可选/00-manifest.json",
+      "role": "manifest",
+      "status": "active"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627132014-飞书临时会话工作目录可选/01-proposal.md",
+      "role": "proposal",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627132014-飞书临时会话工作目录可选/02-design.md",
+      "role": "design",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627132014-飞书临时会话工作目录可选/03-tasks.md",
+      "role": "tasks",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627132014-飞书临时会话工作目录可选/04-review.md",
+      "role": "review",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627132014-飞书临时会话工作目录可选/05-summary.md",
+      "role": "summary",
+      "kind": "change_doc",
+      "source": "archive",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627132014-飞书临时会话工作目录可选/06-automation-test.md",
+      "role": "automation_test",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "electron/session-dispatcher.ts",
+      "role": "implementation",
+      "kind": "code",
+      "source": "apply",
+      "status": "changed"
+    },
+    {
+      "path": "src/daemon.ts",
+      "role": "implementation",
+      "kind": "code",
+      "source": "apply",
+      "status": "changed"
+    },
+    {
+      "path": "electron/daemon-manager.ts",
+      "role": "implementation",
+      "kind": "code",
+      "source": "apply",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/业务域/Agent调度/02-多会话模型.md",
+      "role": "knowledge",
+      "kind": "knowledge",
+      "source": "archive",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/业务域/Agent调度/04-远程指令.md",
+      "role": "knowledge",
+      "kind": "knowledge",
+      "source": "archive",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/业务域/Agent调度/01-概览.md",
+      "role": "knowledge",
+      "kind": "knowledge",
+      "source": "archive",
+      "status": "changed"
+    },
+    {
+      "path": "package.json",
+      "role": "config",
+      "kind": "config",
+      "source": "archive",
+      "status": "changed"
+    },
+    {
+      "path": "changelog/1.4.2.json",
+      "role": "changelog",
+      "kind": "config",
+      "source": "archive",
+      "status": "changed"
+    }
+  ],
+  "updated_at": "2026-06-27T16:37:34+0800"
+}

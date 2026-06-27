@@ -317,7 +317,8 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
   let workDir: string
   if (p.workingDirectory) {
     workDir = p.workingDirectory
-    if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true })
+    // temp 指定目录须已存在（T1/T3 校验）；workflow 节点目录仍可自动创建
+    if (chatType !== "temp" && !fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true })
   } else if (useMain || isOwnTask) {
     workDir = effectiveWorkspaceDir(channel)
   } else {
@@ -375,11 +376,13 @@ export async function launchSessionAgent(
 export async function launchIndependentAgent(
   taskId: string, taskName: string, message: string, type: ChatType = "task",
   chatId?: string, channelId?: string, model?: string, modelParams?: string,
+  workingDirectory?: string,
 ): Promise<{ ok: boolean; error?: string }> {
   return launchAgent({
     sessionKey: taskId, chatType: type, chatName: taskName, taskMessage: message,
     meta: { chatId: chatId ?? taskName, chatType: type },
     channelId, modelOverride: model, modelParamsOverride: modelParams,
+    workingDirectory,
   })
 }
 
@@ -424,6 +427,64 @@ export function getSessionAgentList() {
   })
 }
 
+// ── /chat new 参数解析与目录校验 ────────────────────────────
+
+const CHAT_NEW_DIR_FLAG = "-dir"
+
+const CHAT_NEW_USAGE =
+  "💡 用法：/chat new <任务描述> [-dir <工作目录路径>]\n" +
+  "例如：/chat new 帮我检查一下服务器状态\n" +
+  "例如：/chat new -dir /path/to/project 帮我检查一下服务器状态"
+
+function parseChatNewArgs(tokens: string[]):
+  | { ok: true; taskMsg: string; workingDirectory?: string }
+  | { ok: false; error: string } {
+  const dirIdx = tokens.findIndex((t) => t.toLowerCase() === CHAT_NEW_DIR_FLAG)
+  if (dirIdx === -1) {
+    const taskMsg = tokens.join(" ").trim()
+    if (!taskMsg) return { ok: false, error: CHAT_NEW_USAGE }
+    return { ok: true, taskMsg }
+  }
+  const before = tokens.slice(0, dirIdx)
+  const after = tokens.slice(dirIdx + 1)
+  if (after.length === 0) return { ok: false, error: "❌ -dir 缺少路径" }
+  let taskMsg: string
+  let workingDirectory: string
+  if (before.length > 0) {
+    taskMsg = before.join(" ").trim()
+    workingDirectory = after.join(" ").trim()
+  } else {
+    workingDirectory = after[0].trim()
+    taskMsg = after.slice(1).join(" ").trim()
+  }
+  if (!workingDirectory) return { ok: false, error: "❌ -dir 缺少路径" }
+  if (!taskMsg) return { ok: false, error: CHAT_NEW_USAGE }
+  return { ok: true, taskMsg, workingDirectory }
+}
+
+function validateWorkspacePath(dir: string):
+  | { ok: true; resolved: string }
+  | { ok: false; error: string } {
+  const trimmed = dir.trim()
+  if (!trimmed) {
+    return { ok: false, error: "工作目录未配置，请先在设置中配置主工作目录" }
+  }
+  const resolved = path.resolve(trimmed)
+  if (!fs.existsSync(resolved)) {
+    return { ok: false, error: "目录不存在，请检查路径或省略 -dir 使用当前主会话目录" }
+  }
+  try {
+    const stat = fs.statSync(resolved)
+    if (!stat.isDirectory()) {
+      return { ok: false, error: "指定路径不是目录，请改为有效的文件夹路径" }
+    }
+    fs.accessSync(resolved, fs.constants.R_OK)
+  } catch {
+    return { ok: false, error: "无法访问该目录，请检查权限或改用其他路径" }
+  }
+  return { ok: true, resolved }
+}
+
 // ── /chat 命令处理 ────────────────────────────────────────
 
 export async function handleChatCommand(tokens: string[], port: number, messageId: string, chatId?: string): Promise<void> {
@@ -450,10 +511,19 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
   }
 
   if (sub === "new") {
-    const taskMsg = tokens.slice(2).join(" ").trim()
-    if (!taskMsg) { await reply(false, "💡 用法：/chat new <任务描述>\n例如：/chat new 帮我检查一下服务器状态"); return }
+    const parsed = parseChatNewArgs(tokens.slice(2))
+    if (!parsed.ok) { await reply(false, parsed.error); return }
+
+    const channel = chatId ? getChannel(parseChatKey(chatId).channelId) : undefined
+    const dirToValidate = parsed.workingDirectory ?? effectiveWorkspaceDir(channel)
+    const dirCheck = validateWorkspacePath(dirToValidate)
+    if (!dirCheck.ok) { await reply(false, dirCheck.error); return }
+
     const taskId = `temp_${Date.now()}`
-    const result = await launchIndependentAgent(taskId, "临时会话", taskMsg, "temp", chatId)
+    const result = await launchIndependentAgent(
+      taskId, "临时会话", parsed.taskMsg, "temp", chatId,
+      undefined, undefined, undefined, dirCheck.resolved,
+    )
     if (result.ok && chatId) {
       const currentActive = await getCurrentActiveSession(port, chatId)
       if (currentActive && currentActive !== taskId) previousActiveSessionMap.set(taskId, currentActive)
@@ -461,11 +531,13 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
     }
     if (result.ok) {
       const newSession = getSessionAgentList().find((s) => s.sessionKey === taskId)
+      const workspaceDisplay = newSession?.workspaceDir ?? dirCheck.resolved
       const lines = [
         `🚀 新会话已创建:`,
+        `  任务: ${parsed.taskMsg}`,
         `  SessionKey: ${taskId}`,
         `  类型: 临时`,
-        `  工作目录: ${newSession?.workspaceDir ? path.basename(newSession.workspaceDir) : "-"}`,
+        `  工作目录: ${workspaceDisplay}`,
         `  PID: ${newSession?.pid || "-"}`,
         `  启动时间: ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`,
         `\n🔀 已切换到此会话，临时会话结束后将自动回退`,
@@ -518,7 +590,7 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
     return
   }
 
-  await reply(false, "💡 /chat 用法:\n  /chat ls — 列出所有活跃会话\n  /chat <序号> — 切换到指定会话\n  /chat stop <序号> — 停止指定会话\n  /chat new <描述> — 创建新临时会话")
+  await reply(false, "💡 /chat 用法:\n  /chat ls — 列出所有活跃会话\n  /chat <序号> — 切换到指定会话\n  /chat stop <序号> — 停止指定会话\n  /chat new <描述> [-dir <路径>] — 创建新临时会话（省略 -dir 则使用当前主会话目录）")
 }
 
 // ── 僵尸 Agent 检测 ──────────────────────────────────────
