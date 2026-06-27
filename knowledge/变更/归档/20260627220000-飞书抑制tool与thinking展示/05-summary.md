@@ -3,7 +3,7 @@
 > **变更 ID**：`20260627220000-飞书抑制tool与thinking展示`
 > **来源**：kb-lite
 > **lite 类型**：知识同步型
-> **阶段**：`tested`（LITE-01/02 done；E1–E6 飞书/微信 E2E 待人工，archive 门禁）
+> **阶段**：`archived`（v1.6.2；LITE-01/02 done；E1–E6 飞书/微信 E2E 待后续人工）
 
 ---
 
@@ -54,6 +54,8 @@
 
 ---
 
-## Archive 待办（用户可见变更）
+## 归档结果
 
-archive 时须 **patch** bump 版本并新建 changelog，说明「飞书不再展示 tool/thinking 过程卡，取代 v1.6.1 群聊 shell 策略」；E1–E5 至少一次飞书联调 + E6 微信 smoke 为归档门禁。
+- **版本**：`1.6.2`（patch bump）
+- **changelog**：`changelog/1.6.2.json` — 飞书全通道抑制 tool/thinking 过程卡、SDK UI 日志保留、取代 v1.6.1 群聊 shell 策略
+- **E2E**：E1–E6 飞书/微信联调仍待后续人工，不阻塞 lite archive
