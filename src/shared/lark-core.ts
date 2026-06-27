@@ -114,6 +114,11 @@ export class LarkSender {
   }
 
   private formatForSend(text: string, title?: string): { content: string; msgType: string } {
+    return this.formatStreamForSend(text, title, false);
+  }
+
+  /** 流式 outbound：interactive 卡片含 update_multi 以支持 PATCH；text 类型走 update 接口 */
+  private formatStreamForSend(text: string, title?: string, stream = true): { content: string; msgType: string } {
     const fullText = `${this.messagePrefix}${text}`;
     if (LarkSender.containsAtTag(fullText)) {
       return { content: JSON.stringify({ text: fullText }), msgType: "text" };
@@ -121,13 +126,60 @@ export class LarkSender {
     const escaped = fullText.replace(/\\/g, "\\\\");
     const card: any = {
       schema: "2.0",
-      config: { wide_screen_mode: true },
+      config: { wide_screen_mode: true, ...(stream ? { update_multi: true } : {}) },
       body: { elements: [{ tag: "markdown", content: escaped }] },
     };
     if (title) {
       card.header = { title: { tag: "plain_text", content: title }, template: "turquoise" };
     }
     return { content: JSON.stringify(card), msgType: "interactive" };
+  }
+
+  /** 流式首包：发送可 PATCH 的 interactive 卡片（PATCH 不可行时由 daemon 分段 sendMessage 降级） */
+  async sendStreamMessage(text: string, chatId?: string, title?: string): Promise<string | undefined> {
+    const targetChatId = chatId ?? this.chatId;
+    if (!targetChatId) { this.log("WARN", "无发送目标"); return undefined; }
+    try {
+      const { content, msgType } = this.formatStreamForSend(text, title, true);
+      const res = await this.client.im.message.create({
+        params: { receive_id_type: "chat_id" as any },
+        data: { receive_id: targetChatId, content, msg_type: msgType },
+      });
+      if ((res as any).code === 0 || (res as any).code === undefined) this.log("INFO", `飞书流式首包已发送(${text.length}字)`);
+      else this.log("ERROR", `飞书流式首包失败: code=${(res as any).code}, msg=${(res as any).msg}`);
+      return (res as any)?.data?.message_id;
+    } catch (e: any) { this.log("ERROR", `飞书流式首包异常: ${e?.message ?? e}`); return undefined; }
+  }
+
+  /**
+   * PATCH 更新已发送消息 content；interactive 走 im.message.patch，text 走 im.message.update。
+   * 返回 false 时 daemon 应降级为段落分段 sendMessage（F4.3）。
+   */
+  async updateMessageContent(messageId: string, text: string, title?: string): Promise<boolean> {
+    try {
+      const fullText = `${this.messagePrefix}${text}`;
+      if (LarkSender.containsAtTag(fullText)) {
+        const res = await (this.client.im.message as any).update({
+          path: { message_id: messageId },
+          data: { msg_type: "text", content: JSON.stringify({ text: fullText }) },
+        });
+        if ((res as any).code === 0 || (res as any).code === undefined) return true;
+        this.log("WARN", `飞书 text update 失败: code=${(res as any).code}, msg=${(res as any).msg}`);
+        return false;
+      }
+      const { content, msgType } = this.formatStreamForSend(text, title, true);
+      if (msgType !== "interactive") return false;
+      const res = await (this.client.im.message as any).patch({
+        path: { message_id: messageId },
+        data: { content },
+      });
+      if ((res as any).code === 0 || (res as any).code === undefined) return true;
+      this.log("WARN", `飞书 PATCH 失败: code=${(res as any).code}, msg=${(res as any).msg}`);
+      return false;
+    } catch (e: any) {
+      this.log("WARN", `飞书消息更新失败 (${messageId}): ${e?.message ?? e}`);
+      return false;
+    }
   }
 
   async replyMessage(messageId: string, text: string, title?: string): Promise<string | undefined> {

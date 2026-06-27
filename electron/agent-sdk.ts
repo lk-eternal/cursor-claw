@@ -2,6 +2,9 @@ import { Agent, type SDKAgent, type Run, type SDKMessage } from "@cursor/sdk"
 import { resolve, join, dirname } from "node:path"
 import { existsSync } from "node:fs"
 import { createRequire } from "node:module"
+import { readLockFile, httpPost } from "./daemon-client"
+import { getChannel } from "./config-store"
+import { parseChatKey } from "../src/shared/channel-types"
 import { pushUiLog, broadcastLog, broadcastSessionStatus } from "./ui-logger"
 import { type ChatType, type LaunchMeta, buildPrompt, resolveSessionChatName } from "./agent-launcher"
 
@@ -19,6 +22,14 @@ interface SdkSessionAgent {
   abortController: AbortController
   /** 流式日志聚合缓冲：连续同类型(thinking/text)增量合并成一条打印 */
   logAgg: { kind: "thinking" | "text" | null; buf: string }
+  /** 主用户私聊 SDK 流式桥接（f41Eligible） */
+  f41Stream: boolean
+  streamBuffer: string
+  outboundMessageId?: string
+  streamId?: string
+  streamLastPostAt?: number
+  streamPostTimer?: ReturnType<typeof setTimeout>
+  errorNotified?: boolean
   /** 最近一次终态状态事件（ERROR/EXPIRED/CANCELLED），用于结束时还原真实错误原因 */
   lastStatus?: { status: string; message?: string }
 }
@@ -27,6 +38,131 @@ const sdkSessions = new Map<string, SdkSessionAgent>()
 const pendingLaunches = new Set<string>()
 const failedCooldowns = new Map<string, number>()
 const FAIL_COOLDOWN_MS = 30_000
+const NOTIFY_PROCESSING = "Agent 处理中…"
+const STREAM_POST_INTERVAL_MS = 400
+
+function extractChatId(sessionKey: string): string {
+  const idx = sessionKey.indexOf("::")
+  return idx > 0 ? sessionKey.slice(0, idx) : sessionKey
+}
+
+/** 主用户私聊 + SDK 资源 → 可走 /api/stream-text（resource.type 在 agent-sdk 内恒为 sdk） */
+function f41Eligible(sessionKey: string, chatType: ChatType): boolean {
+  if (chatType !== "p2p") return false
+  const chatId = extractChatId(sessionKey)
+  const { channelId, chatId: raw } = parseChatKey(chatId)
+  const channel = getChannel(channelId)
+  if (!channel?.mainUserEnabled || !channel.mainUserChatId?.trim()) return false
+  return raw === channel.mainUserChatId.trim()
+}
+
+function formatSdkStreamFailure(status?: string, message?: string): string {
+  const st = status?.toUpperCase()
+  if (st === "CANCELLED") return "Agent 任务已取消。"
+  if (st === "EXPIRED") return "Agent 会话已过期，请重新发送消息。"
+  const msg = message?.trim()
+  if (msg && !/[/\\]|\.ts:|at |stack|Error:|ENOENT|spawn|EACCES|EPERM/i.test(msg)) {
+    return `⚠️ Agent 处理失败：${msg}`
+  }
+  return "⚠️ Agent 处理失败，请稍后重试。"
+}
+
+async function notifySdkFailure(session: SdkSessionAgent, override?: string): Promise<void> {
+  if (session.errorNotified || session.abortController.signal.aborted) return
+  session.errorNotified = true
+  const last = session.lastStatus
+  const text = override ?? formatSdkStreamFailure(last?.status, last?.message)
+  await notifySessionChat(session.sessionKey, text, true)
+}
+
+interface StreamTextPayload {
+  session_key: string
+  text: string
+  stream_id?: string
+  outbound_message_id?: string
+  final?: boolean
+}
+
+async function postStreamText(session: SdkSessionAgent, payload: StreamTextPayload): Promise<void> {
+  const lock = readLockFile()
+  if (!lock?.port) return
+  try {
+    const res = (await httpPost(`http://127.0.0.1:${lock.port}/api/stream-text`, payload, 5000)) as {
+      ok?: boolean
+      stream_id?: string
+      outbound_message_id?: string
+      error?: string
+    }
+    if (res?.stream_id) session.streamId = res.stream_id
+    if (res?.outbound_message_id) session.outboundMessageId = res.outbound_message_id
+    if (res?.ok === false && res.error) {
+      pushUiLog("SDK", "WARN", `[${session.sessionKey}] stream-text 拒绝: ${res.error}`)
+    }
+  } catch (e: unknown) {
+    pushUiLog("SDK", "WARN", `[${session.sessionKey}] stream-text 推送失败: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
+function clearStreamPostTimer(session: SdkSessionAgent): void {
+  if (session.streamPostTimer) {
+    clearTimeout(session.streamPostTimer)
+    session.streamPostTimer = undefined
+  }
+}
+
+async function flushStreamPost(session: SdkSessionAgent, final: boolean): Promise<void> {
+  clearStreamPostTimer(session)
+  if (!session.f41Stream) return
+  const text = session.streamBuffer
+  if (!text.trim() && !final) return
+
+  const payload: StreamTextPayload = {
+    session_key: session.sessionKey,
+    text,
+  }
+  if (session.streamId) payload.stream_id = session.streamId
+  if (session.outboundMessageId) payload.outbound_message_id = session.outboundMessageId
+  if (final) payload.final = true
+
+  await postStreamText(session, payload)
+  session.streamLastPostAt = Date.now()
+}
+
+function scheduleStreamPost(session: SdkSessionAgent, final: boolean): void {
+  if (!session.f41Stream) return
+  if (final) {
+    void flushStreamPost(session, true)
+    return
+  }
+  const now = Date.now()
+  const elapsed = session.streamLastPostAt != null ? now - session.streamLastPostAt : STREAM_POST_INTERVAL_MS
+  if (elapsed >= STREAM_POST_INTERVAL_MS) {
+    void flushStreamPost(session, false)
+    return
+  }
+  if (session.streamPostTimer) return
+  session.streamPostTimer = setTimeout(() => {
+    session.streamPostTimer = undefined
+    void flushStreamPost(session, false)
+  }, STREAM_POST_INTERVAL_MS - elapsed)
+}
+
+function appendStreamDelta(session: SdkSessionAgent, delta: string): void {
+  session.streamBuffer += delta
+  scheduleStreamPost(session, false)
+}
+
+async function notifySessionChat(sessionKey: string, text: string, stopProgress = false): Promise<void> {
+  const lock = readLockFile()
+  if (!lock?.port) return
+  try {
+    await httpPost(`http://127.0.0.1:${lock.port}/api/send-text`, {
+      text, session_key: sessionKey, ...(stopProgress && { stop_progress: true }),
+    }, 5000)
+  } catch (e: unknown) {
+    broadcastLog(`[SDK Notify] 发送通知失败 (${sessionKey}): ${e instanceof Error ? e.message : String(e)}`, "WARN")
+  }
+}
 
 function ensureSdkBinaryPaths(): void {
   if (process.env.CURSOR_RIPGREP_PATH) return
@@ -112,6 +248,9 @@ async function streamRunEvents(session: SdkSessionAgent, run: Run): Promise<void
       handleSdkEvent(session, event)
     }
     flushSdkLog(session)
+    if (session.f41Stream && (session.streamBuffer.trim() || session.outboundMessageId)) {
+      await flushStreamPost(session, true)
+    }
   } catch (e: unknown) {
     flushSdkLog(session)
     if (!session.abortController.signal.aborted) {
@@ -119,6 +258,7 @@ async function streamRunEvents(session: SdkSessionAgent, run: Run): Promise<void
       const stack = e instanceof Error ? e.stack?.split("\n").slice(0, 3).join(" | ") : ""
       const cause = e instanceof Error && "cause" in e && e.cause ? JSON.stringify(e.cause) : ""
       pushUiLog("SDK", "ERROR", `[${session.sessionKey}] 流处理异常: ${msg}${stack ? ` stack=${stack}` : ""}${cause ? ` cause=${cause}` : ""}`)
+      await notifySdkFailure(session)
     }
   }
 }
@@ -127,7 +267,13 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
   switch (event.type) {
     case "assistant":
       for (const block of event.message.content) {
-        if (block.type === "text" && block.text) appendSdkLog(session, "text", block.text)
+        if (block.type === "text" && block.text) {
+          if (session.f41Stream) {
+            appendStreamDelta(session, block.text)
+          } else {
+            appendSdkLog(session, "text", block.text)
+          }
+        }
       }
       break
     case "thinking":
@@ -142,6 +288,9 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
       const isErr = event.status === "ERROR" || event.status === "EXPIRED"
       if (isErr || event.status === "CANCELLED") {
         session.lastStatus = { status: event.status, message: event.message }
+        if (!session.abortController.signal.aborted) {
+          void notifySdkFailure(session)
+        }
       }
       const lvl = isErr ? "ERROR" as const : "INFO" as const
       pushUiLog("SDK", lvl, `[${session.sessionKey}] [status] ${event.status}${event.message ? ` - ${event.message}` : ""}`)
@@ -256,6 +405,8 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       chatName,
       abortController,
       logAgg: { kind: null, buf: "" },
+      f41Stream: f41Eligible(sessionKey, chatType),
+      streamBuffer: "",
     }
 
     sdkSessions.set(sessionKey, session)
@@ -266,6 +417,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     const run = await agent.send(prompt)
     session.run = run
 
+    await notifySessionChat(sessionKey, NOTIFY_PROCESSING)
     streamRunEvents(session, run).then(async () => {
       const level = run.status === "error" ? "ERROR" : "INFO"
 
@@ -277,6 +429,9 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
         const lastStr = last ? `lastStatus=${last.status}${last.message ? ` msg=${last.message}` : ""} ` : ""
         pushUiLog("SDK", "ERROR", `[${sessionKey}] 运行错误详情: ${lastStr}waitResult=${detail}`)
         failedCooldowns.set(sessionKey, Date.now() + FAIL_COOLDOWN_MS)
+        if (!session.errorNotified) {
+          await notifySdkFailure(session)
+        }
       }
 
       const summary = [
@@ -284,6 +439,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
         run.durationMs != null && `duration=${run.durationMs}ms`,
       ].filter(Boolean).join(", ")
       pushUiLog("SDK", level, `[${sessionKey}] Agent 运行结束 (status=${run.status}${summary ? `, ${summary}` : ""})`)
+      clearStreamPostTimer(session)
       try { session.agent.close() } catch { /* best-effort */ }
       sdkSessions.delete(sessionKey)
       broadcastSdkSessionStatus()
@@ -307,6 +463,7 @@ export function stopSdkSession(sessionKey: string): void {
   const s = sdkSessions.get(sessionKey)
   if (!s) return
   s.abortController.abort()
+  clearStreamPostTimer(s)
   if (s.run) {
     s.run.cancel().catch(() => {})
   }

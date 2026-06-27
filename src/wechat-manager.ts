@@ -24,6 +24,11 @@ export interface WeChatManagerOptions {
 
 export type WeChatStatus = "disconnected" | "qr_pending" | "logging_in" | "connected" | "error";
 
+export interface WeChatSendOptions {
+  /** 默认 true：不绑定 typing 生命周期，由 daemon 进度状态机驱动 */
+  skipTyping?: boolean;
+}
+
 export class WeChatManager extends EventEmitter {
   private client: WeChatClient | null = null;
   private status: WeChatStatus = "disconnected";
@@ -148,16 +153,17 @@ export class WeChatManager extends EventEmitter {
     this.opts.log("INFO", "[WeChat] 已停止");
   }
 
-  async sendText(toUserName: string, text: string): Promise<boolean> {
+  async sendText(toUserName: string, text: string, opts?: WeChatSendOptions): Promise<boolean> {
     if (!this.client || this.status !== "connected") {
       this.opts.log("WARN", "[WeChat] 发送失败: 未连接");
       return false;
     }
+    const skipTyping = opts?.skipTyping !== false;
     try {
       const normalized = text.replace(/\r\n/g, "\n").replace(/\n/g, "\r\n");
-      await this.ensureTyping(toUserName);
+      if (!skipTyping) await this.ensureTyping(toUserName);
       await this.client.sendText(toUserName, normalized);
-      await this.cancelTyping(toUserName);
+      if (!skipTyping) await this.cancelTyping(toUserName);
       return true;
     } catch (err: any) {
       this.opts.log("ERROR", `[WeChat] 发送文本失败: ${err?.message ?? err}`);
@@ -165,15 +171,16 @@ export class WeChatManager extends EventEmitter {
     }
   }
 
-  async sendMedia(toUserName: string, filePath: string): Promise<boolean> {
+  async sendMedia(toUserName: string, filePath: string, opts?: WeChatSendOptions): Promise<boolean> {
     if (!this.client || this.status !== "connected") {
       this.opts.log("WARN", "[WeChat] 发送媒体失败: 未连接");
       return false;
     }
+    const skipTyping = opts?.skipTyping !== false;
     try {
-      await this.ensureTyping(toUserName);
+      if (!skipTyping) await this.ensureTyping(toUserName);
       await this.client.sendMedia(toUserName, filePath);
-      await this.cancelTyping(toUserName);
+      if (!skipTyping) await this.cancelTyping(toUserName);
       return true;
     } catch (err: any) {
       this.opts.log("ERROR", `[WeChat] 发送媒体失败: ${err?.message ?? err}`);
@@ -181,11 +188,29 @@ export class WeChatManager extends EventEmitter {
     }
   }
 
+  /** 开启会话级进行中指示（由 daemon 进度状态机调用） */
+  async startProgressTyping(userId: string): Promise<void> {
+    if (!this.client || this.status !== "connected") {
+      this.opts.log("WARN", "[WeChat] startProgressTyping: 未连接");
+      return;
+    }
+    await this.startTypingForUser(userId);
+  }
+
+  /** 停止进行中指示并清理 ticket（由 daemon 进度状态机调用） */
+  async stopProgressTyping(userId: string): Promise<void> {
+    if (!this.client || this.status !== "connected") {
+      this.opts.log("WARN", "[WeChat] stopProgressTyping: 未连接");
+      return;
+    }
+    await this.cancelTyping(userId);
+  }
+
   /** 确保发送前有 typing 状态：有缓存 ticket 直接用，没有则重新获取并 typing */
   private async ensureTyping(userId: string): Promise<void> {
     if (!this.client) return;
     const cached = this.typingTickets.get(userId);
-    if (cached) return; // 收到消息时已经 typing 过了
+    if (cached) return; // 已有 ticket 则跳过重复获取
     try {
       const ticket = await this.client.getTypingTicket(userId);
       if (ticket) {
@@ -210,7 +235,7 @@ export class WeChatManager extends EventEmitter {
     }
   }
 
-  /** 收到消息时立即获取 ticket 并开始 typing */
+  /** 获取 ticket 并发送 typing 状态 */
   private async startTypingForUser(userId: string): Promise<void> {
     if (!this.client) return;
     try {
@@ -264,7 +289,6 @@ export class WeChatManager extends EventEmitter {
       };
 
       this.opts.log("INFO", `[WeChat] 收到消息 [${incoming.chatType}] chat=${chatId}: ${content.slice(0, 100)}`);
-      this.startTypingForUser(chatId).catch(() => {});
       this.opts.onMessage(incoming);
     }).catch((err) => {
       this.opts.log("ERROR", `[WeChat] 处理消息内容失败: ${err?.message ?? err}`);

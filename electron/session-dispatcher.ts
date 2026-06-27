@@ -37,12 +37,27 @@ function cachedLock() {
 
 // ── 生命周期通知 ──────────────────────────────────────────
 
-async function notifyChat(sessionKey: string, text: string): Promise<void> {
+const NOTIFY_STARTING = "正在启动"
+const NOTIFY_PROCESSING = "Agent 处理中…"
+
+function formatAgentLaunchFailure(error?: string): string {
+  if (!error?.trim()) return "Agent 启动失败，请稍后重试。"
+  const e = error.trim()
+  if (e.includes("冷却中") || e.includes("未启用其他人") || e.includes("未配置 API Key")) return e
+  if (e.includes("Cursor CLI")) return "Agent 运行环境未就绪，请检查 Cursor CLI 是否已安装。"
+  if (e.includes("工作目录")) return "Agent 工作目录未配置，请检查后重试。"
+  if (/[/\\]|\.ts:|at |stack|Error:|ENOENT|spawn|EACCES|EPERM/i.test(e)) return "Agent 启动失败，请稍后重试。"
+  return `Agent 启动失败：${e}`
+}
+
+async function notifyChat(sessionKey: string, text: string, stopProgress = false): Promise<void> {
   const lock = cachedLock()
   if (!lock?.port) return
   const chatId = extractChatId(sessionKey)
   try {
-    await httpPost(`http://127.0.0.1:${lock.port}/api/send-text`, { text, session_key: sessionKey }, 5000)
+    await httpPost(`http://127.0.0.1:${lock.port}/api/send-text`, {
+      text, session_key: sessionKey, ...(stopProgress && { stop_progress: true }),
+    }, 5000)
   } catch (e: unknown) {
     broadcastLog(`[Notify] 发送通知失败 (${chatId}): ${e instanceof Error ? e.message : String(e)}`, "WARN")
   }
@@ -113,7 +128,7 @@ export async function handleSessionClosed(sessionKey: string, chatType: ChatType
         const drained = await drainSessionMessages(lock.port, sessionKey)
         broadcastLog(`[System] Agent 连续异常退出(exit=${exitInfo.exitCode})，已放弃该会话 ${drained} 条消息`, "WARN")
         if (!mainChat && drained > 0) {
-          await notifyChat(sessionKey, `⚠️ Agent 连续异常退出 (exit=${exitInfo.exitCode})，已放弃 ${drained} 条排队消息，请重新发送。`)
+          await notifyChat(sessionKey, `⚠️ Agent 连续异常退出 (exit=${exitInfo.exitCode})，已放弃 ${drained} 条排队消息，请重新发送。`, true)
         }
       } else {
         // 首次崩溃：保留队列消息，调度器轮询会自动重启 Agent 继续处理
@@ -125,12 +140,12 @@ export async function handleSessionClosed(sessionKey: string, chatType: ChatType
       const errMsg = stderrContent
         ? `⚠️ Agent 异常退出 (exit=${exitInfo.exitCode})。\n错误信息：\n${stderrContent}`
         : `⚠️ Agent 异常退出 (exit=${exitInfo.exitCode})。请检查配置后重试。`
-      await notifyChat(sessionKey, errMsg)
+      await notifyChat(sessionKey, errMsg, true)
     }
   } else if (mainChat) {
     const output = exitInfo?.stderr?.trim() || exitInfo?.stdout?.trim() || ""
     const exitMsg = output ? `Agent已退出\n退出前输出：\n${output}` : "Agent已退出"
-    await notifyChat(sessionKey, exitMsg)
+    await notifyChat(sessionKey, exitMsg, true)
   }
 
   const previous = previousActiveSessionMap.get(sessionKey)
@@ -338,13 +353,15 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
   }
 
   const needResume = chatType === "p2p" || chatType === "group"
-  return _launchCliAgent({
+  const result = await _launchCliAgent({
     sessionKey, chatType, meta, useMainWorkspace: useMain,
     senderOpenId, chatName, taskMessage,
     workspaceDir: workDir, model,
     resumeScope: needResume && channel ? mainChatScopeKey(channel.id, workDir) : undefined,
     newSession: channel?.mainUserNewSession ?? false,
   })
+  if (result.ok) await notifyChat(sessionKey, NOTIFY_PROCESSING)
+  return result
 }
 
 export async function launchSessionAgent(
@@ -575,7 +592,7 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
       ? `群聊 ${chatName ? `「${chatName}」` : chatId}`
       : (mainUser ? `主用户私聊${userName ? ` (${userName})` : ""}` : `私聊 ${userName || chatId}`)
     broadcastLog(`[Agent] ${label} 有新消息，自动拉起${mainUser ? "(主工作目录)" : ""}`)
-    await notifyChat(sessionKey, "正在启动Agent，请稍等...")
+    await notifyChat(sessionKey, NOTIFY_STARTING)
 
     const meta: import("./agent-launcher").LaunchMeta = { chatId, chatType: chatType as "p2p" | "group" }
     const result = await launchSessionAgent(sessionKey, chatType as "p2p" | "group", meta, mainUser, senderOpenId)
@@ -585,7 +602,7 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
     }
     if (!result.ok) {
       broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${result.error}`)
-      await notifyChat(sessionKey, `启动Agent失败: ${result.error ?? "未知错误"}`)
+      await notifyChat(sessionKey, formatAgentLaunchFailure(result.error), true)
       const lock = cachedLock()
       if (lock?.port) {
         const drained = await drainSessionMessages(lock.port, sessionKey)

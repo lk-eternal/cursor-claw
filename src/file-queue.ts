@@ -170,6 +170,17 @@ function hasPendingMessages(dir: string): boolean {
   }
 }
 
+/** 指定会话待处理（待领取 + 已领取待 ack）消息条数；目录不存在或未初始化时返回 0 */
+export function getSessionPendingCount(sessionKey: string): number {
+  if (!queueDir || !sessionKey) return 0;
+  const dir = path.join(queueDir, sanitizeSessionDir(sessionKey));
+  try {
+    return fs.readdirSync(dir).filter((f) => f.endsWith(".qmsg") || f.endsWith(".claimed")).length;
+  } catch {
+    return 0;
+  }
+}
+
 /**
  * 领取该会话所有未确认消息（不删除）：
  * 1. 把所有 .qmsg 改名为 .claimed（标记"已投递、待回复确认"）；

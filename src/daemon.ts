@@ -2,6 +2,7 @@ import * as http from "node:http";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import {
   startDaemonScheduledTasks,
@@ -24,6 +25,7 @@ import {
   deleteQueueMessage as deleteFileQueueMessage,
   getDistinctSessions,
   cleanupStaleMessages,
+  getSessionPendingCount,
   type QueueMessage,
   type QueueMessageMeta,
 } from "./file-queue.js";
@@ -285,6 +287,258 @@ const sessionToChatMap = new Map<string, string>();
 const MSG_SESSION_MAP_MAX = 5000;
 const sessionLastReplyAt = new Map<string, number>();
 
+// ── 会话进行中指示（入队确认后至任务完成，供 T8 停止）──
+interface SessionProgressState {
+  typingActive: boolean;
+  outboundMessageId?: string;
+  streamId?: string;
+  /** 流式：最近一次已推送的全文 */
+  streamLastText?: string;
+  /** 流式：上次推送时间（节流） */
+  streamLastPushAt?: number;
+  /** 流式：飞书 PATCH 是否仍可用；false 后走分段降级 */
+  streamPatchMode?: boolean;
+  /** 流式：fallback 模式下已分段发送的字符数 */
+  streamSentLength?: number;
+  /** 已对 inbound 消息打过 Get 的 id（poll 去重，独立于 typing 生命周期） */
+  getReactedMessageIds?: Set<string>;
+}
+
+/** 流式更新节流间隔（ms），默认 1000，可配置范围 500–1500（NF6） */
+function streamTextThrottleMs(): number {
+  const raw = Number(process.env.STREAM_TEXT_THROTTLE_MS);
+  const ms = Number.isFinite(raw) && raw > 0 ? raw : 1000;
+  return Math.min(1500, Math.max(500, ms));
+}
+
+/** F4.1/F4.4：仅主用户私聊 eligible；群聊与非主用户拒绝 */
+function isStreamTextEligible(sessionKey: string): boolean {
+  const rawKey = resolveRawChatId(sessionKey);
+  if (!rawKey) return false;
+  if (isWechatChatId(rawKey) && rawKey.includes("@chatroom")) return false;
+
+  const { channelId, chatId: raw } = parseChatKey(rawKey);
+  let rt: ChannelRuntime | undefined;
+  if (channelId) {
+    rt = channels.get(channelId);
+  } else {
+    for (const c of channels.values()) {
+      if (isWechatChatId(rawKey) && c.cfg.type === "wechat") { rt = c; break; }
+      if (isFeishuChatId(rawKey) && c.cfg.type === "feishu") { rt = c; break; }
+    }
+  }
+  if (!rt?.cfg.mainUserEnabled || !rt.cfg.mainUserChatId?.trim()) return false;
+  const mainRaw = rt.cfg.mainUserChatId.trim();
+  return (raw || rawKey) === mainRaw;
+}
+
+async function sendStreamSegments(
+  ch: { type: "wechat"; rt: ChannelRuntime; chatId: string } | { type: "feishu"; rt: ChannelRuntime; chatId?: string },
+  state: SessionProgressState,
+  text: string,
+  sessionKey: string,
+  title: string | undefined,
+  final: boolean,
+): Promise<void> {
+  const sentLen = state.streamSentLength ?? 0;
+  if (text.length <= sentLen && !final) return;
+
+  let delta = text.slice(sentLen);
+  if (!final && delta.length > 0) {
+    const lastParaBreak = delta.lastIndexOf("\n\n");
+    if (lastParaBreak > 0) {
+      delta = delta.slice(0, lastParaBreak);
+    } else if (lastParaBreak === -1 && !text.endsWith("\n\n")) {
+      return;
+    }
+  }
+  if (!delta.trim()) {
+    if (final && sentLen < text.length) delta = text.slice(sentLen);
+    else return;
+  }
+
+  if (ch.type === "wechat") {
+    await ch.rt.wechat!.sendText(ch.chatId, delta, { skipTyping: true });
+  } else {
+    const segId = await ch.rt.sender!.sendMessage(delta, undefined, ch.chatId, title);
+    if (segId) trackMessageSession(segId, sessionKey);
+  }
+  state.streamSentLength = sentLen + delta.length;
+  state.streamLastPushAt = Date.now();
+  state.streamLastText = text.slice(0, state.streamSentLength);
+}
+
+async function handleStreamText(body: {
+  session_key?: string;
+  text?: string;
+  stream_id?: string;
+  outbound_message_id?: string;
+  message_id?: string;
+  final?: boolean;
+}): Promise<{ ok: boolean; stream_id?: string; outbound_message_id?: string; error?: string }> {
+  const { session_key, text, stream_id, outbound_message_id, message_id, final } = body;
+  if (!session_key || text === undefined || text === "") {
+    return { ok: false, error: "session_key and text are required" };
+  }
+  if (!isStreamTextEligible(session_key)) {
+    return { ok: false, error: "stream-text not supported for this session" };
+  }
+
+  const ch = resolveChannel(session_key);
+  if (ch.type === "error") return { ok: false, error: ch.message };
+
+  let state = sessionProgressMap.get(session_key);
+  if (!state) {
+    state = { typingActive: false };
+    sessionProgressMap.set(session_key, state);
+  }
+
+  if (stream_id && state.streamId && stream_id !== state.streamId) {
+    return { ok: false, error: "stream_id mismatch" };
+  }
+  const sid = stream_id ?? state.streamId ?? randomUUID();
+  state.streamId = sid;
+
+  const outIdHint = outbound_message_id ?? state.outboundMessageId;
+  const isFirst = !outIdHint;
+  const now = Date.now();
+  const throttle = streamTextThrottleMs();
+  const forceSend = !!final || isFirst;
+  if (!forceSend && state.streamLastPushAt != null && now - state.streamLastPushAt < throttle) {
+    return { ok: true, stream_id: sid, outbound_message_id: state.outboundMessageId };
+  }
+  if (!forceSend && state.streamLastText === text) {
+    return { ok: true, stream_id: sid, outbound_message_id: state.outboundMessageId };
+  }
+
+  const title = extractWorkspaceTitle(session_key);
+  let outId = outIdHint;
+
+  if (isFirst) {
+    if (ch.type === "wechat") {
+      const ok = await ch.rt.wechat!.sendText(ch.chatId, text, { skipTyping: true });
+      if (!ok) return { ok: false, error: "微信发送失败" };
+      outId = `wx_stream_${sid}`;
+      state.streamPatchMode = false;
+    } else {
+      outId = await ch.rt.sender!.sendStreamMessage(text, ch.chatId, title);
+      if (!outId) return { ok: false, error: "飞书发送失败" };
+      state.streamPatchMode = true;
+      trackMessageSession(outId, session_key);
+    }
+    state.outboundMessageId = outId;
+    state.streamLastText = text;
+    state.streamSentLength = text.length;
+    state.streamLastPushAt = now;
+  } else {
+    outId = outId ?? state.outboundMessageId;
+    if (!outId) return { ok: false, error: "missing outbound_message_id" };
+
+    if (ch.type === "feishu" && state.streamPatchMode !== false) {
+      const patched = await ch.rt.sender!.updateMessageContent(outId, text, title);
+      if (patched) {
+        state.streamLastText = text;
+        state.streamLastPushAt = now;
+        state.streamSentLength = text.length;
+      } else {
+        state.streamPatchMode = false;
+        log("INFO", `飞书 PATCH 不可用，降级分段发送: session=${session_key}`);
+        await sendStreamSegments(ch, state, text, session_key, title, !!final);
+      }
+    } else {
+      await sendStreamSegments(ch, state, text, session_key, title, !!final);
+    }
+  }
+
+  sessionLastReplyAt.set(session_key, Date.now());
+  if (final) {
+    if (message_id) {
+      ackOnReply(message_id, session_key);
+    } else {
+      stopSessionProgress(session_key);
+    }
+  }
+  return { ok: true, stream_id: sid, outbound_message_id: outId };
+}
+
+const sessionProgressMap = new Map<string, SessionProgressState>();
+/** 会话 Get 去重集合（stopSessionProgress 清 map 后仍保留，ack 后逐条清理） */
+const sessionGetReactedIds = new Map<string, Set<string>>();
+
+function getGetReactedIds(sessionKey: string): Set<string> {
+  let set = sessionGetReactedIds.get(sessionKey);
+  if (!set) {
+    set = new Set();
+    sessionGetReactedIds.set(sessionKey, set);
+  }
+  const state = sessionProgressMap.get(sessionKey);
+  if (state) state.getReactedMessageIds = set;
+  return set;
+}
+
+function recordGetReactions(sessionKey: string, messageIds: string[]): void {
+  const set = getGetReactedIds(sessionKey);
+  for (const id of messageIds) {
+    if (id) set.add(id);
+  }
+}
+
+function clearGetReactions(sessionKey: string, messageIds: string[]): void {
+  const set = sessionGetReactedIds.get(sessionKey);
+  if (!set) return;
+  for (const id of messageIds) set.delete(id);
+  if (set.size === 0) sessionGetReactedIds.delete(sessionKey);
+}
+
+function stopSessionProgress(sessionKey: string): void {
+  const state = sessionProgressMap.get(sessionKey);
+  if (!state) return;
+  if (state.typingActive) {
+    const ch = resolveChannel(sessionKey);
+    if (ch.type === "wechat") {
+      ch.rt.wechat!.stopProgressTyping(ch.chatId).catch((e: unknown) => {
+        log("WARN", `stopProgressTyping 失败: ${e instanceof Error ? e.message : e}`);
+      });
+    }
+  }
+  sessionProgressMap.delete(sessionKey);
+}
+
+async function confirmEnqueueAndStartProgress(
+  messageId: string,
+  sessionKey: string,
+  chatId?: string,
+): Promise<void> {
+  const pending = getSessionPendingCount(sessionKey);
+  let text = "已收到，正在处理";
+  if (pending > 1) {
+    text += `，前面还有 ${pending - 1} 条待处理`;
+  }
+  try {
+    await replyToMessage(messageId, text, chatId);
+  } catch (e: unknown) {
+    log("WARN", `入队确认发送失败: ${e instanceof Error ? e.message : e}`);
+  }
+
+  let state = sessionProgressMap.get(sessionKey);
+  if (!state) {
+    state = { typingActive: false };
+    sessionProgressMap.set(sessionKey, state);
+  }
+
+  const ch = resolveChannel(sessionKey);
+  if (ch.type === "wechat") {
+    state.typingActive = true;
+    ch.rt.wechat!.startProgressTyping(ch.chatId).catch((e: unknown) => {
+      log("WARN", `startProgressTyping 失败: ${e instanceof Error ? e.message : e}`);
+    });
+  } else if (ch.type === "feishu") {
+    state.typingActive = true;
+    addReactionToMessages([messageId], sessionKey, "Get");
+    recordGetReactions(sessionKey, [messageId]);
+  }
+}
+
 // ── 延迟 DONE 表情队列（等 Agent 下次 poll 时再打，标志任务真正完成）──
 const pendingDoneReactions = new Map<string, Map<string, number>>();
 const PENDING_DONE_TIMEOUT_MS = 10 * 60 * 1000;
@@ -436,6 +690,21 @@ function addReactionToMessages(messageIds: string[], sessionKey: string, emojiTy
   }
 }
 
+/** poll 投递 Get：按 messageId 去重，跳过入队确认或前次 poll 已打 Get 的 inbound（F5.3） */
+function idsNeedingPollGetReaction(freshIds: string[], sessionKey: string): string[] {
+  if (freshIds.length === 0) return freshIds;
+  const reacted = sessionGetReactedIds.get(sessionKey);
+  if (!reacted?.size) return freshIds;
+  return freshIds.filter((id) => !reacted.has(id));
+}
+
+function applyPollGetReactions(freshIds: string[], sessionKey: string): void {
+  const ids = idsNeedingPollGetReaction(freshIds, sessionKey);
+  if (ids.length === 0) return;
+  addReactionToMessages(ids, sessionKey, "Get");
+  recordGetReactions(sessionKey, ids);
+}
+
 /**
  * Agent 回复确认（ack）：删除该 message_id 及更早的未确认消息。
  * DONE 表情不在此处打 —— 而是延迟到 Agent 下次 poll-message 时才打，
@@ -449,6 +718,8 @@ function ackOnReply(messageId?: string, sessionKey?: string): void {
   if (sessionKey) {
     enqueuePendingDone(sessionKey, acked);
     broadcastQueueEvent(sessionKey);
+    clearGetReactions(sessionKey, acked);
+    stopSessionProgress(sessionKey);
   }
 }
 
@@ -513,6 +784,11 @@ function pushMessage(content: string, messageId?: string, chatId?: string, chatT
   if (written) {
     log("INFO", `消息已写入共享队列: ${JSON.stringify(content)} (id=${messageId ?? "none"}, chat=${chatId ?? "none"}${routedId !== chatId ? ` → routed=${routedId}` : ""}${replyMessageId ? `, reply=${replyMessageId}` : ""})`);
     broadcastQueueEvent(routedId);
+    if (messageId && !messageId.startsWith("internal_") && routedId) {
+      confirmEnqueueAndStartProgress(messageId, routedId, chatId).catch((e: unknown) => {
+        log("WARN", `入队确认/进度启动失败: ${e instanceof Error ? e.message : e}`);
+      });
+    }
   } else {
     log("INFO", `消息已跳过（重复或写入失败）: id=${messageId ?? "none"}`);
   }
@@ -1460,13 +1736,17 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
   // ── 消息发送 API ──
   if (method === "POST" && pathname === "/api/send-text") {
     const body = JSON.parse(await readBody(req));
-    const { text, message_id, session_key } = body as { text: string; message_id?: string; session_key?: string };
+    const { text, message_id, session_key, stop_progress } = body as {
+      text: string; message_id?: string; session_key?: string; stop_progress?: boolean;
+    };
     if (!text) { json(res, { ok: false, error: "text is required" }, 400); return true; }
 
     const ch = resolveChannel(session_key);
     if (ch.type === "error") { json(res, { ok: false, error: ch.message }, 400); return true; }
+    let sendOk = false;
     if (ch.type === "wechat") {
-      json(res, { ok: await ch.rt.wechat!.sendText(ch.chatId, text) });
+      sendOk = await ch.rt.wechat!.sendText(ch.chatId, text);
+      json(res, { ok: sendOk });
     } else {
       const sender = ch.rt.sender!;
       const title = extractWorkspaceTitle(session_key);
@@ -1481,10 +1761,32 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
         sentMsgId = await sender.sendMessage(text, undefined, ch.chatId, title);
       }
       if (sentMsgId && session_key) trackMessageSession(sentMsgId, session_key);
-      json(res, { ok: !!sentMsgId, message_id: sentMsgId });
+      sendOk = !!sentMsgId;
+      json(res, { ok: sendOk, message_id: sentMsgId });
     }
-    if (session_key) sessionLastReplyAt.set(session_key, Date.now());
-    ackOnReply(message_id, session_key);
+    if (sendOk) {
+      if (session_key) sessionLastReplyAt.set(session_key, Date.now());
+      ackOnReply(message_id, session_key);
+      if (stop_progress && session_key) stopSessionProgress(session_key);
+    }
+    return true;
+  }
+
+  if (method === "POST" && pathname === "/api/stream-text") {
+    const body = JSON.parse(await readBody(req));
+    const result = await handleStreamText(body as {
+      session_key?: string;
+      text?: string;
+      stream_id?: string;
+      outbound_message_id?: string;
+      message_id?: string;
+      final?: boolean;
+    });
+    if (!result.ok && result.error === "session_key and text are required") {
+      json(res, result, 400);
+    } else {
+      json(res, result);
+    }
     return true;
   }
 
@@ -1500,8 +1802,11 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       await ch.rt.sender!.sendImage(image_path, message_id, ch.chatId);
     }
     json(res, { ok: true });
-    if (session_key) sessionLastReplyAt.set(session_key, Date.now());
-    ackOnReply(message_id, session_key);
+    if (session_key) {
+      sessionLastReplyAt.set(session_key, Date.now());
+      ackOnReply(message_id, session_key);
+      stopSessionProgress(session_key);
+    }
     return true;
   }
 
@@ -1517,8 +1822,11 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       await ch.rt.sender!.sendFile(file_path, message_id, ch.chatId);
     }
     json(res, { ok: true });
-    if (session_key) sessionLastReplyAt.set(session_key, Date.now());
-    ackOnReply(message_id, session_key);
+    if (session_key) {
+      sessionLastReplyAt.set(session_key, Date.now());
+      ackOnReply(message_id, session_key);
+      stopSessionProgress(session_key);
+    }
     return true;
   }
 
@@ -1586,7 +1894,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       if (messages.length > 0) {
         const freshIds = collectFreshAndTrack(messages, sessionKeyFilter);
         log("INFO", `消息已投递(instant): count=${messages.length} session=${sessionKeyFilter}`);
-        addReactionToMessages(freshIds, sessionKeyFilter, "Get");
+        applyPollGetReactions(freshIds, sessionKeyFilter);
       }
       json(res, { messages });
       return true;
@@ -1621,7 +1929,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const freshIds = collectFreshAndTrack(messages, sessionKeyFilter);
     log("INFO", `消息已投递(poll): count=${messages.length} session=${sessionKeyFilter}`);
     json(res, { messages });
-    addReactionToMessages(freshIds, sessionKeyFilter, "Get");
+    applyPollGetReactions(freshIds, sessionKeyFilter);
     return true;
   }
 
