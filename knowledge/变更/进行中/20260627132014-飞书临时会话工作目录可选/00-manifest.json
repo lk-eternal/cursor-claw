@@ -1,10 +1,9 @@
 {
   "name": "飞书临时会话工作目录可选",
   "flow": "standard",
-  "stage": "archived",
+  "stage": "acceptance_reopened",
   "source": "kb-propose",
   "workflow_version": "v2.3",
-  "archived_at": "2026-06-27T16:37:34+0800",
   "tasks": [
     {
       "id": "T1",
@@ -63,44 +62,50 @@
   "revisions": [],
   "files": [
     {
-      "path": "knowledge/变更/归档/20260627132014-飞书临时会话工作目录可选/00-manifest.json",
+      "path": "knowledge/变更/进行中/20260627132014-飞书临时会话工作目录可选/00-manifest.json",
       "role": "manifest",
       "status": "active"
     },
     {
-      "path": "knowledge/变更/归档/20260627132014-飞书临时会话工作目录可选/01-proposal.md",
+      "path": "knowledge/变更/进行中/20260627132014-飞书临时会话工作目录可选/01-proposal.md",
       "role": "proposal",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/归档/20260627132014-飞书临时会话工作目录可选/02-design.md",
+      "path": "knowledge/变更/进行中/20260627132014-飞书临时会话工作目录可选/02-design.md",
       "role": "design",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/归档/20260627132014-飞书临时会话工作目录可选/03-tasks.md",
+      "path": "knowledge/变更/进行中/20260627132014-飞书临时会话工作目录可选/03-tasks.md",
       "role": "tasks",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/归档/20260627132014-飞书临时会话工作目录可选/04-review.md",
+      "path": "knowledge/变更/进行中/20260627132014-飞书临时会话工作目录可选/04-review.md",
       "role": "review",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/归档/20260627132014-飞书临时会话工作目录可选/05-summary.md",
+      "path": "knowledge/变更/进行中/20260627132014-飞书临时会话工作目录可选/05-summary.md",
       "role": "summary",
       "kind": "change_doc",
       "source": "archive",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/归档/20260627132014-飞书临时会话工作目录可选/06-automation-test.md",
+      "path": "knowledge/变更/进行中/20260627132014-飞书临时会话工作目录可选/06-automation-test.md",
       "role": "automation_test",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/进行中/20260627132014-飞书临时会话工作目录可选/08-verify-issue.md",
+      "role": "verify_issue",
       "kind": "change_doc",
       "status": "changed"
     },
@@ -161,5 +166,17 @@
       "status": "changed"
     }
   ],
-  "updated_at": "2026-06-27T16:37:34+0800"
+  "updated_at": "2026-06-27T16:47:55+0800",
+  "external": {
+    "acceptance": {
+      "rounds": [
+        {
+          "round": 1,
+          "feedback": "桌面端通道配置页未体现管理员创建临时会话时可选 -dir 工作目录说明；配置界面仅显示「允许其他人使用」相关文案，用户找不到 -dir 能力说明。",
+          "created_at": "2026-06-27T16:47:55+0800",
+          "reason": "code"
+        }
+      ]
+    }
+  }
 }
