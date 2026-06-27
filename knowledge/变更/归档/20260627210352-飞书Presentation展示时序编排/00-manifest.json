@@ -1,9 +1,10 @@
 {
   "name": "飞书Presentation展示时序编排",
   "flow": "standard",
-  "stage": "tested",
+  "stage": "archived_with_debt",
   "source": "kb-propose",
   "workflow_version": "v2.6",
+  "archived_at": "2026-06-27T21:51:07+08:00",
   "tasks": [
     {
       "id": "T1",
@@ -58,10 +59,10 @@
       "title": "MergeBatch 不回归与端到端验收",
       "status": "blocked",
       "files": [
-        "knowledge/变更/进行中/20260627210352-飞书Presentation展示时序编排/06-automation-test.md"
+        "knowledge/变更/归档/20260627210352-飞书Presentation展示时序编排/06-automation-test.md"
       ],
       "depends_on": ["T1", "T2", "T3", "T4", "T5"],
-      "note": "代码层+编译门禁通过；Rev1 后 E1/E3/E5/E7 不再目检过程卡，侧重 assistant defer；E1–E7 飞书联调待人工执行，archive 阻塞"
+      "note": "代码层+编译门禁通过；Rev1 后 E1/E3/E5/E7 不再目检过程卡，侧重 assistant defer；E1–E7 飞书联调待人工，不阻塞 archived_with_debt"
     },
     {
       "id": "T7",
@@ -120,7 +121,7 @@
       "summary": "schedulePreambleRelease 400ms 短窗 + isAwaitingFirstProcessEvent；主路径 preamble→tool defer 生效",
       "task_id": "T-FIX-01",
       "re_review": "2026-06-27",
-      "note": "preamble 停顿 >400ms 且 tool 未到时仍可能首 POST，T6 E1 量化"
+      "note": "preamble 停顿 >400ms 且 tool 未到时仍可能首 POST，T6 E1 量化；accepted 警告债务"
     },
     {
       "id": "R3",
@@ -129,7 +130,8 @@
       "file": "electron/agent-sdk.ts",
       "summary": "Electron closeThinkingIfOpen + maybeReleaseDeferredAssistant 已落地；Daemon final-only thinking 仍被 !delta 早退",
       "task_id": "T-FIX-02",
-      "re_review": "2026-06-27"
+      "re_review": "2026-06-27",
+      "note": "Daemon handleThinkingPresentationEvent final-only 无法清 thinkingOpen；accepted 警告债务"
     },
     {
       "id": "R4",
@@ -155,43 +157,49 @@
   "scope_note": "Rev1（2026-06-27）：飞书不再展示过程 CardKit；MVP 验收重心为 assistant 延迟首建与 defer 释放，非过程卡时间轴",
   "files": [
     {
-      "path": "knowledge/变更/进行中/20260627210352-飞书Presentation展示时序编排/00-manifest.json",
+      "path": "knowledge/变更/归档/20260627210352-飞书Presentation展示时序编排/00-manifest.json",
       "kind": "change_doc",
       "source": "lite",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/进行中/20260627210352-飞书Presentation展示时序编排/01-proposal.md",
+      "path": "knowledge/变更/归档/20260627210352-飞书Presentation展示时序编排/01-proposal.md",
       "kind": "change_doc",
       "source": "lite",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/进行中/20260627210352-飞书Presentation展示时序编排/02-design.md",
+      "path": "knowledge/变更/归档/20260627210352-飞书Presentation展示时序编排/02-design.md",
       "kind": "change_doc",
       "source": "kb-design",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/进行中/20260627210352-飞书Presentation展示时序编排/03-tasks.md",
+      "path": "knowledge/变更/归档/20260627210352-飞书Presentation展示时序编排/03-tasks.md",
       "kind": "change_doc",
       "source": "kb-plan",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/进行中/20260627210352-飞书Presentation展示时序编排/04-review.md",
+      "path": "knowledge/变更/归档/20260627210352-飞书Presentation展示时序编排/04-review.md",
       "kind": "change_doc",
       "source": "kb-review",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/进行中/20260627210352-飞书Presentation展示时序编排/06-automation-test.md",
+      "path": "knowledge/变更/归档/20260627210352-飞书Presentation展示时序编排/05-summary.md",
+      "kind": "change_doc",
+      "source": "kb-archive",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627210352-飞书Presentation展示时序编排/06-automation-test.md",
       "kind": "change_doc",
       "source": "kb-test",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/进行中/20260627210352-飞书Presentation展示时序编排/07-prd-revisions.md",
+      "path": "knowledge/变更/归档/20260627210352-飞书Presentation展示时序编排/07-prd-revisions.md",
       "kind": "change_doc",
       "source": "lite",
       "status": "changed"
@@ -219,7 +227,25 @@
       "kind": "agents",
       "source": "kb-apply",
       "status": "changed"
+    },
+    {
+      "path": "knowledge/业务域/消息桥接/02-飞书通道.md",
+      "kind": "knowledge",
+      "source": "kb-librarian",
+      "status": "changed"
+    },
+    {
+      "path": "package.json",
+      "kind": "config",
+      "source": "kb-archive",
+      "status": "changed"
+    },
+    {
+      "path": "changelog/1.6.3.json",
+      "kind": "changelog",
+      "source": "kb-archive",
+      "status": "changed"
     }
   ],
-  "updated_at": "2026-06-27T22:00:00+0800"
+  "updated_at": "2026-06-27T21:51:07+08:00"
 }

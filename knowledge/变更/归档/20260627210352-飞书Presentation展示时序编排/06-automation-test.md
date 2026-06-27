@@ -11,7 +11,7 @@
 | **层级** | **编译门禁**（`tsc --noEmit`）+ **静态契约**（04 复评 + defer 链 grep/精读）+ **飞书/SDK 联调**（T6 E1–E7，须主用户私聊 + CardKit） |
 | **MVP 范围** | 主用户私聊 SDK；`PRESENTATION_ORDERING` 默认开；对应 `01` 验收 1–6 与 `02` §八·（二） |
 | **排除范围** | 群聊/CLI 时序编排（阶段 2）；`runPresentationEpoch` 预留字段（info 债务，不测） |
-| **通过口径** | 代码层与 02/03/04 一致 + tsc exit 0；**归档门禁**须 T6 E1/E2/E7 至少一次飞书联调通过 |
+| **通过口径** | 代码层与 02/03/04 一致 + tsc exit 0；**archive 采用 `archived_with_debt`**：静态与编译通过即可归档，T6 E1–E7 飞书联调待人工（不阻塞） |
 | **与 review 分工** | 04 负责实现评审；本文负责验收追溯、静态证据与 E2E 占位 |
 
 ## 2、局限与未自动化原因
@@ -51,13 +51,13 @@
 
 | ID | 场景 | 01/02 关联 | 验证方式 | 代码层 | E2E |
 |----|------|------------|----------|--------|-----|
-| **E1** | shell tool × ≥3 | 验收 1 | 飞书联调 | ✅ 主路径 defer 链 | ⏳ 待联调 |
-| **E2** | 无 tool 短问答 × ≥10 | 验收 2 | 联调计时 | ✅ 无额外 defer | ⏳ 待联调 |
-| **E3** | 多步 tool × ≥2 | 验收 3 | 飞书联调 | ✅ `toolCards`+闩锁 | ⏳ 待联调 |
-| **E4** | MergeBatch + tool × ≥1 | 验收 4 | 飞书联调 | ✅ 锚点未改 | ⏳ 待联调 |
-| **E5** | tool 失败/Run 中止 | 验收 5 | 联调 | ✅ final force release | ⏳ 待联调 |
-| **E6** | `PRESENTATION_ORDERING=0` | 验收 6 | 联调+重启 | ✅ 门控 off 跳过 defer | ⏳ 待联调 |
-| **E7** | 3+ 串行 tool，assistant 卡张数 | §八·（二）·2 | 飞书目检 | ✅ `assistantCardReleased` 幂等 | ⏳ 待联调 |
+| **E1** | 带 tool Run × ≥3（如 git pull） | Rev1 E1 / F1' | 飞书联调 | ✅ defer 链 | ⏳ 待人工 |
+| **E2** | 无 tool 短问答 × ≥10 | Rev1 E2 / 验收 2 | 联调计时 | ✅ 无额外 defer | ⏳ 待人工 |
+| **E3** | 多步 tool × ≥2 | Rev1 E3 | 飞书 + SDK UI | ✅ 闩锁 + 抑制 | ⏳ 待人工 |
+| **E4** | MergeBatch + tool × ≥1 | Rev1 E4 / 验收 4 | 飞书联调 | ✅ 锚点未改 | ⏳ 待人工 |
+| **E5** | tool 失败/Run 中止 | Rev1 E5 / 验收 5 | 联调 | ✅ final force release | ⏳ 待人工 |
+| **E6** | `PRESENTATION_ORDERING=0` | Rev1 E6 / 验收 6 | 联调+重启 | ✅ 门控 off 跳过 defer | ⏳ 待人工 |
+| **E7** | 3+ 串行 tool，assistant 卡张数 | Rev1 E7 | 飞书目检 | ✅ 幂等 | ⏳ 待人工 |
 
 ### 3.3 defer 链静态完整性（T6 代码证据）
 
@@ -76,13 +76,13 @@
 
 | 场景 ID | 前置 | 步骤摘要 | 期望 | 关联 |
 |---------|------|----------|------|------|
-| **E1 shell tool** | 主用户私聊 SDK；`PRESENTATION_ORDERING` 默认开 | 发送「git pull 最新代码」等 × ≥3 | 过程卡在上；滚到底见结论；无倒置 | 验收 1；R2 400ms 量化 |
-| **E2 纯对话 P95** | 同上 | 短问答 × ≥10，记首段可见时间 | P95 ≤ 3s 或不劣于现网 | 验收 2 |
-| **E3 多步 tool** | 同上 | 读文件→命令→读结果 × ≥2 | 过程顺序稳定；无重复刷屏 | 验收 3 |
-| **E4 MergeBatch** | collecting/ready 态 | 连发触发合并 + 带 tool 回复 × ≥1 | 合并预览/reply/排队不回归；defer 首建仍锚定 | 验收 4 |
-| **E5 异常** | 同上 | 触发 tool 失败或中途 stop | 过程+结论/失败说明可读 | 验收 5 |
-| **E6 回滚** | 设 `PRESENTATION_ORDERING=0` 重启 | 带 tool 任务 × 1 | assistant 先于 tool（现网）；无卡死 | 验收 6 |
-| **E7 卡张数** | 同上 | 单 Run 3+ 串行 tool | 仅 1 张 assistant 卡，位于最后过程卡下 | §八·（二）·2 |
+| **E1 assistant defer** | 主用户私聊 SDK；`PRESENTATION_ORDERING` 默认开 | 带 tool Run（如「git pull 最新代码」）× ≥3 | 飞书**无** tool/thinking 卡；仅 1 条 assistant 流式卡，首 POST 不早于过程 idle 释放；过程在 SDK UI 日志可见 | Rev1 E1；R2 400ms 量化 |
+| **E2 纯对话 P95** | 同上 | 短问答 × ≥10，记首段可见时间 | P95 ≤ 3s 或不劣于现网；无额外 defer | Rev1 E2 |
+| **E3 多步 tool** | 同上 | 读文件→命令→读结果 × ≥2 | 飞书仅 assistant 卡；SDK UI 日志中 tool 顺序可读、无重复刷屏 | Rev1 E3 |
+| **E4 MergeBatch** | collecting/ready 态 | 连发触发合并 + 带 tool 回复 × ≥1 | 合并预览/reply/排队不回归；飞书无 tool 卡；defer 首建仍锚定 reply | Rev1 E4 |
+| **E5 异常** | 同上 | 触发 tool 失败或中途 stop | 飞书：结论/失败说明可读；**过程仅 SDK UI** | Rev1 E5 |
+| **E6 回滚** | 设 `PRESENTATION_ORDERING=0` 重启 | 带 tool 任务 × 1 | defer 跳过；仍无过程卡（lite）；无卡死 | Rev1 E6 |
+| **E7 卡张数** | 同上 | 单 Run 3+ 串行 tool | 仅 1 张 assistant 卡（**删除**「位于最后过程卡下」目检） | Rev1 E7 |
 
 ### 4.2 静态冒烟（本次已执行）
 
@@ -97,10 +97,11 @@
 
 | 现象 | 优先怀疑 | 备注 |
 |------|----------|------|
-| assistant 仍置顶 | preamble >400ms 竞态或 timer 未清 | 查 `presentation_order_violation` WARN |
+| assistant 首 POST 过早 | preamble >400ms 竞态或 timer 未清 | 查 `presentation_order_violation` WARN |
 | 纯对话首段 >3s | 通道/SDK 非编排回归 | 编排路径无 defer 门控 |
 | MergeBatch reply 错 | 合并批次基线问题 | 非本变更 diff 范围 |
-| 过程卡后无结论 | release 失败 | 查 `presentation_failed` + 降级 send |
+| 过程 idle 后无结论 | release 失败 | 查 `presentation_failed` + 降级 send |
+| 飞书仍见 tool/thinking 卡 | lite 抑制未生效 | 查 `isFeishuProcessPresentationSuppressed` |
 
 ## 5、脚本位置与环境
 
@@ -127,3 +128,4 @@
 | 2026-06-27 | — | E1–E7 飞书/SDK 联调 | 待执行 | 无通道环境 |
 | 2026-06-27 | — | E2 P95 ≥10 样本 | 待执行 | 须联调计时 |
 | 2026-06-27 | — | E6 开关回滚 | 待执行 | 须重启进程 |
+| 2026-06-27 | — | archive 决策 | `archived_with_debt` | 用户要求先归档，T6 E1–E7 不阻塞；见 `05-summary.md` §5 |

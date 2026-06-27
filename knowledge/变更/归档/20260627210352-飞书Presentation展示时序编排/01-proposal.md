@@ -8,6 +8,8 @@
 > **Figma 设计图**：（Figma 闸门后补全，无则写「无」）
 > **任务记录**：无
 
+> **Rev1 说明（2026-06-27）**：lite 变更 `20260627220000-飞书抑制tool与thinking展示`（v1.6.2）已归档——飞书**不再展示** tool/thinking 过程 CardKit。本变更 F1 降级为 **F1'**（assistant defer 首建 + Electron 本地闩锁）；下文「过程在上、结论在下」等过程卡时间轴表述**以 `07-prd-revisions.md` Rev1 与 `05-summary.md` 为准**。
+
 ## 背景与问题
 
 变更「飞书作为 Cursor 展示与控制层」已归档：主用户私聊 SDK 路径已启用统一 Presentation Pipeline，流式正文与工具/思考进度均可经 CardKit 呈现，且同一任务内**不冲突刷屏**。

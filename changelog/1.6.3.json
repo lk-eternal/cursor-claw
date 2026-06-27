@@ -1,0 +1,10 @@
+{
+  "version": "1.6.3",
+  "date": "2026-06-27",
+  "changes": [
+    "主用户私聊 assistant 延迟首建：过程 idle 后才释放飞书流式卡，避免结论卡先于过程置顶",
+    "新增 PRESENTATION_ORDERING 环境变量开关（默认开启，设为 0 可回滚 defer 行为）",
+    "与 v1.6.2 飞书无过程卡策略协同；MergeBatch 合并预览与 reply 锚点行为不变",
+    "NF1 顺序违规可观测：日志记录 process_msg_id 便于排查时序异常"
+  ]
+}

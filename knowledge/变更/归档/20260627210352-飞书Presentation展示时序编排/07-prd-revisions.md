@@ -15,7 +15,7 @@
 | **影响范围** | 产品：`01-proposal.md` 验收与场景描述（本 Rev 文档为准，01 正文待 `/kb-revise` 或 archive 前同步）；测试：`06-automation-test.md` E1–E7 用例；代码：**已实现** defer 链可保留，Daemon tool/thinking handler 在 lite 落地后变为飞书 no-op |
 | **关联变更** | `20260627220000-飞书抑制tool与thinking展示`（lite，supersedes 1.6.1 门控） |
 | **关联 03 任务** | T6（E1–E7 用例调整）；无新增代码任务（抑制由 lite 变更承担） |
-| **实现状态** | **文档已记录**；lite 变更未 apply；T6 E2E 用例待 `06-automation-test.md` 同步后重测 |
+| **实现状态** | **本变更代码已 apply 并复评通过**；lite 抑制变更 **已归档 v1.6.2**（`20260627220000-飞书抑制tool与thinking展示`）；`06-automation-test.md` Rev1 口径已同步；**T6 E1–E7 飞书 E2E 待人工**，不阻塞 `archived_with_debt` |
 
 ### E1–E7 用例调整（Rev1）
 
