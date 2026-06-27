@@ -1,0 +1,285 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vkk.local/schemas/kb-manifest.schema.json",
+  "title": "KB 变更 manifest",
+  "type": "object",
+  "required": [
+    "name",
+    "flow",
+    "stage",
+    "tasks",
+    "reviews",
+    "revisions",
+    "files",
+    "updated_at"
+  ],
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^A-Za-z_/\\\\]+$",
+      "description": "中文变更名称，不包含英文、斜杠或路径分隔符"
+    },
+    "flow": {
+      "type": "string",
+      "enum": ["standard", "lite"]
+    },
+    "stage": {
+      "type": "string",
+      "enum": [
+        "proposed",
+        "designed",
+        "planned",
+        "applying",
+        "applied",
+        "reviewed",
+        "review_failed",
+        "tested",
+        "archived",
+        "archived_with_debt",
+        "acceptance_reopened"
+      ]
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/task"
+      }
+    },
+    "reviews": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/review"
+      }
+    },
+    "revisions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/revision"
+      }
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/file"
+      }
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "workflow_version": {
+      "type": "string",
+      "pattern": "^v\\d+\\.\\d+$",
+      "description": "变更目录创建时的 KB 流程版本，取自进化日志文件内字段表最大版本号"
+    },
+    "metrics": {
+      "$ref": "#/$defs/metrics"
+    },
+    "archived_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source": {
+      "type": "string",
+      "description": "变更入口，标准 PRD 流为 kb-propose"
+    },
+    "external": {
+      "$ref": "#/$defs/external"
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "task": {
+      "type": "object",
+      "required": ["id", "status"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "in_progress",
+            "done",
+            "failed",
+            "blocked",
+            "unknown",
+            "cancelled"
+          ]
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "review": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["open", "fixed", "accepted_debt", "false_positive"]
+        },
+        "file": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "resolution": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "revision": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "task_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "external": {
+      "type": "object",
+      "description": "外部登记与通知信息（/kb-propose、/kb-archive、/kb-verify-issue；provider 由 kb.project.json integrations 决定）",
+      "properties": {
+        "prd_doc_url": { "type": "string" },
+        "prd_document_id": { "type": "string" },
+        "figma_url": { "type": "string", "description": "阶段 7 用户提供的 Figma 设计图链接，可选" },
+        "figma_confirmed": { "type": "boolean", "description": "阶段 7 用户已对「有无 Figma 设计图」明确答复后为 true，作为阶段 8 准入闸门" },
+        "registry_record_url": { "type": "string", "description": "外部任务登记表记录链接（provider 写入）" },
+        "registry_record_id": { "type": "string", "description": "外部任务登记表记录 ID（provider 写入）" },
+        "task_type": { "type": "string", "enum": ["需求", "Bug"] },
+        "priority": { "type": "string" },
+        "notified_events": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["created", "completed"] }
+        },
+        "acceptance": {
+          "$ref": "#/$defs/acceptance"
+        }
+      },
+      "additionalProperties": true
+    },
+    "acceptance": {
+      "type": "object",
+      "description": "验收问题反馈记录（/kb-verify-issue 维护）",
+      "properties": {
+        "rounds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/acceptance_round" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "acceptance_round": {
+      "type": "object",
+      "required": ["round", "reason"],
+      "properties": {
+        "round": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "验收反馈轮次，从 1 递增"
+        },
+        "reason": {
+          "type": "string",
+          "enum": ["requirement", "code"],
+          "description": "归因：requirement=原需求(产品)问题，code=代码实现问题"
+        },
+        "report_doc_url": {
+          "type": "string",
+          "description": "外部在线验收问题报告链接（provider 写入）"
+        },
+        "status_set": {
+          "type": "string",
+          "description": "本轮回写外部登记表的状态值（provider 定义，如 已关闭-产品 / 重新打开）"
+        },
+        "feedback": {
+          "type": "string",
+          "description": "产品反馈的验收问题摘要"
+        },
+        "notified": {
+          "type": "boolean",
+          "description": "本轮 @所有人 群机器人通知是否已发送；为 true 时 /kb-verify-issue 禁止再次 Webhook（同 round 仅一次）"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": true
+    },
+    "metrics": {
+      "type": "object",
+      "description": "流程轻量度量计数（供 /kb-health 汇总、/kb-evolve 决策参考）；由写入型命令在同轮顺带累加，只读命令不写",
+      "properties": {
+        "redispatch": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "子 Agent 失败重派累计次数"
+        },
+        "check_blocked": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "/kb-check 阻断累计次数；/kb-check 为只读命令，由阻断后首个写入型命令补记"
+        }
+      },
+      "additionalProperties": { "type": "integer", "minimum": 0 }
+    },
+    "file": {
+      "type": "object",
+      "required": ["path", "kind", "source", "status"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*\\.\\.)[^*?]+$",
+          "description": "仓库根目录相对路径，不允许绝对路径、上级路径或 glob"
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["code", "knowledge", "change_doc", "index", "config", "other"]
+        },
+        "source": {
+          "type": "string",
+          "enum": ["apply", "review", "archive", "lite", "repair"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["planned", "changed", "archived", "removed"]
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

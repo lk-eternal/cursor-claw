@@ -28,5 +28,5 @@
     "envPath": ".cursor/hooks/feishu.env"
   },
   "scriptsDir": ".cursor/kb/scripts",
-  "manifestSchema": ".cursor/kb-manifest.schema.json"
+  "manifestSchema": ".kb/kb-manifest.schema.json"
 }
