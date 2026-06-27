@@ -1,5 +1,9 @@
 {
   "version": "1.6.1",
   "date": "2026-06-27",
-  "changes": ["飞书群聊中仅展示 shell 工具执行卡片与 thinking 过程卡，抑制 read/grep 等非 shell 工具卡，减少卡片轰炸；主用户私聊行为不变"]
+  "changes": [
+    "飞书群聊中仅展示 shell 工具执行卡片与 thinking 过程卡，抑制 read/grep 等非 shell 工具卡，减少卡片轰炸；主用户私聊行为不变",
+    "shell 工具卡以 CardKit markdown 展示命令（```shell）与执行输出",
+    "SDK 日志打印 shell 工具 args 摘要，便于调试"
+  ]
 }
