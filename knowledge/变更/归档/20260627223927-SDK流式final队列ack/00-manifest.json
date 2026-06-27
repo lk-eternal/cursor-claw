@@ -1,0 +1,81 @@
+{
+  "name": "SDK流式final队列ack",
+  "flow": "lite",
+  "stage": "archived",
+  "source": "kb-lite",
+  "workflow_version": "v2.6",
+  "archived_at": "2026-06-27T22:41:00+0800",
+  "tasks": [
+    {
+      "id": "LITE-01",
+      "title": "SDK 流式 final 传递 inbound message_id 完成队列 ack（方案 A：daemon→launch/dispatch→session→doFlushStreamPost final）",
+      "status": "done",
+      "files": [
+        "src/daemon.ts",
+        "electron/agent-sdk.ts",
+        "electron/session-dispatcher.ts",
+        "electron/AGENTS.md",
+        "src/AGENTS.md",
+        "package.json",
+        "changelog/1.7.2.json",
+        "knowledge/业务域/消息桥接/04-消息队列与路由.md"
+      ]
+    }
+  ],
+  "reviews": [],
+  "revisions": [],
+  "related_changes": [
+    {
+      "id": "20260627113111-消息通道即时响应与流式输出",
+      "relation": "debt_closure",
+      "note": "04-review §7 T-FIX-04：SDK stream-text final 未传 inbound message_id，.claimed 滞留；verify-issue 第2轮归因后本变更闭合"
+    }
+  ],
+  "files": [
+    {
+      "path": "src/daemon.ts",
+      "kind": "code"
+    },
+    {
+      "path": "electron/agent-sdk.ts",
+      "kind": "code"
+    },
+    {
+      "path": "electron/session-dispatcher.ts",
+      "kind": "code"
+    },
+    {
+      "path": "electron/AGENTS.md",
+      "kind": "agents"
+    },
+    {
+      "path": "src/AGENTS.md",
+      "kind": "agents"
+    },
+    {
+      "path": "package.json",
+      "kind": "config"
+    },
+    {
+      "path": "changelog/1.7.2.json",
+      "kind": "changelog"
+    },
+    {
+      "path": "knowledge/业务域/消息桥接/04-消息队列与路由.md",
+      "kind": "knowledge"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627223927-SDK流式final队列ack/00-manifest.json",
+      "kind": "change_doc"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627223927-SDK流式final队列ack/01-proposal.md",
+      "kind": "change_doc"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627223927-SDK流式final队列ack/05-summary.md",
+      "kind": "change_doc"
+    }
+  ],
+  "updated_at": "2026-06-27T22:41:00+0800"
+}

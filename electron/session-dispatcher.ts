@@ -299,6 +299,7 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
       model_params: modelParams,
       working_directory: workDir,
       chat_name: chatName,
+      ...(p.meta?.messageIds?.length && { message_ids: p.meta.messageIds }),
     }, 120_000) as { ok?: boolean; error?: string }
     return { ok: !!res?.ok, error: res?.error }
   } catch (e: unknown) {

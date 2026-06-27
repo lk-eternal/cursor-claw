@@ -49,6 +49,7 @@
 
 ## stream-text（`/api/stream-text`）
 
+- **队列 ack**：`final: true` 且带 `message_id` 时经 `ackOnReply` 确认 `.claimed`（SDK 路径由 launch/dispatch 转发 `message_ids`，electron final flush 传末条 id）。
 - **微信**：首包 `sendText` + 后续分段，逻辑不变。
 - **飞书首选 CardKit**：首包 `createStreamingCardEntity` → `sendStreamingCardMessage`，`SessionProgressState` 记 `cardId`/`elementId`/`cardSequence`/`streamCardKitMode`；后续 `updateStreamingCardText`（`cardSequence` 递增）；`final: true` 时 `closeStreamingCardMode(cardSequence+1)` 再 stop/ack。
 - **CardKit 降级**：创建/发卡片任一步失败 → 回退 `sendStreamMessage`（`streamPatchMode`）；流式更新失败 → `streamCardKitMode=false`，再 PATCH 或 `sendStreamSegments` 分段。

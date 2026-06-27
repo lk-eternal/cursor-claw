@@ -75,6 +75,10 @@ interface SdkSessionAgent {
   modelId?: string
   /** 通道 SDK API Key，供 models.list */
   apiKey?: string
+  /** 本 Run 是否已下发压缩进度通知（防重复） */
+  compressionNotified?: boolean
+  /** 当次 dispatch claim 的 inbound message_ids，final stream-text 末条 id 用于 ack */
+  inboundMessageIds?: string[]
 }
 
 const sdkSessions = new Map<string, SdkSessionAgent>()
@@ -82,6 +86,7 @@ const pendingLaunches = new Set<string>()
 const failedCooldowns = new Map<string, number>()
 const FAIL_COOLDOWN_MS = 30_000
 const NOTIFY_PROCESSING = "Agent 处理中…"
+const NOTIFY_COMPRESSING = "正在压缩上下文…"
 const STREAM_POST_INTERVAL_MS = 400
 /** 观测约 23min 档 Run 超时；低于此阈值的 shell+running 不误判为保活失败 */
 const KEEPALIVE_TIMEOUT_MS = 20 * 60 * 1000
@@ -110,6 +115,7 @@ function resetSdkRunPresentationState(session: SdkSessionAgent): void {
   session.seenProcessEvent = false
   session.thinkingOpen = false
   session.contextUsage = { ...ZERO_CONTEXT_USAGE }
+  session.compressionNotified = false
   session.abortController = new AbortController()
 }
 
@@ -210,6 +216,8 @@ interface StreamTextPayload {
   text: string
   stream_id?: string
   outbound_message_id?: string
+  /** final 包携带末条 inbound id，daemon handleStreamText → ackOnReply */
+  message_id?: string
   final?: boolean
 }
 
@@ -336,7 +344,12 @@ async function doFlushStreamPost(session: SdkSessionAgent, final: boolean): Prom
   }
   if (session.streamId) payload.stream_id = session.streamId
   if (session.outboundMessageId) payload.outbound_message_id = session.outboundMessageId
-  if (final) payload.final = true
+  if (final) {
+    payload.final = true
+    const ids = session.inboundMessageIds
+    const lastId = ids?.[ids.length - 1]
+    if (lastId) payload.message_id = lastId
+  }
 
   await postStreamText(session, payload)
   session.streamLastPostAt = Date.now()
@@ -450,6 +463,15 @@ async function notifySessionChat(sessionKey: string, text: string, stopProgress 
     }, 5000)
   } catch (e: unknown) {
     broadcastLog(`[SDK Notify] 发送通知失败 (${sessionKey}): ${e instanceof Error ? e.message : String(e)}`, "WARN")
+  }
+}
+
+/** 自动压缩开始时向飞书/微信下发进度通知（同「Agent 处理中…」语义，不 stop progress） */
+function makeCompressionNotify(session: SdkSessionAgent): (phase: "started" | "completed") => void {
+  return (phase) => {
+    if (phase !== "started" || session.compressionNotified) return
+    session.compressionNotified = true
+    void notifySessionChat(session.sessionKey, NOTIFY_COMPRESSING)
   }
 }
 
@@ -736,7 +758,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     }
     if (taskMessage?.trim()) {
       const prompt = buildPrompt(meta, taskMessage, sessionKey, opts.useMainWorkspace)
-      return dispatchToSdkAgent(sessionKey, prompt)
+      return dispatchToSdkAgent(sessionKey, prompt, meta?.messageIds)
     }
     return { ok: true }
   }
@@ -808,6 +830,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       contextUsage: { ...ZERO_CONTEXT_USAGE },
       modelId,
       apiKey,
+      inboundMessageIds: meta?.messageIds,
     }
 
     sdkSessions.set(sessionKey, session)
@@ -816,7 +839,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     broadcastSdkSessionStatus()
 
     await resolveContextLimitForSession(session)
-    const run = await agent.send(prompt, createAgentSendOptions(session, pushUiLog))
+    const run = await agent.send(prompt, createAgentSendOptions(session, pushUiLog, makeCompressionNotify(session)))
     await startSdkRun(session, run)
 
     return { ok: true }
@@ -833,7 +856,11 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
   }
 }
 
-export async function dispatchToSdkAgent(sessionKey: string, taskText: string): Promise<{ ok: boolean; error?: string }> {
+export async function dispatchToSdkAgent(
+  sessionKey: string,
+  taskText: string,
+  messageIds?: string[],
+): Promise<{ ok: boolean; error?: string }> {
   ensureAgentSdkHttpServer()
   const text = taskText?.trim()
   if (!text) return { ok: false, error: "empty task" }
@@ -848,11 +875,14 @@ export async function dispatchToSdkAgent(sessionKey: string, taskText: string): 
     return { ok: false, error: "agent busy" }
   }
 
+  // 覆盖当次 batch ids；resetSdkRunPresentationState 不清除 inboundMessageIds
+  session.inboundMessageIds = messageIds?.length ? messageIds : undefined
+
   session.pendingDispatch = true
   try {
     resetSdkRunPresentationState(session)
     await resolveContextLimitForSession(session)
-    const run = await session.agent.send(text, createAgentSendOptions(session, pushUiLog))
+    const run = await session.agent.send(text, createAgentSendOptions(session, pushUiLog, makeCompressionNotify(session)))
     session.pendingDispatch = false
     await startSdkRun(session, run)
     return { ok: true }
@@ -893,6 +923,13 @@ function jsonAgentApi(res: http.ServerResponse, body: object, status = 200): voi
   res.end(data)
 }
 
+function parseInboundMessageIds(body: Record<string, unknown>): string[] | undefined {
+  const raw = body.message_ids
+  if (!Array.isArray(raw)) return undefined
+  const ids = raw.filter((id): id is string => typeof id === "string" && !!id.trim()).map((id) => id.trim())
+  return ids.length ? ids : undefined
+}
+
 export async function launchSdkAgentFromHttp(body: Record<string, unknown>): Promise<{ ok: boolean; error?: string }> {
   const sessionKey = typeof body.session_key === "string" ? body.session_key.trim() : ""
   if (!sessionKey) return { ok: false, error: "session_key is required" }
@@ -909,7 +946,8 @@ export async function launchSdkAgentFromHttp(body: Record<string, unknown>): Pro
   const useMain = body.use_main_workspace === true
 
   const chatId = typeof body.chat_id === "string" ? body.chat_id.trim() : sessionKey.split("::")[0]
-  const meta: LaunchMeta = { chatId, chatType: chatType === "group" ? "group" : "p2p" }
+  const messageIds = parseInboundMessageIds(body)
+  const meta: LaunchMeta = { chatId, chatType: chatType === "group" ? "group" : "p2p", messageIds }
 
   const channel = getChannel(channelId) ?? resolveChannelForSession(sessionKey)
   const resource = getAgentResource(channel?.agentResourceId)
@@ -989,7 +1027,8 @@ export function ensureAgentSdkHttpServer(): void {
           jsonAgentApi(res, { ok: false, error: "session_key is required" }, 400)
           return
         }
-        const result = await dispatchToSdkAgent(session_key, task_text)
+        const messageIds = parseInboundMessageIds(body)
+        const result = await dispatchToSdkAgent(session_key, task_text, messageIds)
         jsonAgentApi(res, result, result.ok ? 200 : 400)
         return
       }

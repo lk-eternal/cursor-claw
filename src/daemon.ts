@@ -1228,6 +1228,7 @@ async function dispatchSessionToAgent(sessionKey: string, chatType: string, send
     chat_id: chatId,
     sender_open_id: senderOpenId,
     use_main_workspace: mainUser,
+    message_ids: claimed.message_ids,
   });
 
   if (result.ok) {
@@ -3198,14 +3199,20 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
 
   if (method === "POST" && pathname === "/api/agent/dispatch") {
     try {
-      const body = JSON.parse(await readBody(req)) as { session_key?: string; task_text?: string };
+      const body = JSON.parse(await readBody(req)) as {
+        session_key?: string; task_text?: string; message_ids?: string[];
+      };
       const session_key = body.session_key?.trim();
       const task_text = body.task_text ?? "";
       if (!session_key) {
         json(res, { ok: false, error: "session_key is required" }, 400);
         return true;
       }
-      const result = await forwardElectronAgentApi("/api/agent/dispatch", { session_key, task_text });
+      const result = await forwardElectronAgentApi("/api/agent/dispatch", {
+        session_key,
+        task_text,
+        ...(Array.isArray(body.message_ids) && body.message_ids.length > 0 && { message_ids: body.message_ids }),
+      });
       if (!result.ok) {
         log("WARN", `dispatch_failed: session=${session_key} error=${result.error ?? "unknown"}`);
       }
