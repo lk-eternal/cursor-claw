@@ -68,8 +68,10 @@ interface SdkSessionAgent {
   seenProcessEvent?: boolean
   /** 本 Run thinking 过程尚未 final */
   thinkingOpen?: boolean
-  /** Run 内累积 token 用量（onDelta turn-ended merge） */
+  /** 当前 turn token 快照（onDelta turn-ended replace） */
   contextUsage: ContextUsageState
+  /** session 级 prompt 侧 peak（跨 Run 保留；压缩后清零；footer 取 max(peak, 当前)） */
+  contextUsagePeakTokens?: number
   /** 模型上下文上限（session 级缓存，跨 Run 复用） */
   contextLimitTokens?: number
   /** 当前模型 id，供 resolveModelContextLimit */
@@ -116,6 +118,7 @@ function resetSdkRunPresentationState(session: SdkSessionAgent): void {
   session.seenProcessEvent = false
   session.thinkingOpen = false
   session.contextUsage = { ...ZERO_CONTEXT_USAGE }
+  // contextUsagePeakTokens 跨 Run 保留，保证同 session 多轮 footer 可比
   session.compressionNotified = false
   session.abortController = new AbortController()
 }
@@ -202,7 +205,11 @@ async function notifySdkFailure(session: SdkSessionAgent, override?: string, run
     lastTool: session.lastTool,
     durationMs: resolveRunDurationMs(session, run),
   })
-  const footer = formatContextFooter(session.contextUsage, session.contextLimitTokens ?? null)
+  const footer = formatContextFooter(
+    session.contextUsage,
+    session.contextLimitTokens ?? null,
+    session.contextUsagePeakTokens,
+  )
   text = appendContextFooter(text, footer)
   await notifySessionChat(session.sessionKey, text, true)
 }
@@ -450,7 +457,11 @@ function maybeReleaseDeferredAssistant(session: SdkSessionAgent): void {
 
 /** final flush 前将上下文 footer 写入 streamBuffer（幂等） */
 function applyContextFooterToBuffer(session: SdkSessionAgent): void {
-  const footer = formatContextFooter(session.contextUsage, session.contextLimitTokens ?? null)
+  const footer = formatContextFooter(
+    session.contextUsage,
+    session.contextLimitTokens ?? null,
+    session.contextUsagePeakTokens,
+  )
   if (!footer) return
   session.streamBuffer = appendContextFooter(session.streamBuffer, footer)
 }

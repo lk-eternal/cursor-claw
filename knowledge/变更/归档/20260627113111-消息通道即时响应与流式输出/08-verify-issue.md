@@ -44,6 +44,15 @@
 - 路径：`/kb-revise-apply` 或 `/kb-apply`
 - 修复方向：串行化 stream 推送、飞书 PATCH/降级策略优化，使行为符合 F4.2 首选或 F4.3 降级，并满足 NF6 不刷屏
 
+### 复验结论
+
+| 字段 | 值 |
+|------|-----|
+| 结论 | **通过** |
+| 用户确认日期 | 2026-06-27 |
+| 修复方案 | Rev1 CardKit 流式卡片（T-Rev1-01 封装、T-Rev1-02 daemon 接入、T-Rev1-03 SDK 串行化） |
+| 复验要点 | 飞书+SDK 主用户私聊长回复：单条消息持续更新（CardKit 打字机），无多条半幅递增刷屏；符合 F4.2/NF6 |
+
 ## 第 2 轮
 
 ### 反馈问题
@@ -78,3 +87,13 @@
 
 - 路径：`/kb-revise-apply` 或 `/kb-apply`
 - 修复方向：在 `doFlushStreamPost(final=true)` 向 stream-text 传 inbound `message_id`（需 agent-sdk 跟踪 poll 领取 ids），或 daemon final 无 id 时 ack 会话全部 claimed；同步闭环 `dispatchSessionToAgent` → launch 的 message_ids 传递（若采用桥接层跟踪方案）
+
+### 复验结论
+
+| 字段 | 值 |
+|------|-----|
+| 结论 | **通过** |
+| 用户确认日期 | 2026-06-27 |
+| 修复方案 | lite 变更 `20260627223927-SDK流式final队列ack` 发布 **1.7.2**；方案 A：`message_ids` 传递 → `doFlushStreamPost(final)` 附带末条 inbound id → daemon `ackOnReply` |
+| 闭合债务 | **T-FIX-04**（`04-review` §7：SDK stream-text final 未传 inbound `message_id`） |
+| 复验要点 | SDK 流式主路径完成后 `.claimed` 正常 ack；重启无 stale `.claimed` 残留、无 orphan 回收或重复投递 |
