@@ -499,13 +499,14 @@ npm run build
 
 # 打包
 npm run dist:win   # Windows
-npm run dist:mac   # macOS（dmg，含检查与 build 编排）
-npm run pack:mac   # macOS 目录包（--dir，便于本地调试）
+npm run dist:mac   # macOS（dmg，默认打包后安装并以 --profile=swg 启动）
+npm run pack:mac   # macOS 目录包（同上）
 
-# macOS 也可直接调用 deploy CLI（支持 --version 覆盖，不写回 package.json）
-node scripts/deploy/mac.cjs
-node scripts/deploy/mac.cjs --mode=pack
-node scripts/deploy/mac.cjs --version=1.2.3-test
+# macOS 也可直接调用 deploy CLI
+node scripts/deploy/mac.cjs              # 打包 + 安装 + 以 profile=swg 启动
+node scripts/deploy/mac.cjs --profile=dev
+node scripts/deploy/mac.cjs --no-profile # 使用默认 userData
+node scripts/deploy/mac.cjs --no-install # 仅打包，不安装
 ```
 
 ## License
