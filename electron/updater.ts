@@ -306,71 +306,77 @@ export function fetchLatestRelease(): Promise<LatestRelease | null> {
   })
 }
 
-function parseChangelogJson(text: string): ChangelogEntry[] {
+function parseVersionEntry(text: string): ChangelogEntry | null {
   try {
-    const parsed = JSON.parse(text) as unknown
-    if (!Array.isArray(parsed)) {
+    const parsed = JSON.parse(text) as ChangelogEntry
+    if (
+      typeof parsed.version === "string" &&
+      typeof parsed.date === "string" &&
+      Array.isArray(parsed.changes)
+    ) {
+      return parsed
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+function sortChangelogEntries(entries: ChangelogEntry[]): ChangelogEntry[] {
+  return [...entries].sort((a, b) => semver.rcompare(a.version, b.version))
+}
+
+function loadChangelogFromDir(dirPath: string): ChangelogEntry[] {
+  try {
+    if (!fs.existsSync(dirPath)) {
       return []
     }
-    return parsed as ChangelogEntry[]
+    const entries: ChangelogEntry[] = []
+    for (const file of fs.readdirSync(dirPath)) {
+      if (!file.endsWith(".json")) {
+        continue
+      }
+      const entry = parseVersionEntry(fs.readFileSync(path.join(dirPath, file), "utf-8"))
+      if (entry) {
+        entries.push(entry)
+      }
+    }
+    return sortChangelogEntries(entries)
   } catch {
     return []
   }
 }
 
-function readBundledChangelog(): ChangelogEntry[] {
-  const candidates = app.isPackaged
-    ? [path.join(process.resourcesPath, "changelog.json")]
-    : [path.join(app.getAppPath(), "changelog.json")]
-  for (const filePath of candidates) {
-    try {
-      if (!fs.existsSync(filePath)) {
-        continue
-      }
-      const entries = parseChangelogJson(fs.readFileSync(filePath, "utf-8"))
-      if (entries.length > 0) {
-        return entries
-      }
-    } catch {
-      /* try next */
-    }
-  }
-  return []
+function getBundledChangelogBaseDir(): string {
+  return app.isPackaged ? process.resourcesPath : app.getAppPath()
 }
 
-function fetchChangelogFromRawGitHub(): Promise<ChangelogEntry[]> {
-  const rawUrl = `/${GITHUB_OWNER}/${GITHUB_REPO}/main/changelog.json`
+function readBundledChangelog(): ChangelogEntry[] {
+  return loadChangelogFromDir(path.join(getBundledChangelogBaseDir(), "changelog"))
+}
+
+function fetchHttpsText(url: string): Promise<string | null> {
   return new Promise((resolve) => {
-    const req = https.request(
-      {
-        hostname: "raw.githubusercontent.com",
-        path: rawUrl,
-        method: "GET",
-        headers: { "User-Agent": "cursor-claw-desktop-updater" },
-      },
-      (res) => {
-        const chunks: Buffer[] = []
-        res.on("data", (c: Buffer) => chunks.push(c))
-        res.on("end", () => {
-          if (res.statusCode !== 200) {
-            resolve([])
-            return
-          }
-          resolve(parseChangelogJson(Buffer.concat(chunks).toString("utf-8")))
-        })
-      },
-    )
-    req.on("error", () => resolve([]))
+    const req = https.get(url, { headers: { "User-Agent": "cursor-claw-desktop-updater" } }, (res) => {
+      const chunks: Buffer[] = []
+      res.on("data", (c: Buffer) => chunks.push(c))
+      res.on("end", () => {
+        if (res.statusCode !== 200) {
+          resolve(null)
+          return
+        }
+        resolve(Buffer.concat(chunks).toString("utf-8"))
+      })
+    })
+    req.on("error", () => resolve(null))
     req.setTimeout(15_000, () => {
       req.destroy()
-      resolve([])
+      resolve(null)
     })
-    req.end()
   })
 }
 
-function fetchChangelogViaGitHubApi(): Promise<ChangelogEntry[]> {
-  const apiPath = `/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/changelog.json?ref=main`
+function fetchGitHubApiJson<T>(apiPath: string): Promise<T | null> {
   return new Promise((resolve) => {
     const req = https.request(
       {
@@ -386,44 +392,51 @@ function fetchChangelogViaGitHubApi(): Promise<ChangelogEntry[]> {
         const chunks: Buffer[] = []
         res.on("data", (c: Buffer) => chunks.push(c))
         res.on("end", () => {
+          if (res.statusCode !== 200) {
+            resolve(null)
+            return
+          }
           try {
-            if (res.statusCode !== 200) {
-              resolve([])
-              return
-            }
-            const json = JSON.parse(Buffer.concat(chunks).toString("utf-8")) as {
-              content?: string
-              encoding?: string
-            }
-            if (json.encoding !== "base64" || typeof json.content !== "string") {
-              resolve([])
-              return
-            }
-            const text = Buffer.from(json.content.replace(/\n/g, ""), "base64").toString("utf-8")
-            resolve(parseChangelogJson(text))
+            resolve(JSON.parse(Buffer.concat(chunks).toString("utf-8")) as T)
           } catch {
-            resolve([])
+            resolve(null)
           }
         })
       },
     )
-    req.on("error", () => resolve([]))
+    req.on("error", () => resolve(null))
     req.setTimeout(15_000, () => {
       req.destroy()
-      resolve([])
+      resolve(null)
     })
     req.end()
   })
 }
 
-async function fetchChangelogEntries(): Promise<ChangelogEntry[]> {
-  const fromRaw = await fetchChangelogFromRawGitHub()
-  if (fromRaw.length > 0) {
-    return fromRaw
+async function fetchChangelogFromGitHub(): Promise<ChangelogEntry[]> {
+  const items = await fetchGitHubApiJson<Array<{ name: string; type: string; download_url?: string | null }>>(
+    `/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/changelog?ref=main`,
+  )
+  if (!items) {
+    return []
   }
-  const fromApi = await fetchChangelogViaGitHubApi()
-  if (fromApi.length > 0) {
-    return fromApi
+  const jsonFiles = items.filter((item) => item.type === "file" && item.name.endsWith(".json"))
+  const entries = await Promise.all(
+    jsonFiles.map(async (item) => {
+      if (typeof item.download_url === "string") {
+        const text = await fetchHttpsText(item.download_url)
+        return text ? parseVersionEntry(text) : null
+      }
+      return null
+    }),
+  )
+  return sortChangelogEntries(entries.filter((e): e is ChangelogEntry => e !== null))
+}
+
+async function fetchChangelogEntries(): Promise<ChangelogEntry[]> {
+  const fromGitHub = await fetchChangelogFromGitHub()
+  if (fromGitHub.length > 0) {
+    return fromGitHub
   }
   return readBundledChangelog()
 }

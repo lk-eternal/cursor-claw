@@ -35,8 +35,10 @@ extraResources:
     to: icon.ico
   - from: resources/template
     to: template
-  - from: changelog.json
-    to: changelog.json
+  - from: changelog/
+    to: changelog/
+    filter:
+      - "**/*.json"
 
 win:
   icon: resources/icon.ico

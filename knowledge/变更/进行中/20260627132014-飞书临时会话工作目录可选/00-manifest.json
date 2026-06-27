@@ -1,0 +1,24 @@
+{
+  "name": "飞书临时会话工作目录可选",
+  "flow": "standard",
+  "stage": "proposed",
+  "source": "kb-propose",
+  "workflow_version": "v2.3",
+  "tasks": [],
+  "reviews": [],
+  "revisions": [],
+  "files": [
+    {
+      "path": "knowledge/变更/进行中/20260627132014-飞书临时会话工作目录可选/00-manifest.json",
+      "role": "manifest",
+      "status": "active"
+    },
+    {
+      "path": "knowledge/变更/进行中/20260627132014-飞书临时会话工作目录可选/01-proposal.md",
+      "role": "proposal",
+      "kind": "change_doc",
+      "status": "changed"
+    }
+  ],
+  "updated_at": "2026-06-27T13:20:39+0800"
+}

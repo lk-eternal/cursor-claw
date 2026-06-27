@@ -1,0 +1,13 @@
+{
+  "version": "1.1.0",
+  "date": "2026-06-03",
+  "changes": [
+    "工作流引擎：多节点顺序执行、实例持久化、workflow_next/workflow_reject 流转",
+    "工作流 UI：设置页面板，支持查看定义/实例、启动运行、可选初始输入",
+    "飞书指令 /workflow（/wf）：ls、info、run、status、delete",
+    "定时任务增强：Cron 调度与独立 Agent、设置页可视化编辑",
+    "飞书一键创建应用：Setup 扫码 OAuth，自动填入凭据",
+    "飞书绑定流程、消息识别与保活规则优化",
+    "修复僵尸进程检查 BUG"
+  ]
+}

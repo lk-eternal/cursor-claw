@@ -84,7 +84,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          sparse-checkout: changelog.json
+          sparse-checkout: changelog/
           sparse-checkout-cone-mode: false
 
       - name: Download all artifacts
@@ -100,14 +100,15 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           BODY=$(python3 -c "
-          import json, sys
-          with open('changelog.json') as f:
-              entries = json.load(f)
-          for e in entries:
-              if e['version'] == '$VERSION':
-                  print('\n'.join(e.get('changes', [])))
-                  sys.exit(0)
-          print('v$VERSION')
+          import json, sys, os
+          version = '$VERSION'
+          version_file = os.path.join('changelog', version + '.json')
+          if os.path.isfile(version_file):
+              with open(version_file) as f:
+                  entry = json.load(f)
+              print('\n'.join(entry.get('changes', [])))
+              sys.exit(0)
+          print('v' + version)
           ")
           {
             echo 'body<<RELEASE_EOF'
