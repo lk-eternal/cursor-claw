@@ -221,3 +221,80 @@ flowchart TD
 ### R-FIX-9、结论
 
 **通过**。T-FIX-01 正确补齐 idle 后预览补偿与 instant poll 预览窗口守卫，对齐 08 根因分析；F4 抑制语义保持；race 与发送失败降级为低优先级警告。建议执行 08 第 2 轮或 `/kb-test` 复验验收 4/10/11 后再 archive。
+
+---
+
+## T-FIX-02 复评（R-FIX-02）
+
+> **触发**：08 第 2 轮打回（`reason=code`）后 T-FIX-02 完成；评审范围 = `git diff src/file-queue.ts src/daemon.ts src/AGENTS.md`（+40/-9 行）。
+
+### R-FIX-02-1、审查范围
+
+- **变更类型**：T-FIX-02 冷启动 orphan claimed 回收 + F1 phase/排队口径修正
+- **评审等级**：lite-review（3 文件、逻辑收敛、无新 API）
+- **涉及文件**：`src/file-queue.ts`、`src/daemon.ts`、`src/AGENTS.md`
+- **对照基准**：`03-tasks.md` T-FIX-02、`08-verify-issue.md` 第 2 轮根因链
+
+### R-FIX-02-2、严重（必须处理）
+
+无
+
+### R-FIX-02-3、警告（建议处理）
+
+1. **daemon 独立重启时 reclaim 可能与 live Agent 重复投递**
+   - 位置: `src/file-queue.ts:512-534`（`cleanupOrphanClaimedOnColdStart`）、`src/daemon.ts:1958-1964`（`initQueue`）
+   - 说明: 回收策略假设「全应用冷启动、无 live Agent」。若仅 daemon 进程重启而 Electron 侧 Agent 仍在处理并已 claim 消息，会将 live `.claimed` 还原为 `.qmsg`，可能造成至少一次重复投递。当前 Electron 与 daemon 同生命周期重启，主路径风险低。评分约 55，不阻断 archive。
+
+2. **移除 claimed→processing fallback 后存在 phase 上报延迟窗口**
+   - 位置: `src/daemon.ts:1688-1690`（`buildEnqueueStatusText`）
+   - 说明: T4 原「phase 缺失 + `.claimed` → processing」兜底已移除；同进程 live 处理中若 electron 尚未 POST `processing`，短暂窗口内 F1 可能走 idle 文案而非 F1.1。冷启动误报已修复；验收 1 依赖 phase 上报及时性。评分约 50，与 T-FIX-02 设计取舍一致，accepted_debt。
+
+### R-FIX-02-4、设计偏差
+
+**无实质性偏差**（相对 T-FIX-02 任务范围）。相对 T4 原设计为**有意收窄**：
+
+| 要点 | T-FIX-02 预期 | 实际 |
+|------|-------------|------|
+| 冷启动 reclaim | `initQueue` 调用 `cleanupOrphanClaimedOnColdStart` | `:1961-1964` 于 `cleanupStaleMessages` 之后执行，有回收条数日志 |
+| F1 排队数 | `getSessionUnclaimedCount`（仅 `.qmsg`） | `confirmEnqueueAndStartProgress` `:1754` |
+| phase fallback | 缺失默认 `idle`，不用磁盘 `.claimed` 推断 | `buildEnqueueStatusText` `:1690` |
+| 至少一次语义 | claimed→qmsg 还原而非删除 | `renameSync`；dest 已存在时删孤儿 claimed |
+| 文档 | AGENTS 记录口径 | `src/AGENTS.md` 已补充 |
+
+**说明**：回收后 orphan 变为 `.qmsg`，若磁盘仍有多条遗留，首条入队 F1 仍可能显示「前面还有 N 条」——口径正确（确有待领取积压），与 08 第 2 轮「虚假 processing」根因不同；idle 主文案不再误报 F1.1。
+
+### R-FIX-02-5、T-FIX-02 验收标准检查
+
+| 验收项 | 条件 | 代码层状态 |
+|--------|------|------------|
+| 08·2 重启首条 | 不误报 processing | ✅ phase 默认 idle；claimed 不计入 pending |
+| 排队数 | 不含 stale claimed | ✅ `getSessionUnclaimedCount` |
+| 冷启动回收 | 遗留 claimed→qmsg + 日志 | ✅ `cleanupOrphanClaimedOnColdStart` |
+| 验收 1 回归 | live processing + phase=processing → F1.1 | ✅ `phase === "processing"` 分支未改 |
+| tsc | `--noEmit` 通过 | ✅ manifest test_evidence |
+
+### R-FIX-02-6、回归风险
+
+| 回归点 | 风险 | 说明 |
+|--------|------|------|
+| F4 / 合并预览抑制 | 低 | orphan reclaim 后无 `.claimed`，不再误 suppress；live claimed 路径仍依赖 phase |
+| 重复投递 | 低 | 仅全应用冷启动；daemon 独立重启见 R-FIX-02-3 #1 |
+| merge edit / F3 | 无 | `claimed` 检查仍用 `pending-unclaimed`，与 reclaim 前语义一致 |
+| blocking poll | 无 | 本任务未改 poll 路径 |
+
+### R-FIX-02-7、遗留债务
+
+1. **R3 飞书端到端**——T-FIX-02 须与 08 第 2 轮场景联调确认首条 F1 文案。
+2. **R-FIX-02-W1/W2**——见 §R-FIX-02-3，不阻断 archive。
+
+### R-FIX-02-8、修复任务建议
+
+| 问题 ID | 建议动作 | 关联任务 |
+|---------|----------|----------|
+| — | 无 open 阻断项 | — |
+| R-FIX-02-W1（可选） | daemon 独立重启时跳过 reclaim 或协商 live 会话 | 未来维护 |
+| R-FIX-02-W2（可选） | phase 延迟窗口：短 TTL 内存 claimed 标记 | 未来维护 |
+
+### R-FIX-02-9、结论
+
+**通过（带债务）**。T-FIX-02 正确闭合 08 第 2 轮根因（stale `.claimed` + phase fallback + pending 口径）；冷启动 reclaim 保留至少一次投递语义；无 critical 项。建议 08 第 2 轮复验验收 2/3 后与 T-FIX-01 一并 `/kb-archive`。

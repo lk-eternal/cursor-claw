@@ -25,6 +25,7 @@ import {
   deleteQueueMessage as deleteFileQueueMessage,
   getDistinctSessions,
   cleanupStaleMessages,
+  cleanupOrphanClaimedOnColdStart,
   getSessionPendingCount,
   getSessionUnclaimedCount,
   listUnclaimedMessages,
@@ -1685,12 +1686,8 @@ async function tryHandleMergePreviewReply(
 }
 
 function buildEnqueueStatusText(sessionKey: string, pending: number): string {
-  let phase = getSessionAgentPhase(sessionKey);
-  if (!phase) {
-    const unclaimed = getSessionUnclaimedCount(sessionKey);
-    const total = getSessionPendingCount(sessionKey);
-    phase = total - unclaimed > 0 ? "processing" : "idle";
-  }
+  // phase 缺失时默认 idle，不用磁盘 .claimed 推断 processing（重启后 stale claimed 会误报 F1.1）
+  const phase = getSessionAgentPhase(sessionKey) ?? "idle";
 
   let text: string;
   if (phase === "starting") {
@@ -1753,7 +1750,8 @@ async function confirmEnqueueAndStartProgress(
   sessionKey: string,
   chatId?: string,
 ): Promise<void> {
-  const pending = getSessionPendingCount(sessionKey);
+  // F1 排队数仅计待领取 .qmsg，不含孤儿 .claimed（冷启动由 cleanupOrphanClaimedOnColdStart 回收）
+  const pending = getSessionUnclaimedCount(sessionKey);
   const text = buildEnqueueStatusText(sessionKey, pending);
   try {
     await replyToMessage(messageId, text, chatId);
@@ -1960,6 +1958,10 @@ function initQueue(): void {
   const dir = initFileQueue();
   log("INFO", `共享文件队列: ${dir}`);
   cleanupStaleMessages();
+  const reclaimed = cleanupOrphanClaimedOnColdStart();
+  if (reclaimed > 0) {
+    log("INFO", `冷启动回收遗留 claimed→qmsg: ${reclaimed} 条`);
+  }
 }
 
 /** 媒体缓存清理：启动清一次 + 每 6 小时清一次，删除 24 小时前的旧文件 */

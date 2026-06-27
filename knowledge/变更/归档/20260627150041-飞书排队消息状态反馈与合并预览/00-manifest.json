@@ -2,7 +2,6 @@
   "name": "飞书排队消息状态反馈与合并预览",
   "flow": "standard",
   "stage": "archived_with_debt",
-  "archived_at": "2026-06-27T18:12:08+0800",
   "source": "kb-propose",
   "workflow_version": "v2.6",
   "tasks": [
@@ -69,6 +68,18 @@
       "files": ["src/daemon.ts", "src/AGENTS.md"],
       "depends_on": ["T5", "T6", "T8"],
       "test_evidence": "tsc 通过；phase-api-contract.sh T-FIX-01 instant poll 冒烟通过；08 场景联调待第 2 轮"
+    },
+    {
+      "id": "T-FIX-02",
+      "title": "冷启动 orphan claimed 回收与 F1 误报修复",
+      "status": "done",
+      "files": [
+        "src/file-queue.ts",
+        "src/daemon.ts",
+        "src/AGENTS.md"
+      ],
+      "depends_on": ["T4"],
+      "test_evidence": "tsc 通过；06 F15 重启首条场景已记录；飞书 F15 联调待用户执行"
     }
   ],
   "reviews": [
@@ -110,6 +121,24 @@
       "summary": "sendMergePreview 失败仍 claim，用户可能看不到预览但 Agent 不卡住",
       "task_id": "T-FIX-01",
       "resolution": "R-FIX 评分 55，与 T6 降级策略一致"
+    },
+    {
+      "id": "R-FIX-02-W1",
+      "severity": "suggestion",
+      "status": "accepted_debt",
+      "file": "src/file-queue.ts",
+      "summary": "daemon 独立重启时 reclaim 可能与 live Agent 重复投递",
+      "task_id": "T-FIX-02",
+      "resolution": "R-FIX-02 评分 55，主路径全应用冷启动"
+    },
+    {
+      "id": "R-FIX-02-W2",
+      "severity": "suggestion",
+      "status": "accepted_debt",
+      "file": "src/daemon.ts",
+      "summary": "移除 claimed fallback 后 phase 上报延迟窗口可能短暂 F1 idle 文案",
+      "task_id": "T-FIX-02",
+      "resolution": "R-FIX-02 评分 50，冷启动修复优先"
     }
   ],
   "revisions": [],
@@ -124,6 +153,12 @@
           "round": 1,
           "feedback": "配置界面未体现合并预览等新能力；飞书私聊连发 3×「1」+「2」+3 条后无合并预览，daemon 日志 instant poll count=5 后用户侧无进展，体验卡住",
           "created_at": "2026-06-27T18:15:00+0800",
+          "reason": "code"
+        },
+        {
+          "round": 2,
+          "feedback": "重启应用后首条飞书消息入队确认误报「Agent 正在处理上一条」及虚假排队数「前面还有 5 条待处理」，预期冷启动/空闲态「已收到，等待 Agent 领取」",
+          "created_at": "2026-06-27T21:30:00+0800",
           "reason": "code"
         }
       ]
@@ -198,33 +233,8 @@
       "status": "changed"
     },
     {
-      "path": "electron/daemon-client.ts",
-      "role": "implementation",
-      "status": "changed"
-    },
-    {
-      "path": "electron/session-dispatcher.ts",
-      "role": "implementation",
-      "status": "changed"
-    },
-    {
-      "path": "electron/agent-sdk.ts",
-      "role": "implementation",
-      "status": "changed"
-    },
-    {
       "path": "src/AGENTS.md",
       "role": "agents",
-      "status": "changed"
-    },
-    {
-      "path": "electron/AGENTS.md",
-      "role": "agents",
-      "status": "changed"
-    },
-    {
-      "path": "knowledge/业务域/消息桥接/01-概览.md",
-      "role": "knowledge",
       "status": "changed"
     },
     {
@@ -243,10 +253,10 @@
       "status": "changed"
     },
     {
-      "path": "changelog/1.5.1.json",
+      "path": "changelog/1.6.4.json",
       "role": "changelog",
       "status": "changed"
     }
   ],
-  "updated_at": "2026-06-27T18:12:08+0800"
+  "updated_at": "2026-06-27T23:30:00+0800"
 }

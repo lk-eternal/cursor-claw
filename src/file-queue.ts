@@ -503,3 +503,33 @@ export function cleanupStaleMessages(): void {
     } catch { /* ignore */ }
   }
 }
+
+/**
+ * 冷启动回收遗留 .claimed：全应用重启后无 live Agent，磁盘 claimed 为孤儿状态。
+ * 还原为 .qmsg 以保留「至少一次」投递语义，供 orchestrator 重新领取。
+ * @returns 回收条数
+ */
+export function cleanupOrphanClaimedOnColdStart(): number {
+  if (!queueDir) return 0;
+  let count = 0;
+  const dirs = listSessionDirs();
+  for (const dir of dirs) {
+    try {
+      const files = fs.readdirSync(dir).filter((f) => f.endsWith(".claimed"));
+      for (const f of files) {
+        const src = path.join(dir, f);
+        const dest = src.replace(/\.claimed$/, ".qmsg");
+        try {
+          if (fs.existsSync(dest)) {
+            // 异常双份：删孤儿 claimed，保留已有 .qmsg
+            fs.unlinkSync(src);
+          } else {
+            fs.renameSync(src, dest);
+          }
+          count++;
+        } catch { /* 并发或 IO 失败，跳过 */ }
+      }
+    } catch { /* ignore */ }
+  }
+  return count;
+}

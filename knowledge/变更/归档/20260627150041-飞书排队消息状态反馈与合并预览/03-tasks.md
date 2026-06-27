@@ -26,6 +26,8 @@ T2 ──→ T5 ──→ T6
 - **第七轮**：T8（poll override 交付与状态清理，依赖 T1、T6、T7）
 - **修复轮（验收打回 code，`08` 第 1 轮）**：T-FIX-01（idle 后预览补偿调度 + instant poll 预览窗口守卫，依赖 T5/T6/T8 已完成）
 
+- **修复轮（验收打回 code，`08` 第 2 轮）**：T-FIX-02（冷启动 orphan claimed 回收 + F1 排队数/phase fallback，依赖 T4 已完成）
+
 ## 2、任务清单
 
 ## T1: 待领取队列计数与 override 替换
@@ -417,4 +419,46 @@ electron 在既有 notify 挂点向 daemon 上报 Agent 阶段，使 F1 文案�
 ### 依赖
 
 - 前置任务: T5、T6、T8（均已 done；本任务为验收打回修复）
+- 后续任务: 无
+
+---
+
+## T-FIX-02: 冷启动 orphan claimed 回收与 F1 误报修复
+
+### 背景
+
+`08-verify-issue.md` 第 2 轮验收打回（`reason=code`）。应用重启后 `sessionAgentPhaseMap` 清空，磁盘遗留未 ack 的 `.claimed` 仍被 `getSessionPendingCount` 与 `buildEnqueueStatusText` phase fallback 计入，首条飞书消息 F1 误报「Agent 正在处理上一条」及虚假排队数。
+
+### 上下文文件
+
+- CodeGraph: `initQueue` `cleanupStaleMessages` `buildEnqueueStatusText` `getSessionPendingCount` `getSessionUnclaimedCount`
+- 必读: `src/file-queue.ts` — `getSessionPendingCount`、`cleanupStaleMessages`
+- 必读: `src/daemon.ts` — `initQueue`、`buildEnqueueStatusText`、`confirmEnqueueAndStartProgress`
+- 必读: `knowledge/变更/进行中/20260627150041-飞书排队消息状态反馈与合并预览/08-verify-issue.md` — 第 2 轮根因链
+
+### 实现范围
+
+- 修改: `src/file-queue.ts`
+  - 新增 `cleanupOrphanClaimedOnColdStart(): number` — 冷启动将遗留 `.claimed` 还原为 `.qmsg`
+- 修改: `src/daemon.ts`
+  - `initQueue` 调用 `cleanupOrphanClaimedOnColdStart` 并打日志
+  - `buildEnqueueStatusText`：phase 缺失默认 `idle`，移除 claimed→processing 推断
+  - `confirmEnqueueAndStartProgress`：排队数改 `getSessionUnclaimedCount`
+- 修改: `src/AGENTS.md` — 冷启动回收与 F1 计数口径
+
+### 接口契约
+
+- `export function cleanupOrphanClaimedOnColdStart(): number` — 冷启动回收条数
+
+### 验收标准
+
+- [ ] 重启后磁盘有 stale `.claimed`、用户发首条：F1 为「已收到，等待 Agent 领取」，不误报 processing
+- [ ] 排队数不含 stale claimed；仅多条 `.qmsg` 时排队数正确
+- [ ] 冷启动后遗留 claimed 已还原为 `.qmsg`（日志可见回收条数）
+- [ ] Agent live processing 连发：phase=processing 时 F1.1 文案仍正确（回归验收 1）
+- [ ] `npx tsc --noEmit` 通过
+
+### 依赖
+
+- 前置任务: T4（F1 文案，done）
 - 后续任务: 无

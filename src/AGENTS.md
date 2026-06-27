@@ -19,6 +19,8 @@
 ## 合并预览与 Agent 阶段（daemon 内存）
 
 - **Agent 阶段**：`sessionAgentPhaseMap` 由 electron `reportSessionAgentPhase`（`daemon-client.ts`）写入；`idle` 即 delete 条目。与 `sessionProgressMap`（流式/typing）职责分离。
+- **冷启动 claimed 回收**：`initQueue` 调用 `cleanupOrphanClaimedOnColdStart`（`file-queue.ts`）将遗留 `.claimed` 还原为 `.qmsg`；全应用重启后无 live Agent，避免 F1 误报 processing。
+- **F1 排队计数**：`confirmEnqueueAndStartProgress` / `buildEnqueueStatusText` 的排队数基于 `getSessionUnclaimedCount`（仅 `.qmsg`）；`phase` 缺失时默认 `idle`，不用磁盘 `.claimed` 推断 `processing`。
 - **idle 补偿**：`POST /api/session-agent-phase` 转 `idle` 后刷新合并卡、`flushReadyMergeBatches`，并 **`scheduleAgentDispatch`**（processing 期间入队的 unclaimed 当时无法 claim，idle 后须重跑 dispatch）。
 
 ## 合并批次 CardKit（MergeBatch，daemon 内存）

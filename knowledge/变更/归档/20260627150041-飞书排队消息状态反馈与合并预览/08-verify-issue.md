@@ -69,3 +69,64 @@
 | **5** | 合并消息 ID 可见、可复制、格式正确 | **未测**（预览未出现） |
 | **10** | Agent 流式/三态进行中不插入预览 | 抑制逻辑符合，但 idle 后补偿缺失导致整体路径失败 |
 | **11** | 预览发出后再发消息，同一 ID 标注「已更新」 | **不通过**（预览未发出，更新路径不可达） |
+
+## 第 2 轮
+
+### 反馈问题
+
+重启应用后发送**第一条**飞书消息，入队确认显示：
+
+> 已收到。Agent 正在处理上一条，你的消息已排队（前面还有 5 条待处理）
+
+**预期**：重启后首条应体现冷启动/空闲态（如「已收到，等待 Agent 领取」），不应误报 processing 与虚假排队数。
+
+### 归因结论
+
+| 问题 | 归因 | `reason` |
+|------|------|----------|
+| 重启首条误报 processing + 虚假排队 5 条 | **代码实现问题** | `code` |
+
+**综合主归因**：`code` — F1 阶段推断与排队计数未区分「进程内 phase」与「磁盘遗留 `.claimed`」，重启后 stale claimed 被当作活跃 processing。
+
+### 判定依据
+
+#### 对照 01 验收 2 / 3 与 F1.2 / F1.3
+
+| 验收项 | PRD 要求 | 代码现状 | 偏差 |
+|--------|----------|----------|------|
+| **2 Agent 现状 — 空闲** | Agent 空闲时入队反馈**不得**误报「正在处理上一条」 | `buildEnqueueStatusText`（`src/daemon.ts:1687-1709`）在 `getSessionAgentPhase` 无值时，若 `getSessionPendingCount - getSessionUnclaimedCount > 0` 即推断 `phase = "processing"` | 重启后 `sessionAgentPhaseMap` 为空，但磁盘仍存上轮未 ack 的 `.claimed`，首条被误判为 processing |
+| **3 Agent 现状 — 冷启动** | Agent 未运行/刚启动时首条应体现「正在启动」或等待领取 | 同上 fallback 优先走 claimed→processing，**未**在 phase 缺失且无 live Agent 时走 `starting`/`idle` | 冷启动首条直接落入 F1.1 文案 |
+| **F1.3 空闲** | 仅本条待领取时主文案「已收到，等待 Agent 领取」 | `confirmEnqueueAndStartProgress` 传入 `pending = getSessionPendingCount`（`:1756`），计数含 `.claimed` + `.qmsg`（`src/file-queue.ts:174-181`） | 1 条新 `.qmsg` + 5 条 stale `.claimed` → `pending=6`，排队提示「前面还有 5 条」 |
+
+**根因链（与用户现象一致）**：
+
+1. 上轮会话 Agent 领取后产生 5 条 `.claimed` 未 ack（或异常退出未清理）。
+2. 应用重启 → daemon 内存 `sessionAgentPhaseMap` 清空，Electron 尚未上报 phase。
+3. 用户发首条 → `pushToFileQueue` 写入 1 条 `.qmsg` → F1 调用 `getSessionPendingCount` 得 6。
+4. phase fallback 见 5 条 `.claimed` → `processing` → 输出 F1.1 文案 + `pending - 1 = 5` 排队数。
+
+**PRD 侧**：01 场景 B / 验收 2 明确要求空闲不误报 processing；T4 设计的「phase 缺失 + 存在 `.claimed` → processing」仅适用于**同进程 live 会话**，未覆盖重启 stale 场景，属实现边界遗漏而非 PRD 口径错误。
+
+### 影响范围
+
+| 模块 | 影响 |
+|------|------|
+| `src/daemon.ts` | `buildEnqueueStatusText` phase fallback；`confirmEnqueueAndStartProgress` 排队计数口径 |
+| `src/file-queue.ts` | `getSessionPendingCount` 含 stale `.claimed`；可选冷启动 reclaim/隔离策略 |
+| F1 入队确认 | 重启/冷启动首条及 stale 队列残留会话 |
+| F4 / 合并预览 | 间接：`shouldSuppressMergePreview` 亦将 orphan `.claimed` 视为 suppress，可能连带影响重启后会话预览（本轮未复测） |
+
+### 后续处理路径
+
+| 问题 | 建议路径 |
+|------|----------|
+| 重启 stale claimed 导致 F1 误报 | `/kb-apply` **T-FIX-02**：冷启动 reclaim 或 F1 排队数改基于 `getSessionUnclaimedCount`；phase 缺失时区分 orphan claimed vs live processing（Electron 上报前默认 `starting`/`idle`） |
+| 自动化回归 | 扩展 `phase-api-contract.sh` 或 08 场景：模拟 restart + orphan `.claimed` + 首条入队 |
+
+### 关联验收标准
+
+| 编号 | 摘要 | 本轮结果 |
+|------|------|----------|
+| **2** | Agent 空闲：不误报「正在处理上一条」 | **不通过**（重启首条误报） |
+| **3** | 冷启动：体现正在启动/等待领取 | **不通过**（落入 F1.1 processing） |
+| **1** | Agent 忙时连发：processing 文案 + 排队数正确 | **未复测**（本轮仅验 restart 首条） |
