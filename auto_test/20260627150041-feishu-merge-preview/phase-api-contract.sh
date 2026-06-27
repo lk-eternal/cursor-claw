@@ -51,7 +51,31 @@ echo "phase-api-contract: ${BASE} session_key=${SESSION_KEY}"
 
 post_phase starting 200
 post_phase processing 200
+
+# T-FIX-01: instant poll 路径（ensureMergePreviewSentBeforeClaim）非破坏冒烟
+instant_poll() {
+  local label="$1"
+  local code
+  code=$(curl -s -o /tmp/kb_poll_resp.json -w "%{http_code}" \
+    "${BASE}/api/poll-message?sessionKey=${SESSION_KEY}&wait=false")
+  if [[ "$code" != "200" ]]; then
+    echo "FAIL ${label} instant poll expected HTTP 200 got ${code}"
+    cat /tmp/kb_poll_resp.json 2>/dev/null || true
+    exit 1
+  fi
+  if ! grep -q '"messages"' /tmp/kb_poll_resp.json 2>/dev/null; then
+    echo "FAIL ${label} instant poll body missing messages"
+    cat /tmp/kb_poll_resp.json
+    exit 1
+  fi
+  echo "OK ${label} instant poll HTTP 200"
+}
+
+instant_poll "processing+suppress"
 post_phase idle 200
+instant_poll "idle-compensation-hook"
+post_phase idle 200
+echo "OK idle compensation idempotent"
 
 post_bad "missing session_key" '{"phase":"starting"}'
 post_bad "invalid phase" "{\"session_key\":\"${SESSION_KEY}\",\"phase\":\"bogus\"}"

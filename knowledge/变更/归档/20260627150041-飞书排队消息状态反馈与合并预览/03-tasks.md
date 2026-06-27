@@ -7,13 +7,13 @@
 ### （一）依赖图
 
 ```
-T1 ──→ T6 ──→ T7 ──→ T8
+T1 ──→ T6 ──→ T7 ──→ T8 ──→ T-FIX-01
 T2 ──→ T3
 T2 ──→ T4 ──→ T6
 T2 ──→ T5 ──→ T6
 ```
 
-**文件冲突说明**：T4、T5、T6、T7、T8 均修改 `src/daemon.ts`，须严格按轮次串行，不得并行。T1 与 T2 可并行（`file-queue.ts` / `daemon.ts` 无交叉写）。T3 仅改 `electron/`，依赖 T2 端点就绪后可与 T4 串行前的空窗独立执行。
+**文件冲突说明**：T4、T5、T6、T7、T8、T-FIX-01 均修改 `src/daemon.ts`，须严格按轮次串行，不得并行。T1 与 T2 可并行（`file-queue.ts` / `daemon.ts` 无交叉写）。T3 仅改 `electron/`，依赖 T2 端点就绪后可与 T4 串行前的空窗独立执行。
 
 ### （二）分组调度
 
@@ -24,6 +24,7 @@ T2 ──→ T5 ──→ T6
 - **第五轮**：T6（合并预览核心，依赖 T1、T4、T5）
 - **第六轮**：T7（F3 回复预览拦截，依赖 T1、T6）
 - **第七轮**：T8（poll override 交付与状态清理，依赖 T1、T6、T7）
+- **修复轮（验收打回 code，`08` 第 1 轮）**：T-FIX-01（idle 后预览补偿调度 + instant poll 预览窗口守卫，依赖 T5/T6/T8 已完成）
 
 ## 2、任务清单
 
@@ -369,4 +370,51 @@ electron 在既有 notify 挂点向 daemon 上报 Agent 阶段，使 F1 文案�
 ### 依赖
 
 - 前置任务: T1、T6、T7
+- 后续任务: T-FIX-01
+
+---
+
+## T-FIX-01: idle 后预览补偿调度与 instant poll 预览窗口守卫
+
+### 背景
+
+`08-verify-issue.md` 第 1 轮验收打回（`reason=code`）。T6 仅在 `pushMessage` 成功时调用 `scheduleMergePreview`；Agent processing 期间 F4 抑制预览 debounce 后，`POST /api/session-agent-phase` 转 `idle` 仅删除 phase Map，**未**在 unclaimed≥2 时重调度预览，导致本应触发的合并预览永久缺失。同时 `blocking=false` 的 `/api/poll-message` 在预览 debounce/发送完成前直接 `claimSessionMessages` 并 `clearMergePreviewState`，instant poll 一次性领取多条消息，违反 F2.6「Agent 领取前须发预览」。本任务在 daemon 侧补齐两处时序缺口，优先不扩展 electron 重复逻辑。
+
+### 上下文文件
+
+- CodeGraph: `scheduleMergePreview` `shouldSuppressMergePreview` `session-agent-phase` `poll-message` `clearMergePreviewState` — 定位触发点与 instant poll 路径
+- 必读: `src/daemon.ts` — `scheduleMergePreview` / `pushMessage` 调用链（~L1167）；`POST /api/session-agent-phase` idle 分支（~L2133）；`shouldSuppressMergePreview`（~L638）；`/api/poll-message` instant 分支（~L2300，`blocking=false`）
+- 必读: `knowledge/变更/进行中/20260627150041-飞书排队消息状态反馈与合并预览/08-verify-issue.md` — 根因、时序推断、关联验收 4/10/11
+- 必读: `knowledge/变更/进行中/20260627150041-飞书排队消息状态反馈与合并预览/01-proposal.md` — F2.1/F2.5/F2.6、F4.1、验收 4/10/11
+- 参考: 本变更 T5（F4 抑制）、T6（预览状态机）、T8（poll 清理）— 复用既有函数，避免重复实现
+
+### 实现范围
+
+- 修改: `src/daemon.ts`
+  - **`session-agent-phase` idle 补偿**：`phase === "idle"` 且自 Map 删除条目后，若 `getSessionUnclaimedCount(sessionKey) >= 2` 且 `!shouldSuppressMergePreview(sessionKey)`，且会话为飞书 p2p（与 T6 发送条件一致），调用 `scheduleMergePreview(sessionKey, ...)`；须能从 sessionKey 或既有 session 元数据解析 `chatId`/`chatType`/`senderOpenId`（可复用 T6 内已有解析 helper）
+  - **instant poll 预览窗口守卫**：在 `/api/poll-message` 且 `blocking=false` 路径中，于 `claimSessionMessages` **之前**插入守卫：当 unclaimed≥2、应发预览（`!shouldSuppressMergePreview`）且当前批次尚未完成预览发送（debounce 进行中或 `mergePreviewBySession` 无有效 `lastPreviewMessageId`）时，须先完成 debounce 并发送/更新预览（可 `await` 既有 debounce 回调或抽取 `ensureMergePreviewSentBeforeClaim(sessionKey): Promise<void>`），**再**执行 claim；不得在应发预览但未发时直接 claim + `clearMergePreviewState`
+  - **F4 不变**：`shouldSuppressMergePreview === true`（processing、存在 `.claimed`、流式 outbound 活跃）时 instant poll **仍**可直接 claim，不强制预览；processing/流式连发路径行为与 T5/T6 一致
+  - **清理时序**：`clearMergePreviewState` 仅在 claim 完成且预览窗口已关闭（已发预览或本批无需预览）后调用；避免在 debounce 未完成时清除状态
+- 删除: 无
+- 不修改: `electron/`（根因在 daemon；08 已确认）
+
+### 接口契约
+
+- `function ensureMergePreviewSentBeforeClaim(sessionKey: string): Promise<void>` — 内部（名称可 inline，行为须等价）：在 instant poll claim 前，满足 F2 触发条件且未抑制时，等待 debounce 完成并确保至少一次预览 outbound 已发送；无需预览或仍抑制时 no-op
+- `POST /api/session-agent-phase` idle 分支 — 行为扩展：idle 后可能触发 `scheduleMergePreview`（条件见实现范围）
+- `/api/poll-message`（`blocking=false`）— 行为扩展：claim 前可能 `await ensureMergePreviewSentBeforeClaim`；对外请求/响应字段不变
+
+### 验收标准
+
+- [ ] **验收 4**：复现 08 场景（Agent processing 期间连发 ≥3 条未领取，后转 idle）：用户在 Agent **领取前**收到 **1 次**合并预览，正文含【消息 1】～【消息 N】及与 Agent 将收到内容一致的完整文本；daemon 日志不得出现「instant poll count=5」且用户侧零预览
+- [ ] **验收 10**：Agent 流式/processing 进行中用户再连发：仅 F1 反馈，**不插入**合并预览；instant poll 在 `shouldSuppressMergePreview===true` 时仍可 claim，不阻塞 Agent 处理当前任务
+- [ ] **验收 11**：在上述修复路径下预览发出后、Agent 领取前再发第 4 条：预览**沿用同一 MG-id** 并标注「已更新」，反映 4 段合并内容（依赖预览已成功发出，更新路径可达）
+- [ ] idle 补偿：`curl` POST `session-agent-phase` idle 后，unclaimed=2、phase 已清、无 suppress 时会 schedule 预览；unclaimed<2 或仍 suppress 时不 schedule
+- [ ] instant poll：`blocking=false` 且应发预览时，poll 响应前用户侧已可见预览消息；claim 条数与预览段数一致，不出现「未预览先 claim 整批」
+- [ ] 单条 unclaimed（验收 9 回归）：无合并预览，instant poll 行为与 T8 一致
+- [ ] 无 `02`/`03` 未要求的抽象层、trait/mixin 中间层或未批准的新依赖（Ponytail 口径）
+
+### 依赖
+
+- 前置任务: T5、T6、T8（均已 done；本任务为验收打回修复）
 - 后续任务: 无

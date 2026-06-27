@@ -55,6 +55,8 @@
 | T7 | 已领取不可改文案 | ✅ |
 | T8 | poll override 交付；领取/ack 清理 preview 态 | ✅ |
 | T8 | 未改 electron poll 消费端（最小范围） | ✅ |
+| T-FIX-01 | idle 补偿 + instant poll 守卫；F4 不变 | ✅ |
+| T-FIX-01 | 08 关联验收 4/10/11 代码路径闭合 | ✅ 需 08 第 2 轮复验 |
 
 ### 01 核心验收（12 条）
 
@@ -63,14 +65,14 @@
 | 1 | Agent 忙连发：入队反馈含「正在处理上一条」+ 排队数 | ✅ 代码路径成立 |
 | 2 | Agent 空闲连发：不误报处理中 | ✅ idle 分支 |
 | 3 | 冷启动：「正在启动」+ 排队 | ✅ starting 分支 |
-| 4 | 连发 3 条：领取前 1 次预览含【消息 1】～【消息 3】 | ✅ 代码就绪，需联调 |
+| 4 | 连发 3 条：领取前 1 次预览含【消息 1】～【消息 3】 | ✅ T-FIX-01 闭合，需 08 复验 |
 | 5 | MG-id 格式与批次内一致 | ✅ `buildMergeId` |
 | 6 | 回复预览修改成功 → Agent 领新全文 | ✅ replace + poll 单条交付 |
 | 7 | 引导/失败含 ID + 全文 + 回复操作 | ✅ |
 | 8 | 无效修改纠错含 ID + 全文 + 操作 | ⚠️ 超长全文见 §3 警告 |
 | 9 | 单条无预览 | ✅ unclaimed < 2 不发 |
-| 10 | 流式进行中不插预览、无重复「处理中」 | ✅ suppress 守卫 |
-| 11 | 预览更新沿用 ID +「已更新」 | ✅ `state.updated` |
+| 10 | 流式进行中不插预览、无重复「处理中」 | ✅ suppress + ensure no-op |
+| 11 | 预览更新沿用 ID +「已更新」 | ✅ ensure 强制更新路径 |
 | 12 | 范围：飞书私聊；微信/群聊不要求 | ✅ p2p + mainUser gated |
 
 ### 02 §八·（二）工程补充验收
@@ -126,6 +128,96 @@ flowchart TD
 
 ## 9、结论
 
-**通过**，可进入 `/kb-archive`。
+**通过**（T-FIX-01 代码修复），建议 08 第 2 轮复验后再 `/kb-archive`。
 
-T1–T8 实现与 `02-design`/`03-tasks` 对齐；01 十二条验收在代码层均可追溯，无评分 ≥75 的功能性阻断项。§3 两项为体验/精简建议；§7 联调与知识库同步为归档前/后常规定动作。`tsc --noEmit` 通过。
+T1–T8 + T-FIX-01 实现与 `02-design`/`03-tasks` 对齐；08 主因（idle 补偿 + instant poll 绕过预览）已在 daemon 侧闭合。无评分 ≥75 的功能性阻断项。§3 R1/R2 仍为体验债务；§7 飞书端到端联调（R3）须在 archive 前复验验收 4/10/11。`tsc --noEmit` 通过。
+
+---
+
+## T-FIX-01 复评（R-FIX）
+
+> **触发**：08 第 1 轮打回（`reason=code`）后 T-FIX-01 完成；评审范围 = `git diff src/daemon.ts src/AGENTS.md`（+48 行）。
+
+### R-FIX-1、审查范围
+
+- **变更类型**：T-FIX-01 修复 diff（idle 补偿 + instant poll 守卫）
+- **评审等级**：focused-review（单文件 daemon 时序补丁 + AGENTS 文档）
+- **涉及文件**：`src/daemon.ts`、`src/AGENTS.md`
+- **对照基准**：`03-tasks.md` T-FIX-01、`08-verify-issue.md` 关联项 4/10/11
+
+### R-FIX-2、严重（必须处理）
+
+无
+
+### R-FIX-3、警告（建议处理）
+
+1. **debounce 回调与 `ensureMergePreviewSentBeforeClaim` 并发可能重复发预览**
+   - 位置: `src/daemon.ts:828-834`（debounce 回调 fire-and-forget `sendMergePreview`）与 `:782-802`（ensure 同步 await）
+   - 说明: debounce 触发后、首个 `sendMergePreview` 完成注册 `lastPreviewMessageId` 之前，instant poll 可能进入 ensure 并再次 `sendMergePreview`，极端时序下用户可见两条预览。Node 单线程下窗口极窄，08 主场景（suppress 后 idle 再 poll）不经过并发 debounce。评分约 65，不阻断。
+
+2. **预览发送失败仍继续 claim**
+   - 位置: `src/daemon.ts:798-802`
+   - 说明: `sendMergePreview` 抛错仅 WARN，claim 仍执行——避免 Agent 永久卡住，但用户可能仍看不到预览。与 T6 debounce 路径一致，属可接受降级。评分约 55。
+
+### R-FIX-4、设计偏差
+
+无。实现与 T-FIX-01 实现范围一致：
+
+| 要点 | 设计预期 | 实际 |
+|------|----------|------|
+| idle 补偿 | unclaimed≥2 且 `!shouldSuppressMergePreview` 且 p2p 时 schedule | `scheduleMergePreviewIfEligible` 于 `:2179` 挂接，四重守卫齐全 |
+| instant poll 守卫 | claim 前 await ensure；suppress 时 no-op | `:2346` await；ensure 首两行复用 suppress/unclaimed 检查 |
+| F4 不变 | processing/claimed/流式时 suppress，instant poll 不阻塞 | suppress=true → ensure 直接 return → claim 照常 |
+| 清理时序 | claim 后 clear | `:2350` 仍在 claim 成功且有消息时 clear |
+| 抽象度 | 可 inline，行为等价即可 | 3 个内部函数（`resolveMergePreviewContext` / `scheduleMergePreviewIfEligible` / `ensureMergePreviewSentBeforeClaim`），无新模块或 trait |
+
+### R-FIX-5、T-FIX-01 验收标准检查
+
+| 验收项 | 条件 | 代码层状态 |
+|--------|------|------------|
+| 08·4 | processing 连发 ≥3 条 → idle 后领取前 1 次预览 | ✅ idle 补偿 + ensure 双路径闭合 08 根因 |
+| 08·10 | processing/流式连发无预览；suppress 时 instant poll 不阻塞 | ✅ ensure 首行 suppress 检查；F4 逻辑未改 |
+| 08·11 | 预览发出后再发第 4 条：同一 MG-id +「已更新」 | ✅ ensure 在 `previewSent && previewPending` 时强制 `sendMergePreview` 更新 |
+| idle 补偿边界 | unclaimed<2 或 suppress 不 schedule | ✅ `:775-776` |
+| instant poll | 应发预览时 claim 前用户可见预览 | ✅ await ensure → sendMergePreview |
+| 验收 9 回归 | 单条 unclaimed 无预览 | ✅ ensure `:783` unclaimed<2 早退 |
+| Ponytail | 无过度抽象 | ✅ |
+
+### R-FIX-6、调用链（补丁后）
+
+```mermaid
+flowchart TD
+  IDLE[POST session-agent-phase idle] --> DEL[delete phase map]
+  DEL --> ELIG{scheduleMergePreviewIfEligible}
+  ELIG -->|unclaimed≥2 且 !suppress| SCH[scheduleMergePreview debounce]
+  INST[GET poll wait=false] --> ENS{ensureMergePreviewSentBeforeClaim}
+  ENS -->|!suppress 且需预览| SEND[await sendMergePreview]
+  ENS -->|suppress 或已发| SKIP[no-op]
+  SEND --> CLAIM[claimSessionMessages]
+  SKIP --> CLAIM
+  CLAIM --> CLR[clearMergePreviewState]
+```
+
+| 回归点 | 风险 | 说明 |
+|--------|------|------|
+| blocking poll 无守卫 | 低 | T-FIX-01 范围仅 `wait=false`；SDK 保活与 08 复现场景均走 instant 路径 |
+| debounce 取消 | 低 | ensure 内 `clearTimeout` 后再 await send，避免 claim 前状态被清 |
+| F4 processing 路径 | 无 | suppress 未弱化；idle 补偿仅在 delete phase 后且 !suppress |
+| race 重复预览 | 低 | 见 R-FIX-3 警告 #1 |
+
+### R-FIX-7、遗留债务
+
+1. **R3 飞书私聊端到端**（F1/F2/F3/F4、NF1/NF2/NF4）——T-FIX-01 闭合代码路径后须复验 08 场景。
+2. **R1 F3 失败纠错超长分条**——与 T-FIX-01 无关，仍 accepted_debt。
+3. **blocking poll 预览守卫**——未纳入 T-FIX-01；CLI legacy blocking 路径理论上仍可先 claim，当前主用户 SDK 路径不受影响。
+
+### R-FIX-8、修复任务建议
+
+| 问题 ID | 建议动作 | 关联任务 |
+|---------|----------|----------|
+| — | 无 open 阻断项 | — |
+| R-FIX-W1（可选） | debounce 与 ensure 互斥锁或 in-flight Promise 去重 | 未来 T-FIX-02 |
+
+### R-FIX-9、结论
+
+**通过**。T-FIX-01 正确补齐 idle 后预览补偿与 instant poll 预览窗口守卫，对齐 08 根因分析；F4 抑制语义保持；race 与发送失败降级为低优先级警告。建议执行 08 第 2 轮或 `/kb-test` 复验验收 4/10/11 后再 archive。

@@ -11,6 +11,8 @@
 ## 合并预览与 Agent 阶段（daemon 内存）
 
 - **Agent 阶段**：`sessionAgentPhaseMap` 由 electron `reportSessionAgentPhase`（`daemon-client.ts`）写入；`idle` 即 delete 条目。与 `sessionProgressMap`（流式/typing）职责分离。
+- **idle 补偿**：`POST /api/session-agent-phase` 转 `idle` 后，若 unclaimed≥2 且未抑制，daemon 须 `scheduleMergePreviewIfEligible`（processing 期间被 F4 跳过的 debounce 不会自动重跑）。
+- **instant poll 守卫**：`blocking=false` 的 `/api/poll-message` 在 `claimSessionMessages` 前 `await ensureMergePreviewSentBeforeClaim`；`shouldSuppressMergePreview===true` 时仍可直接 claim。`clearMergePreviewState` 仅在 claim 完成且预览窗口已关闭后调用。
 - **合并预览**：`mergePreviewBySession` / `mergePreviewRegistry` 生命周期与 poll 领取、`ackOnReply` 清理绑定；debounce 与超长分条逻辑留在 `daemon.ts` 内，勿散落至 file-queue。
 
 ## stream-text（`/api/stream-text`）

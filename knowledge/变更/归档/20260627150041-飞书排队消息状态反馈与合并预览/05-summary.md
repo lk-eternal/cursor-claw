@@ -8,6 +8,7 @@
 |------|----------|
 | `src/file-queue.ts` | 新增 `getSessionUnclaimedCount`、`listUnclaimedMessages`、`replaceSessionUnclaimedMessages` |
 | `src/daemon.ts` | F1 `buildEnqueueStatusText` + `sessionAgentPhaseMap`；F2/F3 `MergePreviewState`/`mergePreviewRegistry`、`scheduleMergePreview`/`sendMergePreview`/`tryHandleMergePreviewReply`；F4 `shouldSuppressMergePreview`；`POST /api/session-agent-phase`；poll `applyMergeOverrideForPoll` + `clearMergePreviewState` |
+| `src/daemon.ts`（T-FIX-01） | `scheduleMergePreviewIfEligible`（phase idle 补偿）；`ensureMergePreviewSentBeforeClaim`（instant poll claim 前预览守卫）；`resolveMergePreviewContext` |
 | `electron/daemon-client.ts` | 新增 `reportSessionAgentPhase` helper |
 | `electron/session-dispatcher.ts` | starting/processing/idle 三处 phase 上报 |
 | `electron/agent-sdk.ts` | processing/idle phase 上报 |

@@ -1,7 +1,8 @@
 {
   "name": "飞书排队消息状态反馈与合并预览",
   "flow": "standard",
-  "stage": "acceptance_reopened",
+  "stage": "archived_with_debt",
+  "archived_at": "2026-06-27T18:12:08+0800",
   "source": "kb-propose",
   "workflow_version": "v2.6",
   "tasks": [
@@ -60,6 +61,14 @@
       "status": "done",
       "files": ["src/daemon.ts"],
       "depends_on": ["T1", "T6", "T7"]
+    },
+    {
+      "id": "T-FIX-01",
+      "title": "idle 后预览补偿调度与 instant poll 预览窗口守卫",
+      "status": "done",
+      "files": ["src/daemon.ts", "src/AGENTS.md"],
+      "depends_on": ["T5", "T6", "T8"],
+      "test_evidence": "tsc 通过；phase-api-contract.sh T-FIX-01 instant poll 冒烟通过；08 场景联调待第 2 轮"
     }
   ],
   "reviews": [
@@ -83,6 +92,24 @@
       "status": "accepted_debt",
       "file": "auto_test/20260627150041-feishu-merge-preview/",
       "summary": "飞书私聊端到端联调（F1/F2/F3/F4、NF1/NF2/NF4）未跑"
+    },
+    {
+      "id": "R-FIX-W1",
+      "severity": "suggestion",
+      "status": "accepted_debt",
+      "file": "src/daemon.ts",
+      "summary": "debounce 回调与 ensureMergePreviewSentBeforeClaim 极端并发可能重复发预览",
+      "task_id": "T-FIX-01",
+      "resolution": "R-FIX 评分 65，08 主场景不触发，暂不阻断"
+    },
+    {
+      "id": "R-FIX-W2",
+      "severity": "suggestion",
+      "status": "accepted_debt",
+      "file": "src/daemon.ts",
+      "summary": "sendMergePreview 失败仍 claim，用户可能看不到预览但 Agent 不卡住",
+      "task_id": "T-FIX-01",
+      "resolution": "R-FIX 评分 55，与 T6 降级策略一致"
     }
   ],
   "revisions": [],
@@ -104,48 +131,48 @@
   },
   "files": [
     {
-      "path": "knowledge/变更/进行中/20260627150041-飞书排队消息状态反馈与合并预览/00-manifest.json",
+      "path": "knowledge/变更/归档/20260627150041-飞书排队消息状态反馈与合并预览/00-manifest.json",
       "role": "manifest",
       "status": "active"
     },
     {
-      "path": "knowledge/变更/进行中/20260627150041-飞书排队消息状态反馈与合并预览/01-proposal.md",
+      "path": "knowledge/变更/归档/20260627150041-飞书排队消息状态反馈与合并预览/01-proposal.md",
       "role": "proposal",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/进行中/20260627150041-飞书排队消息状态反馈与合并预览/02-design.md",
+      "path": "knowledge/变更/归档/20260627150041-飞书排队消息状态反馈与合并预览/02-design.md",
       "role": "design",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/进行中/20260627150041-飞书排队消息状态反馈与合并预览/03-tasks.md",
+      "path": "knowledge/变更/归档/20260627150041-飞书排队消息状态反馈与合并预览/03-tasks.md",
       "role": "tasks",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/进行中/20260627150041-飞书排队消息状态反馈与合并预览/04-review.md",
+      "path": "knowledge/变更/归档/20260627150041-飞书排队消息状态反馈与合并预览/04-review.md",
       "role": "review",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/进行中/20260627150041-飞书排队消息状态反馈与合并预览/05-summary.md",
+      "path": "knowledge/变更/归档/20260627150041-飞书排队消息状态反馈与合并预览/05-summary.md",
       "role": "summary",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/进行中/20260627150041-飞书排队消息状态反馈与合并预览/06-automation-test.md",
+      "path": "knowledge/变更/归档/20260627150041-飞书排队消息状态反馈与合并预览/06-automation-test.md",
       "role": "automation_test",
       "kind": "change_doc",
       "status": "changed"
     },
     {
-      "path": "knowledge/变更/进行中/20260627150041-飞书排队消息状态反馈与合并预览/08-verify-issue.md",
+      "path": "knowledge/变更/归档/20260627150041-飞书排队消息状态反馈与合并预览/08-verify-issue.md",
       "role": "verify_issue",
       "kind": "change_doc",
       "status": "changed"
@@ -216,10 +243,10 @@
       "status": "changed"
     },
     {
-      "path": "changelog/1.5.0.json",
+      "path": "changelog/1.5.1.json",
       "role": "changelog",
       "status": "changed"
     }
   ],
-  "updated_at": "2026-06-27T18:15:00+0800"
+  "updated_at": "2026-06-27T18:12:08+0800"
 }

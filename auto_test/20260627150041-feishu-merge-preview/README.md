@@ -5,6 +5,7 @@
 ## 用途
 
 - 验证 `POST /api/session-agent-phase` HTTP 契约（对应 `03-tasks` T2）。
+- T-FIX-01 非破坏冒烟：`processing` 后、`idle` 后各一次 `GET /api/poll-message?wait=false`，断言 instant poll 路径不 500 且响应含 `messages`（`ensureMergePreviewSentBeforeClaim` / idle 补偿钩子可达；无队列文件时不 claim）。
 - **非**飞书端到端联调；F1/F2/F3 须按 `06-automation-test.md` §4.1 手工验收。
 
 ## 前置
@@ -24,6 +25,7 @@ export DAEMON_PORT=19528   # 按本地 lock 实际端口调整
 ## 通过准则
 
 - starting → processing → idle 均返回 HTTP 200 且 body `ok: true`。
+- T-FIX-01：`wait=false` instant poll 在 processing / idle 后均 HTTP 200；连续 idle 不报错。
 - 缺 `session_key` 或非法 `phase` 返回 HTTP 400。
 - 任一步失败则脚本 exit 1。
 

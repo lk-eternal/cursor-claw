@@ -1,7 +1,7 @@
 # 飞书排队消息状态反馈与合并预览 - 验收记录
 
 > **变更 ID**：`20260627150041-飞书排队消息状态反馈与合并预览`
-> **阶段**：`/kb-test`（默认不重跑全量编译；以 04-review 静态 + 契约脚本 + 飞书私聊联调为主）
+> **阶段**：`/kb-test`（T-FIX-01 修复轮；静态 + 契约脚本 + 飞书私聊联调）
 > **评审结论引用**：`04-review.md` 通过，无 blocking；§3 警告 2 项（F3 失败纠错超长分条、processing 双报）
 
 ## 1、测试策略与范围
@@ -25,30 +25,32 @@
 | 超长合并分条（NF4、§八·(二)·5） | 需构造 >15KB 正文并在飞书客户端核对全文 |
 | `getSessionUnclaimedCount` / replace | 纯文件队列逻辑，04 静态复核已覆盖；可选本地造 `.qmsg`/`.claimed` 目录 |
 | F3 失败纠错超长（04 §3 警告 #1） | 联调超长场景时人工判定；非阻断 |
+| T-FIX-01 预览 outbound 可见性 | `ensureMergePreviewSentBeforeClaim` 依赖飞书 p2p 发送与真实 sessionKey；脚本仅断言 instant poll HTTP 不 500 |
 
 ## 3、验收追溯表
 
 | 来源 | 验收要点 | 验证方式 | 证据类型 | 状态 |
 |------|----------|----------|----------|------|
 | **T1** | unclaimed 仅计 `.qmsg`；replace 折叠；空会话不抛 | 04 静态 + 可选造队列目录 | 代码复核 / 本地文件 | ✅ 静态 |
-| **T2** | `POST /api/session-agent-phase` 校验；idle 删 Map | 04 静态 + `phase-api-contract.sh` | 代码 / HTTP 契约 | ✅ 静态；⏳ 脚本待跑 |
+| **T2** | `POST /api/session-agent-phase` 校验；idle 删 Map | 04 静态 + `phase-api-contract.sh` | 代码 / HTTP 契约 | ✅ 静态；✅ 脚本 |
 | **T3** | starting/processing/idle 上报；失败 WARN | 04 静态 + 冷启动联调 | 代码 / 联调 | ⚠️ 联调待跑 |
 | **T4** | F1.1–F1.3 文案 + 排队数；`.claimed` 兜底 | 04 静态 + 飞书连发 | 代码 / 联调 | ⚠️ 联调待跑 |
 | **T5** | processing/claimed/流式时 suppress 预览 | 04 静态 + 流式连发 | 代码 / 联调 | ⚠️ 联调待跑 |
 | **T6** | debounce；≥2 触发；MG-id；已更新；超长分条 | 04 静态 + 飞书连发 | 代码 / 联调 | ⚠️ 联调待跑 |
 | **T7** | parentId 拦截；ID+全文+操作；旧 previewId | 04 静态 + 回复预览联调 | 代码 / 联调 | ⚠️ 联调待跑 |
 | **T8** | poll override 交付；领取/ack 清 preview | 04 静态 + 修改后任务联调 | 代码 / 联调 | ⚠️ 联调待跑 |
+| **T-FIX-01** | idle 补偿 `scheduleMergePreviewIfEligible`；instant poll `ensureMergePreviewSentBeforeClaim` | 04 R-FIX + `phase-api-contract.sh` T-FIX-01 冒烟 | 代码 / HTTP 冒烟 | ✅ 静态+冒烟；⚠️ 08 场景联调 |
 | **01·1** | Agent 忙连发 B/C：含「正在处理上一条」+ 排队数 | 飞书私聊：任务进行中连发 2 条 | 联调 | ⏳ 待联调 |
 | **01·2** | Agent 空闲连发：不误报处理中 | 空闲时连发 2 条 | 联调 | ⏳ 待联调 |
 | **01·3** | 冷启动：「正在启动」+ 排队 | 停止 Agent 后发 1 条 | 联调 | ⏳ 待联调 |
-| **01·4** | 连发 3 条：领取前 1 次预览含【消息 1】～【消息 3】 | 空闲连发 3 条，领取前观察 | 联调 | ⏳ 待联调 |
+| **01·4** | 连发 3 条：领取前 1 次预览含【消息 1】～【消息 3】 | 空闲连发 3 条，领取前观察；**08 复现场景** | 联调 | ⏳ 08 第 2 轮 |
 | **01·5** | MG-id 格式 `MG-{profile}-{YYYYMMDDHHmmss}` 批次内一致 | 预览/确认/失败文案核对 ID | 联调 | ⏳ 待联调 |
 | **01·6** | 回复预览修改成功 → Agent 领新全文 | 回复预览发新全文 → 观察 Agent 处理 | 联调 | ⏳ 待联调 |
 | **01·7** | 引导/失败含 ID + 全文 + 回复操作 | 检查预览与故意失败回复 | 联调 | ⏳ 待联调 |
 | **01·8** | 无效修改纠错含 ID + 全文 + 操作 | 空正文或未回复预览 | 联调 | ⏳ 待联调 |
 | **01·9** | 单条无预览 | 仅发 1 条 | 联调 | ⏳ 待联调 |
-| **01·10** | 流式进行中连发：仅 F1、无预览、无重复「处理中」 | SDK 长回复中再发消息 | 联调 | ⏳ 待联调 |
-| **01·11** | 预览更新沿用 ID +「已更新」 | 预览后再发第 4 条 | 联调 | ⏳ 待联调 |
+| **01·10** | 流式进行中连发：仅 F1、无预览、无重复「处理中」 | SDK 长回复中再发消息 | 联调 | ⏳ 08 第 2 轮 |
+| **01·11** | 预览更新沿用 ID +「已更新」 | 预览后再发第 4 条 | 联调 | ⏳ 08 第 2 轮 |
 | **01·12** | 范围：飞书私聊；微信/群聊不要求 F2/F3 | 标注通过范围 | 文档 | ✅ 已标注 |
 | **§八·(二)·1** | phase 全链路 F1 文案 | 冷启动→处理→空闲各 1 次 | 联调 | ⏳ 待联调 |
 | **§八·(二)·2** | phase 缺失 + `.claimed` 兜底 processing | 04 静态 | 代码复核 | ✅ 静态 |
@@ -85,7 +87,7 @@
 
 | 检查 | 指针 | 期望 | 状态 |
 |------|------|------|------|
-| TypeScript | builder / `04-review.md` §9 | `tsc --noEmit` 通过 | ✅ 引用 |
+| TypeScript | builder / 本轮回跑 | `tsc --noEmit` 通过 | ✅ 本轮回跑 |
 | Electron 构建 | builder 报告 | electron-vite 通过 | ✅ 引用 |
 | 04-review | `04-review.md` | T1–T8 ✅；01 十二条代码路径成立 | ✅ 静态 |
 
@@ -94,8 +96,8 @@
 | 检查 | 操作指针 | 期望 |
 |------|----------|------|
 | unclaimed 计数 | 队列目录某 `sessionKey` 放 2×`.qmsg` + 1×`.claimed` | `getSessionUnclaimedCount`=2，`getSessionPendingCount`=3 |
-| phase API 契约 | `auto_test/.../phase-api-contract.sh`（daemon 已运行） | 200/400 符合 T2 契约 |
-| suppress 守卫 | phase=processing 或存在 `.claimed` 时连发 | 日志/飞书无 `sendMergePreview`（联调 F10 覆盖） |
+| phase API 契约 | `auto_test/.../phase-api-contract.sh`（daemon 已运行） | 200/400 符合 T2；含 T-FIX-01 instant poll 冒烟 |
+| T-FIX-01 预览守卫 | 同上脚本 processing→instant poll→idle→instant poll | HTTP 200、不 500；无真实队列时不 claim |
 
 环境变量与凭据：**不写密钥**；飞书凭据以本地已配置为准（`LARK_*` 等）。
 
@@ -104,7 +106,7 @@
 | 项 | 说明 |
 |----|------|
 | **脚本目录** | `auto_test/20260627150041-feishu-merge-preview/` |
-| **入口** | `./phase-api-contract.sh` — 见同目录 `README.md` |
+| **入口** | `./phase-api-contract.sh` — T2 契约 + T-FIX-01 instant poll 冒烟；见 `README.md` |
 | **运行依赖** | daemon 已启动（Electron 或独立 `src/daemon`） |
 | **环境变量** | `DAEMON_PORT` 或 `LARK_DAEMON_PORT`（默认 `19528`）；测试用 `KB_TEST_SESSION_KEY`（默认 `__kb_test_phase__`） |
 | **默认行为** | 非破坏：仅 POST phase；不使用真实用户会话键除非显式设置 |
@@ -122,5 +124,6 @@
 |------|------|-----------|------|------|
 | 2026-06-27 | 本地 dev | 04-review 全量 diff T1–T8 | 通过 | 静态契约 |
 | 2026-06-27 | builder | tsc + electron-vite | 通过 | 引用不重跑 |
-| 2026-06-27 | — | `phase-api-contract.sh` | 待执行 | 需 daemon 运行 |
-| 2026-06-27 | — | F1–F14 飞书私聊联调 | 待执行 | 须手工验收 |
+| 2026-06-27 | 本地 dev | `npm run build:mcp`（T-FIX-01 修复轮） | 通过 | tsc --noEmit |
+| 2026-06-27 | 本地 daemon :19528 | `phase-api-contract.sh`（T-FIX-01 轮） | 通过 | T2+instant poll 冒烟 |
+| 2026-06-27 | — | F1–F14 飞书私聊联调 / 08 第 2 轮 | 待执行 | 须手工验收 4/10/11 |

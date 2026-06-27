@@ -758,6 +758,50 @@ async function sendMergePreview(
   }
 }
 
+function resolveMergePreviewContext(sessionKey: string): {
+  chatId?: string;
+  chatType?: string;
+  senderOpenId?: string;
+} {
+  const chatId = resolveRawChatId(sessionKey);
+  if (!chatId || !isMergePreviewEligible(sessionKey)) return {};
+  const messages = listUnclaimedMessages(sessionKey);
+  const state = mergePreviewBySession.get(sessionKey);
+  const senderOpenId = state?.senderOpenId ?? messages[0]?.meta?.senderOpenId;
+  return { chatId, chatType: "p2p", senderOpenId };
+}
+
+function scheduleMergePreviewIfEligible(sessionKey: string): void {
+  if (getSessionUnclaimedCount(sessionKey) < 2) return;
+  if (shouldSuppressMergePreview(sessionKey)) return;
+  const ctx = resolveMergePreviewContext(sessionKey);
+  if (ctx.chatType !== "p2p") return;
+  scheduleMergePreview(sessionKey, ctx.chatId, ctx.chatType, ctx.senderOpenId);
+}
+
+async function ensureMergePreviewSentBeforeClaim(sessionKey: string): Promise<void> {
+  if (getSessionUnclaimedCount(sessionKey) < 2) return;
+  if (shouldSuppressMergePreview(sessionKey)) return;
+  const ctx = resolveMergePreviewContext(sessionKey);
+  if (ctx.chatType !== "p2p") return;
+
+  const state = mergePreviewBySession.get(sessionKey);
+  const previewPending = !!state?.debounceTimer;
+  const previewSent = !!state?.lastPreviewMessageId;
+  if (previewSent && !previewPending) return;
+
+  if (state?.debounceTimer) {
+    clearTimeout(state.debounceTimer);
+    state.debounceTimer = undefined;
+  }
+
+  try {
+    await sendMergePreview(sessionKey, ctx.chatId, ctx.chatType, ctx.senderOpenId);
+  } catch (e: unknown) {
+    log("WARN", `合并预览发送失败(claim 前): ${e instanceof Error ? e.message : e}`);
+  }
+}
+
 function scheduleMergePreview(
   sessionKey: string,
   chatId?: string,
@@ -2132,6 +2176,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       }
       if (phase === "idle") {
         sessionAgentPhaseMap.delete(session_key);
+        scheduleMergePreviewIfEligible(session_key);
       } else {
         sessionAgentPhaseMap.set(session_key, phase);
       }
@@ -2298,6 +2343,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     // 领取不删：.qmsg→.claimed，返回该会话全部未确认消息（含历史未回复的，按时间升序）。
     // 消息只有 Agent 回复（ackOnReply）后才删除；未确认下次 poll 重投，幽灵连接领走也不丢。
     if (!blocking) {
+      await ensureMergePreviewSentBeforeClaim(sessionKeyFilter);
       let messages = claimSessionMessages(sessionKeyFilter);
       messages = applyMergeOverrideForPoll(sessionKeyFilter, messages);
       if (messages.length > 0) {
