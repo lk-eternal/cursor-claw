@@ -46,6 +46,12 @@ interface SdkSessionAgent {
   pendingDispatch: boolean
   /** 当前 Run 启动时刻，供 error 时 durationMs 未就绪的兜底 */
   runStartedAt?: number
+  /** daemon 曾返回 deferred 或本地已见过程，延迟 POST stream-text */
+  presentationDeferStream?: boolean
+  /** 本 Run 是否出现过 tool/thinking */
+  seenProcessEvent?: boolean
+  /** 本 Run thinking 过程尚未 final */
+  thinkingOpen?: boolean
 }
 
 const sdkSessions = new Map<string, SdkSessionAgent>()
@@ -77,6 +83,9 @@ function resetSdkRunPresentationState(session: SdkSessionAgent): void {
   session.streamId = undefined
   session.streamLastPostAt = undefined
   session.logAgg = { kind: null, buf: "" }
+  session.presentationDeferStream = false
+  session.seenProcessEvent = false
+  session.thinkingOpen = false
   session.abortController = new AbortController()
 }
 
@@ -109,6 +118,18 @@ function f41Eligible(sessionKey: string, chatType: ChatType): boolean {
     return channel?.type === "feishu" && !!channel.allowOthers
   }
   return false
+}
+
+function presentationOrderingEnvEnabled(): boolean {
+  const v = (process.env.PRESENTATION_ORDERING ?? "").trim().toLowerCase()
+  if (v === "0" || v === "false") return false
+  return true
+}
+
+/** Presentation 时序编排：PRESENTATION_ORDERING 开启且主用户私聊 SDK 流式 */
+function presentationOrderingEligible(session: SdkSessionAgent): boolean {
+  if (!presentationOrderingEnvEnabled()) return false
+  return session.f41Stream && session.chatType === "p2p"
 }
 
 function resolveRunDurationMs(session: SdkSessionAgent, run?: Run | null): number | undefined {
@@ -224,9 +245,14 @@ async function postStreamText(session: SdkSessionAgent, payload: StreamTextPaylo
       ok?: boolean
       stream_id?: string
       outbound_message_id?: string
+      deferred?: boolean
       error?: string
     }
     if (res?.stream_id) session.streamId = res.stream_id
+    if (res?.deferred) {
+      session.presentationDeferStream = true
+      return
+    }
     if (res?.outbound_message_id) session.outboundMessageId = res.outbound_message_id
     if (res?.ok === false && res.error) {
       pushUiLog("SDK", "WARN", `[${session.sessionKey}] stream-text 拒绝: ${res.error}`)
@@ -251,6 +277,7 @@ function resetStreamPostChain(session: SdkSessionAgent): void {
 async function doFlushStreamPost(session: SdkSessionAgent, final: boolean): Promise<void> {
   clearStreamPostTimer(session)
   if (!session.f41Stream) return
+  if (!final && shouldDeferAssistantPost(session)) return
   const text = session.streamBuffer
   if (!text.trim() && !final) return
 
@@ -297,6 +324,65 @@ function scheduleStreamPost(session: SdkSessionAgent, final: boolean): void {
 function appendStreamDelta(session: SdkSessionAgent, delta: string): void {
   session.streamBuffer += delta
   scheduleStreamPost(session, false)
+}
+
+function shouldDeferAssistantPost(session: SdkSessionAgent): boolean {
+  if (!presentationOrderingEligible(session)) return false
+  if (session.outboundMessageId) return false
+  return !!(session.presentationDeferStream || session.seenProcessEvent)
+}
+
+function isAwaitingFirstProcessEvent(session: SdkSessionAgent): boolean {
+  return presentationOrderingEligible(session)
+    && !session.outboundMessageId
+    && !session.seenProcessEvent
+}
+
+/** 首包 POST 前短窗等待 tool/thinking，与 STREAM_POST_INTERVAL 对齐，纯对话路径不额外延迟 */
+function schedulePreambleRelease(session: SdkSessionAgent): void {
+  if (!session.f41Stream) return
+  clearStreamPostTimer(session)
+  session.streamPostTimer = setTimeout(() => {
+    session.streamPostTimer = undefined
+    if (shouldDeferAssistantPost(session)) return
+    scheduleStreamPost(session, false)
+  }, STREAM_POST_INTERVAL_MS)
+}
+
+function appendAssistantStreamDelta(session: SdkSessionAgent, delta: string): void {
+  session.streamBuffer += delta
+  if (shouldDeferAssistantPost(session)) return
+  if (isAwaitingFirstProcessEvent(session)) {
+    schedulePreambleRelease(session)
+    return
+  }
+  scheduleStreamPost(session, false)
+}
+
+function closeThinkingIfOpen(session: SdkSessionAgent): void {
+  if (!session.thinkingOpen) return
+  session.thinkingOpen = false
+  void postPresentationEvent(session, { kind: "thinking", final: true })
+  maybeReleaseDeferredAssistant(session)
+}
+
+function markProcessEventSeen(session: SdkSessionAgent): void {
+  clearStreamPostTimer(session)
+  session.seenProcessEvent = true
+  if (presentationOrderingEligible(session)) {
+    session.presentationDeferStream = true
+  }
+}
+
+async function flushDeferredStreamPost(session: SdkSessionAgent): Promise<void> {
+  if (!session.streamBuffer.trim()) return
+  await flushStreamPost(session, false)
+}
+
+function maybeReleaseDeferredAssistant(session: SdkSessionAgent): void {
+  if (!presentationOrderingEligible(session)) return
+  if (!session.seenProcessEvent) return
+  void flushDeferredStreamPost(session)
 }
 
 async function notifySessionChat(sessionKey: string, text: string, stopProgress = false): Promise<void> {
@@ -395,6 +481,10 @@ async function streamRunEvents(session: SdkSessionAgent, run: Run): Promise<void
       handleSdkEvent(session, event)
     }
     flushSdkLog(session)
+    closeThinkingIfOpen(session)
+    if (presentationOrderingEligible(session) && session.seenProcessEvent) {
+      await flushDeferredStreamPost(session)
+    }
     if (session.f41Stream && (session.streamBuffer.trim() || session.outboundMessageId)) {
       await flushStreamPost(session, true)
     }
@@ -471,10 +561,11 @@ async function startSdkRun(session: SdkSessionAgent, run: Run): Promise<void> {
 function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
   switch (event.type) {
     case "assistant":
+      closeThinkingIfOpen(session)
       for (const block of event.message.content) {
         if (block.type === "text" && block.text) {
           if (session.f41Stream) {
-            appendStreamDelta(session, block.text)
+            appendAssistantStreamDelta(session, block.text)
           } else {
             appendSdkLog(session, "text", block.text)
           }
@@ -484,13 +575,17 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
     case "thinking":
       if (event.text) {
         appendSdkLog(session, "thinking", event.text)
+        markProcessEventSeen(session)
+        session.thinkingOpen = true
         void postPresentationEvent(session, { kind: "thinking", delta: event.text })
       }
       break
     case "tool_call":
       flushSdkLog(session)
+      closeThinkingIfOpen(session)
       session.lastTool = { name: event.name, status: event.status }
       pushUiLog("SDK", "INFO", `[${session.sessionKey}] [tool] ${event.name}: ${event.status}`)
+      markProcessEventSeen(session)
       if (event.status === "running") session.toolPresentationOutboundIds?.delete(event.name)
       void postPresentationEvent(session, {
         kind: "tool",
@@ -498,6 +593,9 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
         tool_status: mapToolPresentationStatus(event.status),
         final: event.status !== "running",
       })
+      if (event.status !== "running") {
+        maybeReleaseDeferredAssistant(session)
+      }
       break
     case "status": {
       flushSdkLog(session)
@@ -645,6 +743,9 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       streamBuffer: "",
       residentMode: sdkResidentModeEnabled(),
       pendingDispatch: false,
+      presentationDeferStream: false,
+      seenProcessEvent: false,
+      thinkingOpen: false,
     }
 
     sdkSessions.set(sessionKey, session)

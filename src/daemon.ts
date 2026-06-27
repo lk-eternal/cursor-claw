@@ -323,6 +323,18 @@ interface SessionProgressState {
   thinkingLastPushAt?: number;
   /** presentation-event assistant 增量累积（stream-text 回退路径） */
   presentationAssistantAccum?: string;
+  /** Presentation 时序编排：本 Run 已见过程且尚未 idle */
+  presentationProcessActive?: boolean;
+  /** started/running 的 tool_name */
+  activeToolNames?: Set<string>;
+  /** 收到 thinking 且未收 final */
+  thinkingOpen?: boolean;
+  /** 延迟首建期间累积 assistant 全文 */
+  deferredAssistantText?: string;
+  /** 已首建 assistant 卡，防重复 */
+  assistantCardReleased?: boolean;
+  /** 与 Electron runStartedAt 对齐（预留） */
+  runPresentationEpoch?: number;
 }
 
 /** 流式更新节流间隔（ms），默认 1000，可配置范围 500–1500（NF6） */
@@ -369,6 +381,31 @@ function resolveChannelRuntime(sessionKey: string): {
   return { rt, rawKey, chatId: raw || rawKey };
 }
 
+function presentationOrderingEnvEnabled(): boolean {
+  const v = (process.env.PRESENTATION_ORDERING ?? "").trim().toLowerCase();
+  if (v === "0" || v === "false") return false;
+  return true;
+}
+
+/** Presentation 时序编排总开关（默认开，仅主用户私聊） */
+function presentationOrderingEnabled(sessionKey: string): boolean {
+  if (!presentationOrderingEnvEnabled()) return false;
+  return isMainUserP2pEligible(sessionKey);
+}
+
+function isPresentationProcessIdle(state: SessionProgressState): boolean {
+  return (state.activeToolNames?.size ?? 0) === 0 && !state.thinkingOpen;
+}
+
+function resetPresentationOrderingFields(state: SessionProgressState): void {
+  state.presentationProcessActive = false;
+  state.activeToolNames = new Set();
+  state.thinkingOpen = false;
+  state.deferredAssistantText = "";
+  state.assistantCardReleased = false;
+  state.runPresentationEpoch = 0;
+}
+
 /** F4.1：主用户私聊 eligible（合并批次仍限此范围） */
 function isMainUserP2pEligible(sessionKey: string): boolean {
   const resolved = resolveChannelRuntime(sessionKey);
@@ -403,6 +440,20 @@ function getPresentationReplyAnchor(sessionKey: string): string | undefined {
 
 function logPresentationFailed(sessionKey: string, kind: string, reason: string): void {
   log("WARN", `presentation_failed session=${sessionKey} kind=${kind} reason=${reason}`);
+}
+
+function logPresentationOrderViolation(ctx: {
+  sessionKey: string;
+  streamId?: string;
+  assistantMsgId: string;
+  processKind: string;
+  processMsgId?: string;
+  orderingEnabled: boolean;
+}): void {
+  log(
+    "WARN",
+    `presentation_order_violation session_key=${ctx.sessionKey} stream_id=${ctx.streamId ?? ""} assistant_msg_id=${ctx.assistantMsgId} process_kind=${ctx.processKind} process_msg_id=${ctx.processMsgId ?? ""} ordering_enabled=${ctx.orderingEnabled}`,
+  );
 }
 
 async function sendStreamSegments(
@@ -468,6 +519,96 @@ async function feishuStreamFallbackUpdate(
   }
 }
 
+/** 过程 idle 或 Run final 时首建 assistant CardKit（MergeBatch reply 锚点不变） */
+async function releaseDeferredAssistantStream(
+  sessionKey: string,
+  state: SessionProgressState,
+  opts?: { force?: boolean; final?: boolean; message_id?: string },
+): Promise<void> {
+  if (state.assistantCardReleased) return;
+  if (!opts?.force && !isPresentationProcessIdle(state)) return;
+
+  const text = state.deferredAssistantText ?? "";
+  if (!text.trim() && !opts?.force) return;
+
+  const ch = resolveChannel(sessionKey);
+  if (ch.type === "error") return;
+
+  const title = extractWorkspaceTitle(sessionKey);
+  const sid = state.streamId ?? randomUUID();
+  state.streamId = sid;
+  const now = Date.now();
+  let outId: string | undefined;
+
+  if (ch.type === "wechat") {
+    const ok = await ch.rt.wechat!.sendText(ch.chatId, text, { skipTyping: true });
+    if (!ok) {
+      logPresentationFailed(sessionKey, "assistant", "微信发送失败");
+      return;
+    }
+    outId = `wx_stream_${sid}`;
+    state.streamPatchMode = false;
+    state.outboundMessageId = outId;
+    state.streamLastText = text;
+    state.streamSentLength = text.length;
+    state.streamLastPushAt = now;
+  } else {
+    const card = await ch.rt.sender!.createStreamingCardEntity(title);
+    if (card) {
+      const replyAnchor = getPresentationReplyAnchor(sessionKey);
+      const msgId = await ch.rt.sender!.sendStreamingCardMessage(ch.chatId!, card.cardId, replyAnchor);
+      if (msgId) {
+        outId = msgId;
+        state.cardId = card.cardId;
+        state.elementId = card.elementId;
+        state.cardSequence = 1;
+        state.streamCardKitMode = true;
+        trackMessageSession(outId, sessionKey);
+        const updated = await ch.rt.sender!.updateStreamingCardText(
+          card.cardId, card.elementId, text, state.cardSequence,
+        );
+        if (updated) {
+          state.streamLastText = text;
+          state.streamSentLength = text.length;
+          state.streamLastPushAt = now;
+        } else {
+          state.streamCardKitMode = false;
+          log("INFO", `CardKit 首包更新失败，降级 PATCH/分段: session=${sessionKey}`);
+          await feishuStreamFallbackUpdate(ch, state, outId, text, sessionKey, title, !!opts?.final);
+        }
+      }
+    }
+    if (!outId) {
+      outId = await ch.rt.sender!.sendStreamMessage(text, ch.chatId, title);
+      if (!outId) {
+        logPresentationFailed(sessionKey, "assistant", "CardKit 与 sendStreamMessage 均失败");
+        return;
+      }
+      state.streamPatchMode = true;
+      trackMessageSession(outId, sessionKey);
+      state.streamLastText = text;
+      state.streamSentLength = text.length;
+      state.streamLastPushAt = now;
+    }
+    state.outboundMessageId = outId;
+  }
+
+  state.assistantCardReleased = true;
+  sessionLastReplyAt.set(sessionKey, now);
+
+  if (opts?.final) {
+    if (ch.type === "feishu" && state.streamCardKitMode && state.cardId) {
+      const closeSeq = (state.cardSequence ?? 0) + 1;
+      await ch.rt.sender!.closeStreamingCardMode(state.cardId, closeSeq);
+    }
+    if (opts.message_id) {
+      ackOnReply(opts.message_id, sessionKey);
+    } else {
+      stopSessionProgress(sessionKey);
+    }
+  }
+}
+
 async function handleStreamText(body: {
   session_key?: string;
   text?: string;
@@ -475,7 +616,7 @@ async function handleStreamText(body: {
   outbound_message_id?: string;
   message_id?: string;
   final?: boolean;
-}): Promise<{ ok: boolean; stream_id?: string; outbound_message_id?: string; error?: string }> {
+}): Promise<{ ok: boolean; stream_id?: string; outbound_message_id?: string; deferred?: boolean; error?: string }> {
   const { session_key, text, stream_id, outbound_message_id, message_id, final } = body;
   if (!session_key || text === undefined || text === "") {
     return { ok: false, error: "session_key and text are required" };
@@ -490,7 +631,13 @@ async function handleStreamText(body: {
   let state = sessionProgressMap.get(session_key);
   if (!state) {
     state = { typingActive: false };
+    resetPresentationOrderingFields(state);
     sessionProgressMap.set(session_key, state);
+  }
+
+  const ordering = presentationOrderingEnabled(session_key);
+  if (!outbound_message_id && !stream_id) {
+    resetPresentationOrderingFields(state);
   }
 
   if (stream_id && state.streamId && stream_id !== state.streamId) {
@@ -500,7 +647,7 @@ async function handleStreamText(body: {
   state.streamId = sid;
 
   const outIdHint = outbound_message_id ?? state.outboundMessageId;
-  const isFirst = !outIdHint;
+  let isFirst = !outIdHint;
   const now = Date.now();
   const throttle = streamTextThrottleMs();
   const forceSend = !!final || isFirst;
@@ -509,6 +656,21 @@ async function handleStreamText(body: {
   }
   if (!forceSend && state.streamLastText === text) {
     return { ok: true, stream_id: sid, outbound_message_id: state.outboundMessageId };
+  }
+
+  if (ordering) {
+    state.deferredAssistantText = text;
+    if (state.presentationProcessActive && !state.assistantCardReleased && isFirst && !final) {
+      return { ok: true, stream_id: sid, deferred: true };
+    }
+    if (!state.assistantCardReleased && final && state.presentationProcessActive) {
+      await releaseDeferredAssistantStream(session_key, state, { force: true, final: true, message_id });
+      return { ok: true, stream_id: sid, outbound_message_id: state.outboundMessageId };
+    }
+    if (!state.assistantCardReleased && final) {
+      await releaseDeferredAssistantStream(session_key, state, { force: true });
+      isFirst = !state.outboundMessageId;
+    }
   }
 
   const title = extractWorkspaceTitle(session_key);
@@ -524,6 +686,7 @@ async function handleStreamText(body: {
       state.streamLastText = text;
       state.streamSentLength = text.length;
       state.streamLastPushAt = now;
+      if (ordering) state.assistantCardReleased = true;
     } else {
       const card = await ch.rt.sender!.createStreamingCardEntity(title);
       if (card) {
@@ -544,10 +707,12 @@ async function handleStreamText(body: {
             state.streamLastText = text;
             state.streamSentLength = text.length;
             state.streamLastPushAt = now;
+            if (ordering) state.assistantCardReleased = true;
           } else {
             state.streamCardKitMode = false;
             log("INFO", `CardKit 首包更新失败，降级 PATCH/分段: session=${session_key}`);
             await feishuStreamFallbackUpdate(ch, state, outId, text, session_key, title, !!final);
+            if (ordering) state.assistantCardReleased = true;
           }
         } else {
           log("INFO", `CardKit 发送卡片失败，降级 sendStreamMessage: session=${session_key}`);
@@ -562,6 +727,7 @@ async function handleStreamText(body: {
         state.streamLastText = text;
         state.streamSentLength = text.length;
         state.streamLastPushAt = now;
+        if (ordering) state.assistantCardReleased = true;
       }
     }
   } else {
@@ -1150,11 +1316,14 @@ async function handleToolPresentationEvent(
   let state = sessionProgressMap.get(sessionKey);
   if (!state) {
     state = { typingActive: false };
+    resetPresentationOrderingFields(state);
     sessionProgressMap.set(sessionKey, state);
   }
 
   const toolName = event.tool_name.trim();
   if (!state.toolCards) state.toolCards = new Map();
+
+  const ordering = presentationOrderingEnabled(sessionKey);
 
   if (status === "started") {
     state.toolCards.delete(toolName);
@@ -1166,6 +1335,17 @@ async function handleToolPresentationEvent(
     toolCard && outHint
       ? { ...toolCard, cardMessageId: outHint }
       : undefined;
+
+  if (ordering) {
+    if (!state.activeToolNames) state.activeToolNames = new Set();
+    if (status === "started") {
+      state.activeToolNames.add(toolName);
+      state.presentationProcessActive = true;
+    } else if (status === "completed" || status === "failed") {
+      state.activeToolNames.delete(toolName);
+    }
+  }
+
   const replyAnchor = existing ? undefined : getPresentationReplyAnchor(sessionKey);
 
   try {
@@ -1180,11 +1360,24 @@ async function handleToolPresentationEvent(
       logPresentationFailed(sessionKey, "tool", "CardKit render failed");
       return { ok: false, error: "tool card render failed" };
     }
+    if (!existing && (state.outboundMessageId || state.assistantCardReleased)) {
+      logPresentationOrderViolation({
+        sessionKey,
+        streamId: state.streamId,
+        assistantMsgId: state.outboundMessageId ?? "",
+        processKind: "tool",
+        processMsgId: result.cardMessageId,
+        orderingEnabled: ordering,
+      });
+    }
     state.toolCards.set(toolName, result);
     if (status === "completed" || status === "failed") {
       state.toolCards.delete(toolName);
     }
     trackMessageSession(result.cardMessageId, sessionKey);
+    if (ordering && (status === "completed" || status === "failed") && isPresentationProcessIdle(state)) {
+      void releaseDeferredAssistantStream(sessionKey, state, { force: true });
+    }
     return { ok: true, outbound_message_id: result.cardMessageId };
   } catch (e: unknown) {
     const reason = e instanceof Error ? e.message : String(e);
@@ -1212,7 +1405,19 @@ async function handleThinkingPresentationEvent(
   let state = sessionProgressMap.get(sessionKey);
   if (!state) {
     state = { typingActive: false };
+    resetPresentationOrderingFields(state);
     sessionProgressMap.set(sessionKey, state);
+  }
+
+  const ordering = presentationOrderingEnabled(sessionKey);
+  if (ordering) {
+    if (event.delta && !state.thinkingOpen) {
+      state.thinkingOpen = true;
+      state.presentationProcessActive = true;
+    }
+    if (event.final) {
+      state.thinkingOpen = false;
+    }
   }
 
   state.thinkingBuffer = (state.thinkingBuffer ?? "") + event.delta;
@@ -1235,6 +1440,7 @@ async function handleThinkingPresentationEvent(
           cardSequence: state.thinkingCardSequence ?? 0,
         }
       : undefined;
+
   const replyAnchor = existing ? undefined : getPresentationReplyAnchor(sessionKey);
 
   try {
@@ -1249,11 +1455,24 @@ async function handleThinkingPresentationEvent(
       logPresentationFailed(sessionKey, "thinking", "CardKit render failed");
       return { ok: false, error: "thinking card render failed" };
     }
+    if (!existing && (state.outboundMessageId || state.assistantCardReleased)) {
+      logPresentationOrderViolation({
+        sessionKey,
+        streamId: state.streamId,
+        assistantMsgId: state.outboundMessageId ?? "",
+        processKind: "thinking",
+        processMsgId: result.cardMessageId,
+        orderingEnabled: ordering,
+      });
+    }
     state.thinkingCardEntityId = result.cardEntityId;
     state.thinkingCardMessageId = result.cardMessageId;
     state.thinkingCardSequence = result.cardSequence;
     state.thinkingLastPushAt = now;
     trackMessageSession(result.cardMessageId, sessionKey);
+    if (ordering && event.final && isPresentationProcessIdle(state)) {
+      void releaseDeferredAssistantStream(sessionKey, state, { force: true });
+    }
     return { ok: true, outbound_message_id: result.cardMessageId };
   } catch (e: unknown) {
     const reason = e instanceof Error ? e.message : String(e);

@@ -1,0 +1,208 @@
+{
+  "name": "飞书Presentation展示时序编排",
+  "flow": "standard",
+  "stage": "tested",
+  "source": "kb-propose",
+  "workflow_version": "v2.6",
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "PRESENTATION_ORDERING 功能开关与 MVP 范围门控",
+      "status": "done",
+      "files": [
+        "src/daemon.ts",
+        "electron/agent-sdk.ts"
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "T2",
+      "title": "SessionProgressState 编排字段与过程闩锁",
+      "status": "done",
+      "files": [
+        "src/daemon.ts"
+      ],
+      "depends_on": ["T1"]
+    },
+    {
+      "id": "T3",
+      "title": "Daemon handleStreamText 延迟首建与 releaseDeferredAssistantStream",
+      "status": "done",
+      "files": [
+        "src/daemon.ts",
+        "src/shared/lark-core.ts"
+      ],
+      "depends_on": ["T2"]
+    },
+    {
+      "id": "T4",
+      "title": "Electron SDK 事件延迟 POST 与缓冲释放",
+      "status": "done",
+      "files": [
+        "electron/agent-sdk.ts"
+      ],
+      "depends_on": ["T1", "T3"]
+    },
+    {
+      "id": "T5",
+      "title": "NF1 顺序违规日志与 Run 间状态清零强化",
+      "status": "done",
+      "files": [
+        "src/daemon.ts",
+        "electron/agent-sdk.ts"
+      ],
+      "depends_on": ["T2", "T3", "T4"]
+    },
+    {
+      "id": "T6",
+      "title": "MergeBatch 不回归与端到端验收",
+      "status": "blocked",
+      "files": [
+        "knowledge/变更/进行中/20260627210352-飞书Presentation展示时序编排/06-automation-test.md"
+      ],
+      "depends_on": ["T1", "T2", "T3", "T4", "T5"],
+      "note": "代码层+编译门禁通过；E1–E7 飞书联调待人工执行，archive 阻塞"
+    },
+    {
+      "id": "T7",
+      "title": "AGENTS.md Presentation 编排文档同步",
+      "status": "done",
+      "files": [
+        "src/AGENTS.md",
+        "electron/AGENTS.md"
+      ],
+      "depends_on": ["T5"]
+    },
+    {
+      "id": "T-FIX-01",
+      "title": "defer 门控与 preamble 短窗等待",
+      "status": "done",
+      "files": [
+        "electron/agent-sdk.ts"
+      ],
+      "depends_on": ["T4"]
+    },
+    {
+      "id": "T-FIX-02",
+      "title": "thinking final 闭合与 idle 释放",
+      "status": "done",
+      "files": [
+        "electron/agent-sdk.ts",
+        "src/daemon.ts"
+      ],
+      "depends_on": ["T4"]
+    },
+    {
+      "id": "T-FIX-03",
+      "title": "NF1 日志补全 process_msg_id",
+      "status": "done",
+      "files": [
+        "src/daemon.ts"
+      ],
+      "depends_on": ["T5"]
+    }
+  ],
+  "reviews": [
+    {
+      "id": "R1",
+      "severity": "critical",
+      "status": "verified",
+      "file": "electron/agent-sdk.ts",
+      "summary": "doFlushStreamPost 非 final 复检 shouldDeferAssistantPost；markProcessEventSeen/schedulePreambleRelease clearStreamPostTimer",
+      "task_id": "T-FIX-01",
+      "re_review": "2026-06-27"
+    },
+    {
+      "id": "R2",
+      "severity": "critical",
+      "status": "verified",
+      "file": "electron/agent-sdk.ts",
+      "summary": "schedulePreambleRelease 400ms 短窗 + isAwaitingFirstProcessEvent；主路径 preamble→tool defer 生效",
+      "task_id": "T-FIX-01",
+      "re_review": "2026-06-27",
+      "note": "preamble 停顿 >400ms 且 tool 未到时仍可能首 POST，T6 E1 量化"
+    },
+    {
+      "id": "R3",
+      "severity": "warning",
+      "status": "verified_partial",
+      "file": "electron/agent-sdk.ts",
+      "summary": "Electron closeThinkingIfOpen + maybeReleaseDeferredAssistant 已落地；Daemon final-only thinking 仍被 !delta 早退",
+      "task_id": "T-FIX-02",
+      "re_review": "2026-06-27"
+    },
+    {
+      "id": "R4",
+      "severity": "warning",
+      "status": "verified",
+      "file": "src/daemon.ts",
+      "summary": "logPresentationOrderViolation 传入 processMsgId: result.cardMessageId",
+      "task_id": "T-FIX-03",
+      "re_review": "2026-06-27"
+    }
+  ],
+  "revisions": [],
+  "files": [
+    {
+      "path": "knowledge/变更/进行中/20260627210352-飞书Presentation展示时序编排/00-manifest.json",
+      "kind": "change_doc",
+      "source": "lite",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/进行中/20260627210352-飞书Presentation展示时序编排/01-proposal.md",
+      "kind": "change_doc",
+      "source": "lite",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/进行中/20260627210352-飞书Presentation展示时序编排/02-design.md",
+      "kind": "change_doc",
+      "source": "kb-design",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/进行中/20260627210352-飞书Presentation展示时序编排/03-tasks.md",
+      "kind": "change_doc",
+      "source": "kb-plan",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/进行中/20260627210352-飞书Presentation展示时序编排/04-review.md",
+      "kind": "change_doc",
+      "source": "kb-review",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/进行中/20260627210352-飞书Presentation展示时序编排/06-automation-test.md",
+      "kind": "change_doc",
+      "source": "kb-test",
+      "status": "changed"
+    },
+    {
+      "path": "src/daemon.ts",
+      "kind": "code",
+      "source": "kb-apply",
+      "status": "changed"
+    },
+    {
+      "path": "electron/agent-sdk.ts",
+      "kind": "code",
+      "source": "kb-apply",
+      "status": "changed"
+    },
+    {
+      "path": "src/AGENTS.md",
+      "kind": "agents",
+      "source": "kb-apply",
+      "status": "changed"
+    },
+    {
+      "path": "electron/AGENTS.md",
+      "kind": "agents",
+      "source": "kb-apply",
+      "status": "changed"
+    }
+  ],
+  "updated_at": "2026-06-28T00:30:00+0800"
+}

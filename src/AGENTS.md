@@ -34,6 +34,16 @@
 - **eligible 分层**：`isMainUserP2pEligible`（合并批次）⊂ `isStreamTextEligible`（+ S1.8 飞书群聊且 `allowOthers`）；`sessionChatTypeMap` 在 `pushMessage` 写入。
 - **NF2**：活跃 MergeBatch 时 stream/tool/thinking 首包经 `getPresentationReplyAnchor` → `sendStreamingCardMessage` reply 到 `lastInboundMessageId`，不争用合并卡首屏。
 
+## Presentation 时序编排（PRESENTATION_ORDERING）
+
+- **开关**：`PRESENTATION_ORDERING` 环境变量；未设置或 `1`/`true` 为开启，`0`/`false` 关闭（回滚至先到先展示）。默认开启。
+- **MVP 范围**：`presentationOrderingEnabled(sessionKey)` = 开关开启 **且** `isMainUserP2pEligible`；群聊/CLI 不在本阶段。
+- **编排字段**（`SessionProgressState`）：`presentationProcessActive`、`activeToolNames`、`thinkingOpen`、`deferredAssistantText`、`assistantCardReleased`、`runPresentationEpoch`。
+- **规则**：本 Run 一旦过程活跃（tool/thinking），assistant CardKit **延迟首建**；过程 idle 或 Run `final` 时 `releaseDeferredAssistantStream` 首建并 PATCH；纯对话（从未过程活跃）首 delta 仍立即建卡。
+- **defer 响应**：`POST /api/stream-text` 可返回 `{ ok: true, deferred: true }`（无 `outbound_message_id`）；Electron 据此设 `presentationDeferStream`。
+- **NF1**：assistant 已建卡后再首建过程卡 → WARN 日志 `presentation_order_violation`（字段：`session_key`、`stream_id`、`assistant_msg_id`、`process_kind`、`process_msg_id`、`ordering_enabled`）；不阻断出站。
+- **MergeBatch 不变**：`getPresentationReplyAnchor` / `MergeBatchController` 逻辑**未改**；defer release 首建仍带 reply 锚点。
+
 ## stream-text（`/api/stream-text`）
 
 - **微信**：首包 `sendText` + 后续分段，逻辑不变。
