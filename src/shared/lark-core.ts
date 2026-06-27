@@ -5,6 +5,33 @@ import { randomUUID } from "node:crypto";
 import * as Lark from "@larksuiteoapi/node-sdk";
 
 const STREAM_ELEMENT_ID = "stream_content";
+const MERGE_BATCH_ELEMENT_ID = "merge_body";
+const TOOL_PROGRESS_ELEMENT_ID = "tool_progress";
+const THINKING_ELEMENT_ID = "thinking_summary";
+
+export interface PresentationCardState {
+  cardEntityId: string;
+  cardMessageId: string;
+  cardSequence: number;
+}
+
+function formatToolStatusLabel(status: "started" | "completed" | "failed"): string {
+  if (status === "completed") return "已完成";
+  if (status === "failed") return "失败";
+  return "执行中…";
+}
+
+export interface MergeBatchCardView {
+  title: string;
+  bodyMarkdown: string;
+  footerText: string;
+}
+
+export interface MergeBatchCardState {
+  cardEntityId: string;
+  cardMessageId: string;
+  cardSequence: number;
+}
 
 // ── 媒体缓存目录（飞书/微信下载的图片、文件、语音共用）─────
 
@@ -224,10 +251,21 @@ export class LarkSender {
     }
   }
 
-  /** CardKit 流式：发送引用 card_id 的 interactive 消息 */
-  async sendStreamingCardMessage(chatId: string, cardId: string): Promise<string | null> {
+  /** CardKit 流式：发送引用 card_id 的 interactive 消息（可选 reply 到 inbound，NF2） */
+  async sendStreamingCardMessage(chatId: string, cardId: string, replyMessageId?: string): Promise<string | null> {
     try {
       const content = JSON.stringify({ type: "card", data: { card_id: cardId } });
+      if (replyMessageId && !replyMessageId.startsWith("internal_")) {
+        const res = await this.client.im.message.reply({
+          path: { message_id: replyMessageId },
+          data: { content, msg_type: "interactive" },
+        }) as { code?: number; msg?: string; data?: { message_id?: string } };
+        if (res?.code !== 0) {
+          this.log("WARN", `CardKit reply 发送失败: code=${res?.code}, msg=${res?.msg}`);
+          return null;
+        }
+        return res?.data?.message_id ?? null;
+      }
       const res = await this.client.im.message.create({
         params: { receive_id_type: "chat_id" as any },
         data: { receive_id: chatId, content, msg_type: "interactive" },
@@ -263,6 +301,306 @@ export class LarkSender {
       this.log("WARN", `CardKit 流式更新异常: ${e instanceof Error ? e.message : e}`);
       return false;
     }
+  }
+
+  /** 合并批次 CardKit：创建非流式可 PATCH 卡片实体（含按钮占位） */
+  async createMergeBatchCardEntity(view: MergeBatchCardView): Promise<{ cardId: string; elementId: string } | null> {
+    try {
+      const escapedBody = view.bodyMarkdown.replace(/\\/g, "\\\\");
+      const escapedFooter = view.footerText.replace(/\\/g, "\\\\");
+      const card: Record<string, unknown> = {
+        schema: "2.0",
+        config: { wide_screen_mode: true, update_multi: true },
+        header: { title: { tag: "plain_text", content: view.title }, template: "blue" },
+        body: {
+          elements: [
+            {
+              tag: "markdown",
+              element_id: MERGE_BATCH_ELEMENT_ID,
+              content: `${escapedBody}\n\n---\n*${escapedFooter}*`,
+            },
+            {
+              tag: "action",
+              actions: [
+                { tag: "button", text: { tag: "plain_text", content: "立即发送" }, type: "primary", value: { action: "merge_send_now" } },
+                { tag: "button", text: { tag: "plain_text", content: "编辑" }, type: "default", value: { action: "merge_edit" } },
+                { tag: "button", text: { tag: "plain_text", content: "拆开逐条" }, type: "default", value: { action: "merge_split" } },
+              ],
+            },
+          ],
+        },
+      };
+      const res = await this.client.request({
+        method: "POST",
+        url: "/open-apis/cardkit/v1/cards",
+        data: { type: "card_json", data: JSON.stringify(card) },
+      }) as { code?: number; msg?: string; data?: { card_id?: string } };
+      if (res?.code !== 0) {
+        this.log("WARN", `合并 CardKit 创建失败: code=${res?.code}, msg=${res?.msg}`);
+        return null;
+      }
+      const cardId = res?.data?.card_id;
+      if (!cardId) {
+        this.log("WARN", "合并 CardKit 创建失败: 无 card_id");
+        return null;
+      }
+      return { cardId, elementId: MERGE_BATCH_ELEMENT_ID };
+    } catch (e: unknown) {
+      this.log("WARN", `合并 CardKit 创建异常: ${e instanceof Error ? e.message : e}`);
+      return null;
+    }
+  }
+
+  /** 合并批次 CardKit：发送卡片消息（可选 reply 到 inbound） */
+  async sendMergeBatchCardMessage(chatId: string, cardId: string, replyMessageId?: string): Promise<string | null> {
+    try {
+      const content = JSON.stringify({ type: "card", data: { card_id: cardId } });
+      if (replyMessageId && !replyMessageId.startsWith("internal_")) {
+        const res = await this.client.im.message.reply({
+          path: { message_id: replyMessageId },
+          data: { content, msg_type: "interactive" },
+        }) as { code?: number; msg?: string; data?: { message_id?: string } };
+        if (res?.code !== 0) {
+          this.log("WARN", `合并 CardKit reply 失败: code=${res?.code}, msg=${res?.msg}`);
+          return null;
+        }
+        return res?.data?.message_id ?? null;
+      }
+      return this.sendStreamingCardMessage(chatId, cardId);
+    } catch (e: unknown) {
+      this.log("WARN", `合并 CardKit 发送异常: ${e instanceof Error ? e.message : e}`);
+      return null;
+    }
+  }
+
+  /** 合并批次 CardKit：PATCH 更新正文元素（单 outbound_message_id 全程更新） */
+  async updateMergeBatchCardBody(
+    cardId: string,
+    elementId: string,
+    view: MergeBatchCardView,
+    sequence: number,
+  ): Promise<boolean> {
+    try {
+      const escapedBody = view.bodyMarkdown.replace(/\\/g, "\\\\");
+      const escapedFooter = view.footerText.replace(/\\/g, "\\\\");
+      const content = `${escapedBody}\n\n---\n*${escapedFooter}*`;
+      const res = await this.client.request({
+        method: "PUT",
+        url: `/open-apis/cardkit/v1/cards/${cardId}/elements/${elementId}/content`,
+        data: { content, sequence, uuid: randomUUID() },
+      }) as { code?: number; msg?: string };
+      if (res?.code !== 0) {
+        this.log("WARN", `合并 CardKit PATCH 失败: code=${res?.code}, msg=${res?.msg}`);
+        return false;
+      }
+      return true;
+    } catch (e: unknown) {
+      this.log("WARN", `合并 CardKit PATCH 异常: ${e instanceof Error ? e.message : e}`);
+      return false;
+    }
+  }
+
+  /**
+   * 合并批次 CardKit：创建或 PATCH 更新单卡。
+   * ponytail: 按钮占位，回调由 T8 接线；超 MERGE_CARD_MAX_ITEMS 时正文截断由调用方处理。
+   */
+  async renderMergeBatchCard(
+    chatId: string,
+    view: MergeBatchCardView,
+    existing?: MergeBatchCardState,
+    replyMessageId?: string,
+  ): Promise<MergeBatchCardState | null> {
+    if (existing?.cardEntityId && existing.cardMessageId) {
+      const seq = (existing.cardSequence ?? 0) + 1;
+      const ok = await this.updateMergeBatchCardBody(existing.cardEntityId, MERGE_BATCH_ELEMENT_ID, view, seq);
+      if (ok) return { ...existing, cardSequence: seq };
+      this.log("WARN", "合并 CardKit PATCH 失败，保留旧卡状态");
+      return existing;
+    }
+    const entity = await this.createMergeBatchCardEntity(view);
+    if (!entity) return null;
+    const msgId = await this.sendMergeBatchCardMessage(chatId, entity.cardId, replyMessageId);
+    if (!msgId) return null;
+    return { cardEntityId: entity.cardId, cardMessageId: msgId, cardSequence: 1 };
+  }
+
+  /** 工具进度 CardKit：创建可 PATCH 卡片实体 */
+  async createToolProgressCardEntity(
+    toolName: string,
+    status: "started" | "completed" | "failed",
+  ): Promise<{ cardId: string; elementId: string } | null> {
+    try {
+      const escapedName = toolName.replace(/\\/g, "\\\\");
+      const statusLabel = formatToolStatusLabel(status);
+      const card: Record<string, unknown> = {
+        schema: "2.0",
+        config: { wide_screen_mode: true, update_multi: true },
+        header: { title: { tag: "plain_text", content: "工具执行" }, template: "wathet" },
+        body: {
+          elements: [{
+            tag: "markdown",
+            element_id: TOOL_PROGRESS_ELEMENT_ID,
+            content: `🔧 **${escapedName}**\n状态：${statusLabel}`,
+          }],
+        },
+      };
+      const res = await this.client.request({
+        method: "POST",
+        url: "/open-apis/cardkit/v1/cards",
+        data: { type: "card_json", data: JSON.stringify(card) },
+      }) as { code?: number; msg?: string; data?: { card_id?: string } };
+      if (res?.code !== 0) {
+        this.log("WARN", `工具 CardKit 创建失败: code=${res?.code}, msg=${res?.msg}`);
+        return null;
+      }
+      const cardId = res?.data?.card_id;
+      if (!cardId) {
+        this.log("WARN", "工具 CardKit 创建失败: 无 card_id");
+        return null;
+      }
+      return { cardId, elementId: TOOL_PROGRESS_ELEMENT_ID };
+    } catch (e: unknown) {
+      this.log("WARN", `工具 CardKit 创建异常: ${e instanceof Error ? e.message : e}`);
+      return null;
+    }
+  }
+
+  /** 工具进度 CardKit：PATCH 更新 tool_name + status */
+  async updateToolProgressCardBody(
+    cardId: string,
+    elementId: string,
+    toolName: string,
+    status: "started" | "completed" | "failed",
+    sequence: number,
+  ): Promise<boolean> {
+    try {
+      const escapedName = toolName.replace(/\\/g, "\\\\");
+      const statusLabel = formatToolStatusLabel(status);
+      const content = `🔧 **${escapedName}**\n状态：${statusLabel}`;
+      const res = await this.client.request({
+        method: "PUT",
+        url: `/open-apis/cardkit/v1/cards/${cardId}/elements/${elementId}/content`,
+        data: { content, sequence, uuid: randomUUID() },
+      }) as { code?: number; msg?: string };
+      if (res?.code !== 0) {
+        this.log("WARN", `工具 CardKit PATCH 失败: code=${res?.code}, msg=${res?.msg}`);
+        return false;
+      }
+      return true;
+    } catch (e: unknown) {
+      this.log("WARN", `工具 CardKit PATCH 异常: ${e instanceof Error ? e.message : e}`);
+      return false;
+    }
+  }
+
+  /**
+   * 工具进度 CardKit：创建或 PATCH 单卡。
+   * started 且无 existing 时发新消息；后续 PATCH 同 entity。
+   */
+  async renderToolProgressCard(
+    chatId: string,
+    toolName: string,
+    status: "started" | "completed" | "failed",
+    existing?: PresentationCardState,
+    replyMessageId?: string,
+  ): Promise<PresentationCardState | null> {
+    if (existing?.cardEntityId && existing.cardMessageId) {
+      const seq = (existing.cardSequence ?? 0) + 1;
+      const ok = await this.updateToolProgressCardBody(
+        existing.cardEntityId, TOOL_PROGRESS_ELEMENT_ID, toolName, status, seq,
+      );
+      if (ok) return { ...existing, cardSequence: seq };
+      this.log("WARN", "工具 CardKit PATCH 失败，保留旧卡状态");
+      return existing;
+    }
+    const entity = await this.createToolProgressCardEntity(toolName, status);
+    if (!entity) return null;
+    const msgId = await this.sendStreamingCardMessage(chatId, entity.cardId, replyMessageId);
+    if (!msgId) return null;
+    return { cardEntityId: entity.cardId, cardMessageId: msgId, cardSequence: 1 };
+  }
+
+  /** 思考摘要 CardKit：创建可 PATCH 卡片实体 */
+  async createThinkingCardEntity(summary: string): Promise<{ cardId: string; elementId: string } | null> {
+    try {
+      const escaped = summary.replace(/\\/g, "\\\\");
+      const card: Record<string, unknown> = {
+        schema: "2.0",
+        config: { wide_screen_mode: true, update_multi: true },
+        header: { title: { tag: "plain_text", content: "思考中" }, template: "grey" },
+        body: {
+          elements: [{
+            tag: "markdown",
+            element_id: THINKING_ELEMENT_ID,
+            content: escaped || "…",
+          }],
+        },
+      };
+      const res = await this.client.request({
+        method: "POST",
+        url: "/open-apis/cardkit/v1/cards",
+        data: { type: "card_json", data: JSON.stringify(card) },
+      }) as { code?: number; msg?: string; data?: { card_id?: string } };
+      if (res?.code !== 0) {
+        this.log("WARN", `思考 CardKit 创建失败: code=${res?.code}, msg=${res?.msg}`);
+        return null;
+      }
+      const cardId = res?.data?.card_id;
+      if (!cardId) {
+        this.log("WARN", "思考 CardKit 创建失败: 无 card_id");
+        return null;
+      }
+      return { cardId, elementId: THINKING_ELEMENT_ID };
+    } catch (e: unknown) {
+      this.log("WARN", `思考 CardKit 创建异常: ${e instanceof Error ? e.message : e}`);
+      return null;
+    }
+  }
+
+  /** 思考摘要 CardKit：PATCH 更新正文 */
+  async updateThinkingCardBody(
+    cardId: string,
+    elementId: string,
+    summary: string,
+    sequence: number,
+  ): Promise<boolean> {
+    try {
+      const content = summary.replace(/\\/g, "\\\\") || "…";
+      const res = await this.client.request({
+        method: "PUT",
+        url: `/open-apis/cardkit/v1/cards/${cardId}/elements/${elementId}/content`,
+        data: { content, sequence, uuid: randomUUID() },
+      }) as { code?: number; msg?: string };
+      if (res?.code !== 0) {
+        this.log("WARN", `思考 CardKit PATCH 失败: code=${res?.code}, msg=${res?.msg}`);
+        return false;
+      }
+      return true;
+    } catch (e: unknown) {
+      this.log("WARN", `思考 CardKit PATCH 异常: ${e instanceof Error ? e.message : e}`);
+      return false;
+    }
+  }
+
+  /** 思考摘要 CardKit：创建或 PATCH 单卡 */
+  async renderThinkingCard(
+    chatId: string,
+    summary: string,
+    existing?: PresentationCardState,
+    replyMessageId?: string,
+  ): Promise<PresentationCardState | null> {
+    if (existing?.cardEntityId && existing.cardMessageId) {
+      const seq = (existing.cardSequence ?? 0) + 1;
+      const ok = await this.updateThinkingCardBody(existing.cardEntityId, THINKING_ELEMENT_ID, summary, seq);
+      if (ok) return { ...existing, cardSequence: seq };
+      this.log("WARN", "思考 CardKit PATCH 失败，保留旧卡状态");
+      return existing;
+    }
+    const entity = await this.createThinkingCardEntity(summary);
+    if (!entity) return null;
+    const msgId = await this.sendStreamingCardMessage(chatId, entity.cardId, replyMessageId);
+    if (!msgId) return null;
+    return { cardEntityId: entity.cardId, cardMessageId: msgId, cardSequence: 1 };
   }
 
   /** CardKit 流式：关闭 streaming_mode（final 时调用） */

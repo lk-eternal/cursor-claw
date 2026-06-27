@@ -244,7 +244,8 @@ export function migrateLegacyConfig(hooks?: LegacyMigrationHooks): void {
   }
   partial.agentResources = resources
 
-  const agentResourceId = cfg.agentMode === "sdk" && legacySdkId ? legacySdkId : CLI_RESOURCE_ID
+  const firstSdk = resources.find((r) => r.type === "sdk")
+  const agentResourceId = firstSdk?.id ?? (cfg.agentMode === "sdk" && legacySdkId ? legacySdkId : CLI_RESOURCE_ID)
   const channels = [...(cfg.channels ?? [])]
 
   const baseModel = {
@@ -347,6 +348,23 @@ export function migrateLegacyConfig(hooks?: LegacyMigrationHooks): void {
 
   partial.channelsMigrated = true
   saveConfig(partial)
+  ensureSdkChannelBindings()
+}
+
+/** IM 调度 SDK-only：通道仍指向 cli 时自动绑定首个 SDK 资源 */
+export function ensureSdkChannelBindings(): void {
+  const cfg = getConfig()
+  const firstSdk = (cfg.agentResources ?? []).find((r) => r.type === "sdk")
+  if (!firstSdk) return
+  let changed = false
+  const channels = getChannels().map((c) => {
+    if (c.agentResourceId === CLI_RESOURCE_ID) {
+      changed = true
+      return { ...c, agentResourceId: firstSdk.id }
+    }
+    return c
+  })
+  if (changed) saveConfig({ channels })
 }
 
 // ── 主会话 chatId（CLI resume）─────────────────────────────

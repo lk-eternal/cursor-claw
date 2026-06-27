@@ -4,7 +4,7 @@
 
 ## 职责边界
 
-**负责**：会话模型（私聊/群聊/临时/定时/工作流）、CLI/SDK 双驱动启动、`--resume` 上下文、消息队列调度、远程 `/` 指令、Cron 定时触发、工作区规则/MCP/Skills 注入。
+**负责**：会话模型（私聊/群聊/临时/定时/工作流）、SDK IM 路径与任务 CLI/SDK 启动、`--resume` 上下文、Daemon 转发调度、远程 `/` 指令、Cron 定时触发。
 
 **不负责**：消息通道连接（飞书/微信 WebSocket）、MCP 工具实现、工作流 YAML 编排细节（见工作流域）。
 
@@ -22,7 +22,7 @@
 
 1. **新人**：01 → 02 → 03
 2. **运维/飞书指令**：04 → 05
-3. **排查 Agent 未拉起**：03 → 02
+3. **排查 IM 未 dispatch**：03 → 04（消息桥接 04）
 
 ## 关键源码
 
@@ -36,8 +36,9 @@
 | Cron（UI） | `electron/cron-scheduler.ts` |
 | Cron（Daemon） | `src/daemon-scheduled-tasks.ts` |
 | 配置 | `electron/config-store.ts` |
-| 工作区注入 | `electron/workspace-injector.ts` |
+| agent-api | `electron/agent-sdk.ts`（端口 agent-api-port.json） |
 
 ## 变更记录
 
+2026-06-27：Daemon IM 编排、SDK-only、inject 废弃（archive 20260627162620）。
 2026-06-27：kb-sync 初始建立。

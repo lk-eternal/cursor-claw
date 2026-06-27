@@ -12,7 +12,7 @@
 
 ## 职责边界
 
-- **负责**：多通道消息收发、会话路由、文件队列、poll-message、StreamableHTTP MCP。
+- **负责**：多通道消息收发、会话路由、文件队列、IM 编排 dispatch、Presentation 路由、StreamableHTTP MCP。
 - **不负责**：桌面 UI、electron-store 配置编辑（由 Electron 主进程负责）。
 
 ## 源码入口
@@ -26,4 +26,5 @@
 
 ## 变更记录
 
+- 2026-06-27：IM 唯一编排、poll 移除（archive 20260627162620）
 - 2026-06-27：kb-sync 初始建立

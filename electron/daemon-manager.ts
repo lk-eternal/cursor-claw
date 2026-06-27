@@ -9,7 +9,7 @@ import { app, BrowserWindow, ipcMain, powerSaveBlocker } from "electron"
 import {
   getConfig, saveConfig, type AppConfig,
   getChannels, getEnabledChannels, getChannel,
-  updateChannel, migrateLegacyConfig, effectiveWorkspaceDir,
+  updateChannel, migrateLegacyConfig, effectiveWorkspaceDir, ensureSdkChannelBindings,
   mainChatScopeKey, type MessageChannel,
 } from "./config-store"
 import { parseChatKey, type DaemonChannelConfig, type ChannelStatusInfo } from "../src/shared/channel-types"
@@ -25,7 +25,7 @@ import {
   P2P_SESSION_KEY, setMainChatId, getMainChatId,
   type ChatType,
 } from "./agent-launcher"
-import { stopAllSdkSessions, getSdkSessionCount, getSdkSessionList, checkSdkApiKey, listSdkModels } from "./agent-sdk"
+import { stopAllSdkSessions, getSdkSessionCount, getSdkSessionList, checkSdkApiKey, listSdkModels, ensureAgentSdkHttpServer } from "./agent-sdk"
 import {
   setDaemonPort,
   injectWorkspaceToDir, injectWorkspaceMcpAndRules, clearInjectionCache,
@@ -42,7 +42,7 @@ import { FileCommand, reportCommandResult, handleFeishuModelCommand, handleFeish
 import { readLockFile, getLockFilePath, httpGet, httpPost, syncActiveSession, getCurrentActiveSession, enqueueToMainSession } from "./daemon-client"
 import {
   isSessionAgentRunning, stopSessionAgent, stopAllSessionAgents,
-  dispatchSessionAgents, launchSessionAgent, launchIndependentAgent,
+  launchSessionAgent, launchIndependentAgent,
   launchWorkflowAgent, notifyWorkflowChat,
   getSessionAgentList, handleChatCommand, clearMessageQueue, getQueueMessages,
   pullMergedMessagesFromQueue, isMainUser, extractChatId, chatNameCache,
@@ -493,6 +493,7 @@ function buildDaemonChannelConfigs(): DaemonChannelConfig[] {
     wechatAccountId: c.wechatAccountId?.trim(),
     mainUserEnabled: !!c.mainUserEnabled,
     mainUserChatId: c.mainUserEnabled ? (c.mainUserChatId?.trim() ?? "") : "",
+    allowOthers: !!c.allowOthers,
     workspaceDir: c.workspaceDir?.trim() ?? "",
   }))
 }
@@ -766,8 +767,6 @@ function broadcastStatus(status: DaemonStatus): void {
 
 
 let powerSaveBlockerId: number | null = null
-let sseReq: http.ClientRequest | null = null
-let sseDispatchDebounce: NodeJS.Timeout | null = null
 
 function startDaemonPowerSaveBlock(): void {
   stopDaemonPowerSaveBlock()
@@ -785,62 +784,13 @@ function stopDaemonPowerSaveBlock(): void {
   }
 }
 
-let sseBackoff = 1_000
-const SSE_BACKOFF_MAX = 30_000
-
-function connectSseQueueEvents(): void {
-  disconnectSseQueueEvents()
-  const lock = readLockFile()
-  if (!lock?.port) return
-  const url = `http://127.0.0.1:${lock.port}/api/queue-events`
-  let buf = ""
-  sseReq = http.get(url, { timeout: 0 }, (res) => {
-    sseBackoff = 1_000
-    res.on("data", (chunk: Buffer) => {
-      buf += chunk.toString()
-      const lines = buf.split("\n")
-      buf = lines.pop() ?? ""
-      for (const line of lines) {
-        if (!line.startsWith("data: ")) continue
-        try {
-          const ev = JSON.parse(line.slice(6))
-          if (ev.type === "queue-update") {
-            if (sseDispatchDebounce) clearTimeout(sseDispatchDebounce)
-            sseDispatchDebounce = setTimeout(() => dispatchSessionAgents().catch(() => {}), 300)
-          }
-        } catch { /* ignore */ }
-      }
-    })
-    res.on("end", () => {
-      sseReq = null
-      setTimeout(() => connectSseQueueEvents(), sseBackoff)
-      sseBackoff = Math.min(sseBackoff * 2, SSE_BACKOFF_MAX)
-    })
-  })
-  sseReq.on("error", () => {
-    sseReq = null
-    setTimeout(() => connectSseQueueEvents(), sseBackoff)
-    sseBackoff = Math.min(sseBackoff * 2, SSE_BACKOFF_MAX)
-  })
-}
-
-function disconnectSseQueueEvents(): void {
-  if (sseDispatchDebounce) { clearTimeout(sseDispatchDebounce); sseDispatchDebounce = null }
-  if (sseReq) { try { sseReq.destroy() } catch { /* */ }; sseReq = null }
-}
-
 function startStatusPolling(): void {
   stopStatusPolling()
   startDaemonPowerSaveBlock()
-  connectSseQueueEvents()
   statusInterval = setInterval(async () => {
     try {
       const status = await getDaemonStatus()
       broadcastStatus(status)
-
-      if (status.running && status.queueLength && status.queueLength > 0) {
-        await dispatchSessionAgents()
-      }
 
       const sessions = getSessionAgentList()
       if (getEnabledChannels().some((c) => c.type === "feishu")) {
@@ -869,7 +819,6 @@ function startStatusPolling(): void {
 }
 
 function stopStatusPolling(): void {
-  disconnectSseQueueEvents()
   if (statusInterval) {
     clearInterval(statusInterval)
     statusInterval = null
@@ -1287,8 +1236,10 @@ async function autoStartDaemonOnLaunch(): Promise<void> {
 export function initDaemonManager(): void {
   process.env.APP_DATA_DIR = app.getPath("userData")
   runLegacyConfigMigration()
+  ensureSdkChannelBindings()
   seedBuiltins()
   initSessionDispatcher()
+  ensureAgentSdkHttpServer()
   ipcMain.handle("config:apply-workspace-switch", (_, workspaceDir: string, stopOldSessions: boolean) => applyWorkspaceSwitch(workspaceDir, stopOldSessions))
   ipcMain.handle("daemon:get-log-buffer", () => getLogBuffer())
   ipcMain.handle("agent:stop", () => { stopAgent(); return { ok: true } })

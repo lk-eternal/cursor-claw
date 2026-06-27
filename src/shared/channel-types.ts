@@ -60,6 +60,8 @@ export interface DaemonChannelConfig {
   wechatAccountId?: string;
   mainUserEnabled: boolean;
   mainUserChatId: string;
+  /** 是否响应其他人私聊及群聊 @ 消息 */
+  allowOthers: boolean;
   /** 通道级工作目录，空 = 跟随全局 WORKSPACE_DIR */
   workspaceDir: string;
 }

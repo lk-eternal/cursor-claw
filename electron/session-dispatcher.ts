@@ -11,19 +11,13 @@ import { broadcastLog } from "./ui-logger"
 import { readLockFile, httpGet, httpPost, syncActiveSession, getCurrentActiveSession, drainSessionMessages, reportSessionAgentPhase } from "./daemon-client"
 import { reportCommandResult } from "./command-handler"
 import {
-  launchAgent as _launchCliAgent,
-  stopSessionAgent as _stopCliSession, stopAllSessionAgents as _stopAllCliSessions,
-  getSessionAgentList as getRawCliSessionList,
-  isSessionAgentRunning as _isCliSessionRunning,
-  getSessionAgentStartedAt,
-  setChatNameResolver, setSessionCloseHandler,
-  type ChatType, type SessionExitInfo,
+  setChatNameResolver,
+  type ChatType, type LaunchMeta,
 } from "./agent-launcher"
 import {
-  launchSdkAgent, stopSdkSession, stopAllSdkSessions,
+  stopSdkSession, stopAllSdkSessions,
   isSdkSessionRunning, getSdkSessionList,
 } from "./agent-sdk"
-import { injectWorkspaceToDir } from "./workspace-injector"
 
 // ── readLockFile 短 TTL 缓存 ─────────────────────────────
 let _lockCache: { value: ReturnType<typeof readLockFile>; ts: number } | null = null
@@ -37,18 +31,10 @@ function cachedLock() {
 
 // ── 生命周期通知 ──────────────────────────────────────────
 
-const NOTIFY_STARTING = "正在启动"
-const NOTIFY_PROCESSING = "Agent 处理中…"
-
-function formatAgentLaunchFailure(error?: string): string {
-  if (!error?.trim()) return "Agent 启动失败，请稍后重试。"
-  const e = error.trim()
-  if (e.includes("冷却中") || e.includes("未启用其他人") || e.includes("未配置 API Key")) return e
-  if (e.includes("Cursor CLI")) return "Agent 运行环境未就绪，请检查 Cursor CLI 是否已安装。"
-  if (e.includes("工作目录")) return "Agent 工作目录未配置，请检查后重试。"
-  if (/[/\\]|\.ts:|at |stack|Error:|ENOENT|spawn|EACCES|EPERM/i.test(e)) return "Agent 启动失败，请稍后重试。"
-  return `Agent 启动失败：${e}`
-}
+const CHAT_NEW_USAGE =
+  "💡 用法：/chat new <任务描述> [-dir <工作目录路径>]\n" +
+  "例如：/chat new 帮我检查一下服务器状态\n" +
+  "例如：/chat new -dir /path/to/project 帮我检查一下服务器状态"
 
 async function notifyChat(sessionKey: string, text: string, stopProgress = false): Promise<void> {
   const lock = cachedLock()
@@ -63,28 +49,24 @@ async function notifyChat(sessionKey: string, text: string, stopProgress = false
   }
 }
 
-// ── 内部工具（CLI 与 SDK 双运行时并存）────────────────────
+// ── SDK-only 运行时 ───────────────────────────────────────
 
 export function isSessionAgentRunning(key: string): boolean {
-  return _isCliSessionRunning(key) || isSdkSessionRunning(key)
+  return isSdkSessionRunning(key)
 }
 
 export function stopSessionAgent(key: string): void {
   if (isSdkSessionRunning(key)) stopSdkSession(key)
-  if (_isCliSessionRunning(key)) _stopCliSession(key)
 }
 
 export function stopAllSessionAgents(): void {
   stopAllSdkSessions()
-  _stopAllCliSessions()
 }
 
 // ── Session 状态 ──────────────────────────────────────────
 
 export const chatNameCache = new Map<string, string>()
 export const previousActiveSessionMap = new Map<string, string>()
-const lastCrashAtMap = new Map<string, number>()
-const CRASH_LOOP_WINDOW_MS = 5 * 60 * 1000
 
 // ── Session 工具 ──────────────────────────────────────────
 
@@ -112,41 +94,13 @@ function formatDuration(ms: number): string {
 
 // ── Session 生命周期 ──────────────────────────────────────
 
-export async function handleSessionClosed(sessionKey: string, chatType: ChatType, exitInfo?: SessionExitInfo): Promise<void> {
+export async function handleSessionClosed(sessionKey: string, chatType: ChatType): Promise<void> {
   await reportSessionAgentPhase(sessionKey, "idle")
-  const failed = exitInfo && exitInfo.exitCode !== 0 && exitInfo.exitCode !== null
   const chatId = extractChatId(sessionKey)
   const mainChat = isMainUser(chatId, chatType)
 
-  if (failed) {
-    const lock = cachedLock()
-    const now = Date.now()
-    const prevCrashAt = lastCrashAtMap.get(sessionKey) ?? 0
-    lastCrashAtMap.set(sessionKey, now)
-    if (lock?.port) {
-      if (now - prevCrashAt < CRASH_LOOP_WINDOW_MS) {
-        // 短时间内连续崩溃：放弃排队消息，避免 crash-loop 无限重启
-        const drained = await drainSessionMessages(lock.port, sessionKey)
-        broadcastLog(`[System] Agent 连续异常退出(exit=${exitInfo.exitCode})，已放弃该会话 ${drained} 条消息`, "WARN")
-        if (!mainChat && drained > 0) {
-          await notifyChat(sessionKey, `⚠️ Agent 连续异常退出 (exit=${exitInfo.exitCode})，已放弃 ${drained} 条排队消息，请重新发送。`, true)
-        }
-      } else {
-        // 首次崩溃：保留队列消息，调度器轮询会自动重启 Agent 继续处理
-        broadcastLog(`[System] Agent 异常退出(exit=${exitInfo.exitCode})，保留队列消息等待自动重启`, "WARN")
-      }
-    }
-    if (mainChat) {
-      const stderrContent = exitInfo.stderr?.trim() || ""
-      const errMsg = stderrContent
-        ? `⚠️ Agent 异常退出 (exit=${exitInfo.exitCode})。\n错误信息：\n${stderrContent}`
-        : `⚠️ Agent 异常退出 (exit=${exitInfo.exitCode})。请检查配置后重试。`
-      await notifyChat(sessionKey, errMsg, true)
-    }
-  } else if (mainChat) {
-    const output = exitInfo?.stderr?.trim() || exitInfo?.stdout?.trim() || ""
-    const exitMsg = output ? `Agent已退出\n退出前输出：\n${output}` : "Agent已退出"
-    await notifyChat(sessionKey, exitMsg, true)
+  if (mainChat) {
+    await notifyChat(sessionKey, "Agent已退出", true)
   }
 
   const previous = previousActiveSessionMap.get(sessionKey)
@@ -229,19 +183,6 @@ export async function pullMergedMessagesFromQueue(chatId?: string): Promise<Merg
   }
 }
 
-interface QueueSession { sessionKey: string; chatType: string; senderOpenId?: string }
-
-async function getQueueSessions(): Promise<QueueSession[]> {
-  const lock = cachedLock()
-  if (!lock?.port) return []
-  try {
-    const res = (await httpGet(`http://127.0.0.1:${lock.port}/queue-chat-ids`)) as { chats?: QueueSession[] } | null
-    return res?.chats ?? []
-  } catch {
-    return []
-  }
-}
-
 export async function clearMessageQueue(): Promise<number> {
   const lock = cachedLock()
   if (!lock?.port) return 0
@@ -283,33 +224,35 @@ export async function deleteQueueMessage(fileId: string): Promise<boolean> {
   }
 }
 
-// ── Agent 启动 ─────────────────────────────────────────────
+// ── Agent 启动（Daemon SSOT）──────────────────────────────
 
 interface LaunchAgentParams {
   sessionKey: string
   chatType: ChatType
-  meta?: import("./agent-launcher").LaunchMeta
+  meta?: LaunchMeta
   useMainWorkspace?: boolean
   senderOpenId?: string
   chatName?: string
   taskMessage?: string
-  /** 显式指定通道（定时任务/工作流）；缺省从 sessionKey 的 chatKey 前缀解析 */
   channelId?: string
-  /** 显式模型覆盖（任务模型 / 工作流节点模型） */
   modelOverride?: string
   modelParamsOverride?: string
   workingDirectory?: string
 }
 
 async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?: string }> {
-  const { sessionKey, chatType, meta, senderOpenId, chatName, taskMessage } = p
+  const { sessionKey, chatType, senderOpenId, chatName, taskMessage } = p
   const useMain = p.useMainWorkspace ?? (chatType === "p2p")
 
-  // 通道与 Agent 资源解析
   const channel: MessageChannel | undefined = getChannel(p.channelId) ?? resolveChannelForSession(sessionKey)
   const resource = getAgentResource(channel?.agentResourceId)
+  if (resource.type !== "sdk") {
+    return { ok: false, error: "请配置 SDK 资源（设置 → Agent）" }
+  }
+  if (!resource.apiKey?.trim()) {
+    return { ok: false, error: "通道绑定的 SDK 资源未配置 API Key（设置 → Agent）" }
+  }
 
-  // 其他人会话需要通道显式开启
   const isOwnTask = chatType === "task" || chatType === "temp" || chatType === "workflow"
   if (!useMain && !isOwnTask && !channel?.allowOthers) {
     return { ok: false, error: `通道「${channel?.name ?? "未知"}」未启用其他人使用` }
@@ -318,7 +261,6 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
   let workDir: string
   if (p.workingDirectory) {
     workDir = p.workingDirectory
-    // temp 指定目录须已存在（T1/T3 校验）；workflow 节点目录仍可自动创建
     if (chatType !== "temp" && !fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true })
   } else if (useMain || isOwnTask) {
     workDir = effectiveWorkspaceDir(channel)
@@ -329,10 +271,6 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
   }
   if (!workDir) return { ok: false, error: "工作目录未配置" }
 
-  const skipIdentity = chatType === "workflow"
-  await injectWorkspaceToDir(workDir, useMain || skipIdentity, channel?.digitalIdentity)
-
-  // 模型解析：显式覆盖 > 通道场景模型
   let model: string
   let modelParams: string
   if (p.modelOverride?.trim()) {
@@ -345,32 +283,32 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
     modelParams = resolved.modelParams
   }
 
-  if (resource.type === "sdk") {
-    return launchSdkAgent({
-      sessionKey, chatType, meta, workspaceDir: workDir, useMainWorkspace: useMain,
-      senderOpenId, chatName, taskMessage,
-      apiKey: resource.apiKey ?? "", model, modelParams,
-    })
-  }
+  const lock = cachedLock()
+  if (!lock?.port) return { ok: false, error: "Daemon 未运行" }
 
-  const needResume = chatType === "p2p" || chatType === "group"
-  const result = await _launchCliAgent({
-    sessionKey, chatType, meta, useMainWorkspace: useMain,
-    senderOpenId, chatName, taskMessage,
-    workspaceDir: workDir, model,
-    resumeScope: needResume && channel ? mainChatScopeKey(channel.id, workDir) : undefined,
-    newSession: channel?.mainUserNewSession ?? false,
-  })
-  if (result.ok) {
-    await reportSessionAgentPhase(sessionKey, "processing")
-    await notifyChat(sessionKey, NOTIFY_PROCESSING)
+  try {
+    const res = await httpPost(`http://127.0.0.1:${lock.port}/api/agent/launch`, {
+      session_key: sessionKey,
+      task_text: taskMessage,
+      chat_type: chatType,
+      chat_id: extractChatId(sessionKey),
+      sender_open_id: senderOpenId,
+      use_main_workspace: useMain,
+      channel_id: p.channelId ?? channel?.id,
+      model,
+      model_params: modelParams,
+      working_directory: workDir,
+      chat_name: chatName,
+    }, 120_000) as { ok?: boolean; error?: string }
+    return { ok: !!res?.ok, error: res?.error }
+  } catch (e: unknown) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
   }
-  return result
 }
 
 export async function launchSessionAgent(
   sessionKey: string, chatType: ChatType,
-  meta?: import("./agent-launcher").LaunchMeta,
+  meta?: LaunchMeta,
   useMainWorkspace?: boolean, senderOpenId?: string,
 ): Promise<{ ok: boolean; error?: string }> {
   return launchAgent({ sessionKey, chatType, meta, useMainWorkspace, senderOpenId })
@@ -419,25 +357,19 @@ export async function notifyWorkflowChat(chatId: string, text: string): Promise<
 // ── Session 列表 ──────────────────────────────────────────
 
 export function getSessionAgentList() {
-  const rawList = [
-    ...getRawCliSessionList(),
-    ...getSdkSessionList().map((s) => ({ ...s, pid: 0 })),
-  ]
-  return rawList.map((s) => {
+  return getSdkSessionList().map((s) => {
     const chatId = s.sessionKey.includes("::") ? s.sessionKey.split("::")[0] : s.sessionKey
     const chatName = s.chatName || chatNameCache.get(chatId) || (s.senderOpenId ? chatNameCache.get(s.senderOpenId) : undefined)
-    return { ...s, chatName }
+    return { ...s, chatName, pid: 0 }
   })
 }
+
+// ponytail: T7 调度迁入 Daemon；保留空实现供旧调用方兼容
+export async function dispatchSessionAgents(): Promise<void> {}
 
 // ── /chat new 参数解析与目录校验 ────────────────────────────
 
 const CHAT_NEW_DIR_FLAG = "-dir"
-
-const CHAT_NEW_USAGE =
-  "💡 用法：/chat new <任务描述> [-dir <工作目录路径>]\n" +
-  "例如：/chat new 帮我检查一下服务器状态\n" +
-  "例如：/chat new -dir /path/to/project 帮我检查一下服务器状态"
 
 function parseChatNewArgs(tokens: string[]):
   | { ok: true; taskMsg: string; workingDirectory?: string }
@@ -528,10 +460,9 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
       const type = s.chatType === "p2p" ? "私聊" : s.chatType === "group" ? "群聊" : s.chatType === "task" ? "定时" : s.chatType === "temp" ? "临时" : s.chatType === "workflow" ? "工作流" : s.chatType
       const name = s.chatName || "-"
       const dir = s.workspaceDir ? path.basename(s.workspaceDir) : "-"
-      const pid = s.pid || "-"
       const started = s.startedAt ? new Date(s.startedAt).toLocaleTimeString("zh-CN", { hour12: false }) : "-"
       const dur = s.startedAt ? formatDuration(now - s.startedAt) : "-"
-      return `${idx} [${type}] ${name} | 启动:${started} | 时长:${dur} | dir:${dir} | pid:${pid}`
+      return `${idx} [${type}] ${name} | 启动:${started} | 时长:${dur} | dir:${dir}`
     })
     await reply(true, `📋 活跃会话 (${sessions.length}):\n${lines.join("\n")}`)
     return
@@ -565,7 +496,6 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
         `  SessionKey: ${taskId}`,
         `  类型: 临时`,
         `  工作目录: ${workspaceDisplay}`,
-        `  PID: ${newSession?.pid || "-"}`,
         `  启动时间: ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`,
         `\n🔀 已切换到此会话，临时会话结束后将自动回退`,
       ]
@@ -608,7 +538,6 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
       `  名称: ${s.chatName || "-"}`,
       `  SessionKey: ${s.sessionKey}`,
       `  工作目录: ${s.workspaceDir || "-"}`,
-      `  PID: ${s.pid || "-"}`,
       `  启动时间: ${s.startedAt ? new Date(s.startedAt).toLocaleString("zh-CN", { hour12: false }) : "-"}`,
       `  运行时长: ${s.startedAt ? formatDuration(now - s.startedAt) : "-"}`,
       `\n💡 后续消息将路由到此会话`,
@@ -620,101 +549,8 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
   await reply(false, "💡 /chat 用法:\n  /chat ls — 列出所有活跃会话\n  /chat <序号> — 切换到指定会话\n  /chat stop <序号> — 停止指定会话\n  /chat new <描述> [-dir <路径>] — 创建新临时会话（省略 -dir 则使用当前主会话目录）")
 }
 
-// ── 僵尸 Agent 检测 ──────────────────────────────────────
-
-const ZOMBIE_REPLY_SILENCE_MS = 10 * 60 * 1000
-
-async function isZombieAgent(sessionKey: string): Promise<boolean> {
-  const lock = cachedLock()
-  if (!lock?.port) return false
-  try {
-    const sk = encodeURIComponent(sessionKey)
-    const [replyRes, msgRes] = await Promise.all([
-      httpGet(`http://127.0.0.1:${lock.port}/api/session-last-reply?sessionKey=${sk}`) as Promise<{ lastReplyAt?: number | null }>,
-      httpGet(`http://127.0.0.1:${lock.port}/api/session-earliest-msg?sessionKey=${sk}`) as Promise<{ earliestMsgTime?: number | null }>,
-    ])
-    const earliestMsgTime = msgRes?.earliestMsgTime ?? null
-    if (earliestMsgTime === null) return false
-    const lastActiveTime = replyRes?.lastReplyAt ?? getSessionAgentStartedAt(sessionKey) ?? 0
-    const startTime = Math.max(earliestMsgTime, lastActiveTime)
-    return Date.now() - startTime > ZOMBIE_REPLY_SILENCE_MS
-  } catch {
-    return false
-  }
-}
-
-// ── 会话调度主循环 ────────────────────────────────────────
-
-let dispatching = false
-
-export async function dispatchSessionAgents(): Promise<void> {
-  if (dispatching) return
-  dispatching = true
-  try {
-    await _dispatchSessionAgentsInner()
-  } finally {
-    dispatching = false
-  }
-}
-
-async function _dispatchSessionAgentsInner(): Promise<void> {
-  const config = getConfig()
-  const sessions = await getQueueSessions()
-
-  const feishuOn = (config.channels ?? []).some((c) => c.enabled && c.type === "feishu")
-  const groupKeys = sessions.filter((s) => s.chatType === "group").map((s) => extractChatId(s.sessionKey))
-  if (groupKeys.length > 0 && feishuOn) await fetchChatNames(groupKeys)
-
-  for (const { sessionKey, chatType, senderOpenId } of sessions) {
-    if (isSessionAgentRunning(sessionKey)) {
-      if (await isZombieAgent(sessionKey)) {
-        broadcastLog(`[Agent] ${sessionKey} 疑似僵尸(队列有消息且 ${ZOMBIE_REPLY_SILENCE_MS / 60_000}min 无回复消息)，强制终止并重启`, "WARN")
-        stopSessionAgent(sessionKey)
-        await new Promise((r) => setTimeout(r, 1000))
-      } else {
-        continue
-      }
-    }
-
-    const chatId = extractChatId(sessionKey)
-    const mainUser = isMainUser(chatId, chatType)
-
-    if (feishuOn && chatType === "p2p" && senderOpenId?.startsWith("ou_") && !chatNameCache.has(senderOpenId)) {
-      await fetchUserNames([senderOpenId])
-    }
-
-    await new Promise((r) => setTimeout(r, 500))
-
-    const userName = senderOpenId ? chatNameCache.get(senderOpenId) : undefined
-    const chatName = chatNameCache.get(chatId) || userName
-    const label = chatType === "group"
-      ? `群聊 ${chatName ? `「${chatName}」` : chatId}`
-      : (mainUser ? `主用户私聊${userName ? ` (${userName})` : ""}` : `私聊 ${userName || chatId}`)
-    broadcastLog(`[Agent] ${label} 有新消息，自动拉起${mainUser ? "(主工作目录)" : ""}`)
-    await reportSessionAgentPhase(sessionKey, "starting")
-    await notifyChat(sessionKey, NOTIFY_STARTING)
-
-    const meta: import("./agent-launcher").LaunchMeta = { chatId, chatType: chatType as "p2p" | "group" }
-    const result = await launchSessionAgent(sessionKey, chatType as "p2p" | "group", meta, mainUser, senderOpenId)
-    if (result.ok && chatId !== sessionKey) {
-      const lock = cachedLock()
-      if (lock?.port) await syncActiveSession(lock.port, chatId, sessionKey)
-    }
-    if (!result.ok) {
-      broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${result.error}`)
-      await notifyChat(sessionKey, formatAgentLaunchFailure(result.error), true)
-      const lock = cachedLock()
-      if (lock?.port) {
-        const drained = await drainSessionMessages(lock.port, sessionKey)
-        if (drained > 0) broadcastLog(`[Agent] ${sessionKey} 已丢弃 ${drained} 条消息（启动被拒绝）`)
-      }
-    }
-  }
-}
-
 // ── 初始化 ────────────────────────────────────────────────
 
 export function initSessionDispatcher(): void {
   setChatNameResolver((chatId) => chatNameCache.get(chatId))
-  setSessionCloseHandler(handleSessionClosed)
 }

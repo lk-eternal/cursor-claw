@@ -1,7 +1,6 @@
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
-import { app } from "electron"
 import { getConfig } from "./config-store"
 import { broadcastLog } from "./ui-logger"
 
@@ -16,45 +15,20 @@ export interface InjectResult {
 // ── State ──────────────────────────────────────────────────────
 
 let daemonPort: number | null = null
-let lastMcpHash = ""
-const fullyInjectedDirs = new Set<string>()
 
 const HOME_DIR = os.homedir()
 const GLOBAL_MCP_PATH = path.join(HOME_DIR, ".cursor", "mcp.json")
-
-function norm(p: string): string { return path.resolve(p) }
+const CLAW_MCP_KEYS = ["cursor-claw", "cursor-claw-admin"]
 
 export function setDaemonPort(port: number | null): void {
-  if (daemonPort === port) return
   daemonPort = port
-  clearInjectionCache()
 }
 
-export function clearInjectionCache(dir?: string): void {
-  if (dir) {
-    fullyInjectedDirs.delete(norm(dir))
-  } else {
-    lastMcpHash = ""
-    fullyInjectedDirs.clear()
-  }
+export function clearInjectionCache(_dir?: string): void {
+  // ponytail: 注入缓存已废弃，保留符号供 daemon-manager 调用
 }
 
-// ── Path helpers ───────────────────────────────────────────────
-
-export function getTemplateRoot(): string {
-  if (app.isPackaged) return path.join(process.resourcesPath, "template")
-  return path.join(app.getAppPath(), "resources", "template")
-}
-
-export function getRuleTemplatePath(): string {
-  return path.join(getTemplateRoot(), "rule", "cursor-claw.mdc")
-}
-
-export function getSkillsTemplateDir(): string {
-  return path.join(getTemplateRoot(), "skills")
-}
-
-// ── MCP injection ──────────────────────────────────────────────
+// ── MCP helpers（仅 cleanup 使用）────────────────────────────────
 
 export function buildMcpServers(): Record<string, unknown> {
   if (!daemonPort) return {}
@@ -65,113 +39,10 @@ export function buildMcpServers(): Record<string, unknown> {
   }
 }
 
-export async function injectMcpGlobal(): Promise<boolean> {
+function removeClawMcpKeys(mcpPath: string): void {
+  if (!fs.existsSync(mcpPath)) return
   try {
-    const newServers = buildMcpServers()
-    const hash = JSON.stringify(newServers)
-    if (lastMcpHash === hash) return true
-
-    let mcpConfig: Record<string, unknown> = {}
-    if (fs.existsSync(GLOBAL_MCP_PATH)) {
-      try { mcpConfig = JSON.parse(fs.readFileSync(GLOBAL_MCP_PATH, "utf-8")) } catch { mcpConfig = {} }
-    }
-    const existing = (mcpConfig.mcpServers ?? {}) as Record<string, unknown>
-    Object.assign(existing, newServers)
-    mcpConfig.mcpServers = existing
-
-    const dir = path.dirname(GLOBAL_MCP_PATH)
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(GLOBAL_MCP_PATH, JSON.stringify(mcpConfig, null, 2), "utf-8")
-    lastMcpHash = hash
-    broadcastLog(`MCP 已注入全局配置: ${GLOBAL_MCP_PATH}`)
-    return true
-  } catch (e: unknown) {
-    broadcastLog(`MCP 全局注入失败: ${e instanceof Error ? e.message : e}`, "ERROR")
-    return false
-  }
-}
-
-// ── Rules injection ────────────────────────────────────────────
-
-export function injectRulesToDir(wsDir: string, skipIdentity = false, identityOverride?: string): boolean {
-  try {
-    const rulesDir = path.join(wsDir, ".cursor", "rules")
-    if (!fs.existsSync(rulesDir)) fs.mkdirSync(rulesDir, { recursive: true })
-    const rulePath = path.join(rulesDir, "cursor-claw.mdc")
-    const tplPath = getRuleTemplatePath()
-    let ruleContent = fs.existsSync(tplPath) ? fs.readFileSync(tplPath, "utf-8") : ""
-    if (!ruleContent) {
-      broadcastLog(`规则模板文件不存在: ${tplPath}`, "WARN")
-      return false
-    }
-    if (daemonPort) ruleContent = ruleContent.replace(/\{\{DAEMON_PORT\}\}/g, String(daemonPort))
-    fs.writeFileSync(rulePath, ruleContent, "utf-8")
-    broadcastLog(`规则已注入: ${rulePath}`)
-
-    const identityPath = path.join(rulesDir, "digital-identity.mdc")
-    if (skipIdentity) {
-      if (fs.existsSync(identityPath)) fs.unlinkSync(identityPath)
-    } else {
-      // 优先使用通道级身份规则，未传入时回退全局旧字段
-      const identity = (identityOverride ?? getConfig().digitalIdentity)?.trim()
-      if (identity) {
-        const identityMdc = [
-          "---",
-          "description: 对外身份规则 - 定义 Agent 面向其他用户时的角色与行为边界",
-          "alwaysApply: true",
-          "---",
-          "",
-          identity,
-        ].join("\r\n")
-        fs.writeFileSync(identityPath, identityMdc, "utf-8")
-      } else if (fs.existsSync(identityPath)) {
-        fs.unlinkSync(identityPath)
-      }
-    }
-
-    return true
-  } catch (e: unknown) {
-    broadcastLog(`规则注入失败: ${e instanceof Error ? e.message : e}`, "ERROR")
-    return false
-  }
-}
-
-// ── Skills injection ───────────────────────────────────────────
-
-export function injectSkillsToDir(wsDir: string): boolean {
-  try {
-    const srcDir = getSkillsTemplateDir()
-    if (!fs.existsSync(srcDir)) return false
-    const destBase = path.join(wsDir, ".cursor", "skills")
-    const entries = fs.readdirSync(srcDir, { withFileTypes: true })
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue
-      const skillSrc = path.join(srcDir, entry.name)
-      const skillDest = path.join(destBase, entry.name)
-      if (!fs.existsSync(skillDest)) fs.mkdirSync(skillDest, { recursive: true })
-      for (const file of fs.readdirSync(skillSrc)) {
-        const s = path.join(skillSrc, file)
-        const d = path.join(skillDest, file)
-        if (fs.statSync(s).isFile()) fs.copyFileSync(s, d)
-      }
-    }
-    broadcastLog(`Skills 已注入: ${destBase}`)
-    return true
-  } catch (e: unknown) {
-    broadcastLog(`Skills 注入失败: ${e instanceof Error ? e.message : e}`, "ERROR")
-    return false
-  }
-}
-
-// ── Project-level MCP cleanup ──────────────────────────────────
-
-const CLAW_MCP_KEYS = ["cursor-claw", "cursor-claw-admin"]
-
-function cleanProjectMcpStale(wsDir: string): void {
-  const projectMcpPath = path.join(wsDir, ".cursor", "mcp.json")
-  if (!fs.existsSync(projectMcpPath)) return
-  try {
-    const cfg = JSON.parse(fs.readFileSync(projectMcpPath, "utf-8"))
+    const cfg = JSON.parse(fs.readFileSync(mcpPath, "utf-8"))
     const servers = cfg.mcpServers as Record<string, unknown> | undefined
     if (!servers) return
     let changed = false
@@ -180,37 +51,43 @@ function cleanProjectMcpStale(wsDir: string): void {
     }
     if (!changed) return
     if (Object.keys(servers).length === 0 && Object.keys(cfg).filter((k) => k !== "mcpServers").length === 0) {
-      fs.unlinkSync(projectMcpPath)
-      broadcastLog(`已删除空的项目级 MCP 配置: ${projectMcpPath}`)
+      fs.unlinkSync(mcpPath)
+      broadcastLog(`已删除空的 MCP 配置: ${mcpPath}`)
     } else {
       cfg.mcpServers = servers
-      fs.writeFileSync(projectMcpPath, JSON.stringify(cfg, null, 2), "utf-8")
-      broadcastLog(`已清理项目级 MCP 残留: ${projectMcpPath}`)
+      fs.writeFileSync(mcpPath, JSON.stringify(cfg, null, 2), "utf-8")
+      broadcastLog(`已清理 MCP 残留: ${mcpPath}`)
     }
   } catch { /* ignore */ }
 }
 
-// ── Composite: inject all into a directory ─────────────────────
+/** 可选：手动清理历史注入的 MCP 条目（不自动在 launch/启动时调用） */
+export function cleanupLegacyInjection(wsDir?: string): void {
+  removeClawMcpKeys(GLOBAL_MCP_PATH)
+  const dir = wsDir ?? getConfig().workspaceDir
+  if (dir) removeClawMcpKeys(path.join(dir, ".cursor", "mcp.json"))
+}
 
-export async function injectWorkspaceToDir(dir: string, skipIdentity = false, identityOverride?: string): Promise<boolean> {
-  const key = norm(dir)
-  if (fullyInjectedDirs.has(key)) return true
+// ponytail: 产品决策 — 启动/launch 不再写用户或项目 .cursor；符号保留供兼容
 
-  injectSkillsToDir(dir)
-  const ok = injectRulesToDir(dir, skipIdentity, identityOverride)
-  if (ok) fullyInjectedDirs.add(key)
-  return ok
+export async function injectMcpGlobal(): Promise<boolean> {
+  return true
+}
+
+export function injectRulesToDir(_wsDir: string, _skipIdentity = false, _identityOverride?: string): boolean {
+  return true
+}
+
+export function injectSkillsToDir(_wsDir: string): boolean {
+  return true
+}
+
+export async function injectWorkspaceToDir(_dir: string, _skipIdentity = false, _identityOverride?: string): Promise<boolean> {
+  return true
 }
 
 export async function injectWorkspaceMcpAndRules(): Promise<{ mcpOk: boolean; ruleOk: boolean; skillOk: boolean }> {
-  const config = getConfig()
-  const mcpOk = await injectMcpGlobal()
-  if (!config.workspaceDir) return { mcpOk, ruleOk: false, skillOk: false }
-  cleanProjectMcpStale(config.workspaceDir)
-  const ruleOk = injectRulesToDir(config.workspaceDir, true)
-  const skillOk = injectSkillsToDir(config.workspaceDir)
-  if (mcpOk && ruleOk) fullyInjectedDirs.add(norm(config.workspaceDir))
-  return { mcpOk, ruleOk, skillOk }
+  return { mcpOk: true, ruleOk: true, skillOk: true }
 }
 
 // ── UI-triggered: inject admin skill (IPC) ─────────────────────

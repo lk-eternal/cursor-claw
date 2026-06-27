@@ -1,0 +1,10 @@
+{
+  "version": "1.6.0",
+  "date": "2026-06-27",
+  "changes": [
+    "飞书合并 CardKit 与 Presentation 管道：静默窗口内合并预览，工具/thinking 卡片展示执行进度",
+    "Daemon 成为 IM 调度与展示唯一编排进程，SDK-only 路径移除 CLI spawn 与 poll-message",
+    "移除 launch 时 workspace inject 自动写入，Electron 调度迁入 Daemon 防抖循环",
+    "SDK 长驻 Agent 支持二次 dispatch，群聊在 allowOthers 下可走流式 CardKit 管道"
+  ]
+}

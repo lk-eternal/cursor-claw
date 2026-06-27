@@ -1,9 +1,11 @@
+import * as http from "node:http"
 import { Agent, type SDKAgent, type Run, type SDKMessage } from "@cursor/sdk"
 import { resolve, join, dirname } from "node:path"
-import { existsSync } from "node:fs"
+import { existsSync, writeFileSync, mkdirSync } from "node:fs"
 import { createRequire } from "node:module"
+import { app } from "electron"
 import { readLockFile, httpPost, reportSessionAgentPhase } from "./daemon-client"
-import { getChannel } from "./config-store"
+import { getChannel, getAgentResource, resolveChannelForSession, resolveChannelModel, effectiveWorkspaceDir, type MessageChannel, type ModelScenario } from "./config-store"
 import { parseChatKey } from "../src/shared/channel-types"
 import { pushUiLog, broadcastLog, broadcastSessionStatus } from "./ui-logger"
 import { type ChatType, type LaunchMeta, buildPrompt, resolveSessionChatName } from "./agent-launcher"
@@ -22,10 +24,12 @@ interface SdkSessionAgent {
   abortController: AbortController
   /** 流式日志聚合缓冲：连续同类型(thinking/text)增量合并成一条打印 */
   logAgg: { kind: "thinking" | "text" | null; buf: string }
-  /** 主用户私聊 SDK 流式桥接（f41Eligible） */
+  /** SDK 流式桥接 eligible（f41Eligible：主用户私聊或飞书群聊 allowOthers） */
   f41Stream: boolean
   streamBuffer: string
   outboundMessageId?: string
+  /** 工具进度 CardKit message_id（presentation-event 回传，供 PATCH） */
+  presentationOutboundId?: string
   streamId?: string
   streamLastPostAt?: number
   streamPostTimer?: ReturnType<typeof setTimeout>
@@ -36,6 +40,12 @@ interface SdkSessionAgent {
   lastStatus?: { status: string; message?: string }
   /** 末次 tool 事件快照，供 error 日志与保活失败分类 */
   lastTool?: { name: string; status: string }
+  /** Feature flag SDK_RESIDENT_AGENT：Run 结束后保持 Agent 实例 */
+  residentMode: boolean
+  /** 二次 send 进行中，防并发 dispatch */
+  pendingDispatch: boolean
+  /** 当前 Run 启动时刻，供 error 时 durationMs 未就绪的兜底 */
+  runStartedAt?: number
 }
 
 const sdkSessions = new Map<string, SdkSessionAgent>()
@@ -46,6 +56,29 @@ const NOTIFY_PROCESSING = "Agent 处理中…"
 const STREAM_POST_INTERVAL_MS = 400
 /** 观测约 23min 档 Run 超时；低于此阈值的 shell+running 不误判为保活失败 */
 const KEEPALIVE_TIMEOUT_MS = 20 * 60 * 1000
+
+function sdkResidentModeEnabled(): boolean {
+  const v = (process.env.SDK_RESIDENT_AGENT ?? "").trim().toLowerCase()
+  return v !== "0" && v !== "false"
+}
+
+function isSdkSessionProcessing(session: SdkSessionAgent): boolean {
+  return session.run !== null || session.pendingDispatch
+}
+
+function resetSdkRunPresentationState(session: SdkSessionAgent): void {
+  session.errorNotified = false
+  session.lastStatus = undefined
+  session.lastTool = undefined
+  session.runStartedAt = undefined
+  session.streamBuffer = ""
+  session.outboundMessageId = undefined
+  session.presentationOutboundId = undefined
+  session.streamId = undefined
+  session.streamLastPostAt = undefined
+  session.logAgg = { kind: null, buf: "" }
+  session.abortController = new AbortController()
+}
 
 function isUnsafeSdkMessage(msg?: string): boolean {
   const t = msg?.trim()
@@ -63,14 +96,26 @@ function extractChatId(sessionKey: string): string {
   return idx > 0 ? sessionKey.slice(0, idx) : sessionKey
 }
 
-/** 主用户私聊 + SDK 资源 → 可走 /api/stream-text（resource.type 在 agent-sdk 内恒为 sdk） */
+/** 主用户私聊或飞书群聊（allowOthers）+ SDK 资源 → 可走 /api/stream-text */
 function f41Eligible(sessionKey: string, chatType: ChatType): boolean {
-  if (chatType !== "p2p") return false
   const chatId = extractChatId(sessionKey)
   const { channelId, chatId: raw } = parseChatKey(chatId)
-  const channel = getChannel(channelId)
-  if (!channel?.mainUserEnabled || !channel.mainUserChatId?.trim()) return false
-  return raw === channel.mainUserChatId.trim()
+  const channel = channelId ? getChannel(channelId) : undefined
+  if (chatType === "p2p") {
+    if (!channel?.mainUserEnabled || !channel.mainUserChatId?.trim()) return false
+    return raw === channel.mainUserChatId.trim()
+  }
+  if (chatType === "group") {
+    return channel?.type === "feishu" && !!channel.allowOthers
+  }
+  return false
+}
+
+function resolveRunDurationMs(session: SdkSessionAgent, run?: Run | null): number | undefined {
+  const fromRun = run?.durationMs ?? session.run?.durationMs
+  if (fromRun != null) return fromRun
+  if (session.runStartedAt != null) return Date.now() - session.runStartedAt
+  return undefined
 }
 
 function formatSdkStreamFailure(
@@ -88,7 +133,7 @@ function formatSdkStreamFailure(
     ctx?.durationMs != null &&
     ctx.durationMs >= KEEPALIVE_TIMEOUT_MS
   if (isKeepaliveTimeout && isUnsafeSdkMessage(message)) {
-    return "会话在等待下一条消息时已结束（等待超时）。请重新发送消息，我会继续为你处理。"
+    return "会话因等待超时已退出，请重新发送消息，我会继续为你处理。"
   }
   const msg = message?.trim()
   if (msg && !isUnsafeSdkMessage(msg)) {
@@ -97,15 +142,20 @@ function formatSdkStreamFailure(
   return "⚠️ Agent 处理失败，请稍后重试。"
 }
 
-async function notifySdkFailure(session: SdkSessionAgent, override?: string): Promise<void> {
+async function notifySdkFailure(session: SdkSessionAgent, override?: string, run?: Run | null): Promise<void> {
   if (session.errorNotified || session.abortController.signal.aborted) return
   session.errorNotified = true
   const last = session.lastStatus
   const text = override ?? formatSdkStreamFailure(last?.status, last?.message, {
     lastTool: session.lastTool,
-    durationMs: session.run?.durationMs ?? undefined,
+    durationMs: resolveRunDurationMs(session, run),
   })
   await notifySessionChat(session.sessionKey, text, true)
+}
+
+async function notifyDispatchFailure(sessionKey: string, reason: string): Promise<void> {
+  pushUiLog("SDK", "ERROR", `[${sessionKey}] dispatch_failed: ${reason}`)
+  await notifySessionChat(sessionKey, "⚠️ 消息投递失败，请稍后重试。", true)
 }
 
 interface StreamTextPayload {
@@ -114,6 +164,52 @@ interface StreamTextPayload {
   stream_id?: string
   outbound_message_id?: string
   final?: boolean
+}
+
+export type PresentationKind = "assistant" | "thinking" | "tool" | "diff" | "merge_batch"
+
+export interface PresentationEvent {
+  session_key: string
+  kind: PresentationKind
+  delta?: string
+  tool_name?: string
+  tool_status?: "started" | "completed" | "failed"
+  final?: boolean
+  outbound_message_id?: string
+}
+
+function mapToolPresentationStatus(status: "running" | "completed" | "error"): PresentationEvent["tool_status"] {
+  if (status === "running") return "started"
+  if (status === "completed") return "completed"
+  return "failed"
+}
+
+async function postPresentationEvent(
+  session: SdkSessionAgent,
+  event: Omit<PresentationEvent, "session_key">,
+): Promise<void> {
+  const lock = readLockFile()
+  if (!lock?.port) return
+  const payload: PresentationEvent = {
+    session_key: session.sessionKey,
+    ...event,
+  }
+  if (session.presentationOutboundId && !payload.outbound_message_id) {
+    payload.outbound_message_id = session.presentationOutboundId
+  }
+  try {
+    const res = (await httpPost(`http://127.0.0.1:${lock.port}/api/presentation-event`, payload, 5000)) as {
+      ok?: boolean
+      outbound_message_id?: string
+      error?: string
+    }
+    if (res?.outbound_message_id) session.presentationOutboundId = res.outbound_message_id
+    if (res?.ok === false && res.error) {
+      pushUiLog("SDK", "WARN", `[${session.sessionKey}] presentation-event 拒绝: ${res.error}`)
+    }
+  } catch (e: unknown) {
+    pushUiLog("SDK", "WARN", `[${session.sessionKey}] presentation-event 推送失败: ${e instanceof Error ? e.message : String(e)}`)
+  }
 }
 
 async function postStreamText(session: SdkSessionAgent, payload: StreamTextPayload): Promise<void> {
@@ -310,6 +406,64 @@ async function streamRunEvents(session: SdkSessionAgent, run: Run): Promise<void
   }
 }
 
+async function completeSdkRun(session: SdkSessionAgent, run: Run): Promise<void> {
+  const sessionKey = session.sessionKey
+  const level = run.status === "error" ? "ERROR" : "INFO"
+
+  if (run.status === "error") {
+    const wr = await run.wait().catch((e: unknown) => e)
+    const detail = wr instanceof Error ? `${wr.constructor.name}: ${wr.message}` : JSON.stringify(wr)
+    const last = session.lastStatus
+    const lt = session.lastTool
+    const errorCode = extractErrorCode(wr) ?? extractErrorCode(last)
+    const parts = [
+      `sessionKey=${sessionKey}`,
+      `agentId=${session.agentId}`,
+      last && `lastStatus=${last.status}${last.message ? ` msg=${last.message}` : ""}`,
+      run.result && `run.result=${run.result}`,
+      run.durationMs != null && `durationMs=${run.durationMs}`,
+      errorCode && `errorCode=${errorCode}`,
+      lt && `lastTool=${lt.name}:${lt.status}`,
+      `waitResult=${detail}`,
+    ].filter(Boolean)
+    pushUiLog("SDK", "ERROR", `[${sessionKey}] agent_failed 运行错误详情: ${parts.join(" ")}`)
+    failedCooldowns.set(sessionKey, Date.now() + FAIL_COOLDOWN_MS)
+    if (!session.errorNotified) {
+      await notifySdkFailure(session, undefined, run)
+    }
+  }
+
+  const summary = [
+    run.result && `result=${run.result}`,
+    run.durationMs != null && `duration=${run.durationMs}ms`,
+  ].filter(Boolean).join(", ")
+  pushUiLog("SDK", level, `[${sessionKey}] Agent 运行结束 (status=${run.status}${summary ? `, ${summary}` : ""})`)
+
+  resetStreamPostChain(session)
+  session.run = null
+  session.pendingDispatch = false
+  await reportSessionAgentPhase(sessionKey, "idle")
+
+  if (session.residentMode) {
+    resetSdkRunPresentationState(session)
+    broadcastSdkSessionStatus()
+    return
+  }
+
+  try { session.agent.close() } catch { /* best-effort */ }
+  sdkSessions.delete(sessionKey)
+  broadcastSdkSessionStatus()
+}
+
+async function startSdkRun(session: SdkSessionAgent, run: Run): Promise<void> {
+  session.run = run
+  session.runStartedAt = Date.now()
+  session.lastActivityAt = Date.now()
+  await notifySessionChat(session.sessionKey, NOTIFY_PROCESSING)
+  await reportSessionAgentPhase(session.sessionKey, "processing")
+  streamRunEvents(session, run).then(() => completeSdkRun(session, run))
+}
+
 function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
   switch (event.type) {
     case "assistant":
@@ -324,19 +478,30 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
       }
       break
     case "thinking":
-      if (event.text) appendSdkLog(session, "thinking", event.text)
+      if (event.text) {
+        appendSdkLog(session, "thinking", event.text)
+        void postPresentationEvent(session, { kind: "thinking", delta: event.text })
+      }
       break
     case "tool_call":
       flushSdkLog(session)
       session.lastTool = { name: event.name, status: event.status }
       pushUiLog("SDK", "INFO", `[${session.sessionKey}] [tool] ${event.name}: ${event.status}`)
+      if (event.status === "running") session.presentationOutboundId = undefined
+      void postPresentationEvent(session, {
+        kind: "tool",
+        tool_name: event.name,
+        tool_status: mapToolPresentationStatus(event.status),
+        final: event.status !== "running",
+      })
       break
     case "status": {
       flushSdkLog(session)
       const isErr = event.status === "ERROR" || event.status === "EXPIRED"
       if (isErr || event.status === "CANCELLED") {
         session.lastStatus = { status: event.status, message: event.message }
-        if (!session.abortController.signal.aborted) {
+        // ERROR/EXPIRED 延至 completeSdkRun 再 notify，此时 run.durationMs 已就绪，可正确走保活超时文案
+        if (event.status === "CANCELLED" && !session.abortController.signal.aborted) {
           void notifySdkFailure(session)
         }
       }
@@ -351,6 +516,13 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
 
 export function isSdkSessionRunning(sessionKey: string): boolean {
   if (pendingLaunches.has(sessionKey)) return true
+  const s = sdkSessions.get(sessionKey)
+  if (!s || s.abortController.signal.aborted) return false
+  return isSdkSessionProcessing(s)
+}
+
+/** 长驻 Agent 实例是否存在（含 idle，供 stop 等路径；T7 dispatch 须用 isSdkSessionRunning 区分 processing） */
+export function hasSdkSession(sessionKey: string): boolean {
   const s = sdkSessions.get(sessionKey)
   return s !== undefined && !s.abortController.signal.aborted
 }
@@ -394,10 +566,22 @@ export interface SdkLaunchOptions {
 
 export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: boolean; error?: string }> {
   const { sessionKey, chatType, meta, workspaceDir, senderOpenId, chatName, taskMessage } = opts
+  ensureAgentSdkHttpServer()
 
-  if (isSdkSessionRunning(sessionKey) || pendingLaunches.has(sessionKey)) {
-    const s = sdkSessions.get(sessionKey)
-    if (s) s.lastActivityAt = Date.now()
+  const existing = sdkSessions.get(sessionKey)
+  if (existing && !existing.abortController.signal.aborted) {
+    if (isSdkSessionProcessing(existing)) {
+      existing.lastActivityAt = Date.now()
+      return { ok: true }
+    }
+    if (taskMessage?.trim()) {
+      const prompt = buildPrompt(meta, taskMessage, sessionKey, opts.useMainWorkspace)
+      return dispatchToSdkAgent(sessionKey, prompt)
+    }
+    return { ok: true }
+  }
+
+  if (pendingLaunches.has(sessionKey)) {
     return { ok: true }
   }
 
@@ -455,6 +639,8 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       logAgg: { kind: null, buf: "" },
       f41Stream: f41Eligible(sessionKey, chatType),
       streamBuffer: "",
+      residentMode: sdkResidentModeEnabled(),
+      pendingDispatch: false,
     }
 
     sdkSessions.set(sessionKey, session)
@@ -463,48 +649,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     broadcastSdkSessionStatus()
 
     const run = await agent.send(prompt)
-    session.run = run
-
-    await notifySessionChat(sessionKey, NOTIFY_PROCESSING)
-    await reportSessionAgentPhase(sessionKey, "processing")
-    streamRunEvents(session, run).then(async () => {
-      const level = run.status === "error" ? "ERROR" : "INFO"
-
-      if (run.status === "error") {
-        // wait() 返回 RunResult 对象（出错时也不抛），真实原因藏在 RunResult.result / 终态状态事件里
-        const wr = await run.wait().catch((e: unknown) => e)
-        const detail = wr instanceof Error ? `${wr.constructor.name}: ${wr.message}` : JSON.stringify(wr)
-        const last = session.lastStatus
-        const lt = session.lastTool
-        const errorCode = extractErrorCode(wr) ?? extractErrorCode(last)
-        const parts = [
-          `sessionKey=${sessionKey}`,
-          `agentId=${session.agentId}`,
-          last && `lastStatus=${last.status}${last.message ? ` msg=${last.message}` : ""}`,
-          run.result && `run.result=${run.result}`,
-          run.durationMs != null && `durationMs=${run.durationMs}`,
-          errorCode && `errorCode=${errorCode}`,
-          lt && `lastTool=${lt.name}:${lt.status}`,
-          `waitResult=${detail}`,
-        ].filter(Boolean)
-        pushUiLog("SDK", "ERROR", `[${sessionKey}] 运行错误详情: ${parts.join(" ")}`)
-        failedCooldowns.set(sessionKey, Date.now() + FAIL_COOLDOWN_MS)
-        if (!session.errorNotified) {
-          await notifySdkFailure(session)
-        }
-      }
-
-      const summary = [
-        run.result && `result=${run.result}`,
-        run.durationMs != null && `duration=${run.durationMs}ms`,
-      ].filter(Boolean).join(", ")
-      pushUiLog("SDK", level, `[${sessionKey}] Agent 运行结束 (status=${run.status}${summary ? `, ${summary}` : ""})`)
-      resetStreamPostChain(session)
-      await reportSessionAgentPhase(sessionKey, "idle")
-      try { session.agent.close() } catch { /* best-effort */ }
-      sdkSessions.delete(sessionKey)
-      broadcastSdkSessionStatus()
-    })
+    await startSdkRun(session, run)
 
     return { ok: true }
   } catch (e: unknown) {
@@ -518,6 +663,183 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     broadcastSdkSessionStatus()
     return { ok: false, error: msg }
   }
+}
+
+export async function dispatchToSdkAgent(sessionKey: string, taskText: string): Promise<{ ok: boolean; error?: string }> {
+  ensureAgentSdkHttpServer()
+  const text = taskText?.trim()
+  if (!text) return { ok: false, error: "empty task" }
+
+  const session = sdkSessions.get(sessionKey)
+  if (!session || session.abortController.signal.aborted) {
+    const err = "no resident agent"
+    pushUiLog("SDK", "ERROR", `[${sessionKey}] dispatch_failed: ${err}`)
+    return { ok: false, error: err }
+  }
+  if (isSdkSessionProcessing(session)) {
+    return { ok: false, error: "agent busy" }
+  }
+
+  session.pendingDispatch = true
+  try {
+    resetSdkRunPresentationState(session)
+    const run = await session.agent.send(text)
+    session.pendingDispatch = false
+    await startSdkRun(session, run)
+    return { ok: true }
+  } catch (e: unknown) {
+    session.pendingDispatch = false
+    const msg = e instanceof Error ? e.message : String(e)
+    await notifyDispatchFailure(sessionKey, msg)
+    return { ok: false, error: msg }
+  }
+}
+
+// ponytail: Electron 侧 agent API 端口写入 userData/agent-api-port.json；T7 Daemon 转发 SSOT 后仍可直连此端口
+let agentApiServer: http.Server | null = null
+let agentApiPort = 0
+
+function writeAgentApiPortFile(port: number): void {
+  try {
+    const dir = app.getPath("userData")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, "agent-api-port.json"), JSON.stringify({ port }), "utf-8")
+  } catch (e: unknown) {
+    pushUiLog("SDK", "WARN", `agent-api-port 写入失败: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
+function readAgentApiBody(req: http.IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    req.on("data", (c: Buffer) => chunks.push(c))
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")))
+    req.on("error", reject)
+  })
+}
+
+function jsonAgentApi(res: http.ServerResponse, body: object, status = 200): void {
+  const data = JSON.stringify(body)
+  res.writeHead(status, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) })
+  res.end(data)
+}
+
+export async function launchSdkAgentFromHttp(body: Record<string, unknown>): Promise<{ ok: boolean; error?: string }> {
+  const sessionKey = typeof body.session_key === "string" ? body.session_key.trim() : ""
+  if (!sessionKey) return { ok: false, error: "session_key is required" }
+
+  const chatType = (typeof body.chat_type === "string" ? body.chat_type : "p2p") as ChatType
+  const taskMessage = typeof body.task_text === "string" ? body.task_text : undefined
+  const senderOpenId = typeof body.sender_open_id === "string" ? body.sender_open_id : undefined
+  const chatName = typeof body.chat_name === "string" ? body.chat_name : undefined
+  const channelId = typeof body.channel_id === "string" ? body.channel_id : undefined
+  const explicitDir = typeof body.working_directory === "string" ? body.working_directory.trim() : ""
+  const modelOverride = typeof body.model === "string" ? body.model : undefined
+  const modelParamsOverride = typeof body.model_params === "string" ? body.model_params : undefined
+
+  const useMain = body.use_main_workspace === true
+
+  const chatId = typeof body.chat_id === "string" ? body.chat_id.trim() : sessionKey.split("::")[0]
+  const meta: LaunchMeta = { chatId, chatType: chatType === "group" ? "group" : "p2p" }
+
+  const channel = getChannel(channelId) ?? resolveChannelForSession(sessionKey)
+  const resource = getAgentResource(channel?.agentResourceId)
+  if (resource.type !== "sdk") {
+    return { ok: false, error: "请配置 SDK 资源（设置 → Agent）" }
+  }
+
+  const isOwnTask = chatType === "task" || chatType === "temp" || chatType === "workflow"
+  if (!useMain && !isOwnTask && !channel?.allowOthers) {
+    return { ok: false, error: `通道「${channel?.name ?? "未知"}」未启用其他人使用` }
+  }
+
+  let workDir = explicitDir
+  if (!workDir) {
+    if (useMain || isOwnTask) {
+      workDir = effectiveWorkspaceDir(channel)
+    } else {
+      const mode = channel?.othersWorkspaceMode ?? "isolated"
+      if (mode === "isolated") {
+        const safeChatId = sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_")
+        workDir = join(app.getPath("userData"), "workspaces", safeChatId)
+        if (!existsSync(workDir)) mkdirSync(workDir, { recursive: true })
+      } else {
+        const dir = channel?.othersWorkspaceDir?.trim() ?? ""
+        if (!dir) {
+          workDir = effectiveWorkspaceDir(channel)
+        } else {
+          const resolved = resolve(dir)
+          if (!existsSync(resolved)) return { ok: false, error: "目录不存在，请检查路径或省略 -dir 使用当前主会话目录" }
+          workDir = resolved
+        }
+      }
+    }
+  } else if (chatType !== "temp" && !existsSync(workDir)) {
+    mkdirSync(workDir, { recursive: true })
+  }
+  if (!workDir) return { ok: false, error: "工作目录未配置" }
+
+  let model: string
+  let modelParams: string
+  if (modelOverride?.trim()) {
+    model = modelOverride.trim()
+    modelParams = modelParamsOverride ?? ""
+  } else {
+    const scenario: ModelScenario = useMain || isOwnTask ? "primary" : "others"
+    const resolved = resolveChannelModel(channel, scenario)
+    model = resolved.model
+    modelParams = resolved.modelParams
+  }
+
+  return launchSdkAgent({
+    sessionKey, chatType, meta, workspaceDir: workDir, useMainWorkspace: useMain,
+    senderOpenId, chatName, taskMessage,
+    apiKey: resource.apiKey ?? "", model, modelParams,
+  })
+}
+
+export function getAgentSdkApiPort(): number {
+  return agentApiPort
+}
+
+export function ensureAgentSdkHttpServer(): void {
+  if (agentApiServer) return
+  agentApiServer = http.createServer(async (req, res) => {
+    if (req.method !== "POST") {
+      jsonAgentApi(res, { ok: false, error: "method not allowed" }, 405)
+      return
+    }
+    const pathname = req.url?.split("?")[0] ?? ""
+    try {
+      const raw = await readAgentApiBody(req)
+      const body = raw ? JSON.parse(raw) as Record<string, unknown> : {}
+      if (pathname === "/api/agent/dispatch") {
+        const session_key = typeof body.session_key === "string" ? body.session_key.trim() : ""
+        const task_text = typeof body.task_text === "string" ? body.task_text : ""
+        if (!session_key) {
+          jsonAgentApi(res, { ok: false, error: "session_key is required" }, 400)
+          return
+        }
+        const result = await dispatchToSdkAgent(session_key, task_text)
+        jsonAgentApi(res, result, result.ok ? 200 : 400)
+        return
+      }
+      if (pathname === "/api/agent/launch") {
+        const result = await launchSdkAgentFromHttp(body)
+        jsonAgentApi(res, result, result.ok ? 200 : 400)
+        return
+      }
+      jsonAgentApi(res, { ok: false, error: "not found" }, 404)
+    } catch (e: unknown) {
+      jsonAgentApi(res, { ok: false, error: e instanceof Error ? e.message : String(e) }, 400)
+    }
+  })
+  agentApiServer.listen(0, "127.0.0.1", () => {
+    const addr = agentApiServer!.address()
+    agentApiPort = typeof addr === "object" && addr ? addr.port : 0
+    writeAgentApiPortFile(agentApiPort)
+    pushUiLog("SDK", "INFO", `Agent API 监听 127.0.0.1:${agentApiPort}`)
+  })
 }
 
 export function stopSdkSession(sessionKey: string): void {
