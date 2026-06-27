@@ -108,3 +108,20 @@ export async function enqueueToMainSession(
     return { ok: false, error: e instanceof Error ? e.message : String(e) }
   }
 }
+
+export async function reportSessionAgentPhase(
+  sessionKey: string,
+  phase: "starting" | "processing" | "idle",
+): Promise<void> {
+  const lock = readLockFile()
+  if (!lock?.port || !sessionKey) return
+  try {
+    await httpPost(`http://127.0.0.1:${lock.port}/api/session-agent-phase`, {
+      session_key: sessionKey,
+      phase,
+    }, 5000)
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e)
+    console.warn(`[Phase] 上报失败 (${sessionKey}/${phase}): ${msg}`)
+  }
+}

@@ -8,7 +8,7 @@ import {
 } from "./config-store"
 import { parseChatKey } from "../src/shared/channel-types"
 import { broadcastLog } from "./ui-logger"
-import { readLockFile, httpGet, httpPost, syncActiveSession, getCurrentActiveSession, drainSessionMessages } from "./daemon-client"
+import { readLockFile, httpGet, httpPost, syncActiveSession, getCurrentActiveSession, drainSessionMessages, reportSessionAgentPhase } from "./daemon-client"
 import { reportCommandResult } from "./command-handler"
 import {
   launchAgent as _launchCliAgent,
@@ -113,6 +113,7 @@ function formatDuration(ms: number): string {
 // ── Session 生命周期 ──────────────────────────────────────
 
 export async function handleSessionClosed(sessionKey: string, chatType: ChatType, exitInfo?: SessionExitInfo): Promise<void> {
+  await reportSessionAgentPhase(sessionKey, "idle")
   const failed = exitInfo && exitInfo.exitCode !== 0 && exitInfo.exitCode !== null
   const chatId = extractChatId(sessionKey)
   const mainChat = isMainUser(chatId, chatType)
@@ -360,7 +361,10 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
     resumeScope: needResume && channel ? mainChatScopeKey(channel.id, workDir) : undefined,
     newSession: channel?.mainUserNewSession ?? false,
   })
-  if (result.ok) await notifyChat(sessionKey, NOTIFY_PROCESSING)
+  if (result.ok) {
+    await reportSessionAgentPhase(sessionKey, "processing")
+    await notifyChat(sessionKey, NOTIFY_PROCESSING)
+  }
   return result
 }
 
@@ -687,6 +691,7 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
       ? `群聊 ${chatName ? `「${chatName}」` : chatId}`
       : (mainUser ? `主用户私聊${userName ? ` (${userName})` : ""}` : `私聊 ${userName || chatId}`)
     broadcastLog(`[Agent] ${label} 有新消息，自动拉起${mainUser ? "(主工作目录)" : ""}`)
+    await reportSessionAgentPhase(sessionKey, "starting")
     await notifyChat(sessionKey, NOTIFY_STARTING)
 
     const meta: import("./agent-launcher").LaunchMeta = { chatId, chatType: chatType as "p2p" | "group" }

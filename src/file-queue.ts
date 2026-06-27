@@ -181,6 +181,81 @@ export function getSessionPendingCount(sessionKey: string): number {
   }
 }
 
+/** 指定会话待领取（仅 .qmsg）消息条数；目录不存在或未初始化时返回 0 */
+export function getSessionUnclaimedCount(sessionKey: string): number {
+  if (!queueDir || !sessionKey) return 0;
+  const dir = path.join(queueDir, sanitizeSessionDir(sessionKey));
+  try {
+    return fs.readdirSync(dir).filter((f) => f.endsWith(".qmsg")).length;
+  } catch {
+    return 0;
+  }
+}
+
+/** 按 timestamp 升序返回指定会话全部待领取（.qmsg）消息 */
+export function listUnclaimedMessages(sessionKey: string): QueueMessage[] {
+  if (!queueDir || !sessionKey) return [];
+  const dir = path.join(queueDir, sanitizeSessionDir(sessionKey));
+  let files: string[];
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.endsWith(".qmsg")).sort();
+  } catch {
+    return [];
+  }
+  const items: QueueMessage[] = [];
+  for (const f of files) {
+    const parsed = parseMessageFile(path.join(dir, f));
+    if (parsed) items.push(parsed);
+  }
+  items.sort((a, b) => a.timestamp - b.timestamp);
+  return items;
+}
+
+/** 删除会话全部 .qmsg 并写入单条新消息；.claimed 不动 */
+export function replaceSessionUnclaimedMessages(
+  sessionKey: string,
+  newText: string,
+  meta?: QueueMessageMeta,
+): { ok: boolean; messageId?: string; error?: string } {
+  if (!queueDir || !sessionKey || !newText?.trim()) return { ok: false, error: "invalid input" };
+  const dir = path.join(queueDir, sanitizeSessionDir(sessionKey));
+  if (!fs.existsSync(dir)) return { ok: false, error: "session not found" };
+
+  let files: string[];
+  try {
+    files = fs.readdirSync(dir);
+  } catch {
+    return { ok: false, error: "read failed" };
+  }
+
+  for (const f of files) {
+    if (!f.endsWith(".qmsg")) continue;
+    try { fs.unlinkSync(path.join(dir, f)); } catch { /* ignore */ }
+  }
+
+  const ts = Date.now();
+  const messageId = `merge_override_${ts}`;
+  const safeId = messageId.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const filename = `${ts}_${safeId}.qmsg`;
+  try {
+    const data = JSON.stringify({
+      text: newText.trim(),
+      messageId,
+      timestamp: ts,
+      source: `daemon-${process.pid}`,
+      sessionKey,
+      ...(meta && Object.keys(meta).length > 0 ? { meta } : {}),
+    });
+    const tmpPath = path.join(dir, filename + ".tmp");
+    const finalPath = path.join(dir, filename);
+    fs.writeFileSync(tmpPath, data, "utf-8");
+    fs.renameSync(tmpPath, finalPath);
+    return { ok: true, messageId };
+  } catch {
+    return { ok: false, error: "write failed" };
+  }
+}
+
 /**
  * 领取该会话所有未确认消息（不删除）：
  * 1. 把所有 .qmsg 改名为 .claimed（标记"已投递、待回复确认"）；

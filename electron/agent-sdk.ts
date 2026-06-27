@@ -2,7 +2,7 @@ import { Agent, type SDKAgent, type Run, type SDKMessage } from "@cursor/sdk"
 import { resolve, join, dirname } from "node:path"
 import { existsSync } from "node:fs"
 import { createRequire } from "node:module"
-import { readLockFile, httpPost } from "./daemon-client"
+import { readLockFile, httpPost, reportSessionAgentPhase } from "./daemon-client"
 import { getChannel } from "./config-store"
 import { parseChatKey } from "../src/shared/channel-types"
 import { pushUiLog, broadcastLog, broadcastSessionStatus } from "./ui-logger"
@@ -466,6 +466,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     session.run = run
 
     await notifySessionChat(sessionKey, NOTIFY_PROCESSING)
+    await reportSessionAgentPhase(sessionKey, "processing")
     streamRunEvents(session, run).then(async () => {
       const level = run.status === "error" ? "ERROR" : "INFO"
 
@@ -499,6 +500,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       ].filter(Boolean).join(", ")
       pushUiLog("SDK", level, `[${sessionKey}] Agent 运行结束 (status=${run.status}${summary ? `, ${summary}` : ""})`)
       resetStreamPostChain(session)
+      await reportSessionAgentPhase(sessionKey, "idle")
       try { session.agent.close() } catch { /* best-effort */ }
       sdkSessions.delete(sessionKey)
       broadcastSdkSessionStatus()
@@ -528,6 +530,7 @@ export function stopSdkSession(sessionKey: string): void {
   }
   s.agent.close()
   sdkSessions.delete(sessionKey)
+  void reportSessionAgentPhase(sessionKey, "idle")
   broadcastSdkSessionStatus()
 }
 

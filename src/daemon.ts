@@ -26,6 +26,9 @@ import {
   getDistinctSessions,
   cleanupStaleMessages,
   getSessionPendingCount,
+  getSessionUnclaimedCount,
+  listUnclaimedMessages,
+  replaceSessionUnclaimedMessages,
   type QueueMessage,
   type QueueMessageMeta,
 } from "./file-queue.js";
@@ -551,6 +554,294 @@ const sessionProgressMap = new Map<string, SessionProgressState>();
 /** 会话 Get 去重集合（stopSessionProgress 清 map 后仍保留，ack 后逐条清理） */
 const sessionGetReactedIds = new Map<string, Set<string>>();
 
+type AgentPhase = "starting" | "processing" | "idle";
+const sessionAgentPhaseMap = new Map<string, AgentPhase>();
+
+function getSessionAgentPhase(sessionKey: string): AgentPhase | undefined {
+  return sessionAgentPhaseMap.get(sessionKey);
+}
+
+interface MergePreviewState {
+  mergeId: string;
+  mergedText: string;
+  previewMessageIds: string[];
+  lastPreviewMessageId?: string;
+  updated: boolean;
+  debounceTimer?: NodeJS.Timeout;
+  senderOpenId?: string;
+}
+
+const mergePreviewBySession = new Map<string, MergePreviewState>();
+const mergePreviewRegistry = new Map<string, { sessionKey: string; mergeId: string }>();
+
+const MERGE_PREVIEW_DEBOUNCE_MS = 500;
+const MERGE_PREVIEW_MAX_CHARS = 30000;
+const MERGE_PREVIEW_GUIDE = "\n\n如需修改，请直接回复本条消息，发送你希望提交的完整合并正文。";
+
+function formatMergePreviewBody(messages: QueueMessage[]): string {
+  if (messages.length === 0) return "";
+  if (messages.length === 1) return messages[0].text.trim();
+  return messages.map((m, i) => `【消息 ${i + 1}】\n${m.text.trim()}`).join("\n\n");
+}
+
+function formatMergeIdTimestamp(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+
+function extractMergeProfile(sessionKey: string, senderOpenId?: string): string {
+  let raw = senderOpenId?.replace(/^ou_/, "").slice(-8);
+  if (!raw) {
+    const chatPart = sessionKey.includes("::") ? sessionKey.slice(0, sessionKey.indexOf("::")) : sessionKey;
+    const { chatId: parsed } = parseChatKey(chatPart);
+    raw = parsed || chatPart;
+  }
+  const sanitized = raw.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 16);
+  return sanitized || "user";
+}
+
+function buildMergeId(sessionKey: string, senderOpenId?: string): string {
+  const profile = extractMergeProfile(sessionKey, senderOpenId);
+  return `MG-${profile}-${formatMergeIdTimestamp()}`;
+}
+
+function isMergePreviewEligible(sessionKey: string): boolean {
+  return isStreamTextEligible(sessionKey);
+}
+
+function buildEnqueueStatusText(sessionKey: string, pending: number): string {
+  let phase = getSessionAgentPhase(sessionKey);
+  if (!phase) {
+    const unclaimed = getSessionUnclaimedCount(sessionKey);
+    const total = getSessionPendingCount(sessionKey);
+    phase = total - unclaimed > 0 ? "processing" : "idle";
+  }
+
+  let text: string;
+  if (phase === "starting") {
+    text = "已收到。Agent 正在启动，你的消息已排队";
+  } else if (phase === "processing") {
+    text = "已收到。Agent 正在处理上一条，你的消息已排队";
+  } else if (pending <= 1) {
+    text = "已收到，等待 Agent 领取";
+  } else {
+    text = "已收到，已加入待处理队列";
+  }
+
+  if (pending > 1) {
+    text += `（前面还有 ${pending - 1} 条待处理）`;
+  }
+  return text;
+}
+
+function shouldSuppressMergePreview(sessionKey: string): boolean {
+  if (getSessionAgentPhase(sessionKey) === "processing") return true;
+
+  const unclaimed = getSessionUnclaimedCount(sessionKey);
+  const total = getSessionPendingCount(sessionKey);
+  if (total - unclaimed > 0) return true;
+
+  const state = sessionProgressMap.get(sessionKey);
+  if (!state) return false;
+  if (state.streamCardKitMode) return true;
+  if (state.streamPatchMode === true) return true;
+  if (state.streamId) return true;
+  if (state.streamPatchMode === false && (state.streamSentLength ?? 0) > 0) return true;
+  return false;
+}
+
+function registerMergePreviewMessage(sessionKey: string, mergeId: string, messageId: string): void {
+  mergePreviewRegistry.set(messageId, { sessionKey, mergeId });
+  const state = mergePreviewBySession.get(sessionKey);
+  if (state) {
+    state.previewMessageIds.push(messageId);
+    state.lastPreviewMessageId = messageId;
+  }
+}
+
+function clearMergePreviewState(sessionKey: string): void {
+  const state = mergePreviewBySession.get(sessionKey);
+  if (state?.debounceTimer) clearTimeout(state.debounceTimer);
+  if (state) {
+    for (const mid of state.previewMessageIds) mergePreviewRegistry.delete(mid);
+  }
+  mergePreviewBySession.delete(sessionKey);
+}
+
+function applyMergeOverrideForPoll(sessionKey: string, messages: QueueMessage[]): QueueMessage[] {
+  const state = mergePreviewBySession.get(sessionKey);
+  if (!state?.mergedText || messages.length === 0) return messages;
+
+  const formatted = formatMergePreviewBody(messages);
+  if (state.mergedText === formatted) return messages;
+
+  const last = messages[messages.length - 1];
+  return [{
+    text: state.mergedText,
+    messageId: last.messageId,
+    sessionKey: last.sessionKey || sessionKey,
+    timestamp: last.timestamp,
+    ...(last.meta ? { meta: last.meta } : {}),
+  }];
+}
+
+function buildMergePreviewHeader(mergeId: string, updated: boolean): string {
+  const tag = updated ? " · 已更新" : "";
+  return `【合并预览 · ID：${mergeId}${tag}】\n以下内容将合并为一条发给 Agent：`;
+}
+
+function splitMergePreviewText(fullText: string): string[] {
+  if (fullText.length <= MERGE_PREVIEW_MAX_CHARS) return [fullText];
+  const chunks: string[] = [];
+  let rest = fullText;
+  while (rest.length > 0) {
+    if (rest.length <= MERGE_PREVIEW_MAX_CHARS) {
+      chunks.push(rest);
+      break;
+    }
+    let cut = rest.lastIndexOf("\n\n", MERGE_PREVIEW_MAX_CHARS);
+    if (cut < MERGE_PREVIEW_MAX_CHARS / 2) cut = MERGE_PREVIEW_MAX_CHARS;
+    chunks.push(rest.slice(0, cut));
+    rest = rest.slice(cut).trimStart();
+  }
+  return chunks;
+}
+
+async function sendMergePreview(
+  sessionKey: string,
+  chatId?: string,
+  chatType?: string,
+  senderOpenId?: string,
+): Promise<void> {
+  if (!isMergePreviewEligible(sessionKey)) return;
+
+  const messages = listUnclaimedMessages(sessionKey);
+  if (messages.length < 2) return;
+
+  const mergedBody = formatMergePreviewBody(messages);
+  let state = mergePreviewBySession.get(sessionKey);
+  if (!state) {
+    state = {
+      mergeId: buildMergeId(sessionKey, senderOpenId ?? messages[0].meta?.senderOpenId),
+      mergedText: mergedBody,
+      previewMessageIds: [],
+      updated: false,
+      senderOpenId: senderOpenId ?? messages[0].meta?.senderOpenId,
+    };
+    mergePreviewBySession.set(sessionKey, state);
+  } else {
+    if (!state.mergeId) {
+      state.mergeId = buildMergeId(sessionKey, senderOpenId ?? messages[0].meta?.senderOpenId ?? state.senderOpenId);
+    }
+    const wasUpdated = state.mergedText !== mergedBody && state.previewMessageIds.length > 0;
+    state.mergedText = mergedBody;
+    if (wasUpdated) state.updated = true;
+    if (senderOpenId) state.senderOpenId = senderOpenId;
+  }
+
+  const header = buildMergePreviewHeader(state.mergeId, state.updated);
+  const fullContent = `${header}\n\n${mergedBody}${MERGE_PREVIEW_GUIDE}`;
+  const chunks = splitMergePreviewText(fullContent);
+  const total = chunks.length;
+
+  const ch = resolveChannel(chatId ?? sessionKey);
+  if (ch.type !== "feishu" || !ch.rt.sender) return;
+
+  for (let i = 0; i < chunks.length; i++) {
+    const prefix = total > 1 ? (i === 0 ? "" : `（合并预览续 ${i + 1}/${total}）\n`) : "";
+    const text = prefix + chunks[i];
+    const outId = await ch.rt.sender.sendMessage(text, undefined, ch.chatId);
+    if (!outId) continue;
+    trackMessageSession(outId, sessionKey);
+    registerMergePreviewMessage(sessionKey, state.mergeId, outId);
+  }
+}
+
+function scheduleMergePreview(
+  sessionKey: string,
+  chatId?: string,
+  chatType?: string,
+  senderOpenId?: string,
+): void {
+  if (chatType !== "p2p" || !isMergePreviewEligible(sessionKey)) return;
+
+  let state = mergePreviewBySession.get(sessionKey);
+  if (!state) {
+    state = {
+      mergeId: "",
+      mergedText: "",
+      previewMessageIds: [],
+      updated: false,
+      senderOpenId,
+    };
+    mergePreviewBySession.set(sessionKey, state);
+  } else if (senderOpenId) {
+    state.senderOpenId = senderOpenId;
+  }
+
+  if (state.debounceTimer) clearTimeout(state.debounceTimer);
+  state.debounceTimer = setTimeout(() => {
+    state!.debounceTimer = undefined;
+    if (getSessionUnclaimedCount(sessionKey) < 2) return;
+    if (shouldSuppressMergePreview(sessionKey)) return;
+    sendMergePreview(sessionKey, chatId, chatType, senderOpenId).catch((e: unknown) => {
+      log("WARN", `合并预览发送失败: ${e instanceof Error ? e.message : e}`);
+    });
+  }, MERGE_PREVIEW_DEBOUNCE_MS);
+  state.debounceTimer.unref?.();
+}
+
+async function tryHandleMergePreviewReply(
+  parentId: string | undefined,
+  text: string,
+  messageId: string,
+  chatKey: string,
+  chatType: string,
+  senderOpenId?: string,
+  meta?: QueueMessageMeta,
+): Promise<boolean> {
+  if (!parentId) return false;
+  const entry = mergePreviewRegistry.get(parentId);
+  if (!entry) return false;
+
+  const { sessionKey, mergeId } = entry;
+  const state = mergePreviewBySession.get(sessionKey);
+  const mergedText = state?.mergedText ?? formatMergePreviewBody(listUnclaimedMessages(sessionKey));
+
+  const failReply = async (reason: string) => {
+    const body = `${reason}请直接回复合并预览消息，并发送完整合并正文。当前合并 ID：${mergeId}；当前全文：${mergedText}`;
+    await replyToMessage(messageId, body, chatKey);
+  };
+
+  const claimed = getSessionPendingCount(sessionKey) - getSessionUnclaimedCount(sessionKey);
+  if (claimed > 0) {
+    await replyToMessage(messageId, "该批消息 Agent 已开始处理，无法修改。如需补充请直接发送新消息。", chatKey);
+    return true;
+  }
+
+  const trimmed = text?.trim();
+  if (!trimmed) {
+    await failReply("未能识别修改。");
+    return true;
+  }
+
+  const fullMeta: QueueMessageMeta = { ...(meta || {}), chatType, senderOpenId };
+  const result = replaceSessionUnclaimedMessages(sessionKey, trimmed, fullMeta);
+  if (!result.ok) {
+    await failReply("未能识别修改。");
+    return true;
+  }
+
+  if (state) state.mergedText = trimmed;
+  await replyToMessage(
+    messageId,
+    `已按你的内容更新合并预览（ID：${mergeId}）。Agent 领取后将按新内容处理。`,
+    chatKey,
+  );
+  return true;
+}
+
 function getGetReactedIds(sessionKey: string): Set<string> {
   let set = sessionGetReactedIds.get(sessionKey);
   if (!set) {
@@ -596,10 +887,7 @@ async function confirmEnqueueAndStartProgress(
   chatId?: string,
 ): Promise<void> {
   const pending = getSessionPendingCount(sessionKey);
-  let text = "已收到，正在处理";
-  if (pending > 1) {
-    text += `，前面还有 ${pending - 1} 条待处理`;
-  }
+  const text = buildEnqueueStatusText(sessionKey, pending);
   try {
     await replyToMessage(messageId, text, chatId);
   } catch (e: unknown) {
@@ -806,6 +1094,7 @@ function ackOnReply(messageId?: string, sessionKey?: string): void {
     broadcastQueueEvent(sessionKey);
     clearGetReactions(sessionKey, acked);
     stopSessionProgress(sessionKey);
+    clearMergePreviewState(sessionKey);
   }
 }
 
@@ -874,6 +1163,9 @@ function pushMessage(content: string, messageId?: string, chatId?: string, chatT
       confirmEnqueueAndStartProgress(messageId, routedId, chatId).catch((e: unknown) => {
         log("WARN", `入队确认/进度启动失败: ${e instanceof Error ? e.message : e}`);
       });
+    }
+    if (routedId && fullMeta.chatType === "p2p") {
+      scheduleMergePreview(routedId, chatId, fullMeta.chatType, senderOpenId);
     }
   } else {
     log("INFO", `消息已跳过（重复或写入失败）: id=${messageId ?? "none"}`);
@@ -1006,6 +1298,12 @@ async function startFeishuChannel(rt: ChannelRuntime): Promise<void> {
       if (parentId) {
         const original = await sender.fetchMessageContent(parentId);
         if (original) meta.quotedContent = original;
+      }
+      if (messageType === "text") {
+        const handled = await tryHandleMergePreviewReply(
+          parentId, content, messageId, chatKey, chatType, senderOpenId, meta,
+        );
+        if (handled) return;
       }
       pushMessage(content, messageId, chatKey, chatType, senderOpenId, parentId, meta);
     };
@@ -1820,6 +2118,30 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
   if (crudHandler) return crudHandler(method, req, res);
 
   // ── 消息发送 API ──
+  if (method === "POST" && pathname === "/api/session-agent-phase") {
+    try {
+      const body = JSON.parse(await readBody(req));
+      const { session_key, phase } = body as { session_key?: string; phase?: AgentPhase };
+      if (!session_key?.trim()) {
+        json(res, { ok: false, error: "session_key is required" }, 400);
+        return true;
+      }
+      if (phase !== "starting" && phase !== "processing" && phase !== "idle") {
+        json(res, { ok: false, error: "invalid phase" }, 400);
+        return true;
+      }
+      if (phase === "idle") {
+        sessionAgentPhaseMap.delete(session_key);
+      } else {
+        sessionAgentPhaseMap.set(session_key, phase);
+      }
+      json(res, { ok: true });
+    } catch (e: unknown) {
+      json(res, { ok: false, error: e instanceof Error ? e.message : String(e) }, 400);
+    }
+    return true;
+  }
+
   if (method === "POST" && pathname === "/api/send-text") {
     const body = JSON.parse(await readBody(req));
     const { text, message_id, session_key, stop_progress } = body as {
@@ -1976,8 +2298,10 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     // 领取不删：.qmsg→.claimed，返回该会话全部未确认消息（含历史未回复的，按时间升序）。
     // 消息只有 Agent 回复（ackOnReply）后才删除；未确认下次 poll 重投，幽灵连接领走也不丢。
     if (!blocking) {
-      const messages = claimSessionMessages(sessionKeyFilter);
+      let messages = claimSessionMessages(sessionKeyFilter);
+      messages = applyMergeOverrideForPoll(sessionKeyFilter, messages);
       if (messages.length > 0) {
+        clearMergePreviewState(sessionKeyFilter);
         const freshIds = collectFreshAndTrack(messages, sessionKeyFilter);
         log("INFO", `消息已投递(instant): count=${messages.length} session=${sessionKeyFilter}`);
         applyPollGetReactions(freshIds, sessionKeyFilter);
@@ -1991,7 +2315,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     req.on("close", () => { disconnected = true; unregisterPollConn(sessionKeyFilter, res); });
     req.socket.setTimeout(0);
     const POLL_TIMEOUT_MS = 25 * 60 * 1000;
-    const messages = await waitForSessionMessages(POLL_TIMEOUT_MS, undefined, sessionKeyFilter, () => disconnected);
+    let messages = await waitForSessionMessages(POLL_TIMEOUT_MS, undefined, sessionKeyFilter, () => disconnected);
     unregisterPollConn(sessionKeyFilter, res);
 
     // 客户端已断开：消息仍是 .claimed（未确认），下次 poll 会重新投递，不会丢
@@ -2012,7 +2336,9 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       return true;
     }
 
+    messages = applyMergeOverrideForPoll(sessionKeyFilter, messages);
     const freshIds = collectFreshAndTrack(messages, sessionKeyFilter);
+    if (messages.length > 0) clearMergePreviewState(sessionKeyFilter);
     log("INFO", `消息已投递(poll): count=${messages.length} session=${sessionKeyFilter}`);
     json(res, { messages });
     applyPollGetReactions(freshIds, sessionKeyFilter);

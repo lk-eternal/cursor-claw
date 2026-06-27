@@ -8,6 +8,11 @@
 - **poll Get 去重**：`sessionGetReactedIds` 按 inbound `messageId` 记录已打 Get；入队确认与 poll 均写入，`idsNeedingPollGetReaction` 按 id 过滤，不依赖 `sessionProgressMap` 生命周期。
 - **勿在 sendText 内 cancelTyping**：最终回复与流式分段用 `{ skipTyping: true }`；进行中指示仅由进度状态机 stop。
 
+## 合并预览与 Agent 阶段（daemon 内存）
+
+- **Agent 阶段**：`sessionAgentPhaseMap` 由 electron `reportSessionAgentPhase`（`daemon-client.ts`）写入；`idle` 即 delete 条目。与 `sessionProgressMap`（流式/typing）职责分离。
+- **合并预览**：`mergePreviewBySession` / `mergePreviewRegistry` 生命周期与 poll 领取、`ackOnReply` 清理绑定；debounce 与超长分条逻辑留在 `daemon.ts` 内，勿散落至 file-queue。
+
 ## stream-text（`/api/stream-text`）
 
 - **微信**：首包 `sendText` + 后续分段，逻辑不变。

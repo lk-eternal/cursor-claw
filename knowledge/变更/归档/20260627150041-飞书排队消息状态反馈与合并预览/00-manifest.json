@@ -1,0 +1,210 @@
+{
+  "name": "飞书排队消息状态反馈与合并预览",
+  "flow": "standard",
+  "stage": "archived_with_debt",
+  "source": "kb-propose",
+  "workflow_version": "v2.6",
+  "archived_at": "2026-06-27T17:50:16+0800",
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "待领取队列计数与 override 替换",
+      "status": "done",
+      "files": ["src/file-queue.ts"],
+      "depends_on": []
+    },
+    {
+      "id": "T2",
+      "title": "Agent 阶段 Map 与 phase API",
+      "status": "done",
+      "files": ["src/daemon.ts"],
+      "depends_on": []
+    },
+    {
+      "id": "T3",
+      "title": "Electron Agent 阶段上报",
+      "status": "done",
+      "files": ["electron/session-dispatcher.ts", "electron/agent-sdk.ts"],
+      "depends_on": ["T2"]
+    },
+    {
+      "id": "T4",
+      "title": "F1 入队确认文案增强",
+      "status": "done",
+      "files": ["src/daemon.ts"],
+      "depends_on": ["T2"]
+    },
+    {
+      "id": "T5",
+      "title": "F4 合并预览抑制守卫",
+      "status": "done",
+      "files": ["src/daemon.ts"],
+      "depends_on": ["T2"]
+    },
+    {
+      "id": "T6",
+      "title": "合并预览状态机与发送",
+      "status": "done",
+      "files": ["src/daemon.ts"],
+      "depends_on": ["T1", "T4", "T5"]
+    },
+    {
+      "id": "T7",
+      "title": "F3 回复合并预览拦截与修改",
+      "status": "done",
+      "files": ["src/daemon.ts"],
+      "depends_on": ["T1", "T6"]
+    },
+    {
+      "id": "T8",
+      "title": "Poll override 交付与预览状态清理",
+      "status": "done",
+      "files": ["src/daemon.ts"],
+      "depends_on": ["T1", "T6", "T7"]
+    }
+  ],
+  "reviews": [
+    {
+      "id": "R1",
+      "severity": "suggestion",
+      "status": "accepted_debt",
+      "file": "src/daemon.ts",
+      "summary": "F3 失败纠错超长全文未分条，可能触达飞书单条上限"
+    },
+    {
+      "id": "R2",
+      "severity": "suggestion",
+      "status": "accepted_debt",
+      "file": "electron/session-dispatcher.ts",
+      "summary": "processing 阶段 session-dispatcher 与 agent-sdk 可能双报"
+    },
+    {
+      "id": "R3",
+      "severity": "manual",
+      "status": "accepted_debt",
+      "file": "auto_test/20260627150041-feishu-merge-preview/",
+      "summary": "飞书私聊端到端联调（F1/F2/F3/F4、NF1/NF2/NF4）未跑"
+    }
+  ],
+  "revisions": [],
+  "external": {
+    "figma_confirmed": true,
+    "figma_decision": "auto-none",
+    "task_type": "体验优化",
+    "priority": "P1"
+  },
+  "files": [
+    {
+      "path": "knowledge/变更/归档/20260627150041-飞书排队消息状态反馈与合并预览/00-manifest.json",
+      "role": "manifest",
+      "status": "active"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627150041-飞书排队消息状态反馈与合并预览/01-proposal.md",
+      "role": "proposal",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627150041-飞书排队消息状态反馈与合并预览/02-design.md",
+      "role": "design",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627150041-飞书排队消息状态反馈与合并预览/03-tasks.md",
+      "role": "tasks",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627150041-飞书排队消息状态反馈与合并预览/04-review.md",
+      "role": "review",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627150041-飞书排队消息状态反馈与合并预览/05-summary.md",
+      "role": "summary",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627150041-飞书排队消息状态反馈与合并预览/06-automation-test.md",
+      "role": "automation_test",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "auto_test/20260627150041-feishu-merge-preview/README.md",
+      "role": "automation_test",
+      "status": "changed"
+    },
+    {
+      "path": "auto_test/20260627150041-feishu-merge-preview/phase-api-contract.sh",
+      "role": "automation_test",
+      "status": "changed"
+    },
+    {
+      "path": "src/file-queue.ts",
+      "role": "implementation",
+      "status": "changed"
+    },
+    {
+      "path": "src/daemon.ts",
+      "role": "implementation",
+      "status": "changed"
+    },
+    {
+      "path": "electron/daemon-client.ts",
+      "role": "implementation",
+      "status": "changed"
+    },
+    {
+      "path": "electron/session-dispatcher.ts",
+      "role": "implementation",
+      "status": "changed"
+    },
+    {
+      "path": "electron/agent-sdk.ts",
+      "role": "implementation",
+      "status": "changed"
+    },
+    {
+      "path": "src/AGENTS.md",
+      "role": "agents",
+      "status": "changed"
+    },
+    {
+      "path": "electron/AGENTS.md",
+      "role": "agents",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/业务域/消息桥接/01-概览.md",
+      "role": "knowledge",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/业务域/消息桥接/02-飞书通道.md",
+      "role": "knowledge",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/业务域/消息桥接/04-消息队列与路由.md",
+      "role": "knowledge",
+      "status": "changed"
+    },
+    {
+      "path": "package.json",
+      "role": "config",
+      "status": "changed"
+    },
+    {
+      "path": "changelog/1.5.0.json",
+      "role": "changelog",
+      "status": "changed"
+    }
+  ],
+  "updated_at": "2026-06-27T17:50:16+0800"
+}
