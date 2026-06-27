@@ -499,7 +499,13 @@ npm run build
 
 # 打包
 npm run dist:win   # Windows
-npm run dist:mac   # macOS
+npm run dist:mac   # macOS（dmg，含检查与 build 编排）
+npm run pack:mac   # macOS 目录包（--dir，便于本地调试）
+
+# macOS 也可直接调用 deploy CLI（支持 --version 覆盖，不写回 package.json）
+node scripts/deploy/mac.cjs
+node scripts/deploy/mac.cjs --mode=pack
+node scripts/deploy/mac.cjs --version=1.2.3-test
 ```
 
 ## License

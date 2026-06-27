@@ -1,0 +1,137 @@
+{
+  "name": "macOS本地打包脚本",
+  "flow": "standard",
+  "stage": "archived",
+  "source": "kb-propose",
+  "workflow_version": "v2.6",
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "deploy 入口骨架与 CLI 解析",
+      "status": "done",
+      "files": ["scripts/deploy/mac.cjs"],
+      "depends_on": [],
+      "summary": "新建 scripts/deploy/mac.cjs：ROOT、parseArgs、printHelp、darwin 平台校验、main 骨架"
+    },
+    {
+      "id": "T2",
+      "title": "环境与依赖检查 runChecks",
+      "status": "done",
+      "files": ["scripts/deploy/mac.cjs"],
+      "depends_on": ["T1"],
+      "summary": "runChecks：Node≥engines、node_modules、electron-builder 必检；CSC/Apple 凭据可选 warn"
+    },
+    {
+      "id": "T3",
+      "title": "版本解析 resolveVersion",
+      "status": "done",
+      "files": ["scripts/deploy/mac.cjs"],
+      "depends_on": ["T2"],
+      "summary": "resolveVersion 读 package.json 或校验 --version，供 extraMetadata.version 覆盖"
+    },
+    {
+      "id": "T4",
+      "title": "构建与 electron-builder 编排",
+      "status": "done",
+      "files": ["scripts/deploy/mac.cjs"],
+      "depends_on": ["T3"],
+      "summary": "run/runPipeline：npm run build → npx electron-builder --mac [--dir] --publish never"
+    },
+    {
+      "id": "T5",
+      "title": "npm scripts 薄封装",
+      "status": "done",
+      "files": ["package.json"],
+      "depends_on": ["T4"],
+      "summary": "dist:mac/pack:mac 改为 node scripts/deploy/mac.cjs --mode=dist|pack"
+    }
+  ],
+  "reviews": [],
+  "revisions": [],
+  "files": [
+    {
+      "path": "knowledge/变更/归档/20260627133646-macOS本地打包脚本/00-manifest.json",
+      "role": "manifest",
+      "status": "active"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627133646-macOS本地打包脚本/01-proposal.md",
+      "role": "proposal",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627133646-macOS本地打包脚本/02-design.md",
+      "role": "design",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627133646-macOS本地打包脚本/03-tasks.md",
+      "role": "tasks",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627133646-macOS本地打包脚本/04-review.md",
+      "role": "review",
+      "kind": "change_doc",
+      "status": "added"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627133646-macOS本地打包脚本/05-summary.md",
+      "role": "summary",
+      "kind": "change_doc",
+      "status": "added"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627133646-macOS本地打包脚本/06-automation-test.md",
+      "role": "automation_test",
+      "kind": "change_doc",
+      "status": "added"
+    },
+    {
+      "path": "scripts/deploy/mac.cjs",
+      "role": "implementation",
+      "status": "added"
+    },
+    {
+      "path": "scripts/deploy/AGENTS.md",
+      "role": "agents",
+      "status": "added"
+    },
+    {
+      "path": "package.json",
+      "role": "implementation",
+      "status": "changed"
+    },
+    {
+      "path": "changelog/1.3.0.json",
+      "role": "changelog",
+      "status": "added"
+    },
+    {
+      "path": "knowledge/工程平台/Electron桌面应用/05-构建与打包.md",
+      "role": "knowledge",
+      "status": "added"
+    },
+    {
+      "path": "knowledge/工程平台/Electron桌面应用/00-README.md",
+      "role": "knowledge",
+      "status": "changed"
+    },
+    {
+      "path": "README.md",
+      "role": "index",
+      "status": "changed"
+    }
+  ],
+  "archived_at": "2026-06-27T20:30:00+0800",
+  "updated_at": "2026-06-27T20:30:00+0800",
+  "external": {
+    "figma_confirmed": true,
+    "figma_decision": "auto-none",
+    "task_type": "工程",
+    "priority": "P2"
+  }
+}
