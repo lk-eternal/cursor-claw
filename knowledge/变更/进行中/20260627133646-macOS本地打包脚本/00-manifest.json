@@ -20,5 +20,11 @@
       "status": "changed"
     }
   ],
-  "updated_at": "2026-06-27T13:36:46+0800"
+  "updated_at": "2026-06-27T13:44:51+0800",
+  "external": {
+    "figma_confirmed": true,
+    "figma_decision": "auto-none",
+    "task_type": "工程",
+    "priority": "P2"
+  }
 }
