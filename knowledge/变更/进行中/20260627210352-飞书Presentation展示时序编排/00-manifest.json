@@ -61,7 +61,7 @@
         "knowledge/变更/进行中/20260627210352-飞书Presentation展示时序编排/06-automation-test.md"
       ],
       "depends_on": ["T1", "T2", "T3", "T4", "T5"],
-      "note": "代码层+编译门禁通过；E1–E7 飞书联调待人工执行，archive 阻塞"
+      "note": "代码层+编译门禁通过；Rev1 后 E1/E3/E5/E7 不再目检过程卡，侧重 assistant defer；E1–E7 飞书联调待人工执行，archive 阻塞"
     },
     {
       "id": "T7",
@@ -141,7 +141,18 @@
       "re_review": "2026-06-27"
     }
   ],
-  "revisions": [],
+  "revisions": [
+    {
+      "id": "Rev1",
+      "date": "2026-06-27",
+      "summary": "飞书全通道抑制 tool/thinking CardKit；时序 scope 降级为 assistant defer / Electron 本地闩锁",
+      "source_change": "20260627220000-飞书抑制tool与thinking展示",
+      "doc": "07-prd-revisions.md",
+      "status": "accepted",
+      "note": "取代 v1.6.1 群聊仅 shell 门控；E1/E3/E5/E7 过程卡用例调整见 07 §E1–E7"
+    }
+  ],
+  "scope_note": "Rev1（2026-06-27）：飞书不再展示过程 CardKit；MVP 验收重心为 assistant 延迟首建与 defer 释放，非过程卡时间轴",
   "files": [
     {
       "path": "knowledge/变更/进行中/20260627210352-飞书Presentation展示时序编排/00-manifest.json",
@@ -180,6 +191,12 @@
       "status": "changed"
     },
     {
+      "path": "knowledge/变更/进行中/20260627210352-飞书Presentation展示时序编排/07-prd-revisions.md",
+      "kind": "change_doc",
+      "source": "lite",
+      "status": "changed"
+    },
+    {
       "path": "src/daemon.ts",
       "kind": "code",
       "source": "kb-apply",
@@ -204,5 +221,5 @@
       "status": "changed"
     }
   ],
-  "updated_at": "2026-06-28T00:30:00+0800"
+  "updated_at": "2026-06-27T22:00:00+0800"
 }

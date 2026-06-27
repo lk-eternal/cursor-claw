@@ -31,7 +31,7 @@
 - **编辑 fallback**：`mergeCardRegistry` 仅注册 `cardMessageId`；`tryHandleMergePreviewReply` 只认合并卡 outbound id，更新 `overrideText`。
 - **清理**：`clearMergeBatchState` 在 `ackOnReply` 与 claim 后调用。
 - **Presentation**：`POST /api/presentation-event` 路由 `tool`/`thinking`/`assistant`/`merge_batch`；失败日志含可检索字段 `presentation_failed`。
-- **群聊 Presentation 门控**：`resolveSessionChatType === "group"` 时，`handleToolPresentationEvent` 经 `isGroupChatPresentationToolAllowed` 仅 shell 渲染 CardKit，非 shell 工具静默 `{ ok: true }` 跳过；thinking 与私聊全量 tool/thinking 不变。stream-text 与 PRESENTATION_ORDERING（仅 p2p）不受影响。
+- **飞书 Presentation 门控**：`handleToolPresentationEvent` / `handleThinkingPresentationEvent` 经 `isFeishuProcessPresentationSuppressed` — 飞书全通道抑制 tool/thinking CardKit，静默 `{ ok: true }`；ordering 开启时仍更新 `presentationProcessActive`、`activeToolNames`、`thinkingOpen`。assistant stream-text 与 PRESENTATION_ORDERING（仅 p2p）不受影响。微信路径不变。
 - **eligible 分层**：`isMainUserP2pEligible`（合并批次）⊂ `isStreamTextEligible`（+ S1.8 飞书群聊且 `allowOthers`）；`sessionChatTypeMap` 在 `pushMessage` 写入。
 - **NF2**：活跃 MergeBatch 时 stream/tool/thinking 首包经 `getPresentationReplyAnchor` → `sendStreamingCardMessage` reply 到 `lastInboundMessageId`，不争用合并卡首屏。
 

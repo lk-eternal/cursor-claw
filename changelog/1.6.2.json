@@ -1,0 +1,9 @@
+{
+  "version": "1.6.2",
+  "date": "2026-06-28",
+  "changes": [
+    "飞书群聊与主用户私聊均不再展示 tool/thinking 过程 CardKit，会话内仅保留 assistant 流式正文卡",
+    "工具调用与 thinking 过程改在桌面 SDK UI 日志中查看，内容与改前等价",
+    "取代 v1.6.1 群聊仅展示 shell 工具卡的策略，微信通道行为不变"
+  ]
+}

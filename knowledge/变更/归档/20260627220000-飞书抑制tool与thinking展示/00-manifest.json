@@ -1,0 +1,106 @@
+{
+  "name": "飞书抑制tool与thinking展示",
+  "flow": "lite",
+  "stage": "archived",
+  "source": "kb-lite",
+  "workflow_version": "v2.6",
+  "archived_at": "2026-06-28T03:00:00+0800",
+  "tasks": [
+    {
+      "id": "LITE-01",
+      "title": "飞书全通道（群聊+p2p）抑制 tool/thinking CardKit 出站，保留 stream-text 与 SDK UI 日志",
+      "status": "done",
+      "files": [
+        "electron/agent-sdk.ts",
+        "src/daemon.ts",
+        "src/shared/feishu-presentation-gate.ts"
+      ]
+    },
+    {
+      "id": "LITE-02",
+      "title": "移除 1.6.1 群聊仅 shell 门控，知识同步 02-飞书通道 与 AGENTS",
+      "status": "done",
+      "files": [
+        "knowledge/业务域/消息桥接/02-飞书通道.md",
+        "src/AGENTS.md",
+        "electron/AGENTS.md"
+      ],
+      "depends_on": ["LITE-01"]
+    },
+    {
+      "id": "T-test",
+      "title": "静态验收 + 飞书/微信 E2E 联调",
+      "status": "done",
+      "files": [
+        "knowledge/变更/归档/20260627220000-飞书抑制tool与thinking展示/06-automation-test.md"
+      ],
+      "depends_on": ["LITE-01"],
+      "note": "静态（build/tsc/门控 grep）已通过；E1–E6 飞书/微信 E2E 待后续人工，不阻塞 lite archive"
+    }
+  ],
+  "reviews": [],
+  "revisions": [],
+  "related_changes": [
+    {
+      "id": "20260627210352-飞书Presentation展示时序编排",
+      "relation": "scope_downgrade",
+      "note": "过程卡不再展示后，时序编排 scope 降级为 assistant defer / Electron 本地闩锁；挂靠 07-prd-revisions Rev1"
+    },
+    {
+      "id": "20260627212713-群聊仅展示Shell工具卡片",
+      "relation": "supersedes",
+      "note": "1.6.1 群聊 shell 门控策略由本变更全抑制 tool/thinking 取代"
+    }
+  ],
+  "files": [
+    {
+      "path": "electron/agent-sdk.ts",
+      "kind": "code"
+    },
+    {
+      "path": "src/daemon.ts",
+      "kind": "code"
+    },
+    {
+      "path": "src/shared/feishu-presentation-gate.ts",
+      "kind": "code"
+    },
+    {
+      "path": "electron/AGENTS.md",
+      "kind": "agents"
+    },
+    {
+      "path": "src/AGENTS.md",
+      "kind": "agents"
+    },
+    {
+      "path": "knowledge/业务域/消息桥接/02-飞书通道.md",
+      "kind": "knowledge"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627220000-飞书抑制tool与thinking展示/01-proposal.md",
+      "kind": "change_doc"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627220000-飞书抑制tool与thinking展示/00-manifest.json",
+      "kind": "change_doc"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627220000-飞书抑制tool与thinking展示/05-summary.md",
+      "kind": "change_doc"
+    },
+    {
+      "path": "knowledge/变更/归档/20260627220000-飞书抑制tool与thinking展示/06-automation-test.md",
+      "kind": "change_doc"
+    },
+    {
+      "path": "package.json",
+      "kind": "config"
+    },
+    {
+      "path": "changelog/1.6.2.json",
+      "kind": "changelog"
+    }
+  ],
+  "updated_at": "2026-06-28T03:00:00+0800"
+}

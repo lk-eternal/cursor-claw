@@ -39,6 +39,9 @@ import {
   type DaemonChannelConfig,
   type ChannelStatusInfo,
 } from "./shared/channel-types.js";
+import {
+  isFeishuProcessPresentationSuppressed as feishuSuppressesProcessKind,
+} from "./shared/feishu-presentation-gate.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -432,15 +435,11 @@ function isPresentationEligible(sessionKey: string): boolean {
   return isStreamTextEligible(sessionKey);
 }
 
-/** 群聊判定：resolveSessionChatType === "group" */
-function isGroupChatSession(sessionKey: string): boolean {
-  return resolveSessionChatType(sessionKey) === "group";
-}
-
-/** 群聊 Presentation 门控：仅 shell 工具卡可渲染，私聊全部工具保留 */
-function isGroupChatPresentationToolAllowed(sessionKey: string, toolName: string): boolean {
-  if (!isGroupChatSession(sessionKey)) return true;
-  return toolName === "shell";
+/** 飞书全通道：tool/thinking 不渲染 CardKit，静默 ok；ordering 闩锁仍须更新 */
+function isFeishuProcessPresentationSuppressed(sessionKey: string, kind: string): boolean {
+  const ch = resolveChannel(sessionKey);
+  if (ch.type === "error") return false;
+  return feishuSuppressesProcessKind(ch.type, kind);
 }
 
 /** NF2：活跃合并批次时 stream/tool/thinking 首包 reply 到首条 inbound */
@@ -1328,18 +1327,8 @@ async function handleToolPresentationEvent(
     return { ok: false, error: "presentation not supported for this session" };
   }
   const toolName = event.tool_name.trim();
-  // 群聊降噪：非 shell 工具静默跳过，不渲染 CardKit
-  if (!isGroupChatPresentationToolAllowed(sessionKey, toolName)) {
-    return { ok: true };
-  }
-
-  const ch = resolveChannel(sessionKey);
-  if (ch.type !== "feishu" || !ch.rt.sender || !ch.chatId) {
-    logPresentationFailed(sessionKey, "tool", "feishu channel unavailable");
-    return { ok: false, error: "feishu channel required" };
-  }
-
   const status = event.tool_status ?? "started";
+
   let state = sessionProgressMap.get(sessionKey);
   if (!state) {
     state = { typingActive: false };
@@ -1355,13 +1344,6 @@ async function handleToolPresentationEvent(
     state.toolCards.delete(toolName);
   }
 
-  const toolCard = status !== "started" ? state.toolCards.get(toolName) : undefined;
-  const outHint = event.outbound_message_id ?? toolCard?.cardMessageId;
-  const existing =
-    toolCard && outHint
-      ? { ...toolCard, cardMessageId: outHint }
-      : undefined;
-
   if (ordering) {
     if (!state.activeToolNames) state.activeToolNames = new Set();
     if (status === "started") {
@@ -1371,6 +1353,27 @@ async function handleToolPresentationEvent(
       state.activeToolNames.delete(toolName);
     }
   }
+
+  // 飞书全通道抑制 tool CardKit；ordering 闩锁已在上方更新
+  if (isFeishuProcessPresentationSuppressed(sessionKey, "tool")) {
+    if (ordering && (status === "completed" || status === "failed") && isPresentationProcessIdle(state)) {
+      void releaseDeferredAssistantStream(sessionKey, state, { force: true });
+    }
+    return { ok: true };
+  }
+
+  const ch = resolveChannel(sessionKey);
+  if (ch.type !== "feishu" || !ch.rt.sender || !ch.chatId) {
+    logPresentationFailed(sessionKey, "tool", "feishu channel unavailable");
+    return { ok: false, error: "feishu channel required" };
+  }
+
+  const toolCard = status !== "started" ? state.toolCards.get(toolName) : undefined;
+  const outHint = event.outbound_message_id ?? toolCard?.cardMessageId;
+  const existing =
+    toolCard && outHint
+      ? { ...toolCard, cardMessageId: outHint }
+      : undefined;
 
   const replyAnchor = existing ? undefined : getPresentationReplyAnchor(sessionKey);
 
@@ -1440,14 +1443,8 @@ async function handleThinkingPresentationEvent(
 ): Promise<{ ok: boolean; outbound_message_id?: string; error?: string }> {
   const sessionKey = event.session_key?.trim();
   if (!sessionKey) return { ok: false, error: "session_key is required" };
-  if (!event.delta) return { ok: true, outbound_message_id: event.outbound_message_id };
   if (!isPresentationEligible(sessionKey)) {
     return { ok: false, error: "presentation not supported for this session" };
-  }
-  const ch = resolveChannel(sessionKey);
-  if (ch.type !== "feishu" || !ch.rt.sender || !ch.chatId) {
-    logPresentationFailed(sessionKey, "thinking", "feishu channel unavailable");
-    return { ok: false, error: "feishu channel required" };
   }
 
   let state = sessionProgressMap.get(sessionKey);
@@ -1466,6 +1463,29 @@ async function handleThinkingPresentationEvent(
     if (event.final) {
       state.thinkingOpen = false;
     }
+  }
+
+  const releaseIfProcessIdle = () => {
+    if (ordering && event.final && isPresentationProcessIdle(state!)) {
+      void releaseDeferredAssistantStream(sessionKey, state!, { force: true });
+    }
+  };
+
+  // 飞书全通道抑制 thinking CardKit；无 delta 的 final 仍闭合 thinkingOpen（上方已处理）
+  if (isFeishuProcessPresentationSuppressed(sessionKey, "thinking")) {
+    releaseIfProcessIdle();
+    return { ok: true, outbound_message_id: event.outbound_message_id ?? state.thinkingCardMessageId };
+  }
+
+  if (!event.delta) {
+    releaseIfProcessIdle();
+    return { ok: true, outbound_message_id: event.outbound_message_id };
+  }
+
+  const ch = resolveChannel(sessionKey);
+  if (ch.type !== "feishu" || !ch.rt.sender || !ch.chatId) {
+    logPresentationFailed(sessionKey, "thinking", "feishu channel unavailable");
+    return { ok: false, error: "feishu channel required" };
   }
 
   state.thinkingBuffer = (state.thinkingBuffer ?? "") + event.delta;

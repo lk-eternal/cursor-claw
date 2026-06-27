@@ -8,6 +8,9 @@ import { readLockFile, httpPost, reportSessionAgentPhase } from "./daemon-client
 import { getChannel, getAgentResource, resolveChannelForSession, resolveChannelModel, effectiveWorkspaceDir, type MessageChannel, type ModelScenario } from "./config-store"
 import { parseChatKey } from "../src/shared/channel-types"
 import {
+  isFeishuProcessPresentationSuppressed as feishuSuppressesProcessKind,
+} from "../src/shared/feishu-presentation-gate"
+import {
   extractShellPresentationFields,
   formatToolCallLogSuffix,
 } from "../src/shared/tool-presentation"
@@ -213,22 +216,28 @@ function mapToolPresentationStatus(status: "running" | "completed" | "error"): P
   return "failed"
 }
 
-/** 群聊 Presentation 门控：仅 shell 工具卡可 POST；thinking 保留，非 shell 工具抑制 */
-function isGroupChatPresentationEventAllowed(
-  chatType: ChatType,
+/** 从 sessionKey 解析通道类型（与 f41Eligible 同源 parseChatKey + getChannel） */
+function resolveSessionChannelType(sessionKey: string): string | undefined {
+  const chatId = extractChatId(sessionKey)
+  const { channelId } = parseChatKey(chatId)
+  const channel = channelId ? getChannel(channelId) : resolveChannelForSession(sessionKey)
+  return channel?.type
+}
+
+/** 飞书全通道：tool/thinking 不 POST presentation-event；assistant 仍走 stream-text */
+function isFeishuProcessPresentationSuppressed(
+  session: SdkSessionAgent,
   event: Omit<PresentationEvent, "session_key">,
 ): boolean {
-  if (chatType !== "group") return true
-  if (event.kind !== "tool") return true
-  return event.tool_name === "shell"
+  return feishuSuppressesProcessKind(resolveSessionChannelType(session.sessionKey), event.kind)
 }
 
 async function postPresentationEvent(
   session: SdkSessionAgent,
   event: Omit<PresentationEvent, "session_key">,
 ): Promise<void> {
-  // 群聊降噪：非 shell 工具不 POST；thinking 与私聊行为不变
-  if (!isGroupChatPresentationEventAllowed(session.chatType, event)) return
+  // 飞书抑制过程卡出站；本地闩锁 / SDK UI 日志仍由 handleSdkEvent 维护
+  if (isFeishuProcessPresentationSuppressed(session, event)) return
   const lock = readLockFile()
   if (!lock?.port) return
   const payload: PresentationEvent = {
