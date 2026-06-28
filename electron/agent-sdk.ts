@@ -21,12 +21,15 @@ import {
   type ContextUsageState,
   appendContextFooter,
   createAgentSendOptions,
+  evaluatePreSendContextPressure,
   formatContextFooter,
   resolveContextLimitForSession,
+  resolveDisplayContextTokens,
 } from "./context-usage"
 import { finalizeContextUsageAtRunEnd } from "./context-usage-run-end"
 import { type ChatType, type LaunchMeta, buildPrompt, resolveSessionChatName } from "./agent-launcher"
 import { appendInlineMcpToSendOptions, loadInlineMcpServers } from "./mcp-sdk-loader"
+import { formatUserSdkFailureMessage } from "./sdk-failure-messages"
 import {
   finalizeSdkRunOnTimeout as finalizeSdkRunOnTimeoutImpl,
   isRunTimeoutFailure as isRunTimeoutFailureImpl,
@@ -106,8 +109,6 @@ const FAIL_COOLDOWN_MS = 30_000
 const NOTIFY_PROCESSING = "Agent 处理中…"
 const NOTIFY_COMPRESSING = "正在压缩上下文…"
 const STREAM_POST_INTERVAL_MS = 400
-/** 观测约 23min 档 Run 超时；低于此阈值的 shell+running 不误判为保活失败 */
-const KEEPALIVE_TIMEOUT_MS = 20 * 60 * 1000
 
 function sdkResidentModeEnabled(): boolean {
   const v = (process.env.SDK_RESIDENT_AGENT ?? "").trim().toLowerCase()
@@ -140,11 +141,6 @@ function resetSdkRunPresentationState(session: SdkSessionAgent): void {
   session.runFinalizing = false
   session.failureArchiveDone = false
   session.abortController = new AbortController()
-}
-
-function isUnsafeSdkMessage(msg?: string): boolean {
-  const t = msg?.trim()
-  return !t || /[/\\]|\.ts:|at |stack|Error:|ENOENT|spawn|EACCES|EPERM/i.test(t)
 }
 
 function extractErrorCode(value: unknown): string | undefined {
@@ -195,25 +191,27 @@ function resolveRunDurationMs(session: SdkSessionAgent, run?: Run | null): numbe
 function formatSdkStreamFailure(
   status?: string,
   message?: string,
-  ctx?: { lastTool?: { name: string; status: string }; durationMs?: number },
+  ctx?: {
+    lastTool?: { name: string; status: string }
+    durationMs?: number
+    errorCode?: string
+    runResult?: string
+    contextUsed?: number
+    contextLimit?: number | null
+    isTimeoutFailure?: boolean
+  },
 ): string {
-  const st = status?.toUpperCase()
-  if (st === "CANCELLED") return "Agent 任务已取消。"
-  if (st === "EXPIRED") return "Agent 会话已过期，请重新发送消息。"
-  const lt = ctx?.lastTool
-  const isKeepaliveTimeout =
-    lt?.name === "shell" &&
-    lt.status.toLowerCase() === "running" &&
-    ctx?.durationMs != null &&
-    ctx.durationMs >= KEEPALIVE_TIMEOUT_MS
-  if (isKeepaliveTimeout && isUnsafeSdkMessage(message)) {
-    return "会话因等待超时已退出，请重新发送消息，我会继续为你处理。"
-  }
-  const msg = message?.trim()
-  if (msg && !isUnsafeSdkMessage(msg)) {
-    return `⚠️ Agent 处理失败：${msg}`
-  }
-  return "⚠️ Agent 处理失败，请稍后重试。"
+  return formatUserSdkFailureMessage({
+    status,
+    message,
+    errorCode: ctx?.errorCode,
+    runResult: ctx?.runResult,
+    lastTool: ctx?.lastTool,
+    durationMs: ctx?.durationMs,
+    contextUsed: ctx?.contextUsed,
+    contextLimit: ctx?.contextLimit,
+    isTimeoutFailure: ctx?.isTimeoutFailure ?? false,
+  })
 }
 
 async function notifySdkFailure(
@@ -235,9 +233,18 @@ async function notifySdkFailure(
     runStatus: run?.status ?? session.run?.status,
   })
   const last = session.lastStatus
+  const contextUsed = resolveDisplayContextTokens(
+    session.contextUsage,
+    session.contextUsagePeakTokens,
+  )
   let text = override ?? formatSdkStreamFailure(last?.status, last?.message, {
     lastTool: session.lastTool,
     durationMs: resolveRunDurationMs(session, run),
+    errorCode: extractErrorCode(run) ?? extractErrorCode(last),
+    runResult: run?.result ?? session.run?.result,
+    contextUsed,
+    contextLimit: session.contextLimitTokens ?? null,
+    isTimeoutFailure: run ? isRunTimeoutFailure(session, run, last) : false,
   })
   const footer = formatContextFooter(
     session.contextUsage,
@@ -967,6 +974,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     broadcastSdkSessionStatus()
 
     await resolveContextLimitForSession(session)
+    evaluatePreSendContextPressure(session, pushUiLog)
     const run = await agent.send(
       prompt,
       appendInlineMcpToSendOptions(createAgentSendOptions(session, pushUiLog, makeCompressionNotify(session)), workspaceDir),
@@ -1013,6 +1021,7 @@ export async function dispatchToSdkAgent(
   try {
     resetSdkRunPresentationState(session)
     await resolveContextLimitForSession(session)
+    evaluatePreSendContextPressure(session, pushUiLog)
     const run = await session.agent.send(
       text,
       appendInlineMcpToSendOptions(createAgentSendOptions(session, pushUiLog, makeCompressionNotify(session)), session.workspaceDir),

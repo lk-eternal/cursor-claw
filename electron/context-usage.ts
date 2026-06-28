@@ -3,6 +3,9 @@
  * 供 agent-sdk 在 onDelta / final flush 路径调用。
  */
 import type { InteractionUpdate } from "@cursor/sdk"
+import { evaluatePreSendContextPressureCore, logTurnEndedHighWatermark } from "./context-usage-pressure"
+
+export { HIGH_WATERMARK_RATIO } from "./context-usage-pressure"
 
 /** turn-ended.usage 最小字段（与 SDK TurnUsageInput 对齐） */
 export interface TurnUsageSlice {
@@ -74,13 +77,13 @@ function inferContextLimitFromModelId(modelId: string): number | null {
   return null
 }
 
-/** 合并单 turn usage 到 session 累积态（字段-wise 求和；展示态勿用，见 setTurnUsage） */
-export function mergeTurnUsage(state: ContextUsageState, usage: TurnUsageSlice): ContextUsageState {
+/** 合并单 turn usage（遗留导出；展示态用 setTurnUsage） */
+export function mergeTurnUsage(s: ContextUsageState, u: TurnUsageSlice): ContextUsageState {
   return {
-    inputTokens: state.inputTokens + (usage.inputTokens || 0),
-    outputTokens: state.outputTokens + (usage.outputTokens || 0),
-    cacheReadTokens: state.cacheReadTokens + (usage.cacheReadTokens || 0),
-    cacheWriteTokens: state.cacheWriteTokens + (usage.cacheWriteTokens || 0),
+    inputTokens: s.inputTokens + (u.inputTokens || 0),
+    outputTokens: s.outputTokens + (u.outputTokens || 0),
+    cacheReadTokens: s.cacheReadTokens + (u.cacheReadTokens || 0),
+    cacheWriteTokens: s.cacheWriteTokens + (u.cacheWriteTokens || 0),
   }
 }
 
@@ -190,10 +193,7 @@ export function formatTokensK(tokens: number): string {
   return Number.isInteger(k) ? `${k}k` : `${k.toFixed(1)}k`
 }
 
-/**
- * 格式化 footer；usage 无效时返回 null。
- * 有上限：`上下文：{p}% ({usedK}/{limitK})`；无上限：`上下文：已用 {usedK}`
- */
+/** 格式化 footer；无效返回 null */
 export function formatContextFooter(
   state: ContextUsageState,
   limitTokens: number | null | undefined,
@@ -220,17 +220,27 @@ export function appendContextFooter(body: string, footer: string | null): string
   return body + footer
 }
 
-/** 生成 send 选项用的 onDelta 回调体 */
+/** send 前只读压力评估（T2 契约：session + log，不阻断 send） */
+export function evaluatePreSendContextPressure(
+  session: ContextUsageDisplaySession & { sessionKey: string; contextLimitTokens?: number },
+  log: UiLogFn,
+  options?: { highWatermarkRatio?: number },
+): { ratio: number | null; used: number; limit: number | null } {
+  const used = resolveDisplayContextTokens(session.contextUsage, session.contextUsagePeakTokens)
+  return evaluatePreSendContextPressureCore(session.sessionKey, used, session.contextLimitTokens, log, options)
+}
+
+/** onDelta 回调体：turn-ended 快照、高水位与 summary 压缩日志 */
 export function handleAgentSendDelta(
-  session: ContextUsageDisplaySession & { sessionKey: string },
+  session: ContextUsageDisplaySession & { sessionKey: string; contextLimitTokens?: number },
   update: InteractionUpdate,
   log: UiLogFn,
   onCompression?: CompressionNotifyFn,
 ): void {
   if (update.type === "turn-ended") {
-    if (update.usage) {
-      updateContextUsageDisplay(session, update.usage)
-    }
+    if (update.usage) updateContextUsageDisplay(session, update.usage)
+    const used = resolveDisplayContextTokens(session.contextUsage, session.contextUsagePeakTokens)
+    logTurnEndedHighWatermark(session.sessionKey, used, session.contextLimitTokens, log)
     return
   }
   if (update.type === "summary-started") {
@@ -249,7 +259,7 @@ export function handleAgentSendDelta(
   }
 }
 
-/** 为 agent.send 构造 onDelta 选项（压缩依赖 harness 默认 summarization，SDK 无 autoCompress 字段） */
+/** 为 agent.send 构造 onDelta（harness 默认 summarization，SDK 无 autoCompress） */
 export function createAgentSendOptions(
   session: ContextUsageDisplaySession & { sessionKey: string },
   log: UiLogFn,
@@ -260,11 +270,8 @@ export function createAgentSendOptions(
       try {
         handleAgentSendDelta(session, args.update, log, onCompression)
       } catch (e: unknown) {
-        log(
-          "SDK",
-          "WARN",
-          `[${session.sessionKey}] onDelta 处理异常: ${e instanceof Error ? e.message : String(e)}`,
-        )
+        const msg = e instanceof Error ? e.message : String(e)
+        log("SDK", "WARN", `[${session.sessionKey}] onDelta 处理异常: ${msg}`)
       }
     },
   }

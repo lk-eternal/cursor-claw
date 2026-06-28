@@ -1,0 +1,146 @@
+{
+  "name": "Agent Run 自动压缩",
+  "flow": "standard",
+  "stage": "archived",
+  "source": "kb-propose",
+  "workflow_version": "v2.6",
+  "archived_at": "2026-06-28T17:57:25+0800",
+  "external": {
+    "figma_confirmed": true,
+    "figma_decision": "auto-none",
+    "task_type": "功能增强",
+    "priority": "P1"
+  },
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "SDK 失败归因分类器（sdk-failure-messages.ts）",
+      "status": "done",
+      "files": [
+        "electron/sdk-failure-messages.ts"
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "T2",
+      "title": "上下文压力评估与高水位可观测（context-usage.ts）",
+      "status": "done",
+      "files": [
+        "electron/context-usage.ts",
+        "electron/context-usage-pressure.ts"
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "T3",
+      "title": "send 前 pre-send 挂接（agent-sdk.ts）",
+      "status": "done",
+      "files": [
+        "electron/agent-sdk.ts"
+      ],
+      "depends_on": ["T2"]
+    },
+    {
+      "id": "T4",
+      "title": "失败归因挂接与压缩 IM 回归（agent-sdk.ts）",
+      "status": "done",
+      "files": [
+        "electron/agent-sdk.ts"
+      ],
+      "depends_on": ["T1", "T3"]
+    },
+    {
+      "id": "T5",
+      "title": "electron/AGENTS.md 约定与构建验收",
+      "status": "done",
+      "files": [
+        "electron/AGENTS.md"
+      ],
+      "depends_on": ["T4"]
+    }
+  ],
+  "files": [
+    {
+      "path": "knowledge/变更/归档/20260628165558-Agent Run 自动压缩/00-manifest.json",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628165558-Agent Run 自动压缩/01-proposal.md",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628165558-Agent Run 自动压缩/02-design.md",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628165558-Agent Run 自动压缩/03-tasks.md",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628165558-Agent Run 自动压缩/04-review.md",
+      "kind": "change_doc",
+      "status": "added"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628165558-Agent Run 自动压缩/05-summary.md",
+      "kind": "change_doc",
+      "status": "added"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628165558-Agent Run 自动压缩/06-automation-test.md",
+      "kind": "change_doc",
+      "status": "added"
+    },
+    {
+      "path": "electron/sdk-failure-messages.ts",
+      "kind": "code",
+      "status": "added"
+    },
+    {
+      "path": "electron/context-usage-pressure.ts",
+      "kind": "code",
+      "status": "added"
+    },
+    {
+      "path": "electron/context-usage.ts",
+      "kind": "code",
+      "status": "changed"
+    },
+    {
+      "path": "electron/agent-sdk.ts",
+      "kind": "code",
+      "status": "changed"
+    },
+    {
+      "path": "electron/AGENTS.md",
+      "kind": "code",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/业务域/Agent调度/03-启动与自动重连.md",
+      "kind": "knowledge",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/业务域/消息桥接/02-飞书通道.md",
+      "kind": "knowledge",
+      "status": "changed"
+    },
+    {
+      "path": "package.json",
+      "kind": "code",
+      "status": "changed"
+    },
+    {
+      "path": "changelog/1.8.7.json",
+      "kind": "changelog",
+      "status": "added"
+    }
+  ],
+  "reviews": [],
+  "updated_at": "2026-06-28T17:57:25+0800"
+}
