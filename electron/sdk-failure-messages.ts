@@ -99,13 +99,13 @@ function formatTimeoutFailureMessage(ctx: SdkFailureContext): string {
 export function formatUserSdkFailureMessage(ctx: SdkFailureContext): string {
   const st = ctx.status?.toUpperCase()
 
-  if (st === "CANCELLED") return "Agent 任务已取消。"
-  if (st === "EXPIRED") return "Agent 会话已过期，请重新发送消息。"
-
-  // 超时类优先于上下文归因（调用方已用 isRunTimeoutFailure 判定）
+  // 超时类优先于 CANCELLED 固定句（平台长时取消展示等待超时文案）
   if (ctx.isTimeoutFailure) {
     return formatTimeoutFailureMessage(ctx)
   }
+
+  if (st === "CANCELLED") return "Agent 任务已取消。"
+  if (st === "EXPIRED") return "Agent 会话已过期，请重新发送消息。"
 
   const isError =
     st === "ERROR" ||

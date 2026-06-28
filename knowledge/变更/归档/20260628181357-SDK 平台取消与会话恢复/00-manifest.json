@@ -1,0 +1,129 @@
+{
+  "name": "SDK 平台取消与会话恢复",
+  "flow": "standard",
+  "stage": "archived",
+  "source": "kb-propose",
+  "workflow_version": "v2.6",
+  "archived_at": "2026-06-28T18:20:00+0800",
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "finalize-sdk-run 平台长时判定与 finalizer 收尾",
+      "status": "done",
+      "files": ["electron/finalize-sdk-run.ts"],
+      "depends_on": []
+    },
+    {
+      "id": "T2",
+      "title": "agent-sdk 事件挂接、兜底与 notify 门控",
+      "status": "done",
+      "files": ["electron/agent-sdk.ts"],
+      "depends_on": ["T1"]
+    },
+    {
+      "id": "T3",
+      "title": "sdk-failure-messages 超时文案优先于 CANCELLED",
+      "status": "done",
+      "files": ["electron/sdk-failure-messages.ts"],
+      "depends_on": []
+    },
+    {
+      "id": "T4",
+      "title": "electron/AGENTS.md 约定对齐",
+      "status": "done",
+      "files": ["electron/AGENTS.md"],
+      "depends_on": ["T1", "T2", "T3"]
+    },
+    {
+      "id": "T5",
+      "title": "归档发布物（archive 阶段执行）",
+      "status": "done",
+      "files": ["package.json", "changelog/1.8.8.json"],
+      "depends_on": ["T1", "T2", "T3", "T4"]
+    }
+  ],
+  "reviews": [
+    {
+      "id": "focused-review",
+      "type": "focused-review",
+      "date": "2026-06-28",
+      "scope": "T1-T4",
+      "verdict": "passed_conditional",
+      "status": "completed",
+      "blocking_issues": 0,
+      "warnings": 5,
+      "file": "knowledge/变更/归档/20260628181357-SDK 平台取消与会话恢复/04-review.md",
+      "summary": "T1–T4 与 02/03 一致；闭合归档 R1/R2；crash_log 主路径静态对齐 sdk_timeout；无 ≥90 阻断；01 验收 1–3/5–6 待 /kb-test；T5 留 archive",
+      "resolution": "04-review.md §9"
+    }
+  ],
+  "revisions": [],
+  "files": [
+    {
+      "path": "knowledge/变更/归档/20260628181357-SDK 平台取消与会话恢复/00-manifest.json",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628181357-SDK 平台取消与会话恢复/01-proposal.md",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628181357-SDK 平台取消与会话恢复/02-design.md",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628181357-SDK 平台取消与会话恢复/03-tasks.md",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628181357-SDK 平台取消与会话恢复/04-review.md",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628181357-SDK 平台取消与会话恢复/05-summary.md",
+      "kind": "change_doc",
+      "status": "added"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628181357-SDK 平台取消与会话恢复/06-automation-test.md",
+      "kind": "change_doc",
+      "status": "added"
+    },
+    {
+      "path": "electron/finalize-sdk-run.ts",
+      "kind": "code",
+      "status": "changed"
+    },
+    {
+      "path": "electron/agent-sdk.ts",
+      "kind": "code",
+      "status": "changed"
+    },
+    {
+      "path": "electron/sdk-failure-messages.ts",
+      "kind": "code",
+      "status": "changed"
+    },
+    {
+      "path": "electron/AGENTS.md",
+      "kind": "code",
+      "status": "changed"
+    },
+    {
+      "path": "package.json",
+      "kind": "config",
+      "status": "changed"
+    },
+    {
+      "path": "changelog/1.8.8.json",
+      "kind": "config",
+      "status": "added"
+    }
+  ],
+  "updated_at": "2026-06-28T18:20:00+0800"
+}

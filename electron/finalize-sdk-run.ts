@@ -9,6 +9,9 @@ import { archiveAgentFailureLogs } from "./crash-log-archiver"
 /** 观测约 23min 档 Run 超时；与 agent-sdk KEEPALIVE_TIMEOUT_MS 对齐 */
 const KEEPALIVE_TIMEOUT_MS = 20 * 60 * 1000
 
+/** 平台侧 Run 长时上限观测档（约 7～8min）；与 KEEPALIVE_TIMEOUT_MS(20min) 区分 */
+export const PLATFORM_RUN_LIMIT_MS = 7 * 60 * 1000
+
 /** finalizer 所需 session 字段（避免与 agent-sdk 循环 import） */
 export interface SdkSessionForFinalizer {
   sessionKey: string
@@ -45,21 +48,35 @@ function resolveRunDurationMs(session: SdkSessionForFinalizer, run?: Run | null)
 }
 
 /**
- * 判定是否为超时类失败（ERROR/EXPIRED、保活超时 F3.2、观测 Run 超时档）。
- * 工具失败/网络等通用 error 须返回 false。
+ * 判定是否为超时类失败（平台长时结束、保活超时 F3.2、观测 Run 20min 超时档）。
+ * 短 ERROR/工具失败须返回 false；用户主动 Stop（aborted）须返回 false。
  */
 export function isRunTimeoutFailure(
   session: SdkSessionForFinalizer,
   run: Run,
   lastStatus?: { status: string; message?: string },
 ): boolean {
+  // 用户主动 Stop 不判超时
+  if (session.abortController.signal.aborted) return false
+
   const st = (lastStatus ?? session.lastStatus)?.status?.toUpperCase()
-  if (st === "ERROR" || st === "EXPIRED") return true
+  const message = (lastStatus ?? session.lastStatus)?.message
+  const durationMs = resolveRunDurationMs(session, run)
+
+  // 平台长时结束：非 aborted + duration≥7min + CANCELLED/ERROR/EXPIRED 或 run.status=error
+  if (durationMs != null && durationMs >= PLATFORM_RUN_LIMIT_MS) {
+    if (
+      st === "CANCELLED" ||
+      st === "ERROR" ||
+      st === "EXPIRED" ||
+      run.status === "error"
+    ) {
+      return true
+    }
+  }
 
   if (run.status !== "error") return false
 
-  const message = (lastStatus ?? session.lastStatus)?.message
-  const durationMs = resolveRunDurationMs(session, run)
   const lt = session.lastTool
 
   // F3.2：末次 shell 仍 running + 长 duration + 不安全 message
@@ -71,7 +88,7 @@ export function isRunTimeoutFailure(
     isUnsafeSdkMessage(message)
   if (isKeepaliveTimeout) return true
 
-  // 任务执行超时档：与 ERROR/EXPIRED 等价，duration 达阈值且无用户可理解 message
+  // 任务执行超时档：duration 达 20min 阈值且无用户可理解 message
   if (
     durationMs != null &&
     durationMs >= KEEPALIVE_TIMEOUT_MS &&
@@ -84,7 +101,7 @@ export function isRunTimeoutFailure(
 }
 
 /**
- * 超时类终态主动收尾：cancel/abort → 清 run → notify → idle → 长驻删 session。
+ * 超时类终态主动收尾：先 notify 再 abort → 清 run → idle → 关闭 Agent 删 session。
  * 不写 failedCooldowns；幂等靠 runFinalizing + session.run 空检查。
  */
 export async function finalizeSdkRunOnTimeout(
@@ -106,17 +123,6 @@ export async function finalizeSdkRunOnTimeout(
 
   session.runFinalizing = true
 
-  try {
-    await run.cancel()
-  } catch {
-    // best-effort：流可能已结束
-  }
-  session.abortController.abort()
-
-  ctx.resetStreamPostChain(session)
-  session.run = null
-  session.pendingDispatch = false
-
   const durationMs = resolveRunDurationMs(session, run)
   const last = session.lastStatus
   const lt = session.lastTool
@@ -130,6 +136,7 @@ export async function finalizeSdkRunOnTimeout(
   ].filter(Boolean)
   pushUiLog("SDK", "WARN", `[${sessionKey}] finalizeSdkRunOnTimeout 超时收尾: ${parts.join(" ")}`)
 
+  // 先归档 + notify（abort 前，避免 aborted 闩跳过 IM）
   archiveAgentFailureLogs({
     sessionKey,
     failureType: "sdk_timeout",
@@ -137,16 +144,26 @@ export async function finalizeSdkRunOnTimeout(
     runStatus: run.status,
   })
   await ctx.notifySdkFailure(session, undefined, run)
+
+  try {
+    await run.cancel()
+  } catch {
+    // best-effort：流可能已结束
+  }
+  session.abortController.abort()
+
+  ctx.resetStreamPostChain(session)
+  session.run = null
+  session.pendingDispatch = false
+
   await reportSessionAgentPhase(sessionKey, "idle")
 
-  // 长驻模式超时：关闭 Agent 并删 session，下条消息走 launch 重建
-  if (session.residentMode) {
-    try {
-      session.agent.close()
-    } catch {
-      /* best-effort */
-    }
-    ctx.sdkSessions.delete(sessionKey)
-    ctx.broadcastSdkSessionStatus()
+  // 超时路径统一关闭 Agent 并删 session（长驻重建 + 非长驻 R1 清理）
+  try {
+    session.agent.close()
+  } catch {
+    /* best-effort */
   }
+  ctx.sdkSessions.delete(sessionKey)
+  ctx.broadcastSdkSessionStatus()
 }

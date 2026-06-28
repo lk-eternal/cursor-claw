@@ -668,9 +668,9 @@ async function streamRunEvents(session: SdkSessionAgent, run: Run): Promise<void
     if (session.f41Stream && (session.streamBuffer.trim() || session.outboundMessageId)) {
       await flushStreamPost(session, true)
     }
-    // 流结束兜底：无 status ERROR/EXPIRED 事件时，保活/Run 超时档仍走 finalizer
+    // 流结束兜底：无 status 事件时，平台长时 / 保活超时档仍走 finalizer
     if (
-      run.status === "error" &&
+      (run.status === "error" || run.status === "cancelled") &&
       isRunTimeoutFailure(session, run) &&
       !session.runFinalizing
     ) {
@@ -699,6 +699,16 @@ async function completeSdkRun(session: SdkSessionAgent, run: Run): Promise<void>
       "INFO",
       `[${sessionKey}] completeSdkRun 跳过（幂等 finalizing=${!!session.runFinalizing} runNull=${session.run === null}）`,
     )
+    return
+  }
+
+  // cancelled 未 notify 兜底：平台长时走 finalizer（场景 D）
+  if (
+    run.status === "cancelled" &&
+    !session.errorNotified &&
+    isRunTimeoutFailure(session, run)
+  ) {
+    await finalizeSdkRunOnTimeout(session, run, "complete")
     return
   }
 
@@ -808,12 +818,15 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
       const isErr = event.status === "ERROR" || event.status === "EXPIRED"
       if (isErr || event.status === "CANCELLED") {
         session.lastStatus = { status: event.status, message: event.message }
-        // ERROR/EXPIRED 即时 finalizer；用户主动 stop（aborted）不误触发
-        if (isErr && !session.abortController.signal.aborted && session.run) {
-          void finalizeSdkRunOnTimeout(session, session.run, "status")
-        }
-        if (event.status === "CANCELLED" && !session.abortController.signal.aborted) {
-          void notifySdkFailure(session, undefined, undefined, "sdk_cancelled")
+        // 平台长时 CANCELLED/ERROR/EXPIRED 经 isRunTimeoutFailure 走 finalizer；用户 Stop（aborted）静默
+        if (!session.abortController.signal.aborted && session.run) {
+          if (isRunTimeoutFailure(session, session.run, session.lastStatus)) {
+            void finalizeSdkRunOnTimeout(session, session.run, "status")
+          } else if (event.status === "CANCELLED") {
+            // 短取消极少路径
+            void notifySdkFailure(session, undefined, session.run, "sdk_cancelled")
+          }
+          // 短 ERROR/EXPIRED 留 completeSdkRun 通用失败 + cooldown
         }
       }
       const lvl = isErr ? "ERROR" as const : "INFO" as const
