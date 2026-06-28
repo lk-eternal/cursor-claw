@@ -18,7 +18,7 @@ export interface WatchRunGuardInput {
   timeoutMs: number
   tickMs: number
   onTimeout?: () => Promise<void> | void
-  onTick?: () => Promise<"completed" | "cancelled" | void> | "completed" | "cancelled" | void
+  onTick?: () => Promise<"completed" | "cancelled" | "timeout" | void> | "completed" | "cancelled" | "timeout" | void
 }
 
 const guardBySession = new Map<string, GuardState>()
@@ -66,6 +66,10 @@ export async function watchRunGuard(input: WatchRunGuardInput): Promise<"complet
     if (state.completed) return "completed"
     const phase = await input.onTick?.()
     if (phase === "completed" || phase === "cancelled") return phase
+    if (phase === "timeout") {
+      await input.onTimeout?.()
+      return "timeout"
+    }
     if (Date.now() - startedAt >= input.timeoutMs) {
       await input.onTimeout?.()
       return "timeout"

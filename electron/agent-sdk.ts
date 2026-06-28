@@ -111,6 +111,10 @@ interface SdkSessionAgent {
   runGuardToken?: string
   /** 最近一次调度重试次数（用于可观测） */
   lastDispatchAttempts?: number
+  /** watchdog 状态机：running -> draining -> cancelling */
+  watchdogState: "running" | "draining" | "cancelling"
+  /** watchdog 状态切换时间戳（ms） */
+  watchdogStateAt: number
 }
 
 const sdkSessions = new Map<string, SdkSessionAgent>()
@@ -121,8 +125,27 @@ const NOTIFY_PROCESSING = "Agent 处理中…"
 const NOTIFY_COMPRESSING = "正在压缩上下文…"
 const STREAM_POST_INTERVAL_MS = 400
 const SEND_RETRY_MAX_ATTEMPTS = 3
-const RUN_WATCHDOG_TIMEOUT_MS = Number(process.env.SDK_RUN_WATCHDOG_MS || PLATFORM_RUN_LIMIT_MS)
+const LEGACY_RUN_WATCHDOG_TIMEOUT_MS = Number(process.env.SDK_RUN_WATCHDOG_MS || PLATFORM_RUN_LIMIT_MS)
+const RUN_WATCHDOG_IDLE_TIMEOUT_MS = Number(
+  process.env.SDK_IDLE_TIMEOUT_MS
+  || process.env.sdk_idle_timeout_ms
+  || LEGACY_RUN_WATCHDOG_TIMEOUT_MS,
+)
+const RUN_WATCHDOG_DRAIN_GRACE_MS = Number(process.env.SDK_DRAIN_GRACE_MS || process.env.sdk_drain_grace_ms || 12_000)
+const NEVER_CANCEL_ON_DURATION = (() => {
+  const raw = (process.env.NEVER_CANCEL_ON_DURATION ?? process.env.never_cancel_on_duration ?? "true").trim().toLowerCase()
+  return raw !== "0" && raw !== "false"
+})()
 const RUN_WATCHDOG_TICK_MS = 800
+
+function resolveSafeTimeoutMs(raw: number, fallback: number): number {
+  if (Number.isFinite(raw) && raw > 0) return raw
+  return fallback
+}
+
+const WATCHDOG_IDLE_TIMEOUT_MS = resolveSafeTimeoutMs(RUN_WATCHDOG_IDLE_TIMEOUT_MS, LEGACY_RUN_WATCHDOG_TIMEOUT_MS)
+const WATCHDOG_DRAIN_GRACE_MS = resolveSafeTimeoutMs(RUN_WATCHDOG_DRAIN_GRACE_MS, 12_000)
+const WATCHDOG_ABSOLUTE_TIMEOUT_MS = resolveSafeTimeoutMs(LEGACY_RUN_WATCHDOG_TIMEOUT_MS, PLATFORM_RUN_LIMIT_MS)
 
 function sdkResidentModeEnabled(): boolean {
   const v = (process.env.SDK_RESIDENT_AGENT ?? "").trim().toLowerCase()
@@ -154,7 +177,31 @@ function resetSdkRunPresentationState(session: SdkSessionAgent): void {
   session.compressionNotified = false
   session.runFinalizing = false
   session.failureArchiveDone = false
+  session.watchdogState = "running"
+  session.watchdogStateAt = Date.now()
   session.abortController = new AbortController()
+}
+
+function setWatchdogState(
+  session: SdkSessionAgent,
+  next: "running" | "draining" | "cancelling",
+  reason: string,
+): void {
+  if (session.watchdogState === next) return
+  session.watchdogState = next
+  session.watchdogStateAt = Date.now()
+  pushUiLog("SDK", "INFO", `[${session.sessionKey}] watchdog 状态切换 -> ${next} (${reason})`)
+}
+
+/**
+ * 活跃信号统一入口：任何可观测事件都刷新 lastActivityAt。
+ * 若此前因空闲进入 draining/cancelling，则立即恢复 running，避免误取消。
+ */
+function markSessionActivity(session: SdkSessionAgent, source: string): void {
+  session.lastActivityAt = Date.now()
+  if (session.watchdogState !== "running") {
+    setWatchdogState(session, "running", `activity_resume:${source}`)
+  }
 }
 
 function extractErrorCode(value: unknown): string | undefined {
@@ -749,21 +796,57 @@ async function sendWithRetry(
 
 /** watchdog 统一超时入口：触发 run.cancel + run.wait 收敛，再进入超时 finalizer。 */
 function armRunWatchdog(session: SdkSessionAgent, run: Run, token: string): void {
+  session.watchdogState = "running"
+  session.watchdogStateAt = Date.now()
   void watchRunGuard({
     sessionKey: session.sessionKey,
     token,
-    timeoutMs: RUN_WATCHDOG_TIMEOUT_MS,
+    timeoutMs: NEVER_CANCEL_ON_DURATION ? Number.MAX_SAFE_INTEGER : WATCHDOG_ABSOLUTE_TIMEOUT_MS,
     tickMs: RUN_WATCHDOG_TICK_MS,
     onTick: () => {
       if (session.run !== run) return "completed"
       const st = run.status
       // 覆盖 finished 终态，避免主流程已结束但 watchdog 仍持续等待。
       if (st === "finished" || st === "cancelled" || st === "error") return "completed"
+      const now = Date.now()
+      const idleMs = now - session.lastActivityAt
+      if (idleMs >= WATCHDOG_IDLE_TIMEOUT_MS && session.watchdogState === "running") {
+        // 先进入 draining，给短暂恢复窗口，避免瞬时静默导致误杀。
+        setWatchdogState(session, "draining", `idle:${idleMs}ms`)
+      }
+      if (session.watchdogState === "draining") {
+        const drainingMs = now - session.watchdogStateAt
+        if (drainingMs >= WATCHDOG_DRAIN_GRACE_MS) {
+          setWatchdogState(session, "cancelling", `grace_elapsed:${drainingMs}ms`)
+          return "timeout"
+        }
+      }
+      // 向后兼容：显式关闭 never_cancel_on_duration 时，仍按绝对运行时长触发。
+      if (
+        !NEVER_CANCEL_ON_DURATION &&
+        session.runStartedAt != null &&
+        now - session.runStartedAt >= WATCHDOG_ABSOLUTE_TIMEOUT_MS
+      ) {
+        setWatchdogState(session, "cancelling", "duration_limit")
+        return "timeout"
+      }
       return undefined
     },
     onTimeout: async () => {
       const heldMs = getRunGuardHeldMs(session.sessionKey)
-      pushUiLog("SDK", "WARN", `[${session.sessionKey}] watchdog 超时，开始收尾 heldMs=${heldMs ?? -1}`)
+      if (session.run !== run || session.runFinalizing) return
+      const idleMs = Date.now() - session.lastActivityAt
+      // 超时触发与执行取消之间存在竞态；若已恢复活跃则回退到 running 并跳过收尾。
+      if (idleMs < WATCHDOG_IDLE_TIMEOUT_MS) {
+        setWatchdogState(session, "running", `skip_timeout_idle_recovered:${idleMs}ms`)
+        return
+      }
+      setWatchdogState(session, "cancelling", `timeout_cb_idle:${idleMs}ms`)
+      pushUiLog(
+        "SDK",
+        "WARN",
+        `[${session.sessionKey}] watchdog 超时，开始收尾 heldMs=${heldMs ?? -1} idleMs=${idleMs} state=${session.watchdogState}`,
+      )
       await cancelRunAndWait(run)
       if (!session.runFinalizing && session.run === run) {
         await finalizeSdkRunOnTimeout(session, run, "watchdog")
@@ -819,7 +902,7 @@ async function streamRunEvents(session: SdkSessionAgent, run: Run): Promise<void
   try {
     for await (const event of run.stream()) {
       if (session.abortController.signal.aborted) break
-      session.lastActivityAt = Date.now()
+      markSessionActivity(session, `stream:${event.type}`)
       handleSdkEvent(session, event)
     }
     flushSdkLog(session)
@@ -944,7 +1027,7 @@ async function startSdkRun(session: SdkSessionAgent, run: Run): Promise<void> {
   session.failureArchiveDone = false
   session.run = run
   session.runStartedAt = Date.now()
-  session.lastActivityAt = Date.now()
+  markSessionActivity(session, "run_start")
   if (session.runGuardToken) {
     armRunWatchdog(session, run, session.runGuardToken)
   }
@@ -1076,7 +1159,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
   const existing = sdkSessions.get(sessionKey)
   if (existing && !existing.abortController.signal.aborted) {
     if (isSdkSessionProcessing(existing)) {
-      existing.lastActivityAt = Date.now()
+      markSessionActivity(existing, "launch_reentry")
       pushUiLog(
         "SDK",
         "WARN",
@@ -1161,6 +1244,8 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       modelParams: opts.modelParams,
       apiKey,
       inboundMessageIds: meta?.messageIds,
+      watchdogState: "running",
+      watchdogStateAt: Date.now(),
     }
 
     sdkSessions.set(sessionKey, session)
