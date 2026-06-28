@@ -44,6 +44,18 @@ function resolveOAuthAccessToken(serverName: string, authStore: Record<string, M
   return undefined
 }
 
+/**
+ * 将路径型 segment 解析为绝对路径；bare 命令名（npx/node）与已是绝对路径则原样返回。
+ * 无 shell 的 spawn 无法解析 ./scripts/...、node_modules/.bin/... 等相对路径。
+ */
+function resolvePathLikeSegment(workspaceDir: string, segment: string): string {
+  if (path.isAbsolute(segment)) return segment
+  if (!segment.includes("/") && !segment.includes("\\") && !segment.startsWith("./") && !segment.startsWith("../")) {
+    return segment
+  }
+  return path.resolve(workspaceDir, segment)
+}
+
 /** command/stdio 型 → SDK stdio 配置 */
 function toStdioInlineConfig(raw: RawMcpEntry, workspaceDir: string): McpServerConfig | null {
   if (raw.disabled === true) return null
@@ -51,14 +63,19 @@ function toStdioInlineConfig(raw: RawMcpEntry, workspaceDir: string): McpServerC
   const command = raw.command as string | undefined
   if (!command) return null
 
+  const ws = workspaceDir.trim()
   const cfg: McpServerConfig = {
     type: "stdio",
-    command,
+    command: ws ? resolvePathLikeSegment(ws, command) : command,
     args: raw.args as string[] | undefined,
     env: raw.env as Record<string, string> | undefined,
   }
-  const ws = workspaceDir.trim()
-  if (ws) cfg.cwd = ws
+  if (ws) {
+    cfg.cwd = ws
+    if (cfg.args) {
+      cfg.args = cfg.args.map((arg) => (arg.startsWith("--") ? arg : resolvePathLikeSegment(ws, arg)))
+    }
+  }
   return cfg
 }
 

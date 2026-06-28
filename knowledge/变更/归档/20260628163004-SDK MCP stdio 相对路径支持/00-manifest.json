@@ -1,0 +1,92 @@
+{
+  "name": "SDK MCP stdio 相对路径支持",
+  "flow": "standard",
+  "stage": "archived",
+  "source": "kb-propose",
+  "workflow_version": "v2.6",
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "实现 mcp-sdk-loader stdio 相对路径 resolve",
+      "status": "done",
+      "files": [
+        "electron/mcp-sdk-loader.ts"
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "T2",
+      "title": "更新 electron/AGENTS.md「SDK MCP 内联」段",
+      "status": "done",
+      "files": [
+        "electron/AGENTS.md"
+      ],
+      "depends_on": [
+        "T1"
+      ]
+    }
+  ],
+  "reviews": [],
+  "revisions": [],
+  "files": [
+    {
+      "path": "knowledge/变更/归档/20260628163004-SDK MCP stdio 相对路径支持/00-manifest.json",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628163004-SDK MCP stdio 相对路径支持/01-proposal.md",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628163004-SDK MCP stdio 相对路径支持/02-design.md",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628163004-SDK MCP stdio 相对路径支持/03-tasks.md",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628163004-SDK MCP stdio 相对路径支持/04-review.md",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628163004-SDK MCP stdio 相对路径支持/05-summary.md",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628163004-SDK MCP stdio 相对路径支持/06-automation-test.md",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "electron/mcp-sdk-loader.ts",
+      "kind": "code",
+      "status": "changed",
+      "source": "apply"
+    },
+    {
+      "path": "electron/AGENTS.md",
+      "kind": "code/config",
+      "status": "changed",
+      "source": "apply"
+    },
+    {
+      "path": "package.json",
+      "kind": "config",
+      "status": "changed"
+    },
+    {
+      "path": "changelog/1.8.4.json",
+      "kind": "config",
+      "status": "changed"
+    }
+  ],
+  "archived_at": "2026-06-28T16:46:13+08:00",
+  "updated_at": "2026-06-28T16:46:13+08:00"
+}

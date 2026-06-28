@@ -1,0 +1,7 @@
+{
+  "version": "1.8.4",
+  "date": "2026-06-28",
+  "changes": [
+    "SDK Agent 会话 stdio MCP 支持 mcp.json 相对路径（./scripts、node_modules/.bin 等），与 IDE/CLI 行为对齐"
+  ]
+}
