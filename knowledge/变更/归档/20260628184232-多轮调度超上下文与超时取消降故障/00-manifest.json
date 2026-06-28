@@ -1,0 +1,252 @@
+{
+  "name": "多轮调度超上下文与超时取消降故障",
+  "flow": "standard",
+  "stage": "archived",
+  "source": "kb-propose",
+  "workflow_version": "v2.6",
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "落地 RunGuard 与 watchdog 核心模块",
+      "status": "done",
+      "files": [
+        "electron/agent-run-guard.ts",
+        "electron/finalize-sdk-run.ts"
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "T2",
+      "title": "在调度主链路接入 RetryPolicy 与 busy 重排",
+      "status": "done",
+      "files": [
+        "electron/agent-sdk.ts",
+        "electron/retry-policy.ts",
+        "src/daemon.ts",
+        "electron/sdk-failure-messages.ts"
+      ],
+      "depends_on": [
+        "T1"
+      ]
+    },
+    {
+      "id": "T3",
+      "title": "接入 ContextRotation-lite 控制上下文膨胀",
+      "status": "done",
+      "files": [
+        "electron/context-rotation-lite.ts",
+        "electron/agent-sdk.ts"
+      ],
+      "depends_on": [
+        "T2"
+      ]
+    },
+    {
+      "id": "T4",
+      "title": "完成故障样本回归与构建验证",
+      "status": "done",
+      "files": [
+        "crash_log/20260628181128/meta.json",
+        "crash_log/20260628181128/electron-log.txt",
+        "package.json"
+      ],
+      "depends_on": [
+        "T3"
+      ]
+    },
+    {
+      "id": "T5",
+      "title": "完成文档与版本/changelog 收尾",
+      "status": "done",
+      "files": [
+        "package.json",
+        "changelog/<新版本>.json",
+        "knowledge/变更/归档/20260628184232-多轮调度超上下文与超时取消降故障/00-manifest.json",
+        "knowledge/变更/归档/20260628184232-多轮调度超上下文与超时取消降故障/05-summary.md"
+      ],
+      "depends_on": [
+        "T4"
+      ]
+    },
+    {
+      "id": "T-FIX-01",
+      "title": "修复 ContextRotation 失败回滚路径（R1）",
+      "status": "done",
+      "files": [
+        "electron/agent-sdk.ts"
+      ],
+      "depends_on": [
+        "T3"
+      ]
+    },
+    {
+      "id": "T-FIX-02",
+      "title": "统一 orchestrator busy 延后重排策略（R2）",
+      "status": "done",
+      "files": [
+        "src/daemon.ts"
+      ],
+      "depends_on": [
+        "T-FIX-01"
+      ]
+    }
+  ],
+  "reviews": [
+    {
+      "id": "full-review",
+      "type": "full-review",
+      "date": "2026-06-28",
+      "scope": "T1-T3（代码实现）",
+      "verdict": "failed",
+      "blocking_issues": 2,
+      "warnings": 1,
+      "file": "knowledge/变更/归档/20260628184232-多轮调度超上下文与超时取消降故障/04-review.md",
+      "summary": "RunGuard/Retry/Rotation 主体已接入，但 rotation 失败恢复与 busy 重排覆盖面存在阻断风险"
+    },
+    {
+      "id": "R1",
+      "severity": "critical",
+      "status": "fixed",
+      "score": 92,
+      "file": "electron/agent-sdk.ts",
+      "summary": "ContextRotation 先关闭旧 agent 再重建，重建失败时 dispatch 路径未销毁/重建 session，可能导致后续连续 dispatch 失败",
+      "task_id": "T-FIX-01",
+      "fixed_files": [
+        "electron/agent-sdk.ts"
+      ]
+    },
+    {
+      "id": "R2",
+      "severity": "warning",
+      "status": "fixed",
+      "score": 78,
+      "file": "src/daemon.ts",
+      "summary": "agent_busy 延后重排仅覆盖 /api/agent/dispatch，主 orchestrator launch 路径仍可能立即失败并 ack",
+      "task_id": "T-FIX-02",
+      "fixed_files": [
+        "src/daemon.ts"
+      ]
+    },
+    {
+      "id": "re-review-R1R2",
+      "type": "targeted-review",
+      "date": "2026-06-28",
+      "scope": "T-FIX-01/T-FIX-02（R1/R2 闭环复评）",
+      "verdict": "passed",
+      "blocking_issues": 0,
+      "warnings": 2,
+      "file": "knowledge/变更/归档/20260628184232-多轮调度超上下文与超时取消降故障/04-review.md",
+      "summary": "R1/R2 已闭环：rotation 失败不再损坏 session，orchestrator launch 与 dispatch 的 busy 延后重排策略已一致；仅剩非阻断风险。"
+    }
+  ],
+  "revisions": [],
+  "files": [
+    {
+      "path": "knowledge/变更/归档/20260628184232-多轮调度超上下文与超时取消降故障/00-manifest.json",
+      "kind": "change_doc",
+      "source": "apply",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628184232-多轮调度超上下文与超时取消降故障/01-proposal.md",
+      "kind": "change_doc",
+      "source": "apply",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628184232-多轮调度超上下文与超时取消降故障/02-design.md",
+      "kind": "change_doc",
+      "source": "apply",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628184232-多轮调度超上下文与超时取消降故障/03-tasks.md",
+      "kind": "change_doc",
+      "source": "apply",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628184232-多轮调度超上下文与超时取消降故障/04-review.md",
+      "kind": "change_doc",
+      "source": "review",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628184232-多轮调度超上下文与超时取消降故障/05-summary.md",
+      "kind": "change_doc",
+      "source": "archive",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628184232-多轮调度超上下文与超时取消降故障/06-automation-test.md",
+      "kind": "change_doc",
+      "source": "test",
+      "status": "changed"
+    },
+    {
+      "path": "electron/agent-sdk.ts",
+      "kind": "code",
+      "source": "apply",
+      "status": "changed"
+    },
+    {
+      "path": "electron/agent-run-guard.ts",
+      "kind": "code",
+      "source": "apply",
+      "status": "changed"
+    },
+    {
+      "path": "electron/context-rotation-lite.ts",
+      "kind": "code",
+      "source": "apply",
+      "status": "changed"
+    },
+    {
+      "path": "electron/retry-policy.ts",
+      "kind": "code",
+      "source": "apply",
+      "status": "changed"
+    },
+    {
+      "path": "electron/finalize-sdk-run.ts",
+      "kind": "code",
+      "source": "apply",
+      "status": "changed"
+    },
+    {
+      "path": "electron/sdk-failure-messages.ts",
+      "kind": "code",
+      "source": "apply",
+      "status": "changed"
+    },
+    {
+      "path": "src/daemon.ts",
+      "kind": "code",
+      "source": "apply",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/业务域/Agent调度/03-启动与自动重连.md",
+      "kind": "knowledge",
+      "source": "archive",
+      "status": "changed"
+    },
+    {
+      "path": "package.json",
+      "kind": "config",
+      "source": "archive",
+      "status": "changed"
+    },
+    {
+      "path": "changelog/1.8.9.json",
+      "kind": "changelog",
+      "source": "archive",
+      "status": "changed"
+    }
+  ],
+  "notes": [
+    "ContextRotation-lite 当前采用保守阈值：usageRatio>=0.9、连续2次命中、冷却3分钟；后续需结合线上指标调参。"
+  ],
+  "archived_at": "2026-06-28T19:10:00+0800",
+  "updated_at": "2026-06-28T19:10:00+0800"
+}

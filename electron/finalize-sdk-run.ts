@@ -35,6 +35,9 @@ export interface FinalizerContext {
   broadcastSdkSessionStatus: () => void
 }
 
+/** 取消后等待终态收敛的上限，避免 run.wait 长时间挂起。 */
+const FINALIZE_WAIT_TIMEOUT_MS = 12_000
+
 function isUnsafeSdkMessage(msg?: string): boolean {
   const t = msg?.trim()
   return !t || /[/\\]|\.ts:|at |stack|Error:|ENOENT|spawn|EACCES|EPERM/i.test(t)
@@ -145,11 +148,8 @@ export async function finalizeSdkRunOnTimeout(
   })
   await ctx.notifySdkFailure(session, undefined, run)
 
-  try {
-    await run.cancel()
-  } catch {
-    // best-effort：流可能已结束
-  }
+  const waitOutcome = await cancelRunAndWait(run)
+  pushUiLog("SDK", "INFO", `[${sessionKey}] finalizeSdkRunOnTimeout wait 结果: ${waitOutcome}`)
   session.abortController.abort()
 
   ctx.resetStreamPostChain(session)
@@ -166,4 +166,26 @@ export async function finalizeSdkRunOnTimeout(
   }
   ctx.sdkSessions.delete(sessionKey)
   ctx.broadcastSdkSessionStatus()
+}
+
+/**
+ * 统一 cancel + wait 收敛逻辑：
+ * - 先 best-effort cancel
+ * - 再等待 run.wait 终态，超时即返回 timeout，避免重复 finalize 阻塞
+ */
+export async function cancelRunAndWait(run: Run, timeoutMs = FINALIZE_WAIT_TIMEOUT_MS): Promise<"completed" | "timeout" | "error"> {
+  try {
+    await run.cancel()
+  } catch {
+    // 流已结束或取消失败均不阻断 wait
+  }
+  try {
+    await Promise.race([
+      run.wait(),
+      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), timeoutMs)),
+    ])
+    return "completed"
+  } catch {
+    return "error"
+  }
 }

@@ -1123,6 +1123,7 @@ async function flushReadyMergeBatches(sessionKey: string): Promise<void> {
 
 let dispatchLoopBusy = false;
 let dispatchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+const busyRetryTimerBySession = new Map<string, ReturnType<typeof setTimeout>>();
 
 function scheduleAgentDispatch(_sessionKey?: string): void {
   if (dispatchDebounceTimer) clearTimeout(dispatchDebounceTimer);
@@ -1149,6 +1150,29 @@ async function forwardElectronAgentApi(subpath: string, body: object): Promise<{
   } catch (e: unknown) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+}
+
+function parseBusyRetryDelayMs(error?: string): number {
+  const raw = error?.trim() ?? "";
+  if (!/agent busy/i.test(raw)) return 0;
+  const m = raw.match(/retry_after=(\d+)/i);
+  const parsed = m ? Number(m[1]) : NaN;
+  if (!Number.isFinite(parsed) || parsed <= 0) return 1500;
+  return Math.min(10_000, parsed);
+}
+
+/**
+ * agent_busy 延后重排：仅设置下一次调度，不在当前请求内硬重试。
+ */
+function scheduleBusyRetry(sessionKey: string, delayMs: number): void {
+  const existing = busyRetryTimerBySession.get(sessionKey);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(() => {
+    busyRetryTimerBySession.delete(sessionKey);
+    scheduleAgentDispatch(sessionKey);
+  }, Math.max(500, delayMs));
+  busyRetryTimerBySession.set(sessionKey, timer);
+  log("INFO", `agent_busy_requeue session=${sessionKey} delay_ms=${Math.max(500, delayMs)}`);
 }
 
 function extractSessionChatId(sessionKey: string): string {
@@ -1237,6 +1261,13 @@ async function dispatchSessionToAgent(sessionKey: string, chatType: string, send
   }
 
   log("WARN", `dispatch_failed: session=${sessionKey} error=${result.error ?? "unknown"}`);
+  const busyDelay = parseBusyRetryDelayMs(result.error);
+  if (busyDelay > 0) {
+    // 与 /api/agent/dispatch 分支保持一致：busy 时延后重排，不提前 ack 当前批次。
+    sessionAgentPhaseMap.delete(sessionKey);
+    scheduleBusyRetry(sessionKey, busyDelay);
+    return;
+  }
   sessionAgentPhaseMap.delete(sessionKey);
   await notifySessionUser(sessionKey, formatOrchestratorFailure(result.error), true);
   const lastId = claimed.message_ids[claimed.message_ids.length - 1];
@@ -3215,6 +3246,8 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       });
       if (!result.ok) {
         log("WARN", `dispatch_failed: session=${session_key} error=${result.error ?? "unknown"}`);
+        const busyDelay = parseBusyRetryDelayMs(result.error);
+        if (busyDelay > 0) scheduleBusyRetry(session_key, busyDelay);
       }
       json(res, result, result.ok ? 200 : 400);
     } catch (e: unknown) {

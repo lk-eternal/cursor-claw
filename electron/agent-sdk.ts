@@ -30,7 +30,12 @@ import { finalizeContextUsageAtRunEnd } from "./context-usage-run-end"
 import { type ChatType, type LaunchMeta, buildPrompt, resolveSessionChatName } from "./agent-launcher"
 import { appendInlineMcpToSendOptions, loadInlineMcpServers } from "./mcp-sdk-loader"
 import { formatUserSdkFailureMessage } from "./sdk-failure-messages"
+import { acquireRunGuard, completeRunGuard, getRunGuardHeldMs, releaseRunGuard, watchRunGuard } from "./agent-run-guard"
+import { buildIdempotencyKey, shouldRetry } from "./retry-policy"
+import { maybeRotateContext } from "./context-rotation-lite"
 import {
+  PLATFORM_RUN_LIMIT_MS,
+  cancelRunAndWait,
   finalizeSdkRunOnTimeout as finalizeSdkRunOnTimeoutImpl,
   isRunTimeoutFailure as isRunTimeoutFailureImpl,
   type FinalizerContext,
@@ -90,6 +95,8 @@ interface SdkSessionAgent {
   contextLimitTokens?: number
   /** 当前模型 id，供 resolveModelContextLimit */
   modelId?: string
+  /** 当前模型参数，供 context rotation 重建 agent */
+  modelParams?: string
   /** 通道 SDK API Key，供 models.list */
   apiKey?: string
   /** 本 Run 是否已下发压缩进度通知（防重复） */
@@ -100,6 +107,10 @@ interface SdkSessionAgent {
   runFinalizing?: boolean
   /** 本 Run 单次失败是否已归档崩溃日志 */
   failureArchiveDone?: boolean
+  /** RunGuard 单飞 token（同 session 仅允许一个活跃 run） */
+  runGuardToken?: string
+  /** 最近一次调度重试次数（用于可观测） */
+  lastDispatchAttempts?: number
 }
 
 const sdkSessions = new Map<string, SdkSessionAgent>()
@@ -109,6 +120,9 @@ const FAIL_COOLDOWN_MS = 30_000
 const NOTIFY_PROCESSING = "Agent 处理中…"
 const NOTIFY_COMPRESSING = "正在压缩上下文…"
 const STREAM_POST_INTERVAL_MS = 400
+const SEND_RETRY_MAX_ATTEMPTS = 3
+const RUN_WATCHDOG_TIMEOUT_MS = Number(process.env.SDK_RUN_WATCHDOG_MS || PLATFORM_RUN_LIMIT_MS)
+const RUN_WATCHDOG_TICK_MS = 800
 
 function sdkResidentModeEnabled(): boolean {
   const v = (process.env.SDK_RESIDENT_AGENT ?? "").trim().toLowerCase()
@@ -588,8 +602,9 @@ function ensureSdkBinaryPaths(): void {
 /** T2 挂接用：绑定 sdkSessions 等依赖的超时 finalizer */
 const finalizerCtx: FinalizerContext = {
   sdkSessions,
-  resetStreamPostChain,
-  notifySdkFailure,
+  resetStreamPostChain: (session) => resetStreamPostChain(session as SdkSessionAgent),
+  notifySdkFailure: (session, override, run) =>
+    notifySdkFailure(session as SdkSessionAgent, override, run),
   broadcastSdkSessionStatus,
 }
 
@@ -608,7 +623,153 @@ export async function finalizeSdkRunOnTimeout(
   run: Run,
   trigger: string,
 ): Promise<void> {
-  return finalizeSdkRunOnTimeoutImpl(finalizerCtx, session, run, trigger)
+  await finalizeSdkRunOnTimeoutImpl(finalizerCtx, session, run, trigger)
+  if (session.runGuardToken) {
+    completeRunGuard(session.sessionKey, session.runGuardToken)
+    releaseRunGuard(session.sessionKey, session.runGuardToken)
+    session.runGuardToken = undefined
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function resolveLastInboundId(session: SdkSessionAgent): string {
+  const ids = session.inboundMessageIds
+  if (!ids || ids.length === 0) return "no-inbound"
+  return ids[ids.length - 1] || "no-inbound"
+}
+
+/** 组装 send 选项并注入幂等键，避免重试/轮转时重复执行。 */
+function buildSendOptions(session: SdkSessionAgent, idempotencyKey: string): Parameters<SDKAgent["send"]>[1] {
+  const options = appendInlineMcpToSendOptions(
+    createAgentSendOptions(session, pushUiLog, makeCompressionNotify(session)),
+    session.workspaceDir,
+  ) as Record<string, unknown>
+  options.idempotencyKey = idempotencyKey
+  return options as Parameters<SDKAgent["send"]>[1]
+}
+
+/** ContextRotation-lite：命中阈值后先建新实例再切换，失败时保持旧会话可继续发送。 */
+async function maybeRotateSessionForPressure(
+  session: SdkSessionAgent,
+  originalText: string,
+): Promise<{ text: string; rotated: boolean }> {
+  const pressure = evaluatePreSendContextPressure(session, pushUiLog)
+  const ratio = pressure.ratio ?? 0
+  const decision = maybeRotateContext({ sessionKey: session.sessionKey, usageRatio: ratio, nowMs: Date.now() })
+  if (!decision.rotated) return { text: originalText, rotated: false }
+  const modelSelection: { id: string; params?: { id: string; value: string }[] } = { id: session.modelId ?? "composer-2" }
+  if (session.modelParams?.trim()) {
+    try {
+      modelSelection.params = JSON.parse(session.modelParams)
+    } catch {
+      // 忽略非法模型参数，保持现网容错语义
+    }
+  }
+  const previousAgent = session.agent
+  const previousAgentId = session.agentId
+  let nextAgent: SDKAgent
+  try {
+    nextAgent = await Agent.create({
+      apiKey: session.apiKey ?? "",
+      model: modelSelection,
+      mcpServers: loadInlineMcpServers(session.workspaceDir ?? process.cwd()),
+      local: {
+        cwd: session.workspaceDir ?? process.cwd(),
+        settingSources: ["project", "user"],
+        sandboxOptions: { enabled: false },
+      },
+    })
+  } catch (err: unknown) {
+    // 轮转失败不破坏当前会话：继续使用旧 agent，避免“假存活/真不可用”。
+    pushUiLog(
+      "SDK",
+      "WARN",
+      `[${session.sessionKey}] context_rotation skipped: ${err instanceof Error ? err.message : String(err)}`,
+    )
+    session.agent = previousAgent
+    session.agentId = previousAgentId
+    return { text: originalText, rotated: false }
+  }
+  session.agent = nextAgent
+  session.agentId = nextAgent.agentId
+  try {
+    previousAgent.close()
+  } catch {
+    // best-effort：旧实例关闭失败不影响已切换的新实例
+  }
+  session.contextUsage = { ...ZERO_CONTEXT_USAGE }
+  session.contextUsagePeakTokens = undefined
+  const summary = decision.summary ?? "已执行上下文轮转。"
+  return { text: `${summary}\n\n${originalText}`, rotated: true }
+}
+
+/** 发送入口：retryable 退避；busy 不硬重试（交给上层延后重排）。 */
+async function sendWithRetry(
+  session: SdkSessionAgent,
+  inputText: string,
+): Promise<{ run?: Run; attempts: number; finalReason?: string; busyDelayMs?: number; rotated: boolean }> {
+  let text = inputText
+  let rotated = false
+  let lastReason = "unknown"
+  for (let attempt = 1; attempt <= SEND_RETRY_MAX_ATTEMPTS; attempt += 1) {
+    if (attempt === 1) {
+      const rotatedResult = await maybeRotateSessionForPressure(session, text)
+      text = rotatedResult.text
+      rotated = rotatedResult.rotated
+    }
+    const idempotencyKey = buildIdempotencyKey(session.sessionKey, resolveLastInboundId(session), attempt)
+    try {
+      const run = await session.agent.send(text, buildSendOptions(session, idempotencyKey))
+      session.lastDispatchAttempts = attempt
+      pushUiLog("SDK", "INFO", `[${session.sessionKey}] dispatch_retry status=ok attempts=${attempt} idempotency=${idempotencyKey}`)
+      return { run, attempts: attempt, rotated }
+    } catch (err: unknown) {
+      const decision = shouldRetry(err, attempt)
+      lastReason = decision.reason
+      pushUiLog(
+        "SDK",
+        "WARN",
+        `[${session.sessionKey}] dispatch_retry status=failed attempts=${attempt} reason=${decision.reason} delayMs=${decision.delayMs}`,
+      )
+      if (decision.isBusy) {
+        return { attempts: attempt, finalReason: decision.reason, busyDelayMs: decision.delayMs, rotated }
+      }
+      if (!decision.retryable || attempt >= SEND_RETRY_MAX_ATTEMPTS) {
+        break
+      }
+      await sleep(decision.delayMs)
+    }
+  }
+  return { attempts: SEND_RETRY_MAX_ATTEMPTS, finalReason: lastReason, rotated }
+}
+
+/** watchdog 统一超时入口：触发 run.cancel + run.wait 收敛，再进入超时 finalizer。 */
+function armRunWatchdog(session: SdkSessionAgent, run: Run, token: string): void {
+  void watchRunGuard({
+    sessionKey: session.sessionKey,
+    token,
+    timeoutMs: RUN_WATCHDOG_TIMEOUT_MS,
+    tickMs: RUN_WATCHDOG_TICK_MS,
+    onTick: () => {
+      if (session.run !== run) return "completed"
+      const st = run.status
+      if (st === "cancelled" || st === "error") return "completed"
+      return undefined
+    },
+    onTimeout: async () => {
+      const heldMs = getRunGuardHeldMs(session.sessionKey)
+      pushUiLog("SDK", "WARN", `[${session.sessionKey}] watchdog 超时，开始收尾 heldMs=${heldMs ?? -1}`)
+      await cancelRunAndWait(run)
+      if (!session.runFinalizing && session.run === run) {
+        await finalizeSdkRunOnTimeout(session, run, "watchdog")
+      }
+    },
+  }).then((result) => {
+    pushUiLog("SDK", "INFO", `[${session.sessionKey}] watchdog 结束: ${result}`)
+  })
 }
 
 function broadcastSdkSessionStatus(): void {
@@ -747,6 +908,11 @@ async function completeSdkRun(session: SdkSessionAgent, run: Run): Promise<void>
   pushUiLog("SDK", level, `[${sessionKey}] Agent 运行结束 (status=${run.status}${summary ? `, ${summary}` : ""})`)
 
   resetStreamPostChain(session)
+  if (session.runGuardToken) {
+    completeRunGuard(sessionKey, session.runGuardToken)
+    releaseRunGuard(sessionKey, session.runGuardToken)
+    session.runGuardToken = undefined
+  }
   session.run = null
   session.pendingDispatch = false
   await reportSessionAgentPhase(sessionKey, "idle")
@@ -767,6 +933,9 @@ async function startSdkRun(session: SdkSessionAgent, run: Run): Promise<void> {
   session.run = run
   session.runStartedAt = Date.now()
   session.lastActivityAt = Date.now()
+  if (session.runGuardToken) {
+    armRunWatchdog(session, run, session.runGuardToken)
+  }
   await notifySessionChat(session.sessionKey, NOTIFY_PROCESSING)
   await reportSessionAgentPhase(session.sessionKey, "processing")
   streamRunEvents(session, run).then(() => completeSdkRun(session, run))
@@ -977,6 +1146,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       thinkingOpen: false,
       contextUsage: { ...ZERO_CONTEXT_USAGE },
       modelId,
+      modelParams: opts.modelParams,
       apiKey,
       inboundMessageIds: meta?.messageIds,
     }
@@ -988,10 +1158,28 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
 
     await resolveContextLimitForSession(session)
     evaluatePreSendContextPressure(session, pushUiLog)
-    const run = await agent.send(
-      prompt,
-      appendInlineMcpToSendOptions(createAgentSendOptions(session, pushUiLog, makeCompressionNotify(session)), workspaceDir),
-    )
+    const guard = acquireRunGuard(sessionKey)
+    if (!guard.acquired) {
+      pendingLaunches.delete(sessionKey)
+      try { session.agent.close() } catch { /* best-effort */ }
+      sdkSessions.delete(sessionKey)
+      return { ok: false, error: "agent busy" }
+    }
+    session.runGuardToken = guard.token
+    const sendResult = await sendWithRetry(session, prompt)
+    if (!sendResult.run) {
+      completeRunGuard(sessionKey, guard.token)
+      releaseRunGuard(sessionKey, guard.token)
+      session.runGuardToken = undefined
+      try { session.agent.close() } catch { /* best-effort */ }
+      sdkSessions.delete(sessionKey)
+      broadcastSdkSessionStatus()
+      if (sendResult.finalReason === "agent_busy") {
+        return { ok: false, error: `agent busy|retry_after=${sendResult.busyDelayMs ?? 1500}` }
+      }
+      return { ok: false, error: `dispatch failed: ${sendResult.finalReason ?? "unknown"}` }
+    }
+    const run = sendResult.run
     await startSdkRun(session, run)
 
     return { ok: true }
@@ -1001,6 +1189,11 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     failedCooldowns.set(sessionKey, Date.now() + FAIL_COOLDOWN_MS)
     pendingLaunches.delete(sessionKey)
     const failed = sdkSessions.get(sessionKey)
+    if (failed?.runGuardToken) {
+      completeRunGuard(sessionKey, failed.runGuardToken)
+      releaseRunGuard(sessionKey, failed.runGuardToken)
+      failed.runGuardToken = undefined
+    }
     if (failed) try { failed.agent.close() } catch { /* best-effort */ }
     sdkSessions.delete(sessionKey)
     broadcastSdkSessionStatus()
@@ -1030,20 +1223,39 @@ export async function dispatchToSdkAgent(
   // 覆盖当次 batch ids；resetSdkRunPresentationState 不清除 inboundMessageIds
   session.inboundMessageIds = messageIds?.length ? messageIds : undefined
 
+  const guard = acquireRunGuard(sessionKey)
+  if (!guard.acquired) {
+    return { ok: false, error: "agent busy|retry_after=1500" }
+  }
+  session.runGuardToken = guard.token
   session.pendingDispatch = true
   try {
     resetSdkRunPresentationState(session)
     await resolveContextLimitForSession(session)
     evaluatePreSendContextPressure(session, pushUiLog)
-    const run = await session.agent.send(
-      text,
-      appendInlineMcpToSendOptions(createAgentSendOptions(session, pushUiLog, makeCompressionNotify(session)), session.workspaceDir),
-    )
+    const sendResult = await sendWithRetry(session, text)
+    if (!sendResult.run) {
+      completeRunGuard(sessionKey, guard.token)
+      releaseRunGuard(sessionKey, guard.token)
+      session.runGuardToken = undefined
+      if (sendResult.finalReason === "agent_busy") {
+        session.pendingDispatch = false
+        return { ok: false, error: `agent busy|retry_after=${sendResult.busyDelayMs ?? 1500}` }
+      }
+      session.pendingDispatch = false
+      return { ok: false, error: `dispatch failed: ${sendResult.finalReason ?? "unknown"}` }
+    }
+    const run = sendResult.run
     session.pendingDispatch = false
     await startSdkRun(session, run)
     return { ok: true }
   } catch (e: unknown) {
     session.pendingDispatch = false
+    if (session.runGuardToken) {
+      completeRunGuard(sessionKey, session.runGuardToken)
+      releaseRunGuard(sessionKey, session.runGuardToken)
+      session.runGuardToken = undefined
+    }
     const msg = e instanceof Error ? e.message : String(e)
     await notifyDispatchFailure(sessionKey, msg)
     return { ok: false, error: msg }
@@ -1212,7 +1424,12 @@ export function stopSdkSession(sessionKey: string): void {
   s.abortController.abort()
   resetStreamPostChain(s)
   if (s.run) {
-    s.run.cancel().catch(() => {})
+    void cancelRunAndWait(s.run)
+  }
+  if (s.runGuardToken) {
+    completeRunGuard(sessionKey, s.runGuardToken)
+    releaseRunGuard(sessionKey, s.runGuardToken)
+    s.runGuardToken = undefined
   }
   s.agent.close()
   sdkSessions.delete(sessionKey)

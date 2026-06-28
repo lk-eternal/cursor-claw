@@ -42,6 +42,8 @@ const CONTEXT_ERROR_CODE_PATTERNS = [/CONTEXT/i, /TOKEN/i, /LIMIT/i, /LENGTH/i] 
 
 /** 会话异常（非 EXPIRED 状态）message/errorCode 模式 */
 const SESSION_ABNORMAL_PATTERNS = [/session/i, /invalid/i, /not found/i] as const
+const RETRYABLE_FAILURE_PATTERNS = [/timeout/i, /temporar/i, /rate limit/i, /429/, /network/i] as const
+const BUSY_FAILURE_PATTERNS = [/agent busy/i, /busy/i] as const
 
 /** 与 agent-sdk isUnsafeSdkMessage 同等安全规则 */
 function isUnsafeSdkMessage(msg?: string): boolean {
@@ -121,6 +123,12 @@ export function formatUserSdkFailureMessage(ctx: SdkFailureContext): string {
 
   const msg = ctx.message?.trim() ?? ""
   const code = ctx.errorCode?.trim() ?? ""
+  if (BUSY_FAILURE_PATTERNS.some((p) => p.test(msg) || p.test(code))) {
+    return "Agent 正在处理上一条请求，系统会稍后重排，请耐心等待。"
+  }
+  if (RETRYABLE_FAILURE_PATTERNS.some((p) => p.test(msg) || p.test(code))) {
+    return "⚠️ 本次请求遇到临时故障，系统已执行退避重试；若仍失败请稍后再试。"
+  }
   if (SESSION_ABNORMAL_PATTERNS.some((p) => p.test(msg) || p.test(code))) {
     return "Agent 会话异常，请重新发送消息继续对话。"
   }
