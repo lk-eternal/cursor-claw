@@ -1,0 +1,159 @@
+{
+  "name": "Agent Run 超时自动停止",
+  "flow": "standard",
+  "stage": "archived_with_debt",
+  "source": "kb-propose",
+  "workflow_version": "v2.6",
+  "archived_at": "2026-06-28T16:50:32+0800",
+  "archive_debt": "04-review R1/R2 open；06 staging 必测 K1/K2 未跑",
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "超时判定与 finalizer 核心（S5-F1、S5-F2）",
+      "status": "done",
+      "files": [
+        "electron/agent-sdk.ts",
+        "electron/finalize-sdk-run.ts"
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "T2",
+      "title": "事件流挂接与 completeSdkRun 幂等（S5-F3–F5、S7-F6）",
+      "status": "done",
+      "files": [
+        "electron/agent-sdk.ts",
+        "electron/finalize-sdk-run.ts"
+      ],
+      "depends_on": ["T1"]
+    },
+    {
+      "id": "T3",
+      "title": "electron/AGENTS.md 约定对齐",
+      "status": "done",
+      "files": [
+        "electron/AGENTS.md"
+      ],
+      "depends_on": ["T2"]
+    }
+  ],
+  "reviews": [
+    {
+      "id": "focused-review",
+      "type": "focused-review",
+      "date": "2026-06-28",
+      "scope": "T1-T3",
+      "verdict": "passed_conditional",
+      "blocking_issues": 0,
+      "warnings": 5,
+      "file": "knowledge/变更/归档/20260628163149-Agent Run 超时自动停止/04-review.md",
+      "summary": "核心 finalizer 挂接与 02 一致；R1/R2 为 warning 非阻断；场景 B 待 /kb-test"
+    },
+    {
+      "id": "R1",
+      "severity": "warning",
+      "status": "open",
+      "score": 78,
+      "file": "electron/finalize-sdk-run.ts",
+      "summary": "非长驻模式超时后 finalizer 未 close/delete session，completeSdkRun 幂等 early return 跳过非 resident 清理",
+      "task_id": "T-FIX-01"
+    },
+    {
+      "id": "R2",
+      "severity": "warning",
+      "status": "open",
+      "score": 76,
+      "file": "electron/finalize-sdk-run.ts",
+      "summary": "isRunTimeoutFailure 对任意 ERROR/EXPIRED status 返回 true，可能误删 resident session 或与 01 验收 7 冲突",
+      "task_id": "T-FIX-02"
+    },
+    {
+      "id": "W1",
+      "severity": "warning",
+      "status": "accepted_debt",
+      "score": 55,
+      "file": "electron/agent-sdk.ts",
+      "summary": "agent-sdk.ts 1246 行超 AGENTS 300 行约定；本变更提取 finalize-sdk-run 部分缓解"
+    },
+    {
+      "id": "W2",
+      "severity": "warning",
+      "status": "open",
+      "score": 52,
+      "file": "electron/AGENTS.md",
+      "summary": "T3 diff 混入并行变更 MCP stdio 文档（scope bleed，非本 manifest 任务）"
+    },
+    {
+      "id": "W3",
+      "severity": "warning",
+      "status": "open",
+      "score": 58,
+      "file": "electron/finalize-sdk-run.ts",
+      "summary": "isRunTimeoutFailure 条件(3) duration≥20min 无 shell:running 也可能误判非超时 error"
+    }
+  ],
+  "revisions": [],
+  "files": [
+    {
+      "path": "knowledge/变更/归档/20260628163149-Agent Run 超时自动停止/00-manifest.json",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628163149-Agent Run 超时自动停止/01-proposal.md",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628163149-Agent Run 超时自动停止/02-design.md",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628163149-Agent Run 超时自动停止/03-tasks.md",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628163149-Agent Run 超时自动停止/04-review.md",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628163149-Agent Run 超时自动停止/05-summary.md",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/归档/20260628163149-Agent Run 超时自动停止/06-automation-test.md",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "electron/agent-sdk.ts",
+      "kind": "code",
+      "status": "changed"
+    },
+    {
+      "path": "electron/finalize-sdk-run.ts",
+      "kind": "code",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/业务域/Agent调度/03-启动与自动重连.md",
+      "kind": "knowledge",
+      "status": "changed"
+    },
+    {
+      "path": "package.json",
+      "kind": "code",
+      "status": "changed"
+    },
+    {
+      "path": "changelog/1.8.5.json",
+      "kind": "changelog",
+      "status": "changed"
+    }
+  ],
+  "updated_at": "2026-06-28T16:50:32+0800"
+}

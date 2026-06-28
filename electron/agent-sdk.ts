@@ -26,6 +26,11 @@ import {
 import { finalizeContextUsageAtRunEnd } from "./context-usage-run-end"
 import { type ChatType, type LaunchMeta, buildPrompt, resolveSessionChatName } from "./agent-launcher"
 import { appendInlineMcpToSendOptions, loadInlineMcpServers } from "./mcp-sdk-loader"
+import {
+  finalizeSdkRunOnTimeout as finalizeSdkRunOnTimeoutImpl,
+  isRunTimeoutFailure as isRunTimeoutFailureImpl,
+  type FinalizerContext,
+} from "./finalize-sdk-run"
 
 interface SdkSessionAgent {
   sessionKey: string
@@ -87,6 +92,8 @@ interface SdkSessionAgent {
   compressionNotified?: boolean
   /** 当次 dispatch claim 的 inbound message_ids，final stream-text 末条 id 用于 ack */
   inboundMessageIds?: string[]
+  /** 本 Run 正在执行超时/终态收尾，防 completeSdkRun 重复 */
+  runFinalizing?: boolean
 }
 
 const sdkSessions = new Map<string, SdkSessionAgent>()
@@ -127,6 +134,7 @@ function resetSdkRunPresentationState(session: SdkSessionAgent): void {
   session.contextUsageFinalized = false
   // contextUsagePeakTokens 跨 Run 保留，保证同 session 多轮 footer 可比
   session.compressionNotified = false
+  session.runFinalizing = false
   session.abortController = new AbortController()
 }
 
@@ -546,6 +554,32 @@ function ensureSdkBinaryPaths(): void {
 }
 
 
+/** T2 挂接用：绑定 sdkSessions 等依赖的超时 finalizer */
+const finalizerCtx: FinalizerContext = {
+  sdkSessions,
+  resetStreamPostChain,
+  notifySdkFailure,
+  broadcastSdkSessionStatus,
+}
+
+/** 超时类终态判定（供 T2 completeSdkRun / streamRunEvents 挂接） */
+export function isRunTimeoutFailure(
+  session: SdkSessionAgent,
+  run: Run,
+  lastStatus?: { status: string; message?: string },
+): boolean {
+  return isRunTimeoutFailureImpl(session, run, lastStatus)
+}
+
+/** 超时类终态主动收尾（供 T2 handleSdkEvent / streamRunEvents 挂接） */
+export async function finalizeSdkRunOnTimeout(
+  session: SdkSessionAgent,
+  run: Run,
+  trigger: string,
+): Promise<void> {
+  return finalizeSdkRunOnTimeoutImpl(finalizerCtx, session, run, trigger)
+}
+
 function broadcastSdkSessionStatus(): void {
   const list = [...sdkSessions.values()].map((s) => ({
     sessionKey: s.sessionKey,
@@ -603,6 +637,14 @@ async function streamRunEvents(session: SdkSessionAgent, run: Run): Promise<void
     if (session.f41Stream && (session.streamBuffer.trim() || session.outboundMessageId)) {
       await flushStreamPost(session, true)
     }
+    // 流结束兜底：无 status ERROR/EXPIRED 事件时，保活/Run 超时档仍走 finalizer
+    if (
+      run.status === "error" &&
+      isRunTimeoutFailure(session, run) &&
+      !session.runFinalizing
+    ) {
+      await finalizeSdkRunOnTimeout(session, run, "stream")
+    }
   } catch (e: unknown) {
     flushSdkLog(session)
     if (!session.abortController.signal.aborted) {
@@ -618,6 +660,17 @@ async function streamRunEvents(session: SdkSessionAgent, run: Run): Promise<void
 
 async function completeSdkRun(session: SdkSessionAgent, run: Run): Promise<void> {
   const sessionKey = session.sessionKey
+
+  // finalizer 已收尾：幂等跳过，避免重复 cooldown/notify/resident 清理
+  if (session.runFinalizing || session.run === null) {
+    pushUiLog(
+      "SDK",
+      "INFO",
+      `[${sessionKey}] completeSdkRun 跳过（幂等 finalizing=${!!session.runFinalizing} runNull=${session.run === null}）`,
+    )
+    return
+  }
+
   const level = run.status === "error" ? "ERROR" : "INFO"
 
   if (run.status === "error") {
@@ -637,7 +690,10 @@ async function completeSdkRun(session: SdkSessionAgent, run: Run): Promise<void>
       `waitResult=${detail}`,
     ].filter(Boolean)
     pushUiLog("SDK", "ERROR", `[${sessionKey}] agent_failed 运行错误详情: ${parts.join(" ")}`)
-    failedCooldowns.set(sessionKey, Date.now() + FAIL_COOLDOWN_MS)
+    // 超时类失败不写 failedCooldowns，便于用户立即重发
+    if (!isRunTimeoutFailure(session, run)) {
+      failedCooldowns.set(sessionKey, Date.now() + FAIL_COOLDOWN_MS)
+    }
     if (!session.errorNotified) {
       await notifySdkFailure(session, undefined, run)
     }
@@ -720,7 +776,10 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
       const isErr = event.status === "ERROR" || event.status === "EXPIRED"
       if (isErr || event.status === "CANCELLED") {
         session.lastStatus = { status: event.status, message: event.message }
-        // ERROR/EXPIRED 延至 completeSdkRun 再 notify，此时 run.durationMs 已就绪，可正确走保活超时文案
+        // ERROR/EXPIRED 即时 finalizer；用户主动 stop（aborted）不误触发
+        if (isErr && !session.abortController.signal.aborted && session.run) {
+          void finalizeSdkRunOnTimeout(session, session.run, "status")
+        }
         if (event.status === "CANCELLED" && !session.abortController.signal.aborted) {
           void notifySdkFailure(session)
         }
@@ -792,6 +851,11 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
   if (existing && !existing.abortController.signal.aborted) {
     if (isSdkSessionProcessing(existing)) {
       existing.lastActivityAt = Date.now()
+      pushUiLog(
+        "SDK",
+        "WARN",
+        `[${sessionKey}] launchSdkAgent 早退：session 仍 processing（run=${existing.run !== null} pendingDispatch=${existing.pendingDispatch}）`,
+      )
       return { ok: true }
     }
     if (taskMessage?.trim()) {
