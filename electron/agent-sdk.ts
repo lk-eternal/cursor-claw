@@ -622,13 +622,14 @@ export async function finalizeSdkRunOnTimeout(
   session: SdkSessionAgent,
   run: Run,
   trigger: string,
-): Promise<void> {
-  await finalizeSdkRunOnTimeoutImpl(finalizerCtx, session, run, trigger)
-  if (session.runGuardToken) {
+): Promise<boolean> {
+  const finalized = await finalizeSdkRunOnTimeoutImpl(finalizerCtx, session, run, trigger)
+  if (finalized && session.runGuardToken) {
     completeRunGuard(session.sessionKey, session.runGuardToken)
     releaseRunGuard(session.sessionKey, session.runGuardToken)
     session.runGuardToken = undefined
   }
+  return finalized
 }
 
 function sleep(ms: number): Promise<void> {
@@ -756,7 +757,8 @@ function armRunWatchdog(session: SdkSessionAgent, run: Run, token: string): void
     onTick: () => {
       if (session.run !== run) return "completed"
       const st = run.status
-      if (st === "cancelled" || st === "error") return "completed"
+      // 覆盖 finished 终态，避免主流程已结束但 watchdog 仍持续等待。
+      if (st === "finished" || st === "cancelled" || st === "error") return "completed"
       return undefined
     },
     onTimeout: async () => {
@@ -853,12 +855,12 @@ async function streamRunEvents(session: SdkSessionAgent, run: Run): Promise<void
 async function completeSdkRun(session: SdkSessionAgent, run: Run): Promise<void> {
   const sessionKey = session.sessionKey
 
-  // finalizer 已收尾：幂等跳过，避免重复 cooldown/notify/resident 清理
-  if (session.runFinalizing || session.run === null) {
+  // finalizer 已接管或 run 已切换：幂等跳过，避免旧 run 提前 close/delete。
+  if (session.runFinalizing || session.run === null || session.run !== run) {
     pushUiLog(
       "SDK",
       "INFO",
-      `[${sessionKey}] completeSdkRun 跳过（幂等 finalizing=${!!session.runFinalizing} runNull=${session.run === null}）`,
+      `[${sessionKey}] completeSdkRun 跳过（幂等 finalizing=${!!session.runFinalizing} runNull=${session.run === null} runMismatch=${session.run !== null && session.run !== run}）`,
     )
     return
   }
@@ -906,6 +908,16 @@ async function completeSdkRun(session: SdkSessionAgent, run: Run): Promise<void>
     run.durationMs != null && `duration=${run.durationMs}ms`,
   ].filter(Boolean).join(", ")
   pushUiLog("SDK", level, `[${sessionKey}] Agent 运行结束 (status=${run.status}${summary ? `, ${summary}` : ""})`)
+
+  // complete 内部存在 await，收尾前再次确认 run 归属，避免和 timeout finalizer 并发清理。
+  if (session.runFinalizing || session.run === null || session.run !== run) {
+    pushUiLog(
+      "SDK",
+      "INFO",
+      `[${sessionKey}] completeSdkRun 收尾前跳过（finalizing=${!!session.runFinalizing} runNull=${session.run === null} runMismatch=${session.run !== null && session.run !== run}）`,
+    )
+    return
+  }
 
   resetStreamPostChain(session)
   if (session.runGuardToken) {

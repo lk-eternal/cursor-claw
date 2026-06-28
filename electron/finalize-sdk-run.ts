@@ -112,60 +112,66 @@ export async function finalizeSdkRunOnTimeout(
   session: SdkSessionForFinalizer,
   run: Run,
   trigger: string,
-): Promise<void> {
+): Promise<boolean> {
   const sessionKey = session.sessionKey
 
-  if (session.runFinalizing || session.run === null) {
+  // 仅允许“当前活跃 run”进入收尾，避免旧 run 误删新会话。
+  if (session.runFinalizing || session.run === null || session.run !== run) {
     pushUiLog(
       "SDK",
       "INFO",
-      `[${sessionKey}] finalizeSdkRunOnTimeout 跳过（幂等 trigger=${trigger} finalizing=${!!session.runFinalizing} runNull=${session.run === null}）`,
+      `[${sessionKey}] finalizeSdkRunOnTimeout 跳过（幂等 trigger=${trigger} finalizing=${!!session.runFinalizing} runNull=${session.run === null} runMismatch=${session.run !== null && session.run !== run}）`,
     )
-    return
+    return false
   }
 
   session.runFinalizing = true
 
-  const durationMs = resolveRunDurationMs(session, run)
-  const last = session.lastStatus
-  const lt = session.lastTool
-  const parts = [
-    `sessionKey=${sessionKey}`,
-    `trigger=${trigger}`,
-    last && `lastStatus=${last.status}${last.message ? ` msg=${last.message}` : ""}`,
-    durationMs != null && `durationMs=${durationMs}`,
-    lt && `lastTool=${lt.name}:${lt.status}`,
-    `run.status=${run.status}`,
-  ].filter(Boolean)
-  pushUiLog("SDK", "WARN", `[${sessionKey}] finalizeSdkRunOnTimeout 超时收尾: ${parts.join(" ")}`)
-
-  // 先归档 + notify（abort 前，避免 aborted 闩跳过 IM）
-  archiveAgentFailureLogs({
-    sessionKey,
-    failureType: "sdk_timeout",
-    session,
-    runStatus: run.status,
-  })
-  await ctx.notifySdkFailure(session, undefined, run)
-
-  const waitOutcome = await cancelRunAndWait(run)
-  pushUiLog("SDK", "INFO", `[${sessionKey}] finalizeSdkRunOnTimeout wait 结果: ${waitOutcome}`)
-  session.abortController.abort()
-
-  ctx.resetStreamPostChain(session)
-  session.run = null
-  session.pendingDispatch = false
-
-  await reportSessionAgentPhase(sessionKey, "idle")
-
-  // 超时路径统一关闭 Agent 并删 session（长驻重建 + 非长驻 R1 清理）
   try {
-    session.agent.close()
-  } catch {
-    /* best-effort */
+    const durationMs = resolveRunDurationMs(session, run)
+    const last = session.lastStatus
+    const lt = session.lastTool
+    const parts = [
+      `sessionKey=${sessionKey}`,
+      `trigger=${trigger}`,
+      last && `lastStatus=${last.status}${last.message ? ` msg=${last.message}` : ""}`,
+      durationMs != null && `durationMs=${durationMs}`,
+      lt && `lastTool=${lt.name}:${lt.status}`,
+      `run.status=${run.status}`,
+    ].filter(Boolean)
+    pushUiLog("SDK", "WARN", `[${sessionKey}] finalizeSdkRunOnTimeout 超时收尾: ${parts.join(" ")}`)
+
+    // 先归档 + notify（abort 前，避免 aborted 闩跳过 IM）
+    archiveAgentFailureLogs({
+      sessionKey,
+      failureType: "sdk_timeout",
+      session,
+      runStatus: run.status,
+    })
+    await ctx.notifySdkFailure(session, undefined, run)
+
+    const waitOutcome = await cancelRunAndWait(run)
+    pushUiLog("SDK", "INFO", `[${sessionKey}] finalizeSdkRunOnTimeout wait 结果: ${waitOutcome}`)
+    session.abortController.abort()
+
+    ctx.resetStreamPostChain(session)
+    session.run = null
+    session.pendingDispatch = false
+
+    await reportSessionAgentPhase(sessionKey, "idle")
+
+    // 超时路径统一关闭 Agent 并删 session（长驻重建 + 非长驻 R1 清理）
+    try {
+      session.agent.close()
+    } catch {
+      /* best-effort */
+    }
+    ctx.sdkSessions.delete(sessionKey)
+    ctx.broadcastSdkSessionStatus()
+    return true
+  } finally {
+    session.runFinalizing = false
   }
-  ctx.sdkSessions.delete(sessionKey)
-  ctx.broadcastSdkSessionStatus()
 }
 
 /**
@@ -179,13 +185,8 @@ export async function cancelRunAndWait(run: Run, timeoutMs = FINALIZE_WAIT_TIMEO
   } catch {
     // 流已结束或取消失败均不阻断 wait
   }
-  try {
-    await Promise.race([
-      run.wait(),
-      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), timeoutMs)),
-    ])
-    return "completed"
-  } catch {
-    return "error"
-  }
+  return Promise.race([
+    run.wait().then(() => "completed" as const).catch(() => "error" as const),
+    new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), timeoutMs)),
+  ])
 }
