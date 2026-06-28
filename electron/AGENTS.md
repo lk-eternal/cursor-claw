@@ -34,6 +34,7 @@
 - **SDK 上下文 footer（IM 回复）**：**单一落点** `agent-sdk` — Run 流结束后 `finalizeRunContextUsage` 读 `run.usage`（必要时 `run.wait()`），与 `onDelta` turn-ended 快照 **并排打 `[context-usage]` 日志**；`doFlushStreamPost(..., final=true)` 前 `applyContextFooterToBuffer` 写入 `streamBuffer`；中间 chunk 不含 footer。footer **优先** `run.usage.totalTokens`，不可得时回退 turn-ended/peak；格式 `\n\n---\n上下文：{p}% ({usedK}k/{limitK}k)`（有上限）或 `\n\n---\n上下文：已用 {usedK}`；上限来自 `Cursor.models.list` 或 modelId 启发式（session 级缓存）。`appendContextFooter` 对已含「上下文：」的正文幂等。CLI 路径不在 IM scope。
 - **SDK 自动压缩飞书通知**：`summary-started` 经 `notifySessionChat` 下发「正在压缩上下文…」（与「Agent 处理中…」同语义，不传 `stop_progress`）；每 Run 至多一次（`compressionNotified`）；`summary-completed` 仅写 UI 日志。
 - **SDK 长驻 Agent（`SDK_RESIDENT_AGENT`）**：默认开启；`SDK_RESIDENT_AGENT=0` 回退 Run 结束 `close()`。**非超时 error**：`completeSdkRun` 在 `residentMode` **保留**实例、`reportSessionAgentPhase(idle)` 触发 Daemon flush。**超时类**：`finalizeSdkRunOnTimeout` 后 `agent.close()` + 删 session（长驻与非长驻均清理），下条 launch 重建；**不写 `failedCooldowns`**。`isSdkSessionRunning` 仅 processing（`run`/`pendingDispatch`），idle 用 `hasSdkSession`。二次任务 `dispatchToSdkAgent`；`launchSdkAgent` 遇 processing 会话 WARN 早退 `{ ok: true }`。失败日志 `dispatch_failed` / `agent_failed`。`ensureAgentSdkHttpServer` 应用 init 启动，端口 `userData/agent-api-port.json`；Daemon 转发 `POST /api/agent/launch|dispatch`。
+- **ContextRotation 切换顺序**：轮转必须“先 `Agent.create` 成功，再替换 `session.agent`，最后 best-effort 关闭旧实例”；创建失败时保留旧实例继续 send，禁止先 `close` 再创建导致会话假存活。
 - **IM 调度 SDK-only**：无 CLI spawn、无 `poll-message`。
 
 ## 通道配置字段

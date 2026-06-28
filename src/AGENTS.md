@@ -15,6 +15,7 @@
 - **门控**：`shouldDeferDispatch` + `sessionAgentPhaseMap` processing；合并 batch 须 `ready` 才 claim。
 - **SSOT**：`POST /api/agent/launch|dispatch` 在 Daemon 暴露并转发 Electron；`GET /api/poll-message` 返回 404。
 - **日志**：调度失败用 `dispatch_failed` 字段；SDK Run 错误在 Electron 侧用 `agent_failed`。
+- **busy 重排一致性**：`agent_busy` 必须统一走 `parseBusyRetryDelayMs + scheduleBusyRetry`（含 launch 与 dispatch 两条入口）；busy 分支不应提前 ack 当前 batch。
 
 ## 合并预览与 Agent 阶段（daemon 内存）
 
