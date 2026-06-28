@@ -4,6 +4,7 @@
 import type { Run, SDKAgent } from "@cursor/sdk"
 import { reportSessionAgentPhase } from "./daemon-client"
 import { pushUiLog } from "./ui-logger"
+import { archiveAgentFailureLogs } from "./crash-log-archiver"
 
 /** 观测约 23min 档 Run 超时；与 agent-sdk KEEPALIVE_TIMEOUT_MS 对齐 */
 const KEEPALIVE_TIMEOUT_MS = 20 * 60 * 1000
@@ -17,6 +18,7 @@ export interface SdkSessionForFinalizer {
   residentMode: boolean
   runFinalizing?: boolean
   errorNotified?: boolean
+  failureArchiveDone?: boolean
   lastStatus?: { status: string; message?: string }
   lastTool?: { name: string; status: string }
   runStartedAt?: number
@@ -128,6 +130,12 @@ export async function finalizeSdkRunOnTimeout(
   ].filter(Boolean)
   pushUiLog("SDK", "WARN", `[${sessionKey}] finalizeSdkRunOnTimeout 超时收尾: ${parts.join(" ")}`)
 
+  archiveAgentFailureLogs({
+    sessionKey,
+    failureType: "sdk_timeout",
+    session,
+    runStatus: run.status,
+  })
   await ctx.notifySdkFailure(session, undefined, run)
   await reportSessionAgentPhase(sessionKey, "idle")
 

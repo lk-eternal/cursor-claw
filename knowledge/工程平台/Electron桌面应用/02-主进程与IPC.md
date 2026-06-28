@@ -2,14 +2,14 @@
 
 ## 一、能力范围
 
-负责 Electron 主进程：窗口/托盘、IPC 注册、Daemon spawn 与状态轮询、MCP/Rules/Skills 文件操作、飞书/微信绑定辅助。不负责 Daemon 内 HTTP 路由实现。
+负责 Electron 主进程：窗口/托盘、IPC 注册、Daemon spawn 与状态轮询、MCP/Rules/Skills 文件操作、飞书/微信绑定辅助、**Agent 失败日志归档**（`crash-log-archiver.ts`）。不负责 Daemon 内 HTTP 路由实现。
 
 ## 二、设计决策与取舍
 
-- **contextIsolation + preload 白名单**：安全隔离渲染进程，API 集中在 `electron/preload.ts` 的 `electronAPI`（依据：`electron/main.ts` webPreferences）。
-- **Daemon 独立子进程**：消息长连接与 Agent poll 解耦 UI 线程；用 `ELECTRON_RUN_AS_NODE` 复用 Electron 内置 Node（依据：`electron/daemon-manager.ts` spawn）。
-- **profile 隔离 userData**：多开互不干扰（依据：`electron/main.ts` `--profile=`）。
-- **IPC 分文件注册**：`main.ts` 注册基础 handler；`daemon-manager`、`updater` 等模块按需 `ipcMain.handle`（依据：源码）。
+- **contextIsolation + preload 白名单**：API 在 `preload.ts` `electronAPI`（`main.ts` webPreferences）。
+- **Daemon 独立子进程**：`ELECTRON_RUN_AS_NODE` spawn（`daemon-manager.ts`）。
+- **profile 隔离 userData**：`--profile=`（`main.ts`）。
+- **IPC 分文件注册**：`main.ts` 基础 handler；各模块按需 `ipcMain.handle`。
 
 ## 三、服务端规则
 
@@ -17,46 +17,27 @@
 
 ## 四、客户端流程
 
-```mermaid
-sequenceDiagram
-  participant R as Renderer
-  participant P as preload
-  participant M as main/daemon-manager
-  participant D as Daemon
-  R->>P: electronAPI.startDaemon
-  P->>M: ipc daemon:start
-  M->>D: spawn + wait lock
-  M-->>R: daemon:status-update
-```
+Renderer 经 preload 调 `daemon:start` 等 IPC，主进程 spawn Daemon 并 `daemon:status-update` 回推（`daemon-manager.ts`）。
 
-关闭窗口：`closeWindowAction` 为 ask/minimize/quit；ask 时主进程 `send window:close-confirm`，渲染层 `CloseWindowModal` 回传结果（`electron/main.ts`）。
+关闭窗口：`closeWindowAction` 为 ask/minimize/quit；ask 时 `window:close-confirm` → `CloseWindowModal`（`main.ts`）。
 
 ## 五、接口
 
-### IPC（main.ts 节选）
+### IPC（节选）
 
-| channel | 作用 |
-|---|---|
-| `config:get` / `config:save` | 读写配置 |
-| `daemon:start/stop/status/queue*` | Daemon 生命周期与队列 |
-| `window:*` | 无边框窗口控制 |
-| `mcp:*` / `rules:*` / `skills:*` | 本地 MCP 与 Cursor 资产 CRUD |
-| `models:list` / `sdk:*` | CLI/SDK 模型 |
+`config:get/save`、`daemon:*`、`window:*`、`mcp:*`/`rules:*`/`skills:*`、`models:list`/`sdk:*`；完整列表见 preload，扩展 handler 在 daemon-manager。
 
-完整列表见 preload；扩展 handler 在 daemon-manager。
-
-### Daemon HTTP（主进程调用）
+### Daemon HTTP
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | POST | `/shutdown` | 停止 Daemon |
-| POST | `/enqueue` | 向主会话入队 |
+| POST | `/enqueue` | 主会话入队 |
 | GET | `/api/active-sessions` | 会话映射 |
 
 ## 六、数据
 
-- 配置：`electron-store` 文件 `cursor-claw-config`（加密 key，见 config-store 分区）。
-- Lock：`userData/daemon.lock.json`，字段 pid/port/version/workspaceDir。
+配置：`electron-store` `cursor-claw-config`（见 config-store）；Lock：`userData/daemon.lock.json`（pid/port/version/workspaceDir）。
 
 ## 七、非功能与可观测
 
@@ -64,9 +45,13 @@ sequenceDiagram
 - `powerSaveBlocker` 在 Daemon 运行期阻止系统休眠（daemon-manager）。
 - MCP CLI 调用 30s 超时（`electron/mcp-manager.ts`）。
 
+### Agent 失败日志归档
+
+`archiveAgentFailureLogs`（`crash-log-archiver.ts`）：best-effort、不 throw、不阻断 notify。挂接 `notifySdkFailure`/`notifyDispatchFailure`/`finalizeSdkRunOnTimeout`（finalizer 先于 notify）；`failureArchiveDone` 幂等闩。已配置 `crashAnalysisDir`：触发行 → logBuffer 锚点 ±30 → `{dir}/{ts[-NNN]}/electron-log.txt` + `meta.json`；未配置 WARN 节流跳过。不归档 daemon.log。
+
 ## 八、推送
 
-无服务端推送；主进程向渲染层 `webContents.send`：`daemon:status-update`、`bind:result`、`feishu:setup-qrcode` 等。
+主进程 `webContents.send`：`daemon:status-update`、`bind:result`、`feishu:setup-qrcode` 等。
 
 ## 九、已知限制与 TODO
 
@@ -74,4 +59,5 @@ sequenceDiagram
 
 ## 十、变更记录
 
-- 2026-06-27：kb-sync 初始建立
+2026-06-28：§七 补充 Agent 失败时 `archiveAgentFailureLogs` 挂接、产物目录与 notify 不阻断约定。
+2026-06-27：kb-sync 初始建立

@@ -15,6 +15,7 @@ import {
   formatToolCallLogSuffix,
 } from "../src/shared/tool-presentation"
 import { pushUiLog, broadcastLog, broadcastSessionStatus } from "./ui-logger"
+import { archiveAgentFailureLogs, type FailureArchiveType } from "./crash-log-archiver"
 import {
   ZERO_CONTEXT_USAGE,
   type ContextUsageState,
@@ -94,6 +95,8 @@ interface SdkSessionAgent {
   inboundMessageIds?: string[]
   /** 本 Run 正在执行超时/终态收尾，防 completeSdkRun 重复 */
   runFinalizing?: boolean
+  /** 本 Run 单次失败是否已归档崩溃日志 */
+  failureArchiveDone?: boolean
 }
 
 const sdkSessions = new Map<string, SdkSessionAgent>()
@@ -135,6 +138,7 @@ function resetSdkRunPresentationState(session: SdkSessionAgent): void {
   // contextUsagePeakTokens 跨 Run 保留，保证同 session 多轮 footer 可比
   session.compressionNotified = false
   session.runFinalizing = false
+  session.failureArchiveDone = false
   session.abortController = new AbortController()
 }
 
@@ -212,9 +216,24 @@ function formatSdkStreamFailure(
   return "⚠️ Agent 处理失败，请稍后重试。"
 }
 
-async function notifySdkFailure(session: SdkSessionAgent, override?: string, run?: Run | null): Promise<void> {
+async function notifySdkFailure(
+  session: SdkSessionAgent,
+  override?: string,
+  run?: Run | null,
+  failureType?: FailureArchiveType,
+): Promise<void> {
   if (session.errorNotified || session.abortController.signal.aborted) return
   session.errorNotified = true
+  const resolvedType: FailureArchiveType =
+    failureType ??
+    (session.lastStatus?.status === "CANCELLED" ? "sdk_cancelled" : "sdk_run_error")
+  archiveAgentFailureLogs({
+    sessionKey: session.sessionKey,
+    failureType: resolvedType,
+    session,
+    agentId: session.agentId,
+    runStatus: run?.status ?? session.run?.status,
+  })
   const last = session.lastStatus
   let text = override ?? formatSdkStreamFailure(last?.status, last?.message, {
     lastTool: session.lastTool,
@@ -232,6 +251,11 @@ async function notifySdkFailure(session: SdkSessionAgent, override?: string, run
 
 async function notifyDispatchFailure(sessionKey: string, reason: string): Promise<void> {
   pushUiLog("SDK", "ERROR", `[${sessionKey}] dispatch_failed: ${reason}`)
+  archiveAgentFailureLogs({
+    sessionKey,
+    failureType: "dispatch_failed",
+    detail: reason,
+  })
   await notifySessionChat(sessionKey, "⚠️ 消息投递失败，请稍后重试。", true)
 }
 
@@ -653,7 +677,7 @@ async function streamRunEvents(session: SdkSessionAgent, run: Run): Promise<void
       const cause = e instanceof Error && "cause" in e && e.cause ? JSON.stringify(e.cause) : ""
       pushUiLog("SDK", "ERROR", `[${session.sessionKey}] 流处理异常: ${msg}${stack ? ` stack=${stack}` : ""}${cause ? ` cause=${cause}` : ""}`)
       await finalizeRunContextUsage(session, run)
-      await notifySdkFailure(session)
+      await notifySdkFailure(session, undefined, run, "sdk_stream_exception")
     }
   }
 }
@@ -722,6 +746,7 @@ async function completeSdkRun(session: SdkSessionAgent, run: Run): Promise<void>
 }
 
 async function startSdkRun(session: SdkSessionAgent, run: Run): Promise<void> {
+  session.failureArchiveDone = false
   session.run = run
   session.runStartedAt = Date.now()
   session.lastActivityAt = Date.now()
@@ -781,7 +806,7 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
           void finalizeSdkRunOnTimeout(session, session.run, "status")
         }
         if (event.status === "CANCELLED" && !session.abortController.signal.aborted) {
-          void notifySdkFailure(session)
+          void notifySdkFailure(session, undefined, undefined, "sdk_cancelled")
         }
       }
       const lvl = isErr ? "ERROR" as const : "INFO" as const

@@ -28,6 +28,8 @@ export interface AppConfig {
 
   // ── 全局配置 ──
   workspaceDir: string
+  /** 崩溃分析根目录，空字符串表示未配置 */
+  crashAnalysisDir: string
   autoStart: boolean
   setupComplete: boolean
   httpProxy: string
@@ -68,6 +70,7 @@ const defaults: AppConfig = {
   channelsMigrated: false,
 
   workspaceDir: "",
+  crashAnalysisDir: "",
   autoStart: false,
   setupComplete: false,
   httpProxy: "",

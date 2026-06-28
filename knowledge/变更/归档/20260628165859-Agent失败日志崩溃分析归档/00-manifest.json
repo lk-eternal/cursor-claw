@@ -1,0 +1,102 @@
+{
+  "name": "Agent失败日志崩溃分析归档",
+  "flow": "standard",
+  "stage": "archived_with_debt",
+  "source": "kb-propose",
+  "workflow_version": "v2.6",
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "config-store + preload + env.d.ts — crashAnalysisDir 配置贯通",
+      "status": "done",
+      "files": [
+        "electron/config-store.ts",
+        "electron/preload.ts",
+        "src/renderer/env.d.ts"
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "T2",
+      "title": "electron/crash-log-archiver.ts — archiveAgentFailureLogs 归档模块",
+      "status": "done",
+      "files": [
+        "electron/crash-log-archiver.ts"
+      ],
+      "depends_on": ["T1"]
+    },
+    {
+      "id": "T3",
+      "title": "agent-sdk.ts + finalize-sdk-run.ts — 归档挂接与 failureArchiveDone 幂等",
+      "status": "done",
+      "files": [
+        "electron/agent-sdk.ts",
+        "electron/finalize-sdk-run.ts"
+      ],
+      "depends_on": ["T2"]
+    },
+    {
+      "id": "T4",
+      "title": "Settings.tsx general tab — 崩溃分析目录 UI",
+      "status": "done",
+      "files": [
+        "src/renderer/pages/Settings.tsx"
+      ],
+      "depends_on": ["T1"]
+    },
+    {
+      "id": "T5",
+      "title": "electron/AGENTS.md — 失败归档约定沉淀",
+      "status": "done",
+      "files": [
+        "electron/AGENTS.md"
+      ],
+      "depends_on": ["T2", "T3", "T4"]
+    }
+  ],
+  "reviews": [
+    {
+      "id": "W1",
+      "severity": "warning",
+      "status": "closed",
+      "file": "electron/AGENTS.md",
+      "summary": "T5 未更新：02 §十·（一）要求的失败归档挂接点、crashAnalysisDir、failureArchiveDone 与产物约定尚未写入 AGENTS.md",
+      "task_id": "T5",
+      "score": 78
+    },
+    {
+      "id": "W2",
+      "severity": "warning",
+      "status": "accepted_debt",
+      "file": "electron/crash-log-archiver.ts",
+      "summary": "写盘失败时 failureArchiveDone 未置位，同次 finalizer→notify 链可能产生第二个事件目录",
+      "task_id": "T-FIX-01",
+      "score": 76
+    }
+  ],
+  "revisions": [],
+  "files": [
+    "00-manifest.json",
+    "01-proposal.md",
+    "02-design.md",
+    "03-tasks.md",
+    "04-review.md",
+    "05-summary.md",
+    "06-automation-test.md",
+    "electron/config-store.ts",
+    "electron/preload.ts",
+    "src/renderer/env.d.ts",
+    "electron/crash-log-archiver.ts",
+    "electron/agent-sdk.ts",
+    "electron/finalize-sdk-run.ts",
+    "src/renderer/pages/Settings.tsx",
+    "electron/AGENTS.md",
+    "package.json",
+    "changelog/1.8.6.json",
+    "knowledge/工程平台/Electron桌面应用/02-主进程与IPC.md",
+    "knowledge/工程平台/Electron桌面应用/03-渲染端界面.md",
+    "knowledge/工程平台/Electron桌面应用/04-配置与更新.md"
+  ],
+  "archived_at": "2026-06-28T17:25:52+0800",
+  "updated_at": "2026-06-28T17:25:52+0800"
+}

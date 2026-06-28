@@ -49,6 +49,8 @@ export interface AppConfig {
   agentResources: AgentResource[]
   channels: MessageChannel[]
   workspaceDir: string
+  /** 崩溃分析根目录，空=未配置 */
+  crashAnalysisDir: string
   allowOthers: boolean
   autoStart: boolean
   setupComplete: boolean

@@ -91,6 +91,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
   }, [initialTab, onTabConsumed])
 
   const [workspaceDir, setWorkspaceDir] = useState("")
+  const [crashAnalysisDir, setCrashAnalysisDir] = useState("")
   const [proxy, setProxy] = useState("")
   const [noProxy, setNoProxy] = useState("localhost,127.0.0.1,feishu.cn")
   const [closeWindowAction, setCloseWindowAction] = useState<CloseWindowAction>("ask")
@@ -274,6 +275,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
   useEffect(() => {
     if (tab === "general" || tab === "setup") window.electronAPI.getConfig().then((config) => {
       setWorkspaceDir(config.workspaceDir)
+      setCrashAnalysisDir(config.crashAnalysisDir ?? "")
       setProxy(config.httpProxy || config.httpsProxy || "")
       setNoProxy(config.noProxy || "localhost,127.0.0.1,feishu.cn")
       setCloseWindowAction(config.closeWindowAction ?? "ask")
@@ -300,6 +302,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
     saveTimer.current = setTimeout(async () => {
       const r = await window.electronAPI.saveConfig({
         workspaceDir: workspaceDir.trim(),
+        crashAnalysisDir: crashAnalysisDir.trim(),
         httpProxy: proxy.trim(), httpsProxy: proxy.trim(), noProxy: noProxy.trim(),
         closeWindowAction,
       })
@@ -312,7 +315,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
       }
       setSaved(true); setTimeout(() => setSaved(false), 1500)
     }, 500)
-  }, [workspaceDir, proxy, noProxy, closeWindowAction, refreshMcpServers])
+  }, [workspaceDir, crashAnalysisDir, proxy, noProxy, closeWindowAction, refreshMcpServers])
 
   useEffect(() => { autoSave() }, [autoSave])
 
@@ -425,6 +428,10 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
   }
 
   const selectDir = async () => { const d = await window.electronAPI.selectDirectory(); if (d) setWorkspaceDir(d) }
+  const selectCrashAnalysisDir = async () => {
+    const d = await window.electronAPI.selectDirectory()
+    if (d) setCrashAnalysisDir(d)
+  }
 
   const handleAutoLaunchToggle = async () => {
     const next = !autoLaunch
@@ -645,6 +652,18 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
                     <FolderOpen size={18} className="text-blue-400" /><span className="truncate text-sm">{workspaceDir || "点击选择..."}</span>
                   </div>
                   <p className="mt-1 text-xs text-gray-600">主用户私聊时使用此目录，群聊和其他用户使用自动创建的临时目录</p>
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">崩溃分析目录</label>
+                  <div className="flex items-center gap-2">
+                    <div onClick={selectCrashAnalysisDir} className="flex flex-1 cursor-pointer items-center gap-3 rounded-lg border border-gray-700 px-4 py-3 transition hover:border-blue-500">
+                      <FolderOpen size={18} className="text-blue-400" /><span className="truncate text-sm">{crashAnalysisDir || "未配置（跳过归档）"}</span>
+                    </div>
+                    {crashAnalysisDir && (
+                      <button type="button" onClick={() => setCrashAnalysisDir("")} className="shrink-0 rounded-lg border border-gray-700 px-3 py-3 text-xs text-gray-400 transition hover:border-gray-500 hover:text-gray-200">清除</button>
+                    )}
+                  </div>
+                  <p className="mt-1 text-xs text-gray-600">Agent 处理失败时将相关日志片段导出到此目录；留空则跳过归档</p>
                 </div>
               </section>
               <section className="space-y-3">

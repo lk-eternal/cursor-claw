@@ -54,6 +54,8 @@ interface AppConfig {
   agentResources: AgentResource[]
   channels: ChannelConfig[]
   workspaceDir: string
+  /** 崩溃分析根目录，空=未配置 */
+  crashAnalysisDir: string
   autoStart: boolean
   setupComplete: boolean
   httpProxy: string
