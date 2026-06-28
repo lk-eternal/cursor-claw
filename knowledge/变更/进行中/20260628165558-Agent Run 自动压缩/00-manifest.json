@@ -1,0 +1,26 @@
+{
+  "name": "Agent Run 自动压缩",
+  "flow": "standard",
+  "stage": "proposed",
+  "source": "kb-propose",
+  "workflow_version": "v2.6",
+  "external": {
+    "figma_confirmed": true,
+    "figma_decision": "auto-none",
+    "task_type": "功能增强",
+    "priority": "P1"
+  },
+  "files": [
+    {
+      "path": "knowledge/变更/进行中/20260628165558-Agent Run 自动压缩/00-manifest.json",
+      "kind": "change_doc",
+      "status": "changed"
+    },
+    {
+      "path": "knowledge/变更/进行中/20260628165558-Agent Run 自动压缩/01-proposal.md",
+      "kind": "change_doc",
+      "status": "changed"
+    }
+  ],
+  "updated_at": "2026-06-28T17:30:42+0800"
+}
