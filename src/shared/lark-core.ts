@@ -55,6 +55,14 @@ export function localTimestamp(): string {
 
 // ── Lark Client 工厂 ────────────────────────────────────
 
+const SILENT_LOGGER = {
+  error: () => {},
+  warn: () => {},
+  info: () => {},
+  debug: () => {},
+  trace: () => {},
+};
+
 export function createLarkClient(appId: string, appSecret: string): Lark.Client {
   return new Lark.Client({
     appId,
@@ -62,6 +70,7 @@ export function createLarkClient(appId: string, appSecret: string): Lark.Client 
     appType: Lark.AppType.SelfBuild,
     domain: Lark.Domain.Feishu,
     loggerLevel: Lark.LoggerLevel.error,
+    logger: SILENT_LOGGER,
   });
 }
 
@@ -103,7 +112,7 @@ export class LarkSender {
       // 引用消息无 mentions 上下文，清理残留的 @ 占位符
       return result ? result.replace(/@_user_\d+\s?/g, "").trim() || null : null;
     } catch (e: any) {
-      this.log("WARN", `拉取消息内容失败 (${messageId}): ${e?.message ?? e}`);
+      this.log("DEBUG", `拉取消息内容失败 (${messageId}): ${e?.message ?? e}`);
       return null;
     }
   }
@@ -140,7 +149,7 @@ export class LarkSender {
       if ((res as any).code === 0 || (res as any).code === undefined) this.log("INFO", `飞书回复已发送(${text.length}字)`);
       else this.log("ERROR", `飞书回复失败: code=${(res as any).code}, msg=${(res as any).msg}`);
       return (res as any)?.data?.message_id;
-    } catch (e: any) { this.log("ERROR", `飞书回复异常: ${e?.message ?? e}`); return undefined; }
+    } catch (e: any) { this.log("WARN", `飞书回复异常: ${e?.message ?? e}`); return undefined; }
   }
 
   async sendMessage(text: string, replyMessageId?: string, chatId?: string, title?: string): Promise<string | undefined> {

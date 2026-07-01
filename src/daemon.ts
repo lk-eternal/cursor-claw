@@ -642,7 +642,14 @@ async function startFeishuChannel(rt: ChannelRuntime): Promise<void> {
         if (roster) meta.botRoster = roster;
       }
       if (parentId) {
-        const original = await sender.fetchMessageContent(parentId);
+        let original = await sender.fetchMessageContent(parentId);
+        if (!original) {
+          for (const peer of channels.values()) {
+            if (peer === rt || peer.cfg.type !== "feishu" || !peer.sender) continue;
+            original = await peer.sender.fetchMessageContent(parentId);
+            if (original) break;
+          }
+        }
         if (original) meta.quotedContent = original;
       }
       pushMessage(content, messageId, chatKey, chatType, senderOpenId, parentId, meta);
