@@ -21,7 +21,7 @@ import {
 } from "./agent-launcher"
 import {
   launchSdkAgent, stopSdkSession, stopAllSdkSessions,
-  isSdkSessionRunning, getSdkSessionList,
+  isSdkSessionRunning, getSdkSessionList, setSdkIdleHandler, hasWarmSdkSession,
 } from "./agent-sdk"
 import { injectWorkspaceToDir } from "./workspace-injector"
 
@@ -55,7 +55,8 @@ export function isSessionAgentRunning(key: string): boolean {
 }
 
 export function stopSessionAgent(key: string): void {
-  if (isSdkSessionRunning(key)) stopSdkSession(key)
+  // 无条件调用：温存续会话（run=null）isSdkSessionRunning 为 false，但 agent 进程需要释放
+  stopSdkSession(key)
   if (_isCliSessionRunning(key)) _stopCliSession(key)
 }
 
@@ -101,6 +102,9 @@ export async function handleSessionClosed(sessionKey: string, chatType: ChatType
   const failed = exitInfo && exitInfo.exitCode !== 0 && exitInfo.exitCode !== null
   const chatId = extractChatId(sessionKey)
   const mainChat = isMainUser(chatId, chatType)
+  // 非长连接模式下正常退出是常态，不打扰用户
+  const ch = resolveChannelForSession(sessionKey)
+  const persistentPoll = (ch?.keepSession ?? true) && (ch?.persistentPoll ?? true)
 
   if (failed) {
     const lock = cachedLock()
@@ -127,7 +131,7 @@ export async function handleSessionClosed(sessionKey: string, chatType: ChatType
         : `⚠️ Agent 异常退出 (exit=${exitInfo.exitCode})。请检查配置后重试。`
       await notifyChat(sessionKey, errMsg)
     }
-  } else if (mainChat) {
+  } else if (mainChat && persistentPoll) {
     const output = exitInfo?.stderr?.trim() || exitInfo?.stdout?.trim() || ""
     const exitMsg = output ? `Agent已退出\n退出前输出：\n${output}` : "Agent已退出"
     await notifyChat(sessionKey, exitMsg)
@@ -329,11 +333,16 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
     modelParams = resolved.modelParams
   }
 
+  // 会话保活模式：保留会话（温存续）+ 长连接（无限 poll）；长连接仅在保留会话开启时有效
+  const keepSession = channel?.keepSession ?? true
+  const persistentPoll = keepSession && (channel?.persistentPoll ?? true)
+
   if (resource.type === "sdk") {
     return launchSdkAgent({
       sessionKey, chatType, meta, workspaceDir: workDir, useMainWorkspace: useMain,
       senderOpenId, chatName, taskMessage,
       apiKey: resource.apiKey ?? "", model, modelParams,
+      keepSession, persistentPoll,
     })
   }
 
@@ -344,6 +353,7 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
     workspaceDir: workDir, model,
     resumeScope: needResume && channel ? mainChatScopeKey(channel.id, workDir) : undefined,
     newSession: channel?.mainUserNewSession ?? false,
+    persistentPoll,
   })
 }
 
@@ -571,11 +581,13 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
 
     const userName = senderOpenId ? chatNameCache.get(senderOpenId) : undefined
     const chatName = chatNameCache.get(chatId) || userName
+    const warm = hasWarmSdkSession(sessionKey)
     const label = chatType === "group"
       ? `群聊 ${chatName ? `「${chatName}」` : chatId}`
       : (mainUser ? `主用户私聊${userName ? ` (${userName})` : ""}` : `私聊 ${userName || chatId}`)
-    broadcastLog(`[Agent] ${label} 有新消息，自动拉起${mainUser ? "(主工作目录)" : ""}`)
-    await notifyChat(sessionKey, "正在启动Agent，请稍等...")
+    broadcastLog(`[Agent] ${label} 有新消息，${warm ? "温启动唤醒" : "自动拉起"}${mainUser ? "(主工作目录)" : ""}`)
+    // 温启动秒级恢复，不打扰用户；仅冷启动（Agent.create 需数秒）才提示等待
+    if (!warm) await notifyChat(sessionKey, "正在启动Agent，请稍等...")
 
     const meta: import("./agent-launcher").LaunchMeta = { chatId, chatType: chatType as "p2p" | "group" }
     const result = await launchSessionAgent(sessionKey, chatType as "p2p" | "group", meta, mainUser, senderOpenId)
@@ -600,4 +612,6 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
 export function initSessionDispatcher(): void {
   setChatNameResolver((chatId) => chatNameCache.get(chatId))
   setSessionCloseHandler(handleSessionClosed)
+  // 温存续收口后立即调度：收口期间到达的消息无需等下一轮轮询
+  setSdkIdleHandler(() => { void dispatchSessionAgents().catch(() => {}) })
 }

@@ -12,11 +12,13 @@ interface Props {
   onChange: (value: string) => void
   options: Option[]
   placeholder?: string
+  /** value 在 options 中无匹配时的显示文本（避免已保存值显示为 placeholder） */
+  fallbackLabel?: string
 }
 
 const DROP_MAX_H = 280
 
-export default function SearchableSelect({ value, onChange, options, placeholder }: Props) {
+export default function SearchableSelect({ value, onChange, options, placeholder, fallbackLabel }: Props) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState("")
   const [style, setStyle] = useState<React.CSSProperties>({})
@@ -67,6 +69,7 @@ export default function SearchableSelect({ value, onChange, options, placeholder
     : options
 
   const selected = options.find((o) => o.id === value)
+  const displayText = selected?.label || (value ? fallbackLabel : undefined)
 
   return (
     <>
@@ -76,8 +79,8 @@ export default function SearchableSelect({ value, onChange, options, placeholder
         onClick={() => { setOpen(!open); setQuery("") }}
         className="flex h-[34px] w-full items-center justify-between rounded-md border border-gray-700 bg-gray-800 px-3 text-left text-sm outline-none transition hover:border-gray-600 focus:border-blue-500"
       >
-        <span className={selected ? "text-gray-100" : "text-gray-500"}>
-          {selected?.label || placeholder || "选择..."}
+        <span className={`truncate ${displayText ? "text-gray-100" : "text-gray-500"}`} title={displayText}>
+          {displayText || placeholder || "选择..."}
         </span>
         <ChevronDown size={14} className={`text-gray-500 transition ${open ? "rotate-180" : ""}`} />
       </button>
@@ -112,7 +115,7 @@ export default function SearchableSelect({ value, onChange, options, placeholder
                     o.id === value ? "bg-blue-600/20 text-blue-400" : "text-gray-300"
                   }`}
                 >
-                  <span className="truncate">{o.label}</span>
+                  <span className="truncate" title={o.label}>{o.label}</span>
                 </button>
               ))
             )}

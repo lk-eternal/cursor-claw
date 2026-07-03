@@ -5,6 +5,7 @@ import {
 } from "lucide-react"
 import SearchableSelect from "./SearchableSelect"
 import useInlineModal from "./useInlineModal"
+import { modelSlug } from "../model-utils"
 
 const inputCls = "w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm outline-none transition focus:border-blue-500"
 
@@ -30,6 +31,8 @@ function emptyChannel(type: "feishu" | "wechat", defaultName: string): ChannelCo
     allowOthers: false,
     digitalIdentity: "",
     workspaceDir: "",
+    keepSession: true,
+    persistentPoll: true,
   }
 }
 
@@ -158,7 +161,7 @@ export default function ChannelPanel() {
                             <span className="text-gray-700">·</span>
                           </>
                         )}
-                        <span className="truncate">{resource?.name ?? "Cursor CLI"} · 主模型 {c.model || "auto"}{c.othersModel ? ` · 其他人 ${c.othersModel}` : ""}{c.workspaceDir ? ` · 📁${c.workspaceDir.split(/[\\/]/).pop()}` : ""}</span>
+                        <span className="truncate">{resource?.name ?? "Cursor CLI"} · 主模型 {modelSlug(c.model, c.modelParams) || "auto"}{c.othersModel ? ` · 其他人 ${modelSlug(c.othersModel, c.othersModelParams)}` : ""}{c.workspaceDir ? ` · 📁${c.workspaceDir.split(/[\\/]/).pop()}` : ""}</span>
                       </p>
                     </div>
                   </div>
@@ -270,7 +273,7 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
         else if (!r.ok) void showAlert("错误", r.error || "获取模型列表失败")
       } else {
         const r = await window.electronAPI.listModels()
-        if (r.ok && r.models.length > 0) setModelOptions(r.models.map((m) => ({ ...m, params: "" })))
+        if (r.ok && r.models.length > 0) setModelOptions(r.models.map((m) => ({ ...m, label: m.id, params: "" })))
         else if (!r.ok) void showAlert("错误", r.error || "获取模型列表失败")
       }
     } finally {
@@ -553,8 +556,9 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
                     onChange={(key) => { const { id, params } = parseModelKey(key); set({ model: id, modelParams: params }) }}
                     options={modelOptions.map((o) => ({ id: modelKey(o.id, o.params), label: o.label }))}
                     placeholder="选择模型..."
+                    fallbackLabel={modelSlug(draft.model, draft.modelParams)}
                   />
-                : <input type="text" value={draft.model} onChange={(e) => set({ model: e.target.value, modelParams: "" })} placeholder="auto" className={inputCls} />}
+                : <input type="text" value={modelSlug(draft.model, draft.modelParams)} onChange={(e) => set({ model: e.target.value, modelParams: "" })} placeholder="auto" className={inputCls} />}
             </div>
             <div>
               <label className="mb-1 block text-xs text-gray-500">其他人模型 <span className="text-gray-600">— 其他用户私聊 & 群聊</span></label>
@@ -564,9 +568,36 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
                     onChange={(key) => { if (!key) { set({ othersModel: "", othersModelParams: "" }); return } const { id, params } = parseModelKey(key); set({ othersModel: id, othersModelParams: params }) }}
                     options={[{ id: "", label: "跟随主模型" }, ...modelOptions.map((o) => ({ id: modelKey(o.id, o.params), label: o.label }))]}
                     placeholder="跟随主模型"
+                    fallbackLabel={modelSlug(draft.othersModel, draft.othersModelParams)}
                   />
-                : <input type="text" value={draft.othersModel} onChange={(e) => set({ othersModel: e.target.value, othersModelParams: "" })} placeholder="留空则跟随主模型" className={inputCls} />}
+                : <input type="text" value={modelSlug(draft.othersModel, draft.othersModelParams)} onChange={(e) => set({ othersModel: e.target.value, othersModelParams: "" })} placeholder="留空则跟随主模型" className={inputCls} />}
             </div>
+          </div>
+
+          {/* ── 会话保活模式 ── */}
+          <div className="space-y-3 rounded-lg border border-gray-800 p-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <h4 className="text-xs font-medium text-gray-400">保留会话</h4>
+                <p className="text-xs text-gray-600">回答结束后保留 Agent 进程，新消息温启动秒回且上下文延续；关闭后每次问答结束即释放，下次消息冷启动</p>
+              </div>
+              <button onClick={() => set({ keepSession: !(draft.keepSession ?? true) })}
+                className={`relative h-5 w-9 shrink-0 rounded-full transition ${(draft.keepSession ?? true) ? "bg-blue-600" : "bg-gray-600"}`}>
+                <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition ${(draft.keepSession ?? true) ? "left-[18px]" : "left-0.5"}`} />
+              </button>
+            </div>
+            {(draft.keepSession ?? true) && (
+              <div className="flex items-center justify-between border-t border-gray-800 pt-3">
+                <div>
+                  <p className="text-xs text-gray-400">保持长连接 <span className="ml-1 rounded bg-blue-900/50 px-1.5 py-0.5 text-[10px] text-blue-300">次数套餐用户推荐</span></p>
+                  <p className="text-xs text-gray-600">无限轮询保活，会话期间多条消息共享一次额度；关闭后回答完即结束回合、按需温启动唤醒（Token 计费用户推荐关闭，空闲零消耗）</p>
+                </div>
+                <button onClick={() => set({ persistentPoll: !(draft.persistentPoll ?? true) })}
+                  className={`relative h-5 w-9 shrink-0 rounded-full transition ${(draft.persistentPoll ?? true) ? "bg-blue-600" : "bg-gray-600"}`}>
+                  <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition ${(draft.persistentPoll ?? true) ? "left-[18px]" : "left-0.5"}`} />
+                </button>
+              </div>
+            )}
           </div>
 
           {/* ── 主用户绑定 ── */}

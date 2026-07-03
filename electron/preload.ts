@@ -31,6 +31,8 @@ export interface MessageChannel {
   allowOthers: boolean
   digitalIdentity: string
   workspaceDir: string
+  keepSession?: boolean
+  persistentPoll?: boolean
 }
 
 export interface ChannelStatusInfo {

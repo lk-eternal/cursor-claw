@@ -494,6 +494,7 @@ function buildDaemonChannelConfigs(): DaemonChannelConfig[] {
     mainUserEnabled: !!c.mainUserEnabled,
     mainUserChatId: c.mainUserEnabled ? (c.mainUserChatId?.trim() ?? "") : "",
     workspaceDir: c.workspaceDir?.trim() ?? "",
+    keepAlive: (c.keepSession ?? true) && (c.persistentPoll ?? true),
   }))
 }
 
@@ -1157,7 +1158,7 @@ export async function applyWorkspaceSwitch(workspaceDir: string, stopOldSessions
 /**
  * 保存配置；若工作目录变更且旧目录有活跃会话，返回会话列表供渲染进程展示确认弹窗。
  */
-/** 通道中影响 Daemon 连接的字段子集（变更后才需要重启 Daemon） */
+/** 通道中影响 Daemon 连接的字段子集（变更后才需要重启 Daemon）；配置类字段走热更新，不入此名单 */
 function daemonRelevantChannelView(channels: MessageChannel[]): string {
   return JSON.stringify(channels.map((c) => ({
     id: c.id, type: c.type, enabled: c.enabled,
@@ -1165,6 +1166,28 @@ function daemonRelevantChannelView(channels: MessageChannel[]): string {
     token: c.wechatToken, account: c.wechatAccountId,
     ws: c.workspaceDir,
   })))
+}
+
+/** 运行时可热更新的通道配置（保存后直推 daemon 内存，不重启、不打断会话） */
+function channelRuntimeFlags(channels: MessageChannel[]) {
+  return channels.filter(channelReady).map((c) => ({
+    id: c.id,
+    keepAlive: (c.keepSession ?? true) && (c.persistentPoll ?? true),
+    name: c.name,
+    mainUserEnabled: !!c.mainUserEnabled,
+    mainUserChatId: c.mainUserEnabled ? (c.mainUserChatId?.trim() ?? "") : "",
+  }))
+}
+
+async function pushChannelFlagsToDaemon(channels: MessageChannel[]): Promise<void> {
+  const port = cachedPort ?? readLockFile()?.port
+  if (!port) return
+  try {
+    await httpPost(`http://127.0.0.1:${port}/api/channel-flags`, { channels: channelRuntimeFlags(channels) }, 5000)
+    broadcastLog("[Channels] 保活开关已热更新至 Daemon（无需重启）")
+  } catch (e: unknown) {
+    broadcastLog(`[Channels] 保活开关热更新失败: ${e instanceof Error ? e.message : String(e)}`, "WARN")
+  }
 }
 
 export async function saveAppConfigFromRenderer(partial: Partial<AppConfig>): Promise<ConfigSaveResult> {
@@ -1216,11 +1239,11 @@ export async function saveAppConfigFromRenderer(partial: Partial<AppConfig>): Pr
 
   saveConfig(partial)
 
-  // 通道配置变化：重启 Daemon 使新连接配置生效
   if (channelsChanging) {
+    // 连接类字段（凭据/启停/工作目录）变化：必须重启 Daemon 重建连接
     const st = await getDaemonStatus()
     if (st.running) {
-      broadcastLog("[Channels] 通道配置已变更，正在重启 Daemon...")
+      broadcastLog("[Channels] 通道连接配置已变更，正在重启 Daemon...")
       void (async () => {
         await stopDaemon()
         await new Promise((r) => setTimeout(r, 800))
@@ -1229,6 +1252,9 @@ export async function saveAppConfigFromRenderer(partial: Partial<AppConfig>): Pr
         broadcastStatus(await getDaemonStatus())
       })()
     }
+  } else if (partial.channels !== undefined) {
+    // 仅运行时配置（保活开关等）变化：热推送到 Daemon，不重启、不打断会话
+    void pushChannelFlagsToDaemon(partial.channels)
   }
 
   return { ok: true, ...(workspaceDirChanged ? { workspaceDirChanged: true } : {}) }
@@ -1411,6 +1437,7 @@ export function initDaemonManager(): void {
 
   ipcMain.handle("channel:unbind", (_e, channelId: string) => {
     updateChannel(channelId, { mainUserEnabled: false, mainUserChatId: "" })
+    void pushChannelFlagsToDaemon(getChannels())
     return { ok: true }
   })
 

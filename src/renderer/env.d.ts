@@ -36,6 +36,8 @@ interface ChannelConfig {
   allowOthers: boolean
   digitalIdentity: string
   workspaceDir: string
+  keepSession?: boolean
+  persistentPoll?: boolean
 }
 
 interface ChannelStatusInfo {

@@ -57,7 +57,10 @@ function DefEditor({ initial, onSave, onCancel }: DefEditorProps) {
       setDefaultModel(cfg.model || "auto")
       const fetcher = cfg.agentMode === "sdk" ? window.electronAPI.listSdkModels : window.electronAPI.listModels
       fetcher().then((res) => {
-        if (res.ok) setModelOptions(res.models.map((m) => ({ id: m.id, label: m.label || m.id })))
+        if (!res.ok) return
+        // 工作流节点模型只存 id（不带 variant 参数），按 id 去重并直接以 id 展示
+        const seen = new Set<string>()
+        setModelOptions(res.models.filter((m) => !seen.has(m.id) && (seen.add(m.id), true)).map((m) => ({ id: m.id, label: m.id })))
       })
     })
   }, [])
@@ -236,6 +239,7 @@ function DefEditor({ initial, onSave, onCancel }: DefEditorProps) {
                         onChange={(v) => updateNode(activeNodeIdx, { model: v || undefined })}
                         options={modelOptions}
                         placeholder={activeNodeIdx === 0 ? `默认: ${modelLabel(defaultModel)}` : `继承: ${getInheritedModel(activeNodeIdx)}`}
+                        fallbackLabel={activeNode.model}
                       />
                     ) : (
                       <div className="flex h-[34px] items-center rounded-md border border-gray-700/50 bg-gray-800/50 px-3 text-xs text-gray-400">

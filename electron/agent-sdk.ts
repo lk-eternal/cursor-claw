@@ -8,6 +8,7 @@ import { type ChatType, type LaunchMeta, buildPrompt, resolveSessionChatName } f
 interface SdkSessionAgent {
   sessionKey: string
   agent: SDKAgent
+  /** 当前活跃 run；null = 温存续（agent 进程保留，等待下一次 send 免冷启动） */
   run: Run | null
   agentId: string
   startedAt: number
@@ -17,16 +18,58 @@ interface SdkSessionAgent {
   senderOpenId?: string
   chatName?: string
   abortController: AbortController
+  /** 通道开关：run 结束后是否保留 agent 进程（温存续） */
+  keepSession: boolean
+  /** 通道开关：是否长连接（无限 poll 保活）；false = 回答完即收回合，按需唤醒 */
+  persistentPoll: boolean
   /** 流式日志聚合缓冲：连续同类型(thinking/text)增量合并成一条打印 */
   logAgg: { kind: "thinking" | "text" | null; buf: string }
   /** 最近一次终态状态事件（ERROR/EXPIRED/CANCELLED），用于结束时还原真实错误原因 */
   lastStatus?: { status: string; message?: string }
+  /** 温存续闲置回收 */
+  idleTimer?: ReturnType<typeof setTimeout>
 }
 
 const sdkSessions = new Map<string, SdkSessionAgent>()
 const pendingLaunches = new Set<string>()
 const failedCooldowns = new Map<string, number>()
 const FAIL_COOLDOWN_MS = 30_000
+
+// ── 温存续（会话保留）────────────────────────────────────
+// keepSession=true 的 p2p/群聊会话在 run 结束后不释放 agent 进程：
+// - 长连接模式下 run 意外断掉（网络抖动/平台侧中断），下一条消息温启动恢复，上下文保留；
+// - 非长连接模式下回答完即收回合，新消息由调度器温启动唤醒，跳过 Agent.create 冷启动。
+const WARM_IDLE_TTL_MS = 4 * 60 * 60 * 1000
+
+function isWarmEligible(session: SdkSessionAgent): boolean {
+  return session.keepSession && (session.chatType === "p2p" || session.chatType === "group")
+}
+
+function buildWakePrompt(session: SdkSessionAgent): string {
+  return [
+    "[SESSION_RESUME / 系统指令] 会话已由后台唤醒（历史上下文完整保留），有新消息待处理。",
+    "立即执行：非阻塞检查 poll-message（wait=false），按 cursor-claw 协议处理所有消息并逐条回复，然后按 keep_alive 模式收尾。",
+    "禁止向用户发送问候、唤醒说明等任何多余消息。",
+    "---",
+    "会话元数据:",
+    `[session_key=${session.sessionKey}]`,
+    `[chat_type=${session.chatType}]`,
+    `[keep_alive=${session.persistentPoll}]`,
+  ].join("\n")
+}
+
+let sdkIdleHandler: ((sessionKey: string) => void) | null = null
+
+/** run 转入温存续后回调（调度器借此立即消费积压消息） */
+export function setSdkIdleHandler(fn: (sessionKey: string) => void): void {
+  sdkIdleHandler = fn
+}
+
+function closeAndRemoveSession(session: SdkSessionAgent): void {
+  if (session.idleTimer) { clearTimeout(session.idleTimer); session.idleTimer = undefined }
+  try { session.agent.close() } catch { /* best-effort */ }
+  sdkSessions.delete(session.sessionKey)
+}
 
 function ensureSdkBinaryPaths(): void {
   if (process.env.CURSOR_RIPGREP_PATH) return
@@ -155,13 +198,20 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
 export function isSdkSessionRunning(sessionKey: string): boolean {
   if (pendingLaunches.has(sessionKey)) return true
   const s = sdkSessions.get(sessionKey)
-  return s !== undefined && !s.abortController.signal.aborted
+  // 温存续（run=null）视为未运行：新消息走 launchSdkAgent 的温续期路径
+  return s !== undefined && !s.abortController.signal.aborted && s.run !== null
+}
+
+/** 是否存在可温启动唤醒的存续会话（秒级恢复，无需"正在启动"提示） */
+export function hasWarmSdkSession(sessionKey: string): boolean {
+  const s = sdkSessions.get(sessionKey)
+  return s !== undefined && !s.abortController.signal.aborted && s.run === null
 }
 
 export function getSdkSessionCount(): number {
   let count = 0
   for (const s of sdkSessions.values()) {
-    if (!s.abortController.signal.aborted) count++
+    if (!s.abortController.signal.aborted && s.run !== null) count++
   }
   return count
 }
@@ -176,6 +226,7 @@ export function getSdkSessionList() {
     workspaceDir: s.workspaceDir,
     senderOpenId: s.senderOpenId,
     chatName: s.chatName,
+    idle: s.run === null,
   }))
 }
 
@@ -193,6 +244,80 @@ export interface SdkLaunchOptions {
   /** 调用方解析好的模型（空 = composer-2） */
   model?: string
   modelParams?: string
+  /** 通道开关：run 结束后保留 agent 进程（默认 true） */
+  keepSession?: boolean
+  /** 通道开关：长连接无限 poll 保活（默认 true；false = 回答完收回合按需唤醒） */
+  persistentPoll?: boolean
+}
+
+/** run 生命周期托管：结束后按 keepSession 转温存续或释放 */
+function startRunLifecycle(session: SdkSessionAgent, run: Run): void {
+  session.run = run
+  session.lastActivityAt = Date.now()
+
+  streamRunEvents(session, run).then(async () => {
+    const sessionKey = session.sessionKey
+    const level = run.status === "error" ? "ERROR" : "INFO"
+
+    if (run.status === "error") {
+      // wait() 返回 RunResult 对象（出错时也不抛），真实原因藏在 RunResult.result / 终态状态事件里
+      const wr = await run.wait().catch((e: unknown) => e)
+      const detail = wr instanceof Error ? `${wr.constructor.name}: ${wr.message}` : JSON.stringify(wr)
+      const last = session.lastStatus
+      const lastStr = last ? `lastStatus=${last.status}${last.message ? ` msg=${last.message}` : ""} ` : ""
+      pushUiLog("SDK", "ERROR", `[${sessionKey}] 运行错误详情: ${lastStr}waitResult=${detail}`)
+      failedCooldowns.set(sessionKey, Date.now() + FAIL_COOLDOWN_MS)
+    }
+
+    const summary = [
+      run.result && `result=${run.result}`,
+      run.durationMs != null && `duration=${run.durationMs}ms`,
+    ].filter(Boolean).join(", ")
+    pushUiLog("SDK", level, `[${sessionKey}] Agent 运行结束 (status=${run.status}${summary ? `, ${summary}` : ""})`)
+
+    session.run = null
+    if (isWarmEligible(session) && !session.abortController.signal.aborted) {
+      session.idleTimer = setTimeout(() => {
+        pushUiLog("SDK", "INFO", `[${sessionKey}] 温会话闲置 ${WARM_IDLE_TTL_MS / 3_600_000}h，释放 agent 进程`)
+        closeAndRemoveSession(session)
+        broadcastSdkSessionStatus()
+      }, WARM_IDLE_TTL_MS)
+      pushUiLog("SDK", "INFO", `[${sessionKey}] 会话转入温存续（agent 进程保留，新消息温启动免冷启动）`)
+      broadcastSdkSessionStatus()
+      // 收口期间可能已有积压消息，立即触发一次调度
+      sdkIdleHandler?.(sessionKey)
+    } else {
+      closeAndRemoveSession(session)
+      broadcastSdkSessionStatus()
+    }
+  })
+}
+
+/** 温启动唤醒：复用存活的 agent 进程直接 send，跳过 Agent.create 冷启动 */
+async function wakeWarmSession(session: SdkSessionAgent, opts: SdkLaunchOptions): Promise<{ ok: boolean; error?: string }> {
+  const { sessionKey } = session
+  pendingLaunches.add(sessionKey)
+  try {
+    if (session.idleTimer) { clearTimeout(session.idleTimer); session.idleTimer = undefined }
+    // 开关热更新：唤醒时同步通道最新配置
+    session.keepSession = opts.keepSession ?? true
+    session.persistentPoll = (opts.keepSession ?? true) && (opts.persistentPoll ?? true)
+    pushUiLog("SDK", "INFO", `[${sessionKey}] 温启动唤醒 (agentId=${session.agentId}, 免冷启动)`)
+    const wakePrompt = buildWakePrompt(session)
+    pushUiLog("SDK", "INFO", `[${sessionKey}] 唤醒 Prompt:\n${wakePrompt}`)
+    const run = await session.agent.send(wakePrompt)
+    startRunLifecycle(session, run)
+    broadcastSdkSessionStatus()
+    return { ok: true }
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e)
+    pushUiLog("SDK", "WARN", `[${sessionKey}] 温启动失败，将回退冷启动: ${msg}`)
+    closeAndRemoveSession(session)
+    broadcastSdkSessionStatus()
+    return { ok: false, error: msg }
+  } finally {
+    pendingLaunches.delete(sessionKey)
+  }
 }
 
 export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: boolean; error?: string }> {
@@ -210,6 +335,14 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
   }
   failedCooldowns.delete(sessionKey)
 
+  // 温会话优先：agent 进程还活着，直接温启动唤醒
+  const warm = sdkSessions.get(sessionKey)
+  if (warm && !warm.abortController.signal.aborted && warm.run === null) {
+    const woken = await wakeWarmSession(warm, opts)
+    if (woken.ok) return woken
+    // 温启动失败已清理会话，继续走冷启动
+  }
+
   pendingLaunches.add(sessionKey)
 
   const apiKey = opts.apiKey?.trim()
@@ -218,7 +351,9 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     return { ok: false, error: "通道绑定的 SDK 资源未配置 API Key（设置 → Agent）" }
   }
 
-  const prompt = buildPrompt(meta, taskMessage, sessionKey, opts.useMainWorkspace)
+  const keepSession = opts.keepSession ?? true
+  const persistentPoll = keepSession && (opts.persistentPoll ?? true)
+  const prompt = buildPrompt(meta, taskMessage, sessionKey, opts.useMainWorkspace, persistentPoll)
 
   try {
     ensureSdkBinaryPaths()
@@ -255,51 +390,30 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       senderOpenId,
       chatName,
       abortController,
+      keepSession,
+      persistentPoll,
       logAgg: { kind: null, buf: "" },
     }
 
     sdkSessions.set(sessionKey, session)
-    pendingLaunches.delete(sessionKey)
     broadcastLog(`[SDK] 会话 ${sessionKey} 已创建, agentId=${agent.agentId}`)
     broadcastSdkSessionStatus()
 
+    pushUiLog("SDK", "INFO", `[${sessionKey}] 启动 Prompt:\n${prompt}`)
     const run = await agent.send(prompt)
-    session.run = run
-
-    streamRunEvents(session, run).then(async () => {
-      const level = run.status === "error" ? "ERROR" : "INFO"
-
-      if (run.status === "error") {
-        // wait() 返回 RunResult 对象（出错时也不抛），真实原因藏在 RunResult.result / 终态状态事件里
-        const wr = await run.wait().catch((e: unknown) => e)
-        const detail = wr instanceof Error ? `${wr.constructor.name}: ${wr.message}` : JSON.stringify(wr)
-        const last = session.lastStatus
-        const lastStr = last ? `lastStatus=${last.status}${last.message ? ` msg=${last.message}` : ""} ` : ""
-        pushUiLog("SDK", "ERROR", `[${sessionKey}] 运行错误详情: ${lastStr}waitResult=${detail}`)
-        failedCooldowns.set(sessionKey, Date.now() + FAIL_COOLDOWN_MS)
-      }
-
-      const summary = [
-        run.result && `result=${run.result}`,
-        run.durationMs != null && `duration=${run.durationMs}ms`,
-      ].filter(Boolean).join(", ")
-      pushUiLog("SDK", level, `[${sessionKey}] Agent 运行结束 (status=${run.status}${summary ? `, ${summary}` : ""})`)
-      try { session.agent.close() } catch { /* best-effort */ }
-      sdkSessions.delete(sessionKey)
-      broadcastSdkSessionStatus()
-    })
+    startRunLifecycle(session, run)
 
     return { ok: true }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e)
     broadcastLog(`[SDK] 启动失败 ${sessionKey}: ${msg}`, "ERROR")
     failedCooldowns.set(sessionKey, Date.now() + FAIL_COOLDOWN_MS)
-    pendingLaunches.delete(sessionKey)
     const failed = sdkSessions.get(sessionKey)
-    if (failed) try { failed.agent.close() } catch { /* best-effort */ }
-    sdkSessions.delete(sessionKey)
+    if (failed) closeAndRemoveSession(failed)
     broadcastSdkSessionStatus()
     return { ok: false, error: msg }
+  } finally {
+    pendingLaunches.delete(sessionKey)
   }
 }
 
@@ -310,8 +424,7 @@ export function stopSdkSession(sessionKey: string): void {
   if (s.run) {
     s.run.cancel().catch(() => {})
   }
-  s.agent.close()
-  sdkSessions.delete(sessionKey)
+  closeAndRemoveSession(s)
   broadcastSdkSessionStatus()
 }
 
@@ -344,6 +457,14 @@ export interface SdkModelOption {
   current: boolean
 }
 
+/** 变体参数合成 CLI 风格 slug：claude-4.6-opus + {thinking:true, context:max} → claude-4.6-opus-thinking-max */
+function modelSlug(id: string, params: { id: string; value: string }[]): string {
+  return id + params
+    .filter((p) => p.value !== "false")
+    .map((p) => (p.value === "true" ? `-${p.id}` : `-${p.value}`))
+    .join("")
+}
+
 export async function listSdkModels(apiKey: string, currentModelId?: string, currentModelParams?: string): Promise<{ ok: boolean; models: SdkModelOption[]; error?: string }> {
   const key = apiKey?.trim()
   if (!key) return { ok: false, models: [], error: "API Key 未配置" }
@@ -357,16 +478,19 @@ export async function listSdkModels(apiKey: string, currentModelId?: string, cur
     const models: SdkModelOption[] = []
     for (const m of sdkModels) {
       if (m.variants && m.variants.length > 0) {
-        const nameCount = new Map<string, number>()
-        for (const v of m.variants) nameCount.set(v.displayName, (nameCount.get(v.displayName) || 0) + 1)
+        const slugCount = new Map<string, number>()
+        for (const v of m.variants) {
+          const s = modelSlug(m.id, v.params)
+          slugCount.set(s, (slugCount.get(s) || 0) + 1)
+        }
 
         for (const v of m.variants) {
           const ps = JSON.stringify(v.params)
-          const hasDup = (nameCount.get(v.displayName) || 0) > 1
-          const suffix = hasDup ? ` (${v.params.map((p) => `${p.id}=${p.value}`).join(", ")})` : ""
+          const slug = modelSlug(m.id, v.params)
+          const hasDup = (slugCount.get(slug) || 0) > 1
           models.push({
             id: m.id,
-            label: (v.displayName || m.displayName) + suffix,
+            label: hasDup ? `${slug} (${v.params.map((p) => `${p.id}=${p.value}`).join(", ")})` : slug,
             params: ps,
             current: m.id === currentModel && ps === currentParams,
           })
@@ -374,7 +498,7 @@ export async function listSdkModels(apiKey: string, currentModelId?: string, cur
       } else {
         models.push({
           id: m.id,
-          label: m.displayName || m.id,
+          label: m.id,
           params: "",
           current: m.id === currentModel && !currentParams,
         })

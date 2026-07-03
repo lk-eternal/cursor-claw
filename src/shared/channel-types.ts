@@ -43,6 +43,10 @@ export interface MessageChannel {
   digitalIdentity: string;
   // 工作目录，空 = 使用全局主工作目录
   workspaceDir: string;
+  /** 保留会话：run 结束后保留 agent 进程，新消息温启动免冷启动（默认 true） */
+  keepSession?: boolean;
+  /** 保持长连接：无限 poll 保活，次数套餐推荐（默认 true；false = 回答完收回合按需唤醒） */
+  persistentPoll?: boolean;
 }
 
 /** 下发给 Daemon 的通道配置（含运行所需的全部字段） */
@@ -58,6 +62,8 @@ export interface DaemonChannelConfig {
   mainUserChatId: string;
   /** 通道级工作目录，空 = 跟随全局 WORKSPACE_DIR */
   workspaceDir: string;
+  /** 合成开关（keepSession && persistentPoll）：poll 响应随路下发，作为 Agent 收尾方式的权威来源 */
+  keepAlive?: boolean;
 }
 
 /** Daemon 上报的通道状态 */

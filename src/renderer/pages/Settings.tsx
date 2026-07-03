@@ -45,6 +45,7 @@ import WorkspaceSessionModal, { type SessionEntry } from "../components/Workspac
 import TitleBar from "../components/TitleBar"
 import useInlineModal from "../components/useInlineModal"
 import { REQUIRED_FEISHU_SCOPES, FEISHU_SCOPES_JSON } from "../constants"
+import { modelSlug } from "../model-utils"
 
 interface Props { onBack: () => void; initialTab?: string; onTabConsumed?: () => void }
 
@@ -416,7 +417,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
         else if (!r.ok) void showAlert("错误", r.error || "获取模型列表失败")
       } else {
         const r = await window.electronAPI.listModels()
-        if (r.ok && r.models.length > 0) setTaskModelOptions(r.models.map((m) => ({ ...m, params: "" })))
+        if (r.ok && r.models.length > 0) setTaskModelOptions(r.models.map((m) => ({ ...m, label: m.id, params: "" })))
         else if (!r.ok) void showAlert("错误", r.error || "获取模型列表失败")
       }
     } finally {
@@ -844,7 +845,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
                           <p className={`truncate text-sm font-medium ${t.enabled ? "" : "text-gray-600 line-through"}`}>{t.name}</p>
                           <span className="shrink-0 rounded bg-gray-800 px-1.5 py-0.5 font-mono text-[10px] text-gray-500">{t.cron}</span>
                           {t.channelId && <span className="shrink-0 rounded bg-blue-900/40 px-1.5 py-0.5 text-[10px] text-blue-400">{taskChannels.find((c) => c.id === t.channelId)?.name ?? "通道已删除"}</span>}
-                          {t.model && <span className="shrink-0 rounded bg-purple-900/40 px-1.5 py-0.5 text-[10px] text-purple-400">{t.model}</span>}
+                          {t.model && <span className="shrink-0 rounded bg-purple-900/40 px-1.5 py-0.5 text-[10px] text-purple-400">{modelSlug(t.model, t.modelParams)}</span>}
                           {t.independent !== false && <span className="shrink-0 rounded bg-indigo-900/40 px-1.5 py-0.5 text-[10px] text-indigo-400">独立</span>}
                           {isRunning && <span className="inline-flex items-center gap-1 shrink-0 rounded bg-green-900/40 px-1.5 py-0.5 text-[10px] text-green-400"><span className="inline-block h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse" />运行中</span>}
                         </div>
@@ -1335,8 +1336,9 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
                         }}
                         options={[{ id: "", label: "跟随通道主模型" }, ...taskModelOptions.map((o) => ({ id: o.id + (o.params ? "\0" + o.params : ""), label: o.label }))]}
                         placeholder="跟随通道主模型"
+                        fallbackLabel={modelSlug(taskEditing.model, taskEditing.modelParams)}
                       />
-                    : <input type="text" value={taskEditing.model ?? ""} onChange={(e) => setTaskEditing({ ...taskEditing, model: e.target.value || undefined, modelParams: undefined })} placeholder="留空跟随通道主模型" className={inputCls} />}
+                    : <input type="text" value={modelSlug(taskEditing.model, taskEditing.modelParams)} onChange={(e) => setTaskEditing({ ...taskEditing, model: e.target.value || undefined, modelParams: undefined })} placeholder="留空跟随通道主模型" className={inputCls} />}
                 </div>
               </div>
               <div className="flex items-center gap-4">
