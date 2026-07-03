@@ -1714,22 +1714,31 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
   }
 
   // ── 用户名查询（通过 open_id 获取用户名）──
+  // open_id 是应用维度的：优先用 channelId 指定的通道查询，未指定时回退遍历所有飞书通道
   if (pathname === "/api/user-names" && method === "POST") {
     const body = JSON.parse(await readBody(req));
     const openIds = Array.isArray(body.openIds) ? body.openIds as string[] : [];
-    const clients = [...channels.values()].filter((c) => c.cfg.type === "feishu" && c.client).map((c) => c.client!);
-    if (clients.length === 0) { json(res, { ok: false, error: "飞书未启用" }, 400); return true; }
+    const preferred = typeof body.channelId === "string" ? channels.get(body.channelId) : undefined;
+    const feishuRts = [...channels.values()].filter((c) => c.cfg.type === "feishu" && c.client);
+    if (feishuRts.length === 0) { json(res, { ok: false, error: "飞书未启用" }, 400); return true; }
+    const ordered = preferred?.client ? [preferred, ...feishuRts.filter((c) => c !== preferred)] : feishuRts;
     const names: Record<string, string> = {};
     for (const oid of openIds) {
-      for (const client of clients) {
+      const errors: string[] = [];
+      for (const rt of ordered) {
         try {
-          const r: any = await client.contact.user.get({
+          const r: any = await rt.client!.contact.user.get({
             path: { user_id: oid },
             params: { user_id_type: "open_id" },
           });
           const name = r?.data?.user?.name;
           if (name) { names[oid] = name; break; }
-        } catch { /* ignore */ }
+        } catch (e: any) {
+          errors.push(`[${rt.cfg.name}] ${e?.response?.data?.msg ?? e?.message ?? e}`);
+        }
+      }
+      if (!names[oid]) {
+        log("WARN", `用户名解析失败 ${oid}: ${errors.join("; ") || "所有通道均无结果"}（若为权限问题，请为对应应用开通 contact:contact.base:readonly）`);
       }
     }
     json(res, { ok: true, names });

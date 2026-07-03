@@ -12,7 +12,7 @@ import {
   updateChannel, migrateLegacyConfig, effectiveWorkspaceDir,
   mainChatScopeKey, type MessageChannel,
 } from "./config-store"
-import { parseChatKey, type DaemonChannelConfig, type ChannelStatusInfo } from "../src/shared/channel-types"
+import { parseChatKey, channelIdFromSessionKey, type DaemonChannelConfig, type ChannelStatusInfo } from "../src/shared/channel-types"
 import { validateCron, readTasksFromFile, writeTasksToFile, previewCronNextRuns, getNextCronFireLabel } from "./cron-scheduler"
 import { seedBuiltins, listDefinitions, saveDefinition, deleteDefinition, listInstances, getInstance, saveInstance, deleteInstance } from "./workflow-file"
 import { runWorkflowDefinition } from "./workflow-runner"
@@ -854,10 +854,17 @@ function startStatusPolling(): void {
           .map((s) => s.sessionKey.includes("::") ? s.sessionKey.split("::")[0] : s.sessionKey)
         if (uncachedGroups.length > 0) await fetchChatNames(uncachedGroups)
 
-        const uncachedP2pOpenIds = sessions
+        // open_id 按签发应用分组查询（open_id 是应用维度的，跨应用查询必然失败）
+        const uncachedP2p = sessions
           .filter((s) => s.chatType === "p2p" && s.senderOpenId?.startsWith("ou_") && !chatNameCache.has(s.senderOpenId))
-          .map((s) => s.senderOpenId!)
-        if (uncachedP2pOpenIds.length > 0) await fetchUserNames(uncachedP2pOpenIds)
+        const byChannel = new Map<string | undefined, string[]>()
+        for (const s of uncachedP2p) {
+          const cid = channelIdFromSessionKey(s.sessionKey)
+          const list = byChannel.get(cid) ?? []
+          list.push(s.senderOpenId!)
+          byChannel.set(cid, list)
+        }
+        for (const [cid, ids] of byChannel) await fetchUserNames(ids, cid)
       }
 
       if (status.running) {

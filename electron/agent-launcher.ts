@@ -48,6 +48,7 @@ function appendCapped(buf: string, chunk: string): string {
 }
 
 let chatNameResolver: ((chatId: string) => string | undefined) | null = null
+let chatNameFallback: ((chatId: string) => string | undefined) | null = null
 let sessionCloseHandler: ((sessionKey: string, chatType: ChatType, exitInfo?: SessionExitInfo) => void | Promise<void>) | null = null
 
 export interface SessionExitInfo {
@@ -61,15 +62,22 @@ export function setChatNameResolver(fn: (chatId: string) => string | undefined):
   chatNameResolver = fn
 }
 
+/** 名字解析不到时的兜底展示（如「通道名·访客」），避免 UI 直接裸展示 sessionKey */
+export function setChatNameFallback(fn: (chatId: string) => string | undefined): void {
+  chatNameFallback = fn
+}
+
 export function setSessionCloseHandler(fn: (sessionKey: string, chatType: ChatType, exitInfo?: SessionExitInfo) => void | Promise<void>): void {
   sessionCloseHandler = fn
 }
 
-/** 广播时实时解析会话名：优先用会话自带名，否则按 chatId / senderOpenId 查缓存（群名异步解析后自愈） */
+/** 广播时实时解析会话名：优先用会话自带名，否则按 chatId / senderOpenId 查缓存（群名异步解析后自愈），最后走兜底名 */
 export function resolveSessionChatName(sessionKey: string, chatName?: string, senderOpenId?: string): string | undefined {
   if (chatName) return chatName
   const chatId = sessionKey.includes("::") ? sessionKey.split("::")[0] : sessionKey
-  return chatNameResolver?.(chatId) || (senderOpenId ? chatNameResolver?.(senderOpenId) : undefined)
+  return chatNameResolver?.(chatId)
+    || (senderOpenId ? chatNameResolver?.(senderOpenId) : undefined)
+    || chatNameFallback?.(chatId)
 }
 
 function broadcastSessionStatus(): void {

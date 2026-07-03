@@ -16,7 +16,7 @@ import {
   getSessionAgentList as getRawCliSessionList,
   isSessionAgentRunning as _isCliSessionRunning,
   getSessionAgentStartedAt,
-  setChatNameResolver, setSessionCloseHandler,
+  setChatNameResolver, setChatNameFallback, setSessionCloseHandler, resolveSessionChatName,
   type ChatType, type SessionExitInfo,
 } from "./agent-launcher"
 import {
@@ -169,15 +169,23 @@ export async function fetchChatNames(chatIds: string[]): Promise<void> {
   } catch { /* ignore */ }
 }
 
-export async function fetchUserNames(openIds: string[]): Promise<void> {
-  const missing = openIds.filter((id) => id && !chatNameCache.has(id))
+/** 解析失败冷却：避免对无权限/无法解析的 openId 每轮轮询都打 API */
+const nameFetchFailedAt = new Map<string, number>()
+const NAME_FETCH_RETRY_MS = 10 * 60_000
+
+export async function fetchUserNames(openIds: string[], channelId?: string): Promise<void> {
+  const now = Date.now()
+  const missing = openIds.filter((id) =>
+    id && !chatNameCache.has(id) && now - (nameFetchFailedAt.get(id) ?? 0) > NAME_FETCH_RETRY_MS)
   if (missing.length === 0) return
   const lock = cachedLock()
   if (!lock?.port) return
   try {
-    const res = (await httpPost(`http://127.0.0.1:${lock.port}/api/user-names`, { openIds: missing }, 15_000)) as { names?: Record<string, string> }
-    if (res?.names) {
-      for (const [id, name] of Object.entries(res.names)) chatNameCache.set(id, name)
+    const res = (await httpPost(`http://127.0.0.1:${lock.port}/api/user-names`, { openIds: missing, channelId }, 15_000)) as { names?: Record<string, string> }
+    for (const id of missing) {
+      const name = res?.names?.[id]
+      if (name) chatNameCache.set(id, name)
+      else nameFetchFailedAt.set(id, now)
     }
   } catch { /* ignore */ }
 }
@@ -410,11 +418,7 @@ export function getSessionAgentList() {
     ...getRawCliSessionList(),
     ...getSdkSessionList().map((s) => ({ ...s, pid: 0 })),
   ]
-  return rawList.map((s) => {
-    const chatId = s.sessionKey.includes("::") ? s.sessionKey.split("::")[0] : s.sessionKey
-    const chatName = s.chatName || chatNameCache.get(chatId) || (s.senderOpenId ? chatNameCache.get(s.senderOpenId) : undefined)
-    return { ...s, chatName }
-  })
+  return rawList.map((s) => ({ ...s, chatName: resolveSessionChatName(s.sessionKey, s.chatName, s.senderOpenId) }))
 }
 
 // ── /chat 命令处理 ────────────────────────────────────────
@@ -574,7 +578,7 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
     const mainUser = isMainUser(chatId, chatType)
 
     if (feishuOn && chatType === "p2p" && senderOpenId?.startsWith("ou_") && !chatNameCache.has(senderOpenId)) {
-      await fetchUserNames([senderOpenId])
+      await fetchUserNames([senderOpenId], parseChatKey(chatId).channelId)
     }
 
     await new Promise((r) => setTimeout(r, 500))
@@ -582,9 +586,10 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
     const userName = senderOpenId ? chatNameCache.get(senderOpenId) : undefined
     const chatName = chatNameCache.get(chatId) || userName
     const warm = hasWarmSdkSession(sessionKey)
+    const p2pName = userName || resolveSessionChatName(sessionKey, undefined, senderOpenId) || chatId
     const label = chatType === "group"
       ? `群聊 ${chatName ? `「${chatName}」` : chatId}`
-      : (mainUser ? `主用户私聊${userName ? ` (${userName})` : ""}` : `私聊 ${userName || chatId}`)
+      : (mainUser ? `主用户私聊${userName ? ` (${userName})` : ""}` : `私聊 ${p2pName}`)
     broadcastLog(`[Agent] ${label} 有新消息，${warm ? "温启动唤醒" : "自动拉起"}${mainUser ? "(主工作目录)" : ""}`)
     // 温启动秒级恢复，不打扰用户；仅冷启动（Agent.create 需数秒）才提示等待
     if (!warm) await notifyChat(sessionKey, "正在启动Agent，请稍等...")
@@ -611,6 +616,11 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
 
 export function initSessionDispatcher(): void {
   setChatNameResolver((chatId) => chatNameCache.get(chatId))
+  // 名字查不到（如 bot 缺通讯录权限）时，用「通道名·访客」代替裸 sessionKey
+  setChatNameFallback((chatId) => {
+    const channel = getChannel(parseChatKey(chatId).channelId)
+    return channel?.name ? `${channel.name}·访客` : undefined
+  })
   setSessionCloseHandler(handleSessionClosed)
   // 温存续收口后立即调度：收口期间到达的消息无需等下一轮轮询
   setSdkIdleHandler(() => { void dispatchSessionAgents().catch(() => {}) })
