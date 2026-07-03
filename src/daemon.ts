@@ -388,9 +388,20 @@ function extractWorkspaceTitle(sessionKey?: string): string | undefined {
   const idx = sessionKey.indexOf("::");
   if (idx < 0) return undefined;
   const wsDir = sessionKey.slice(idx + 2);
-  if (!wsDir) return undefined;
+  // 仅路径形态的后缀才是工作目录（排除 wf_xxx 等非路径会话后缀）
+  if (!wsDir || !/[\\/]/.test(wsDir)) return undefined;
   const name = wsDir.replace(/\\/g, "/").split("/").filter(Boolean).pop();
   return name || undefined;
+}
+
+/** 仅主用户私聊显示工作目录标题（只有主用户可能在多个工作目录间切换），群聊/其他人不显示 */
+function resolveReplyTitle(ch: ResolvedChannel, sessionKey?: string): string | undefined {
+  if (ch.type !== "feishu") return undefined;
+  const { mainUserEnabled, mainUserChatId } = ch.rt.cfg;
+  if (!mainUserEnabled || !mainUserChatId) return undefined;
+  // chatId 为空时走 sender 默认目标（绑定主用户后即主用户私聊）
+  if (ch.chatId && ch.chatId !== mainUserChatId) return undefined;
+  return extractWorkspaceTitle(sessionKey);
 }
 
 type ResolvedChannel =
@@ -1518,7 +1529,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       json(res, { ok: await ch.rt.wechat!.sendText(ch.chatId, text) });
     } else {
       const sender = ch.rt.sender!;
-      const title = extractWorkspaceTitle(session_key);
+      const title = resolveReplyTitle(ch, session_key);
       let sentMsgId: string | undefined;
       if (message_id) {
         sentMsgId = await sender.sendMessage(text, message_id, undefined, title);
@@ -1714,31 +1725,34 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
   }
 
   // ── 用户名查询（通过 open_id 获取用户名）──
-  // open_id 是应用维度的：优先用 channelId 指定的通道查询，未指定时回退遍历所有飞书通道
+  // open_id 是应用维度的：只有签发它的应用（所属通道）能解析，跨通道查询必然报 "open_id cross app"
   if (pathname === "/api/user-names" && method === "POST") {
     const body = JSON.parse(await readBody(req));
     const openIds = Array.isArray(body.openIds) ? body.openIds as string[] : [];
-    const preferred = typeof body.channelId === "string" ? channels.get(body.channelId) : undefined;
-    const feishuRts = [...channels.values()].filter((c) => c.cfg.type === "feishu" && c.client);
-    if (feishuRts.length === 0) { json(res, { ok: false, error: "飞书未启用" }, 400); return true; }
-    const ordered = preferred?.client ? [preferred, ...feishuRts.filter((c) => c !== preferred)] : feishuRts;
+    const owner = typeof body.channelId === "string" ? channels.get(body.channelId) : undefined;
     const names: Record<string, string> = {};
-    for (const oid of openIds) {
-      const errors: string[] = [];
-      for (const rt of ordered) {
-        try {
-          const r: any = await rt.client!.contact.user.get({
-            path: { user_id: oid },
-            params: { user_id_type: "open_id" },
-          });
-          const name = r?.data?.user?.name;
-          if (name) { names[oid] = name; break; }
-        } catch (e: any) {
-          errors.push(`[${rt.cfg.name}] ${e?.response?.data?.msg ?? e?.message ?? e}`);
-        }
+    if (!owner?.client) {
+      if (openIds.length > 0) {
+        log("WARN", `用户名解析跳过 ${openIds.join(",")}: 所属通道 ${body.channelId ?? "未知"} 未连接或非飞书通道`);
       }
-      if (!names[oid]) {
-        log("WARN", `用户名解析失败 ${oid}: ${errors.join("; ") || "所有通道均无结果"}（若为权限问题，请为对应应用开通 contact:contact.base:readonly）`);
+      json(res, { ok: true, names });
+      return true;
+    }
+    for (const oid of openIds) {
+      try {
+        const r: any = await owner.client.contact.user.get({
+          path: { user_id: oid },
+          params: { user_id_type: "open_id" },
+        });
+        const name = r?.data?.user?.name;
+        if (name) { names[oid] = name; continue; }
+        // SDK 对业务错误码（code!=0）不一定抛异常，这里把真实 code/msg 显式暴露出来
+        log("WARN", `用户名解析失败 ${oid}@${owner.cfg.name}: code=${r?.code ?? "?"} ${r?.msg ?? "返回为空"}`
+          + "（需 contact:contact.base:readonly 且用户在应用通讯录可见范围内；外部用户无法解析，将以“通道名·访客”展示）");
+      } catch (e: any) {
+        const msg = e?.response?.data?.msg ?? e?.message ?? String(e);
+        log("WARN", `用户名解析失败 ${oid}@${owner.cfg.name}: ${msg}`
+          + "（需 contact:contact.base:readonly 且用户在应用通讯录可见范围内；外部用户无法解析，将以“通道名·访客”展示）");
       }
     }
     json(res, { ok: true, names });

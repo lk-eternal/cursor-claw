@@ -43,7 +43,7 @@ export interface MessageChannel {
   digitalIdentity: string;
   // 工作目录，空 = 使用全局主工作目录
   workspaceDir: string;
-  /** 保留会话：run 结束后保留 agent 进程，新消息温启动免冷启动（默认 true） */
+  /** 保留会话：run 结束后保留上下文（记录 agentId），新消息 Resume 延续对话（默认 true） */
   keepSession?: boolean;
   /** 保持长连接：无限 poll 保活，次数套餐推荐（默认 true；false = 回答完收回合按需唤醒） */
   persistentPoll?: boolean;

@@ -21,7 +21,8 @@ import {
 } from "./agent-launcher"
 import {
   launchSdkAgent, stopSdkSession, stopAllSdkSessions,
-  isSdkSessionRunning, getSdkSessionList, setSdkIdleHandler, hasWarmSdkSession,
+  isSdkSessionRunning, getSdkSessionList, setSdkIdleHandler, hasResumableSdkSession,
+  getSdkCooldownUntil,
 } from "./agent-sdk"
 import { injectWorkspaceToDir } from "./workspace-injector"
 
@@ -55,7 +56,7 @@ export function isSessionAgentRunning(key: string): boolean {
 }
 
 export function stopSessionAgent(key: string): void {
-  // 无条件调用：温存续会话（run=null）isSdkSessionRunning 为 false，但 agent 进程需要释放
+  // 无条件调用：send 前短暂窗口（run=null）isSdkSessionRunning 为 false，但 agent 进程需要释放
   stopSdkSession(key)
   if (_isCliSessionRunning(key)) _stopCliSession(key)
 }
@@ -297,7 +298,7 @@ interface LaunchAgentParams {
   workingDirectory?: string
 }
 
-async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?: string }> {
+async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?: string; retryable?: boolean }> {
   const { sessionKey, chatType, meta, senderOpenId, chatName, taskMessage } = p
   const useMain = p.useMainWorkspace ?? (chatType === "p2p")
 
@@ -341,7 +342,7 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
     modelParams = resolved.modelParams
   }
 
-  // 会话保活模式：保留会话（温存续）+ 长连接（无限 poll）；长连接仅在保留会话开启时有效
+  // 会话模式：保留会话（run 结束持久化 agentId，新消息 Resume 续上下文）+ 长连接（无限 poll）
   const keepSession = channel?.keepSession ?? true
   const persistentPoll = keepSession && (channel?.persistentPoll ?? true)
 
@@ -351,6 +352,7 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
       senderOpenId, chatName, taskMessage,
       apiKey: resource.apiKey ?? "", model, modelParams,
       keepSession, persistentPoll,
+      newSession: useMain && (channel?.mainUserNewSession ?? false),
     })
   }
 
@@ -369,7 +371,7 @@ export async function launchSessionAgent(
   sessionKey: string, chatType: ChatType,
   meta?: import("./agent-launcher").LaunchMeta,
   useMainWorkspace?: boolean, senderOpenId?: string,
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; error?: string; retryable?: boolean }> {
   return launchAgent({ sessionKey, chatType, meta, useMainWorkspace, senderOpenId })
 }
 
@@ -545,6 +547,9 @@ async function isZombieAgent(sessionKey: string): Promise<boolean> {
 
 let dispatching = false
 
+/** 每个冷却周期只向用户提示一次（记录已提示的冷却截止时间戳） */
+const cooldownNotifiedUntil = new Map<string, number>()
+
 export async function dispatchSessionAgents(): Promise<void> {
   if (dispatching) return
   dispatching = true
@@ -574,6 +579,18 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
       }
     }
 
+    // 失败冷却期内不启动也不丢消息：队列保留，下一轮调度自动重试
+    const cooldownUntil = getSdkCooldownUntil(sessionKey)
+    if (cooldownUntil > 0) {
+      if (cooldownNotifiedUntil.get(sessionKey) !== cooldownUntil) {
+        cooldownNotifiedUntil.set(sessionKey, cooldownUntil)
+        const secs = Math.ceil((cooldownUntil - Date.now()) / 1000)
+        broadcastLog(`[Agent] ${sessionKey} 冷却中，约 ${secs}s 后自动重试（消息保留在队列）`)
+        await notifyChat(sessionKey, `⏳ Agent 正在恢复，您的消息将在约 ${secs} 秒后自动处理`)
+      }
+      continue
+    }
+
     const chatId = extractChatId(sessionKey)
     const mainUser = isMainUser(chatId, chatType)
 
@@ -585,14 +602,14 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
 
     const userName = senderOpenId ? chatNameCache.get(senderOpenId) : undefined
     const chatName = chatNameCache.get(chatId) || userName
-    const warm = hasWarmSdkSession(sessionKey)
+    const resumable = hasResumableSdkSession(sessionKey)
     const p2pName = userName || resolveSessionChatName(sessionKey, undefined, senderOpenId) || chatId
     const label = chatType === "group"
       ? `群聊 ${chatName ? `「${chatName}」` : chatId}`
       : (mainUser ? `主用户私聊${userName ? ` (${userName})` : ""}` : `私聊 ${p2pName}`)
-    broadcastLog(`[Agent] ${label} 有新消息，${warm ? "温启动唤醒" : "自动拉起"}${mainUser ? "(主工作目录)" : ""}`)
-    // 温启动秒级恢复，不打扰用户；仅冷启动（Agent.create 需数秒）才提示等待
-    if (!warm) await notifyChat(sessionKey, "正在启动Agent，请稍等...")
+    broadcastLog(`[Agent] ${label} 有新消息，${resumable ? "Resume 恢复" : "自动拉起"}${mainUser ? "(主工作目录)" : ""}`)
+    // Resume 恢复静默进行；仅真正冷启动（无历史上下文可续）才提示等待
+    if (!resumable) await notifyChat(sessionKey, "正在启动Agent，请稍等...")
 
     const meta: import("./agent-launcher").LaunchMeta = { chatId, chatType: chatType as "p2p" | "group" }
     const result = await launchSessionAgent(sessionKey, chatType as "p2p" | "group", meta, mainUser, senderOpenId)
@@ -601,6 +618,11 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
       if (lock?.port) await syncActiveSession(lock.port, chatId, sessionKey)
     }
     if (!result.ok) {
+      if (result.retryable) {
+        // 瞬态失败（如冷却竞态）：消息保留在队列，下一轮调度自动重试
+        broadcastLog(`[Agent] ${sessionKey} 本轮跳过: ${result.error}（消息保留待重试）`)
+        continue
+      }
       broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${result.error}`)
       await notifyChat(sessionKey, `启动Agent失败: ${result.error ?? "未知错误"}`)
       const lock = cachedLock()
@@ -622,6 +644,6 @@ export function initSessionDispatcher(): void {
     return channel?.name ? `${channel.name}·访客` : undefined
   })
   setSessionCloseHandler(handleSessionClosed)
-  // 温存续收口后立即调度：收口期间到达的消息无需等下一轮轮询
+  // run 收口释放后立即调度：运行期间到达的消息无需等下一轮轮询
   setSdkIdleHandler(() => { void dispatchSessionAgents().catch(() => {}) })
 }

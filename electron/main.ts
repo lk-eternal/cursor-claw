@@ -374,16 +374,22 @@ let isQuitting = false
 
 // 第三方 SDK（如 @cursor/sdk）深处的异步 socket 错误无法在调用点捕获，
 // 全局兜底记日志，避免 Electron 默认弹出 "JavaScript error in main process" 并中断运行
-process.on("uncaughtException", (err) => {
+// 网络类抖动（代理/NAT 掐掉闲置长连接等）降为 WARN：会话层已有 Resume 自愈机制
+const NETWORK_NOISE_RE = /WRONG_VERSION_NUMBER|SSL routines|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EPIPE|socket hang up|fetch failed|GOAWAY/i
+
+function logGlobalError(kind: string, raw: unknown): void {
+  const msg = raw instanceof Error ? raw.message : String(raw)
   try {
-    broadcastLog(`[Main] 未捕获异常: ${err?.message ?? err}`, "ERROR")
-  } catch { console.error("[Main] uncaughtException:", err) }
-})
-process.on("unhandledRejection", (reason) => {
-  try {
-    broadcastLog(`[Main] 未处理的 Promise 拒绝: ${reason instanceof Error ? reason.message : reason}`, "ERROR")
-  } catch { console.error("[Main] unhandledRejection:", reason) }
-})
+    if (NETWORK_NOISE_RE.test(msg)) {
+      broadcastLog(`[Main] SDK 后台连接抖动（已由会话恢复机制兜底）: ${msg}`, "WARN")
+    } else {
+      broadcastLog(`[Main] ${kind}: ${msg}`, "ERROR")
+    }
+  } catch { console.error(`[Main] ${kind}:`, raw) }
+}
+
+process.on("uncaughtException", (err) => logGlobalError("未捕获异常", err))
+process.on("unhandledRejection", (reason) => logGlobalError("未处理的 Promise 拒绝", reason))
 
 app.on("before-quit", () => {
   isQuitting = true

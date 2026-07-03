@@ -579,7 +579,7 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
             <div className="flex items-center justify-between">
               <div>
                 <h4 className="text-xs font-medium text-gray-400">保留会话</h4>
-                <p className="text-xs text-gray-600">回答结束后保留 Agent 进程，新消息温启动秒回且上下文延续；关闭后每次问答结束即释放，下次消息冷启动</p>
+                <p className="text-xs text-gray-600">回答结束后保留会话上下文，新消息自动恢复延续对话（应用重启也不丢）；关闭后每条消息都是全新会话</p>
               </div>
               <button onClick={() => set({ keepSession: !(draft.keepSession ?? true) })}
                 className={`relative h-5 w-9 shrink-0 rounded-full transition ${(draft.keepSession ?? true) ? "bg-blue-600" : "bg-gray-600"}`}>
@@ -590,7 +590,7 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
               <div className="flex items-center justify-between border-t border-gray-800 pt-3">
                 <div>
                   <p className="text-xs text-gray-400">保持长连接 <span className="ml-1 rounded bg-blue-900/50 px-1.5 py-0.5 text-[10px] text-blue-300">次数套餐用户推荐</span></p>
-                  <p className="text-xs text-gray-600">无限轮询保活，会话期间多条消息共享一次额度；关闭后回答完即结束回合、按需温启动唤醒（Token 计费用户推荐关闭，空闲零消耗）</p>
+                  <p className="text-xs text-gray-600">无限轮询保活，有新消息立即处理，会话期间多条消息共享一次额度；关闭后回答完即结束回合、新消息重新冷启动</p>
                 </div>
                 <button onClick={() => set({ persistentPoll: !(draft.persistentPoll ?? true) })}
                   className={`relative h-5 w-9 shrink-0 rounded-full transition ${(draft.persistentPoll ?? true) ? "bg-blue-600" : "bg-gray-600"}`}>

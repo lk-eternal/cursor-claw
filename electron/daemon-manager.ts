@@ -25,7 +25,7 @@ import {
   P2P_SESSION_KEY, setMainChatId, getMainChatId,
   type ChatType,
 } from "./agent-launcher"
-import { stopAllSdkSessions, getSdkSessionCount, getSdkSessionList, checkSdkApiKey, listSdkModels } from "./agent-sdk"
+import { stopAllSdkSessions, resetSdkSessionContext, getSdkSessionCount, getSdkSessionList, checkSdkApiKey, listSdkModels } from "./agent-sdk"
 import {
   setDaemonPort,
   injectWorkspaceToDir, injectWorkspaceMcpAndRules, clearInjectionCache,
@@ -1034,6 +1034,8 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           if (sessionKey && isSessionAgentRunning(sessionKey)) {
             stopSessionAgent(sessionKey)
           }
+          // SDK 上下文重置：丢弃 resume 映射，下条消息全新会话
+          if (sessionKey) resetSdkSessionContext(sessionKey)
           const wsDir = resolveResetWorkspaceDir(sessionKey, claimed.chatId, claimed.chatType)
           const cmdChannelId = claimed.chatId ? parseChatKey(claimed.chatId).channelId : undefined
           if (wsDir && cmdChannelId) setMainChatId(mainChatScopeKey(cmdChannelId, wsDir), "")

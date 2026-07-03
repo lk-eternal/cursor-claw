@@ -1,6 +1,7 @@
 import { Agent, type SDKAgent, type Run, type SDKMessage } from "@cursor/sdk"
+import { app } from "electron"
 import { resolve, join, dirname } from "node:path"
-import { existsSync } from "node:fs"
+import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import { pushUiLog, broadcastLog, broadcastSessionStatus } from "./ui-logger"
 import { type ChatType, type LaunchMeta, buildPrompt, resolveSessionChatName } from "./agent-launcher"
@@ -8,7 +9,7 @@ import { type ChatType, type LaunchMeta, buildPrompt, resolveSessionChatName } f
 interface SdkSessionAgent {
   sessionKey: string
   agent: SDKAgent
-  /** 当前活跃 run；null = 温存续（agent 进程保留，等待下一次 send 免冷启动） */
+  /** 当前活跃 run；null 仅出现在 send 前的短暂窗口（run 结束即整体释放） */
   run: Run | null
   agentId: string
   startedAt: number
@@ -18,7 +19,7 @@ interface SdkSessionAgent {
   senderOpenId?: string
   chatName?: string
   abortController: AbortController
-  /** 通道开关：run 结束后是否保留 agent 进程（温存续） */
+  /** 通道开关：是否保留会话上下文（run 结束后记录 agentId，新消息 Resume 续上） */
   keepSession: boolean
   /** 通道开关：是否长连接（无限 poll 保活）；false = 回答完即收回合，按需唤醒 */
   persistentPoll: boolean
@@ -26,8 +27,6 @@ interface SdkSessionAgent {
   logAgg: { kind: "thinking" | "text" | null; buf: string }
   /** 最近一次终态状态事件（ERROR/EXPIRED/CANCELLED），用于结束时还原真实错误原因 */
   lastStatus?: { status: string; message?: string }
-  /** 温存续闲置回收 */
-  idleTimer?: ReturnType<typeof setTimeout>
 }
 
 const sdkSessions = new Map<string, SdkSessionAgent>()
@@ -35,14 +34,57 @@ const pendingLaunches = new Set<string>()
 const failedCooldowns = new Map<string, number>()
 const FAIL_COOLDOWN_MS = 30_000
 
-// ── 温存续（会话保留）────────────────────────────────────
-// keepSession=true 的 p2p/群聊会话在 run 结束后不释放 agent 进程：
-// - 长连接模式下 run 意外断掉（网络抖动/平台侧中断），下一条消息温启动恢复，上下文保留；
-// - 非长连接模式下回答完即收回合，新消息由调度器温启动唤醒，跳过 Agent.create 冷启动。
-const WARM_IDLE_TTL_MS = 4 * 60 * 60 * 1000
+// ── 会话上下文恢复（Resume）──────────────────────────────
+// 不保留闲置 agent 进程：闲置连接会被代理/NAT 静默掐死，复用必报 SSL WRONG_VERSION_NUMBER。
+// run 结束即释放进程，仅持久化 sessionKey→agentId 映射；新消息 Agent.resume 恢复——
+// 全新连接 + 历史上下文完整保留，应用重启后同样有效。
+interface ResumeEntry { agentId: string; workspaceDir: string; updatedAt: number }
 
-function isWarmEligible(session: SdkSessionAgent): boolean {
+const RESUME_ENTRY_TTL_MS = 14 * 24 * 60 * 60 * 1000
+let resumableAgents: Map<string, ResumeEntry> | null = null
+
+function resumeStorePath(): string {
+  return join(app.getPath("userData"), "sdk-resume-map.json")
+}
+
+function getResumableMap(): Map<string, ResumeEntry> {
+  if (resumableAgents) return resumableAgents
+  resumableAgents = new Map()
+  try {
+    const raw = JSON.parse(readFileSync(resumeStorePath(), "utf8")) as Record<string, ResumeEntry>
+    const now = Date.now()
+    for (const [key, e] of Object.entries(raw)) {
+      if (e?.agentId && e.workspaceDir && now - (e.updatedAt ?? 0) < RESUME_ENTRY_TTL_MS) {
+        resumableAgents.set(key, e)
+      }
+    }
+  } catch { /* 首次运行或文件损坏：从空开始 */ }
+  return resumableAgents
+}
+
+function saveResumableMap(): void {
+  if (!resumableAgents) return
+  try {
+    writeFileSync(resumeStorePath(), JSON.stringify(Object.fromEntries(resumableAgents)), "utf8")
+  } catch (e: unknown) {
+    pushUiLog("SDK", "WARN", `Resume 映射保存失败: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
+function isResumeEligible(session: SdkSessionAgent): boolean {
   return session.keepSession && (session.chatType === "p2p" || session.chatType === "group")
+}
+
+function rememberResumable(session: SdkSessionAgent): void {
+  if (!isResumeEligible(session) || !session.workspaceDir) return
+  getResumableMap().set(session.sessionKey, {
+    agentId: session.agentId, workspaceDir: session.workspaceDir, updatedAt: Date.now(),
+  })
+  saveResumableMap()
+}
+
+function forgetResumable(sessionKey: string): void {
+  if (getResumableMap().delete(sessionKey)) saveResumableMap()
 }
 
 function buildWakePrompt(session: SdkSessionAgent): string {
@@ -60,13 +102,12 @@ function buildWakePrompt(session: SdkSessionAgent): string {
 
 let sdkIdleHandler: ((sessionKey: string) => void) | null = null
 
-/** run 转入温存续后回调（调度器借此立即消费积压消息） */
+/** run 收口释放后回调（调度器借此立即消费运行期间积压的消息） */
 export function setSdkIdleHandler(fn: (sessionKey: string) => void): void {
   sdkIdleHandler = fn
 }
 
 function closeAndRemoveSession(session: SdkSessionAgent): void {
-  if (session.idleTimer) { clearTimeout(session.idleTimer); session.idleTimer = undefined }
   try { session.agent.close() } catch { /* best-effort */ }
   sdkSessions.delete(session.sessionKey)
 }
@@ -198,14 +239,23 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
 export function isSdkSessionRunning(sessionKey: string): boolean {
   if (pendingLaunches.has(sessionKey)) return true
   const s = sdkSessions.get(sessionKey)
-  // 温存续（run=null）视为未运行：新消息走 launchSdkAgent 的温续期路径
   return s !== undefined && !s.abortController.signal.aborted && s.run !== null
 }
 
-/** 是否存在可温启动唤醒的存续会话（秒级恢复，无需"正在启动"提示） */
-export function hasWarmSdkSession(sessionKey: string): boolean {
-  const s = sdkSessions.get(sessionKey)
-  return s !== undefined && !s.abortController.signal.aborted && s.run === null
+/** 是否有可 Resume 的历史会话（上下文可恢复，无需完整冷启动提示） */
+export function hasResumableSdkSession(sessionKey: string): boolean {
+  return getResumableMap().has(sessionKey)
+}
+
+/** 该会话失败冷却的截止时间戳；0 = 未在冷却 */
+export function getSdkCooldownUntil(sessionKey: string): number {
+  const until = failedCooldowns.get(sessionKey)
+  if (!until) return 0
+  if (Date.now() >= until) {
+    failedCooldowns.delete(sessionKey)
+    return 0
+  }
+  return until
 }
 
 export function getSdkSessionCount(): number {
@@ -226,7 +276,6 @@ export function getSdkSessionList() {
     workspaceDir: s.workspaceDir,
     senderOpenId: s.senderOpenId,
     chatName: s.chatName,
-    idle: s.run === null,
   }))
 }
 
@@ -244,13 +293,15 @@ export interface SdkLaunchOptions {
   /** 调用方解析好的模型（空 = composer-2） */
   model?: string
   modelParams?: string
-  /** 通道开关：run 结束后保留 agent 进程（默认 true） */
+  /** 通道开关：保留会话上下文（默认 true；false = 每条消息全新会话） */
   keepSession?: boolean
   /** 通道开关：长连接无限 poll 保活（默认 true；false = 回答完收回合按需唤醒） */
   persistentPoll?: boolean
+  /** 主用户每次新会话：跳过 Resume，直接新建（上下文清零） */
+  newSession?: boolean
 }
 
-/** run 生命周期托管：结束后按 keepSession 转温存续或释放 */
+/** run 生命周期托管：结束即释放 agent 进程（上下文靠持久化的 agentId Resume 恢复） */
 function startRunLifecycle(session: SdkSessionAgent, run: Run): void {
   session.run = run
   session.lastActivityAt = Date.now()
@@ -276,51 +327,14 @@ function startRunLifecycle(session: SdkSessionAgent, run: Run): void {
     pushUiLog("SDK", level, `[${sessionKey}] Agent 运行结束 (status=${run.status}${summary ? `, ${summary}` : ""})`)
 
     session.run = null
-    if (isWarmEligible(session) && !session.abortController.signal.aborted) {
-      session.idleTimer = setTimeout(() => {
-        pushUiLog("SDK", "INFO", `[${sessionKey}] 温会话闲置 ${WARM_IDLE_TTL_MS / 3_600_000}h，释放 agent 进程`)
-        closeAndRemoveSession(session)
-        broadcastSdkSessionStatus()
-      }, WARM_IDLE_TTL_MS)
-      pushUiLog("SDK", "INFO", `[${sessionKey}] 会话转入温存续（agent 进程保留，新消息温启动免冷启动）`)
-      broadcastSdkSessionStatus()
-      // 收口期间可能已有积压消息，立即触发一次调度
-      sdkIdleHandler?.(sessionKey)
-    } else {
-      closeAndRemoveSession(session)
-      broadcastSdkSessionStatus()
-    }
+    closeAndRemoveSession(session)
+    broadcastSdkSessionStatus()
+    // 运行期间可能已有积压消息，立即触发一次调度（异常场景由冷却期门控节奏）
+    sdkIdleHandler?.(sessionKey)
   })
 }
 
-/** 温启动唤醒：复用存活的 agent 进程直接 send，跳过 Agent.create 冷启动 */
-async function wakeWarmSession(session: SdkSessionAgent, opts: SdkLaunchOptions): Promise<{ ok: boolean; error?: string }> {
-  const { sessionKey } = session
-  pendingLaunches.add(sessionKey)
-  try {
-    if (session.idleTimer) { clearTimeout(session.idleTimer); session.idleTimer = undefined }
-    // 开关热更新：唤醒时同步通道最新配置
-    session.keepSession = opts.keepSession ?? true
-    session.persistentPoll = (opts.keepSession ?? true) && (opts.persistentPoll ?? true)
-    pushUiLog("SDK", "INFO", `[${sessionKey}] 温启动唤醒 (agentId=${session.agentId}, 免冷启动)`)
-    const wakePrompt = buildWakePrompt(session)
-    pushUiLog("SDK", "INFO", `[${sessionKey}] 唤醒 Prompt:\n${wakePrompt}`)
-    const run = await session.agent.send(wakePrompt)
-    startRunLifecycle(session, run)
-    broadcastSdkSessionStatus()
-    return { ok: true }
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e)
-    pushUiLog("SDK", "WARN", `[${sessionKey}] 温启动失败，将回退冷启动: ${msg}`)
-    closeAndRemoveSession(session)
-    broadcastSdkSessionStatus()
-    return { ok: false, error: msg }
-  } finally {
-    pendingLaunches.delete(sessionKey)
-  }
-}
-
-export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: boolean; error?: string }> {
+export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: boolean; error?: string; retryable?: boolean }> {
   const { sessionKey, chatType, meta, workspaceDir, senderOpenId, chatName, taskMessage } = opts
 
   if (isSdkSessionRunning(sessionKey) || pendingLaunches.has(sessionKey)) {
@@ -331,17 +345,9 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
 
   const cooldownUntil = failedCooldowns.get(sessionKey)
   if (cooldownUntil && Date.now() < cooldownUntil) {
-    return { ok: false, error: `冷却中，${Math.ceil((cooldownUntil - Date.now()) / 1000)}s 后可重试` }
+    return { ok: false, retryable: true, error: `冷却中，${Math.ceil((cooldownUntil - Date.now()) / 1000)}s 后自动重试` }
   }
   failedCooldowns.delete(sessionKey)
-
-  // 温会话优先：agent 进程还活着，直接温启动唤醒
-  const warm = sdkSessions.get(sessionKey)
-  if (warm && !warm.abortController.signal.aborted && warm.run === null) {
-    const woken = await wakeWarmSession(warm, opts)
-    if (woken.ok) return woken
-    // 温启动失败已清理会话，继续走冷启动
-  }
 
   pendingLaunches.add(sessionKey)
 
@@ -353,7 +359,6 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
 
   const keepSession = opts.keepSession ?? true
   const persistentPoll = keepSession && (opts.persistentPoll ?? true)
-  const prompt = buildPrompt(meta, taskMessage, sessionKey, opts.useMainWorkspace, persistentPoll)
 
   try {
     ensureSdkBinaryPaths()
@@ -365,17 +370,33 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
         modelSelection.params = JSON.parse(opts.modelParams)
       } catch { /* ignore bad JSON */ }
     }
-    pushUiLog("SDK", "INFO", `[${sessionKey}] 正在创建 SDK Agent (cwd=${workspaceDir}, model=${JSON.stringify(modelSelection)})`)
 
-    const agent = await Agent.create({
-      apiKey,
-      model: modelSelection,
-      local: {
-        cwd: workspaceDir,
-        settingSources: ["project", "user"],
-        sandboxOptions: { enabled: false },
-      },
-    })
+    const localOptions = {
+      cwd: workspaceDir,
+      settingSources: ["project", "user"] as ("project" | "user")[],
+      sandboxOptions: { enabled: false },
+    }
+
+    // 有可恢复的 agentId 时优先 Resume：全新连接，历史上下文完整保留；
+    // 关闭保留会话 / 主用户每次新会话 / 任务类会话直接新建
+    const wantResume = keepSession && !opts.newSession && !taskMessage
+    if (!wantResume) forgetResumable(sessionKey)
+    const resumable = wantResume ? getResumableMap().get(sessionKey) : undefined
+    let agent: SDKAgent | undefined
+    if (resumable && resumable.workspaceDir === workspaceDir) {
+      try {
+        pushUiLog("SDK", "INFO", `[${sessionKey}] Resume 恢复会话 (agentId=${resumable.agentId}, 新连接/上下文保留)`)
+        agent = await Agent.resume(resumable.agentId, { apiKey, model: modelSelection, local: localOptions })
+      } catch (e: unknown) {
+        pushUiLog("SDK", "WARN", `[${sessionKey}] Resume 失败，回退全新会话: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
+    const resumed = agent !== undefined
+
+    if (!agent) {
+      pushUiLog("SDK", "INFO", `[${sessionKey}] 正在创建 SDK Agent (cwd=${workspaceDir}, model=${JSON.stringify(modelSelection)})`)
+      agent = await Agent.create({ apiKey, model: modelSelection, local: localOptions })
+    }
 
     const abortController = new AbortController()
     const session: SdkSessionAgent = {
@@ -396,18 +417,24 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     }
 
     sdkSessions.set(sessionKey, session)
-    broadcastLog(`[SDK] 会话 ${sessionKey} 已创建, agentId=${agent.agentId}`)
+    broadcastLog(`[SDK] 会话 ${sessionKey} 已${resumed ? "恢复" : "创建"}, agentId=${agent.agentId}`)
     broadcastSdkSessionStatus()
 
-    pushUiLog("SDK", "INFO", `[${sessionKey}] 启动 Prompt:\n${prompt}`)
+    const prompt = resumed
+      ? buildWakePrompt(session)
+      : buildPrompt(meta, taskMessage, sessionKey, opts.useMainWorkspace, persistentPoll)
+    pushUiLog("SDK", "INFO", `[${sessionKey}] ${resumed ? "恢复" : "启动"} Prompt:\n${prompt}`)
     const run = await agent.send(prompt)
     startRunLifecycle(session, run)
+    // 持久化最新 agentId：run 结束释放进程后靠它 Resume，应用重启后依然有效
+    rememberResumable(session)
 
     return { ok: true }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e)
     broadcastLog(`[SDK] 启动失败 ${sessionKey}: ${msg}`, "ERROR")
     failedCooldowns.set(sessionKey, Date.now() + FAIL_COOLDOWN_MS)
+    // 不动 resume 映射：仍指向上一个可用的 agentId，冷却结束后重试可续上上下文
     const failed = sdkSessions.get(sessionKey)
     if (failed) closeAndRemoveSession(failed)
     broadcastSdkSessionStatus()
@@ -417,6 +444,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
   }
 }
 
+/** 停止会话进程（保留 resume 映射，下条消息仍可续上下文；清上下文用 resetSdkSessionContext） */
 export function stopSdkSession(sessionKey: string): void {
   const s = sdkSessions.get(sessionKey)
   if (!s) return
@@ -428,12 +456,21 @@ export function stopSdkSession(sessionKey: string): void {
   broadcastSdkSessionStatus()
 }
 
+/** 显式重置会话上下文（/reset）：丢弃 resume 映射，下条消息全新会话 */
+export function resetSdkSessionContext(sessionKey: string): void {
+  forgetResumable(sessionKey)
+}
+
+/** 停止全部运行中的会话进程；保留 resume 映射（应用重启后上下文可恢复） */
 export function stopAllSdkSessions(): void {
-  for (const key of [...sdkSessions.keys()]) {
-    stopSdkSession(key)
+  for (const s of [...sdkSessions.values()]) {
+    s.abortController.abort()
+    if (s.run) s.run.cancel().catch(() => {})
+    closeAndRemoveSession(s)
   }
   failedCooldowns.clear()
   pendingLaunches.clear()
+  broadcastSdkSessionStatus()
 }
 
 export async function checkSdkApiKey(apiKey: string): Promise<{ ok: boolean; email?: string; error?: string }> {
