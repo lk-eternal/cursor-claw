@@ -7,7 +7,7 @@ import {
 import {
   resolveAgentBinary, getAgentPaths, applyProxyEnv, createAgentEnv,
   spawnAgentChild, execAgentSync, execAgentAsync, ensureAgentBinary, quoteArg,
-  checkCliInstalled,
+  checkCliInstalled, disableCliMaxMode,
 } from "./agent-cli"
 import {
   broadcastLog, pushUiLog, flushAgentStreamChunk, logCursorAgentInvocation, logCursorAgentResponse,
@@ -232,6 +232,7 @@ function ensureMainChatId(workspaceDir: string, scope: string, spawnEnv: Record<
 
 function spawnAgentWithLogs(args: string[], env: Record<string, string>, label: string, cwd?: string): ChildProcess {
   logCursorAgentInvocation(label, args, cwd)
+  disableCliMaxMode()
   const { agentNodePath, agentIndexPath } = getAgentPaths()
   const spawnOpts = { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] as ("ignore" | "pipe")[], env, cwd }
   if (agentNodePath && agentIndexPath) {
