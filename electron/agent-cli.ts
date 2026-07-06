@@ -100,31 +100,6 @@ function ensureAgentBinarySync(): boolean {
   return resolveAgentBinary()
 }
 
-// ── Max Mode 关闭 ───────────────────────────────────────
-
-/**
- * 每次启动 cursor-agent 前强制关闭 Max Mode——Cursor 会自动把它改回，
- * 而 Max Mode 会成倍消耗按次计费额度，故在每次 spawn 前重置一次。
- * 顶层 maxMode 与 model.maxMode 两处都要处理。
- */
-export function disableCliMaxMode(): void {
-  try {
-    const p = path.join(os.homedir(), ".cursor", "cli-config.json")
-    if (!fs.existsSync(p)) return
-    const cfg = JSON.parse(fs.readFileSync(p, "utf-8")) as Record<string, any>
-    let changed = false
-    if (cfg.maxMode !== false) {
-      cfg.maxMode = false
-      changed = true
-    }
-    if (cfg.model && typeof cfg.model === "object" && cfg.model.maxMode !== false) {
-      cfg.model.maxMode = false
-      changed = true
-    }
-    if (changed) fs.writeFileSync(p, JSON.stringify(cfg, null, 2), "utf-8")
-  } catch { /* ignore */ }
-}
-
 // ── Proxy / Env 构建 ────────────────────────────────────
 
 const PROXY_ENV_KEYS = [
@@ -170,7 +145,6 @@ export type ExecAgentResult = { ok: boolean; stdout: string; stderr: string; err
 export type ExecAgentOptions = { timeoutMs?: number; cwd?: string; logLabel?: string }
 
 export function spawnAgentChild(args: string[], env: Record<string, string>, opts?: { cwd?: string; stdio?: any }): ChildProcess {
-  disableCliMaxMode()
   if (agentNodePath && agentIndexPath) {
     return spawn(agentNodePath, [agentIndexPath, ...args], {
       windowsHide: true,
@@ -203,7 +177,6 @@ export function execAgentSync(
   }
 
   logCursorAgentInvocation(opts.logLabel ?? "invoke-sync", agentArgs, cwd)
-  disableCliMaxMode()
   const mergedEnv = { ...process.env as Record<string, string>, ...env }
   if (agentNodePath && agentIndexPath) {
     const r = spawnSync(agentNodePath, [agentIndexPath, ...agentArgs], {
