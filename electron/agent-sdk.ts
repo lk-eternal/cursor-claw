@@ -424,7 +424,17 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       ? buildWakePrompt(session)
       : buildPrompt(meta, taskMessage, sessionKey, opts.useMainWorkspace, persistentPoll)
     pushUiLog("SDK", "INFO", `[${sessionKey}] ${resumed ? "恢复" : "启动"} Prompt:\n${prompt}`)
-    const run = await agent.send(prompt)
+    let run: Run
+    try {
+      run = await agent.send(prompt)
+    } catch (e: unknown) {
+      // 上次进程异常退出未落终态的 wedged run 会卡死会话（already has active run）；
+      // SDK 官方恢复路径：force 过期残留 run 后重发
+      const msg = e instanceof Error ? e.message : String(e)
+      if (!msg.includes("already has active run")) throw e
+      pushUiLog("SDK", "WARN", `[${sessionKey}] 检测到残留 active run，force 恢复重发`)
+      run = await agent.send(prompt, { local: { force: true } })
+    }
     startRunLifecycle(session, run)
     // 持久化最新 agentId：run 结束释放进程后靠它 Resume，应用重启后依然有效
     rememberResumable(session)
@@ -444,15 +454,27 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
   }
 }
 
+/** 停止并释放会话：先等 cancel 把 run 落为终态再关进程（直接 close 会残留 active run，拖垮下次 Resume） */
+function releaseSession(s: SdkSessionAgent): void {
+  s.abortController.abort()
+  const { agent, run } = s
+  if (run) {
+    const timeout = new Promise<void>((r) => setTimeout(r, 5000))
+    Promise.race([run.cancel().catch(() => {}), timeout]).finally(() => {
+      try { agent.close() } catch { /* best-effort */ }
+    })
+    sdkSessions.delete(s.sessionKey)
+  } else {
+    closeAndRemoveSession(s)
+  }
+}
+
 /** 停止会话进程（保留 resume 映射，下条消息仍可续上下文；清上下文用 resetSdkSessionContext） */
 export function stopSdkSession(sessionKey: string): void {
   const s = sdkSessions.get(sessionKey)
   if (!s) return
-  s.abortController.abort()
-  if (s.run) {
-    s.run.cancel().catch(() => {})
-  }
-  closeAndRemoveSession(s)
+  pushUiLog("SDK", "INFO", `[${sessionKey}] 会话已停止（队列有未回复消息时将自动重新拉起）`)
+  releaseSession(s)
   broadcastSdkSessionStatus()
 }
 
@@ -463,11 +485,7 @@ export function resetSdkSessionContext(sessionKey: string): void {
 
 /** 停止全部运行中的会话进程；保留 resume 映射（应用重启后上下文可恢复） */
 export function stopAllSdkSessions(): void {
-  for (const s of [...sdkSessions.values()]) {
-    s.abortController.abort()
-    if (s.run) s.run.cancel().catch(() => {})
-    closeAndRemoveSession(s)
-  }
+  for (const s of [...sdkSessions.values()]) releaseSession(s)
   failedCooldowns.clear()
   pendingLaunches.clear()
   broadcastSdkSessionStatus()

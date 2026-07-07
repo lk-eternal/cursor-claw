@@ -607,7 +607,7 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
     const label = chatType === "group"
       ? `群聊 ${chatName ? `「${chatName}」` : chatId}`
       : (mainUser ? `主用户私聊${userName ? ` (${userName})` : ""}` : `私聊 ${p2pName}`)
-    broadcastLog(`[Agent] ${label} 有新消息，${resumable ? "Resume 恢复" : "自动拉起"}${mainUser ? "(主工作目录)" : ""}`)
+    broadcastLog(`[Agent] ${label} 有新消息，正在启动Agent（${resumable ? "Resume 恢复上下文" : "全新会话"}）${mainUser ? "(主工作目录)" : ""}`)
     // Resume 恢复静默进行；仅真正冷启动（无历史上下文可续）才提示等待
     if (!resumable) await notifyChat(sessionKey, "正在启动Agent，请稍等...")
 
@@ -624,7 +624,7 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
         continue
       }
       broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${result.error}`)
-      await notifyChat(sessionKey, `启动Agent失败: ${result.error ?? "未知错误"}`)
+      await notifyChat(sessionKey, `⚠️ Agent 启动失败，本条消息未能处理，请稍后重发。\n原因: ${result.error ?? "未知错误"}`)
       const lock = cachedLock()
       if (lock?.port) {
         const drained = await drainSessionMessages(lock.port, sessionKey)
