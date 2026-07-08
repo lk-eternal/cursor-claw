@@ -21,7 +21,7 @@ import {
 } from "./agent-launcher"
 import {
   launchSdkAgent, stopSdkSession, stopAllSdkSessions,
-  isSdkSessionRunning, getSdkSessionList, setSdkIdleHandler, hasResumableSdkSession,
+  isSdkSessionRunning, getSdkSessionList, setSdkIdleHandler, setSdkRunErrorHandler, hasResumableSdkSession,
 } from "./agent-sdk"
 import { injectWorkspaceToDir } from "./workspace-injector"
 
@@ -620,6 +620,28 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
 
 // ── 初始化 ────────────────────────────────────────────────
 
+/** SDK run 异常终态处理：窗口外首次异常自动重试拉起（Resume 静默恢复），窗口内重复异常或重试失败则通知用户 */
+async function handleSdkRunError(sessionKey: string, chatType: ChatType, errorDetail: string): Promise<void> {
+  const now = Date.now()
+  const prevCrashAt = lastCrashAtMap.get(sessionKey) ?? 0
+  lastCrashAtMap.set(sessionKey, now)
+
+  if (now - prevCrashAt < CRASH_LOOP_WINDOW_MS) {
+    broadcastLog(`[SDK] ${sessionKey} 短时间内连续异常结束，停止自动重试`, "WARN")
+    await notifyChat(sessionKey, `⚠️ Agent 连续异常结束，已停止自动重试。\n错误信息：${errorDetail}\n请稍后重新发消息唤醒，若持续失败请检查网络或 API Key。`)
+    return
+  }
+
+  broadcastLog(`[SDK] ${sessionKey} 运行异常结束(${errorDetail})，自动重试拉起`, "WARN")
+  const chatId = extractChatId(sessionKey)
+  const meta: import("./agent-launcher").LaunchMeta = { chatId, chatType: chatType as "p2p" | "group" }
+  const result = await launchSessionAgent(sessionKey, chatType, meta, isMainUser(chatId, chatType))
+    .catch((e: unknown) => ({ ok: false as const, error: e instanceof Error ? e.message : String(e) }))
+  if (!result.ok) {
+    await notifyChat(sessionKey, `⚠️ Agent 异常结束，自动重试拉起失败：${result.error ?? "未知错误"}\n原始错误：${errorDetail}\n请重新发消息唤醒。`)
+  }
+}
+
 export function initSessionDispatcher(): void {
   setChatNameResolver((chatId) => chatNameCache.get(chatId))
   // 名字查不到（如 bot 缺通讯录权限）时，用「通道名·访客」代替裸 sessionKey
@@ -630,4 +652,8 @@ export function initSessionDispatcher(): void {
   setSessionCloseHandler(handleSessionClosed)
   // run 收口释放后立即调度：运行期间到达的消息无需等下一轮轮询
   setSdkIdleHandler(() => { void dispatchSessionAgents().catch(() => {}) })
+  // SDK run 异常终态：自动重试 1 次（Resume 恢复上下文），重试失败/连续异常时通知用户
+  setSdkRunErrorHandler((sessionKey, chatType, errorDetail) => {
+    void handleSdkRunError(sessionKey, chatType, errorDetail).catch(() => {})
+  })
 }

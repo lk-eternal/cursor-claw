@@ -568,7 +568,7 @@ function ackOnReply(messageId?: string, sessionKey?: string): void {
   }
 }
 
-function resolveRoutingKey(chatId?: string, replyMessageId?: string): string | undefined {
+function resolveRoutingKey(chatId?: string, replyMessageId?: string): { sessionKey?: string; viaReply: boolean } {
   if (replyMessageId) {
     const sk = messageSessionMap.get(replyMessageId);
     if (sk) {
@@ -578,13 +578,13 @@ function resolveRoutingKey(chatId?: string, replyMessageId?: string): string | u
       const msgChannel = chatId ? parseChatKey(chatId).channelId : undefined;
       if (!skChannel || !msgChannel || skChannel === msgChannel) {
         log("INFO", `路由命中 messageId 映射: ${replyMessageId} → ${sk}`);
-        return sk;
+        return { sessionKey: sk, viaReply: true };
       }
       log("INFO", `messageId 映射跨通道(${skChannel}→${msgChannel})，忽略: ${replyMessageId}`);
     }
   }
-  if (!chatId) return undefined;
-  return activeSessionMap.get(chatId) ?? chatId;
+  if (!chatId) return { sessionKey: undefined, viaReply: false };
+  return { sessionKey: activeSessionMap.get(chatId) ?? chatId, viaReply: false };
 }
 
 // ── 文件队列 ─────────────────────────────────────────────
@@ -611,15 +611,26 @@ function pushMessage(content: string, messageId?: string, chatId?: string, chatT
     log("WARN", `丢弃空消息 (messageId=${messageId})`);
     return;
   }
-  let routedId = resolveRoutingKey(chatId, replyMessageId);
-  if (routedId && routedId === chatId && chatType === "p2p" && !routedId.includes("::")) {
-    const { channelId } = parseChatKey(chatId!);
-    const rt = channelId ? channels.get(channelId) : undefined;
-    const wsDir = rt ? channelWorkspaceDir(rt) : WORKSPACE_DIR;
-    if (wsDir) {
-      const defaultSessionKey = `${chatId}::${wsDir}`;
-      setActiveSession(chatId!, defaultSessionKey);
-      routedId = defaultSessionKey;
+  const resolved = resolveRoutingKey(chatId, replyMessageId);
+  let routedId = resolved.sessionKey;
+  // 非回复消息的 p2p 路由规则:一律投递到当前主工作目录会话(引用回复才跟随原会话)。
+  // 仅当 active 指向显式特殊会话(temp/task/wf 等非路径 key)时尊重指针,避免残留的旧目录映射错投。
+  if (!resolved.viaReply && chatId && chatType === "p2p") {
+    const idx = routedId ? routedId.indexOf("::") : -1;
+    const suffix = routedId && idx >= 0 ? routedId.slice(idx + 2) : undefined;
+    const isExplicitSession = !!routedId && routedId !== chatId
+        && (suffix === undefined || !/[\\/]/.test(suffix));
+    if (!isExplicitSession) {
+      const { channelId } = parseChatKey(chatId);
+      const rt = channelId ? channels.get(channelId) : undefined;
+      const wsDir = rt ? channelWorkspaceDir(rt) : WORKSPACE_DIR;
+      if (wsDir) {
+        const mainSessionKey = `${chatId}::${wsDir}`;
+        if (routedId !== mainSessionKey) {
+          setActiveSession(chatId, mainSessionKey);
+          routedId = mainSessionKey;
+        }
+      }
     }
   }
   const fullMeta: QueueMessageMeta = { ...(meta || {}) };
@@ -1585,14 +1596,18 @@ async function handleWorkspaceAdmin(method: string, req: http.IncomingMessage, r
     const oldDir = WORKSPACE_DIR;
     WORKSPACE_DIR = newDir;
     if (oldDir !== newDir) {
+      // 迁移所有"路径型"会话指针(含历史残留的其他目录映射),仅放过 wf_/task 等非路径会话;
+      // 只按旧全局目录匹配会漏掉残留映射,导致切换后消息仍投旧会话(重启也无效,映射已持久化)
       for (const [chatId, oldSessionKey] of activeSessionMap) {
-        if (oldSessionKey.endsWith(`::${oldDir}`)) {
-          const newSessionKey = `${chatId}::${newDir}`;
-          activeSessionMap.set(chatId, newSessionKey);
-          sessionToChatMap.delete(oldSessionKey);
-          sessionToChatMap.set(newSessionKey, chatId);
-          log("INFO", `[Workspace] 会话路由迁移: ${oldSessionKey} → ${newSessionKey}`);
-        }
+        const idx = oldSessionKey.indexOf("::");
+        const suffix = idx >= 0 ? oldSessionKey.slice(idx + 2) : "";
+        const isPathSession = idx < 0 || /[\\/]/.test(suffix);
+        if (!isPathSession || suffix === newDir) continue;
+        const newSessionKey = `${chatId}::${newDir}`;
+        activeSessionMap.set(chatId, newSessionKey);
+        if (idx >= 0) sessionToChatMap.delete(oldSessionKey);
+        sessionToChatMap.set(newSessionKey, chatId);
+        log("INFO", `[Workspace] 会话路由迁移: ${oldSessionKey} → ${newSessionKey}`);
       }
       scheduleRoutingSave();
     }

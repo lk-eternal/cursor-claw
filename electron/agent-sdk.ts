@@ -105,6 +105,13 @@ export function setSdkIdleHandler(fn: (sessionKey: string) => void): void {
   sdkIdleHandler = fn
 }
 
+let sdkRunErrorHandler: ((sessionKey: string, chatType: ChatType, errorDetail: string) => void) | null = null
+
+/** run 以 error 终态结束时回调（调度器借此自动重试拉起 / 通知用户），在 idle 回调之前触发 */
+export function setSdkRunErrorHandler(fn: (sessionKey: string, chatType: ChatType, errorDetail: string) => void): void {
+  sdkRunErrorHandler = fn
+}
+
 function closeAndRemoveSession(session: SdkSessionAgent): void {
   try { session.agent.close() } catch { /* best-effort */ }
   sdkSessions.delete(session.sessionKey)
@@ -385,6 +392,10 @@ function startRunLifecycle(session: SdkSessionAgent, run: Run): void {
     session.run = null
     closeAndRemoveSession(session)
     broadcastSdkSessionStatus()
+    // 异常终态先交错误处理器（自动重试拉起/通知用户），再走 idle 调度消费积压消息
+    if (run.status === "error") {
+      sdkRunErrorHandler?.(sessionKey, session.chatType, errorDetail ?? "unknown")
+    }
     // 运行期间可能已有积压消息，立即触发一次调度
     sdkIdleHandler?.(sessionKey)
   })
