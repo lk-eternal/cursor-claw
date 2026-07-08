@@ -84,6 +84,7 @@ export default function Dashboard({ onSettings, active }: Props) {
   const logRef = useRef<HTMLDivElement>(null)
   /** 是否贴底跟随：用户上翻后暂停自动滚动，回到底部（或点击按钮）后恢复 */
   const logStickRef = useRef(true)
+  const programmaticScrollRef = useRef(false)
 
   useEffect(() => {
     const syncCliStatus = (s: DaemonStatus) => {
@@ -171,14 +172,22 @@ export default function Dashboard({ onSettings, active }: Props) {
     : logLines
 
   useEffect(() => {
-    if (logRef.current && logStickRef.current) {
-      logRef.current.scrollTop = logRef.current.scrollHeight
+    const el = logRef.current
+    if (el && logStickRef.current && el.scrollHeight - el.scrollTop - el.clientHeight > 1) {
+      programmaticScrollRef.current = true
+      el.scrollTop = el.scrollHeight
     }
   }, [logLines, logFilter])
 
   const handleLogScroll = () => {
     const el = logRef.current
     if (!el) return
+    // 程序化吸底滚动自身触发的 scroll 事件不参与吸底判定，
+    // 否则高频日志下渲染与滚动竞态会把 stick 误判为 false（自动滚动偶发失效）
+    if (programmaticScrollRef.current) {
+      programmaticScrollRef.current = false
+      return
+    }
     const stick = el.scrollHeight - el.scrollTop - el.clientHeight < 40
     logStickRef.current = stick
     setLogAtBottom(stick)

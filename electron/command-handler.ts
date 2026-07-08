@@ -17,9 +17,11 @@ import type { WorkflowDefinition } from "../src/shared/workflow-types"
 
 export interface FileCommand { id: string; command: string; messageId: string; chatId?: string; chatType?: string }
 
-export async function reportCommandResult(port: number, messageId: string, ok: boolean, message: string, chatId?: string): Promise<void> {
+export interface CommandButton { label: string; cmd: string }
+
+export async function reportCommandResult(port: number, messageId: string, ok: boolean, message: string, chatId?: string, buttons?: CommandButton[]): Promise<void> {
   try {
-    await httpPost(`http://127.0.0.1:${port}/cmd/result`, { messageId, ok, message, chatId })
+    await httpPost(`http://127.0.0.1:${port}/cmd/result`, { messageId, ok, message, chatId, buttons })
   } catch (e: unknown) {
     broadcastLog(`指令结果回报失败: ${e instanceof Error ? e.message : e}`, "WARN")
   }
@@ -131,7 +133,9 @@ export async function handleFeishuModelCommand(port: number, messageId: string, 
       return [`#${n}`, `\t id · ${m.id}`, `\t说明 · ${m.label}${tag}`].join("\n")
     })
     const body = [`🧠 模型列表（共 ${lr.models.length} 个）`, "", ...blocks, "", "💡 设置：/model set <序号>"].join("\n")
-    await reportCommandResult(port, messageId, true, body)
+    // 前几个模型附一键设置按钮，其余仍用 /model set <序号>
+    const btns = lr.models.slice(0, 6).map((m, i) => ({ label: `设为 #${i + 1} ${m.id}`, cmd: `/model set ${i + 1}` }))
+    await reportCommandResult(port, messageId, true, body, undefined, btns)
     return
   }
 

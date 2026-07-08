@@ -25,6 +25,19 @@ alwaysApply: true
 - 需要把任务路由给其他机器人时，在 `text` 中使用 `<at user_id="ou_xxx">名字</at> 任务内容`（user_id 必须是 ou_ 开头的 open_id）。
 - ⚠️ 防循环：仅在明确需要对方处理时才 @ 机器人；收到机器人消息后若无需继续协作，正常回复文字即可，**不要**回 @ 对方；禁止两个机器人间无目的的往复 @。
 
+### 提问选择：`send_question`（MCP）
+
+需要用户在**有限选项**中做决策时优先使用（飞书发交互卡片按钮，微信自动降级为文本选项列表）。
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `text` | 是 | 问题内容（支持 markdown） |
+| `options` | 是 | 选项文本数组（1-10 个） |
+| `message_id` | 否 | 要回复的消息 ID |
+| `session_key` | 是 | 当前会话 sessionKey，用户点击的选项按此路由回你的队列 |
+
+发出后**继续 poll-message 等待**；用户点击按钮后，所选选项文本会作为一条普通用户消息进入队列（messageId 为 internal_ 前缀）。用户也可能不点按钮直接回复文字，两种都按普通消息处理。
+
 ### 拉取消息：HTTP `/api/poll-message`（Shell）
 
 所有**入站**消息统一通过此接口获取，按 `sessionKey` 过滤。
@@ -67,6 +80,7 @@ curl -G -s "http://127.0.0.1:{{DAEMON_PORT}}/api/poll-message" --data-urlencode 
 | 发送文本 | `POST /api/send-text` body: `{text, message_id?, session_key?}` |
 | 拉取消息（阻塞） | `GET /api/poll-message?sessionKey={session_key}` |
 | 拉取消息（非阻塞） | `GET /api/poll-message?sessionKey={session_key}&wait=false` |
+| 提问选择 | `POST /api/send-question` body: `{text, options[], message_id?, session_key}` |
 | 发送图片 | `POST /api/send-image` body: `{image_path, message_id?, session_key?}` |
 | 发送文件 | `POST /api/send-file` body: `{file_path, message_id?, session_key?}` |
 

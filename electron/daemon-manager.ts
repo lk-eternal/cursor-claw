@@ -912,7 +912,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
     const cmdTokens = rawCmd.split(/\s+/).filter((t) => t.length > 0)
     const head = (cmdTokens[0] ?? "").toLowerCase()
     const isAdmin = isMainUser(claimed.chatId, claimed.chatType)
-    const reply = (ok: boolean, msg: string) => reportCommandResult(lock.port, claimed!.messageId, ok, msg, claimed!.chatId)
+    const reply = (ok: boolean, msg: string, buttons?: { label: string; cmd: string }[]) => reportCommandResult(lock.port, claimed!.messageId, ok, msg, claimed!.chatId, buttons)
     const denyNonAdmin = () => reply(false, "🔒 该指令仅管理员可用")
 
     broadcastLog(`[指令] 执行 ${rawCmd} (msgId=${claimed.messageId} admin=${isAdmin})`)
@@ -1082,7 +1082,15 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           const lines = isAdmin
             ? ["💡 可用指令（管理员）：", ...common, ...adminOnly]
             : ["💡 可用指令：", ...common]
-          await reply(true, lines.join("\n"))
+          const helpBtns = isAdmin
+            ? [
+                { label: "📊 运行状态", cmd: "/status" },
+                { label: "💬 会话列表", cmd: "/chat ls" },
+                { label: "🧠 模型列表", cmd: "/model ls" },
+                { label: "⏰ 定时任务", cmd: "/task ls" },
+              ]
+            : [{ label: "📊 运行状态", cmd: "/status" }]
+          await reply(true, lines.join("\n"), helpBtns)
           break
         }
 

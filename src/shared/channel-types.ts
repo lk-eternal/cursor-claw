@@ -35,8 +35,6 @@ export interface MessageChannel {
   // 主用户（可选）
   mainUserEnabled: boolean;
   mainUserChatId: string;         // 原始 chatId（不含通道前缀）
-  /** 主用户私聊每次新建会话（原全局 agentNewSession） */
-  mainUserNewSession: boolean;
   // 其他人使用（通道级）
   allowOthers: boolean;
   /** 对外身份规则，注入到其他人会话的临时工作目录 */

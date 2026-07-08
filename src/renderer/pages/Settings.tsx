@@ -1035,6 +1035,33 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
                 </div>
               </section>
 
+              <section className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-medium text-gray-300">回调订阅</h3>
+                  {firstFeishuAppId.trim() && (
+                    <a href={`https://open.feishu.cn/app/${firstFeishuAppId.trim()}/event?tab=callback`} target="_blank" rel="noreferrer"
+                      className="flex items-center gap-1 rounded-md border border-gray-700 px-2.5 py-1 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-blue-400">
+                      <ExternalLink size={12} />前往设置回调订阅
+                    </a>
+                  )}
+                </div>
+                <div className="rounded-lg border border-gray-800 divide-y divide-gray-800">
+                  <div className="px-3 py-2 flex items-center justify-between">
+                    <code className="text-xs text-blue-400">card.action.trigger</code>
+                    <span className="text-xs text-gray-500">卡片回传交互</span>
+                  </div>
+                  <div className="px-3 py-2 flex items-center justify-between">
+                    <span className="text-xs text-gray-300">用户点击卡片按钮（选项 / 指令）时回调</span>
+                    <span className="text-xs text-emerald-400">需订阅</span>
+                  </div>
+                  <div className="px-3 py-2 text-xs text-gray-500 space-y-1">
+                    <div>订阅方式：<span className="text-gray-300">应用身份</span></div>
+                    <div>回调类型：<span className="text-gray-300">长连接（WebSocket）</span></div>
+                    <div className="text-gray-600">不订阅时按钮点击无响应，send_question / 指令按钮不可用</div>
+                  </div>
+                </div>
+              </section>
+
               <section className="space-y-3">
                 <h3 className="text-sm font-medium text-gray-300">参考文档</h3>
                 <div className="flex flex-wrap gap-2">

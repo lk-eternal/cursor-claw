@@ -351,6 +351,8 @@ export interface SdkLaunchOptions {
 function startRunLifecycle(session: SdkSessionAgent, run: Run): void {
   session.run = run
   session.lastActivityAt = Date.now()
+  // 新 run 已启动：清掉上一轮的终态记录，避免 UI 持续展示已恢复会话的旧错误
+  lastRunResults.delete(session.sessionKey)
 
   streamRunEvents(session, run).then(async () => {
     const sessionKey = session.sessionKey

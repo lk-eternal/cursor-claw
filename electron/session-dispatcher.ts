@@ -356,7 +356,6 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
       senderOpenId, chatName, taskMessage,
       apiKey: resource.apiKey ?? "", model, modelParams,
       keepSession, persistentPoll,
-      newSession: useMain && (channel?.mainUserNewSession ?? false),
     })
   }
 
@@ -366,7 +365,6 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
     senderOpenId, chatName, taskMessage,
     workspaceDir: workDir, model,
     resumeScope: needResume && channel ? mainChatScopeKey(channel.id, workDir) : undefined,
-    newSession: channel?.mainUserNewSession ?? false,
     persistentPoll,
   })
 }
@@ -430,7 +428,7 @@ export function getSessionAgentList() {
 // ── /chat 命令处理 ────────────────────────────────────────
 
 export async function handleChatCommand(tokens: string[], port: number, messageId: string, chatId?: string): Promise<void> {
-  const reply = (ok: boolean, msg: string) => reportCommandResult(port, messageId, ok, msg, chatId)
+  const reply = (ok: boolean, msg: string, buttons?: { label: string; cmd: string }[]) => reportCommandResult(port, messageId, ok, msg, chatId, buttons)
   const sub = tokens[1]?.toLowerCase()
 
   const sessions = getSessionAgentList().sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0))
@@ -448,7 +446,8 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
       const dur = s.startedAt ? formatDuration(now - s.startedAt) : "-"
       return `${idx} [${type}] ${name} | 启动:${started} | 时长:${dur} | dir:${dir} | pid:${pid}`
     })
-    await reply(true, `📋 活跃会话 (${sessions.length}):\n${lines.join("\n")}`)
+    const chatBtns = sessions.slice(0, 8).map((s, i) => ({ label: `切换到 #${i + 1} ${s.chatName || path.basename(s.workspaceDir ?? "") || s.chatType}`, cmd: `/chat ${i + 1}` }))
+    await reply(true, `📋 活跃会话 (${sessions.length}):\n${lines.join("\n")}`, chatBtns)
     return
   }
 
@@ -539,7 +538,9 @@ async function isZombieAgent(sessionKey: string): Promise<boolean> {
     ])
     const earliestMsgTime = msgRes?.earliestMsgTime ?? null
     if (earliestMsgTime === null) return false
-    const lastActiveTime = replyRes?.lastReplyAt ?? getSessionAgentStartedAt(sessionKey) ?? 0
+    // Agent 有运行时活动（SDK 流事件 / CLI 输出）就不算僵尸——正在干长活未回消息是正常状态
+    const agentActivityAt = getSessionAgentList().find((s) => s.sessionKey === sessionKey)?.lastActivityAt ?? 0
+    const lastActiveTime = Math.max(replyRes?.lastReplyAt ?? 0, getSessionAgentStartedAt(sessionKey) ?? 0, agentActivityAt)
     const startTime = Math.max(earliestMsgTime, lastActiveTime)
     return Date.now() - startTime > ZOMBIE_REPLY_SILENCE_MS
   } catch {

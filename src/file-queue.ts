@@ -248,7 +248,11 @@ export function waitForSessionMessages(
 export function ackMessages(messageId: string, filterSessionKey?: string): string[] {
   if (!queueDir || !messageId) return [];
   const safeId = messageId.replace(/[^a-zA-Z0-9_-]/g, "_");
-  const dirs = filterSessionKey ? [getSessionDir(filterSessionKey)] : [queueDir, ...listSessionDirs()];
+  // 指定会话目录优先（快路径）；未命中时全局兜底——messageId 全局唯一，
+  // 防止调用方 session_key 形态偏差（转义/大小写）导致 ack 静默失败、消息反复重投
+  const dirs = [...new Set(filterSessionKey
+    ? [getSessionDir(filterSessionKey), queueDir, ...listSessionDirs()]
+    : [queueDir, ...listSessionDirs()])];
 
   for (const dir of dirs) {
     let files: string[];

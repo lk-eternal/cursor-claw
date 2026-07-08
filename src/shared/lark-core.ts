@@ -76,6 +76,13 @@ export function createLarkClient(appId: string, appSecret: string): Lark.Client 
 
 // ── 飞书发送 ─────────────────────────────────────────────
 
+export interface CardButton {
+  label: string;
+  /** 回传交互数据，card.action.trigger 回调中原样返回 */
+  value: unknown;
+  type?: "primary" | "default" | "danger";
+}
+
 export interface LarkSenderOptions {
   client: Lark.Client;
   chatId: string;
@@ -127,16 +134,56 @@ export class LarkSender {
     if (LarkSender.containsAtTag(fullText)) {
       return { content: JSON.stringify({ text: fullText }), msgType: "text" };
     }
-    const escaped = fullText.replace(/\\/g, "\\\\");
+    return { content: JSON.stringify(LarkSender.buildCard(fullText, title)), msgType: "interactive" };
+  }
+
+  /** 构造 schema 2.0 markdown 卡片；buttons 为回传交互按钮（点击触发 card.action.trigger） */
+  static buildCard(text: string, title?: string, buttons?: CardButton[]): any {
+    const elements: any[] = [{ tag: "markdown", content: text.replace(/\\/g, "\\\\") }];
+    for (const b of buttons ?? []) {
+      elements.push({
+        tag: "button",
+        text: { tag: "plain_text", content: b.label.slice(0, 100) },
+        type: b.type ?? "primary",
+        width: "fill",
+        behaviors: [{ type: "callback", value: b.value }],
+      });
+    }
     const card: any = {
       schema: "2.0",
       config: { wide_screen_mode: true },
-      body: { elements: [{ tag: "markdown", content: escaped }] },
+      body: { elements },
     };
     if (title) {
       card.header = { title: { tag: "plain_text", content: title }, template: "turquoise" };
     }
-    return { content: JSON.stringify(card), msgType: "interactive" };
+    return card;
+  }
+
+  /** 发送带回传按钮的交互卡片（优先回复，退避 chat 直发），返回 message_id */
+  async sendCardWithButtons(text: string, buttons: CardButton[], replyMessageId?: string, chatId?: string, title?: string): Promise<string | undefined> {
+    const card = LarkSender.buildCard(`${this.messagePrefix}${text}`, title, buttons);
+    const content = JSON.stringify(card);
+    if (replyMessageId && !replyMessageId.startsWith("internal_")) {
+      try {
+        const res = await this.client.im.message.reply({
+          path: { message_id: replyMessageId },
+          data: { content, msg_type: "interactive" },
+        });
+        const mid = (res as any)?.data?.message_id;
+        if (mid) { this.log("INFO", `飞书按钮卡片已回复(${buttons.length}个按钮)`); return mid; }
+      } catch (e: any) { this.log("WARN", `按钮卡片回复退避 (${replyMessageId}): ${e?.message ?? e}`); }
+    }
+    const targetChatId = chatId ?? this.chatId;
+    if (!targetChatId) { this.log("WARN", "无发送目标"); return undefined; }
+    try {
+      const res = await this.client.im.message.create({
+        params: { receive_id_type: "chat_id" as any },
+        data: { receive_id: targetChatId, content, msg_type: "interactive" },
+      });
+      this.log("INFO", `飞书按钮卡片已发送(${buttons.length}个按钮)`);
+      return (res as any)?.data?.message_id;
+    } catch (e: any) { this.log("ERROR", `按钮卡片发送异常: ${e?.message ?? e}`); return undefined; }
   }
 
   async replyMessage(messageId: string, text: string, title?: string): Promise<string | undefined> {
@@ -452,6 +499,7 @@ export class LarkSender {
     appSecret: string,
     encryptKey: string,
     onMessage: (event: LarkMessageEvent) => void,
+    onCardAction?: (event: LarkCardActionEvent) => Promise<unknown> | unknown,
   ): Promise<void> {
     const eventDispatcher = new Lark.EventDispatcher(encryptKey ? { encryptKey } : {}).register({
       "im.message.receive_v1": (data) => {
@@ -473,6 +521,22 @@ export class LarkSender {
           onMessage({ text, messageId, chatId, chatType, messageType, rawContent, senderOpenId, senderType, parentId: parentId || undefined, mentions });
         } catch (e: any) {
           this.log("ERROR", `事件处理异常: ${e?.message ?? e}`);
+        }
+      },
+      "card.action.trigger": async (data: any) => {
+        try {
+          const evt: LarkCardActionEvent = {
+            messageId: data?.context?.open_message_id ?? data?.open_message_id ?? "",
+            chatId: data?.context?.open_chat_id ?? data?.open_chat_id ?? "",
+            operatorOpenId: data?.operator?.open_id,
+            value: data?.action?.value,
+          };
+          this.log("INFO", `卡片按钮点击: msg=${evt.messageId} value=${JSON.stringify(evt.value)?.slice(0, 200)}`);
+          if (!onCardAction) return {};
+          return (await onCardAction(evt)) ?? {};
+        } catch (e: any) {
+          this.log("ERROR", `卡片回调处理异常: ${e?.message ?? e}`);
+          return {};
         }
       },
     });
@@ -497,6 +561,15 @@ export interface LarkMention {
   key: string;
   id: string;
   name: string;
+}
+
+export interface LarkCardActionEvent {
+  /** 卡片所在消息 ID */
+  messageId: string;
+  chatId: string;
+  operatorOpenId?: string;
+  /** 按钮 behaviors callback 配置的自定义回传数据 */
+  value: unknown;
 }
 
 export interface LarkMessageEvent {

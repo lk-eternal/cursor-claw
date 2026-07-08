@@ -8,7 +8,7 @@ import {
   stopDaemonScheduledTasks,
   setDaemonSchedulerLogger,
 } from "./daemon-scheduled-tasks.js";
-import { stripProxyEnv, localTimestamp, createLarkClient, LarkSender, LarkMessageEvent, cleanupMediaCache } from "./shared/lark-core.js";
+import { stripProxyEnv, localTimestamp, createLarkClient, LarkSender, LarkMessageEvent, LarkCardActionEvent, CardButton, cleanupMediaCache } from "./shared/lark-core.js";
 import { WeChatManager } from "./wechat-manager.js";
 import {
   initFileQueue,
@@ -331,6 +331,40 @@ const sessionToChatMap = new Map<string, string>();
 const MSG_SESSION_MAP_MAX = 5000;
 const sessionLastReplyAt = new Map<string, number>();
 
+// ── 路由映射持久化：daemon 重启后回复历史消息仍能路由到原会话 ──
+const ROUTING_FILE = path.join(APP_DATA_DIR, "session-routing.json");
+let routingSaveTimer: NodeJS.Timeout | null = null;
+
+function loadRoutingMaps(): void {
+  try {
+    if (!APP_DATA_DIR || !fs.existsSync(ROUTING_FILE)) return;
+    const raw = JSON.parse(fs.readFileSync(ROUTING_FILE, "utf-8")) as {
+      messageSession?: Record<string, string>; activeSession?: Record<string, string>; sessionToChat?: Record<string, string>;
+    };
+    for (const [k, v] of Object.entries(raw.messageSession ?? {})) messageSessionMap.set(k, v);
+    for (const [k, v] of Object.entries(raw.activeSession ?? {})) activeSessionMap.set(k, v);
+    for (const [k, v] of Object.entries(raw.sessionToChat ?? {})) sessionToChatMap.set(k, v);
+    log("INFO", `[Routing] 路由映射已恢复: msg=${messageSessionMap.size}, active=${activeSessionMap.size}, chat=${sessionToChatMap.size}`);
+  } catch (e: any) { log("WARN", `[Routing] 路由映射恢复失败: ${e?.message ?? e}`); }
+}
+
+function scheduleRoutingSave(): void {
+  if (!APP_DATA_DIR || routingSaveTimer) return;
+  routingSaveTimer = setTimeout(() => {
+    routingSaveTimer = null;
+    try {
+      const data = {
+        messageSession: Object.fromEntries(messageSessionMap),
+        activeSession: Object.fromEntries(activeSessionMap),
+        sessionToChat: Object.fromEntries(sessionToChatMap),
+      };
+      fs.writeFileSync(ROUTING_FILE + ".tmp", JSON.stringify(data));
+      fs.renameSync(ROUTING_FILE + ".tmp", ROUTING_FILE);
+    } catch { /* ignore */ }
+  }, 1000);
+  routingSaveTimer.unref?.();
+}
+
 // ── 延迟 DONE 表情队列（等 Agent 下次 poll 时再打，标志任务真正完成）──
 const pendingDoneReactions = new Map<string, Map<string, number>>();
 const PENDING_DONE_TIMEOUT_MS = 10 * 60 * 1000;
@@ -386,6 +420,7 @@ function terminateSessionsByChat(chatId: string): void {
 function setActiveSession(chatId: string, sessionKey: string): void {
   activeSessionMap.set(chatId, sessionKey);
   sessionToChatMap.set(sessionKey, chatId);
+  scheduleRoutingSave();
   log("INFO", `会话路由更新: ${chatId} → ${sessionKey}`);
 }
 
@@ -405,6 +440,18 @@ function extractWorkspaceTitle(sessionKey?: string): string | undefined {
   return name || undefined;
 }
 
+/** 该聊天下活跃目录会话数（挂起的 poll 连接 + 近 30 分钟有回复的会话，去重） */
+function chatActiveSessionCount(chatKey: string): number {
+  const prefix = chatKey + "::";
+  const keys = new Set<string>();
+  for (const k of activePollConnections.keys()) { if (k.startsWith(prefix)) keys.add(k); }
+  const now = Date.now();
+  for (const [k, t] of sessionLastReplyAt) {
+    if (k.startsWith(prefix) && now - t < 30 * 60_000) keys.add(k);
+  }
+  return keys.size;
+}
+
 /** 仅主用户私聊显示工作目录标题（只有主用户可能在多个工作目录间切换），群聊/其他人不显示 */
 function resolveReplyTitle(ch: ResolvedChannel, sessionKey?: string): string | undefined {
   if (ch.type !== "feishu") return undefined;
@@ -412,6 +459,9 @@ function resolveReplyTitle(ch: ResolvedChannel, sessionKey?: string): string | u
   if (!mainUserEnabled || !mainUserChatId) return undefined;
   // chatId 为空时走 sender 默认目标（绑定主用户后即主用户私聊）
   if (ch.chatId && ch.chatId !== mainUserChatId) return undefined;
+  // 单会话时引用回复已足够定位，标题反而头重；仅同一聊天多个目录会话并行时才需要目录标题区分
+  const chatKey = makeChatKey(ch.rt.cfg.id, ch.chatId ?? mainUserChatId);
+  if (chatActiveSessionCount(chatKey) < 2) return undefined;
   return extractWorkspaceTitle(sessionKey);
 }
 
@@ -468,6 +518,7 @@ function trackMessageSession(messageId: string, sessionKey: string): void {
     if (oldest) messageSessionMap.delete(oldest);
   }
   messageSessionMap.set(messageId, sessionKey);
+  scheduleRoutingSave();
 }
 
 /** 已打过 Get 表情的消息——与路由映射解耦：映射在入队时即建立，表情只在首次投递时打 */
@@ -729,7 +780,7 @@ async function startFeishuChannel(rt: ChannelRuntime): Promise<void> {
         .then((result) => enqueue(result || cleanText))
         .catch(() => enqueue(cleanText));
     }
-  }).then(
+  }, (cardEvt) => handleCardAction(rt, cardEvt)).then(
     () => { rt.feishuConnected = true; },
     () => { rt.feishuConnected = false; },
   );
@@ -759,17 +810,73 @@ function isCommand(text: string): boolean {
   return Object.keys(COMMANDS).some((cmd) => trimmed === cmd || trimmed.startsWith(cmd + " "));
 }
 
-async function replyToMessage(messageId: string, text: string, chatId?: string): Promise<void> {
+// ── 卡片按钮回调 ─────────────────────────────────────────
+
+interface CardQuestionEntry { text: string; options: string[]; sessionKey?: string; createdAt: number }
+const cardQuestionMap = new Map<string, CardQuestionEntry>();
+const CARD_QUESTION_MAX = 500;
+
+function rememberCardQuestion(messageId: string, entry: CardQuestionEntry): void {
+  if (cardQuestionMap.size >= CARD_QUESTION_MAX) {
+    const oldest = cardQuestionMap.keys().next().value;
+    if (oldest) cardQuestionMap.delete(oldest);
+  }
+  cardQuestionMap.set(messageId, entry);
+}
+
+/** 卡片按钮点击回调；返回值作为 card.action.trigger 响应（toast + 更新卡片） */
+async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): Promise<unknown> {
+  const value = evt.value as { kind?: string; opt?: string; cmd?: string } | undefined;
+  const chatKey = makeChatKey(rt.cfg.id, evt.chatId);
+
+  if (value?.kind === "question") {
+    const opt = String(value.opt ?? "").trim();
+    const entry = cardQuestionMap.get(evt.messageId);
+    // daemon 重启或登记淘汰后问题上下文已丢失：标记过期，引导用户直接发消息
+    if (!entry || !opt) {
+      return {
+        toast: { type: "warning", content: "该问题已过期" },
+        card: { type: "raw", data: LarkSender.buildCard("⌛ 该问题已过期，请直接发消息告知你的选择") },
+      };
+    }
+    log("INFO", `[${rt.cfg.name}] 问题卡片选择: ${opt} (msg=${evt.messageId})`);
+    if (entry.sessionKey) trackMessageSession(evt.messageId, entry.sessionKey);
+    pushMessage(opt, `internal_card_${Date.now()}`, chatKey, undefined, evt.operatorOpenId, evt.messageId, { senderType: "user" });
+    cardQuestionMap.delete(evt.messageId);
+    return {
+      toast: { type: "success", content: `已选择: ${opt.slice(0, 30)}` },
+      card: { type: "raw", data: LarkSender.buildCard(`${entry.text}\n\n✅ 已选择: **${opt}**`) },
+    };
+  }
+
+  if (value?.kind === "cmd") {
+    const cmd = String(value.cmd ?? "").trim();
+    if (!cmd || !isCommand(cmd)) return { toast: { type: "error", content: "无效指令" } };
+    log("INFO", `[${rt.cfg.name}] 卡片指令点击: ${cmd}`);
+    handleCommand(cmd, evt.messageId, chatKey, undefined).catch((e: any) => log("ERROR", `卡片指令失败: ${e?.message ?? e}`));
+    return { toast: { type: "info", content: `已执行 ${cmd}` } };
+  }
+
+  return {};
+}
+
+async function replyToMessage(messageId: string, text: string, chatId?: string, buttons?: { label: string; cmd: string }[]): Promise<void> {
   const ch = resolveChannel(chatId);
   if (ch.type === "error") { log("WARN", `回复失败: ${ch.message}`); return; }
   if (ch.type === "wechat") {
     try { await ch.rt.wechat!.sendText(ch.chatId, text); } catch (e: any) { log("WARN", `微信回复失败: ${e?.message}`); }
     return;
   }
+  const sender = ch.rt.sender!;
+  if (buttons && buttons.length > 0) {
+    const btns: CardButton[] = buttons.slice(0, 10).map((b) => ({ label: b.label, value: { kind: "cmd", cmd: b.cmd }, type: "default" as const }));
+    await sender.sendCardWithButtons(text, btns, ch.chatId ? undefined : messageId, ch.chatId);
+    return;
+  }
   if (ch.chatId) {
-    await ch.rt.sender!.sendMessage(text, undefined, ch.chatId);
+    await sender.sendMessage(text, undefined, ch.chatId);
   } else {
-    await ch.rt.sender!.replyMessage(messageId, text);
+    await sender.replyMessage(messageId, text);
   }
 }
 
@@ -975,6 +1082,27 @@ function createMcpServer(): McpServer {
     },
   );
 
+  s.tool(
+    "send_question",
+    "向用户提问并给出选项按钮。飞书发交互卡片，用户点击按钮后所选选项会作为一条用户消息进入你的 poll-message 队列；微信降级为文本选项列表（用户直接回复文字）。发出后继续 poll-message 等待用户选择。",
+    {
+      text: z.string().describe("问题内容（支持 markdown）"),
+      options: z.array(z.string()).min(1).max(10).describe("选项文本列表（1-10 个）"),
+      message_id: z.string().optional().describe("要回复的消息ID，传入后以回复模式发送"),
+      session_key: z.string().describe("目标会话 sessionKey，用户点击的选项按此路由回你的消息队列，不可省略"),
+    },
+    async ({ text, options, message_id, session_key }) => {
+      try {
+        const r = await httpJson<{ ok: boolean; degraded?: boolean }>(localDaemonUrl("/api/send-question"), { text, options, message_id, session_key });
+        if (!r?.ok) return { content: [{ type: "text" as const, text: "[send_failed] 问题发送失败" }] };
+        return { content: [{ type: "text" as const, text: r.degraded ? "问题已发送（微信文本降级），用户将直接回复文字" : "问题卡片已发送，用户点击选项后会以普通消息进入队列，请继续 poll-message 等待" }] };
+      } catch (e: any) {
+        log("ERROR", `send_question 异常: ${e?.message ?? e}`);
+        return { content: [{ type: "text" as const, text: `[error] ${e?.message ?? "unknown error"}` }] };
+      }
+    },
+  );
+
   registerWorkflowAgentTools(s);
   return s;
 }
@@ -1158,9 +1286,9 @@ function startHttpServer(): Promise<number> {
         }
 
         if (method === "POST" && pathname === "/cmd/result") {
-          const body = JSON.parse(await readBody(req)) as { messageId: string; ok: boolean; message: string; chatId?: string };
+          const body = JSON.parse(await readBody(req)) as { messageId: string; ok: boolean; message: string; chatId?: string; buttons?: { label: string; cmd: string }[] };
           log("INFO", `指令执行完成: ok=${body.ok}, msgId=${body.messageId}, chatId=${body.chatId ?? "N/A"}`);
-          if (body.messageId) await replyToMessage(body.messageId, body.message, body.chatId);
+          if (body.messageId) await replyToMessage(body.messageId, body.message, body.chatId, body.buttons);
           json(res, { ok: true });
           return;
         }
@@ -1462,6 +1590,7 @@ async function handleWorkspaceAdmin(method: string, req: http.IncomingMessage, r
           log("INFO", `[Workspace] 会话路由迁移: ${oldSessionKey} → ${newSessionKey}`);
         }
       }
+      scheduleRoutingSave();
     }
     log("INFO", `[Workspace] hot-updated: ${oldDir} -> ${newDir}`);
     process.stdout.write(`__WORKSPACE_SWITCH__:${JSON.stringify({ dir: newDir })}\n`);
@@ -1567,6 +1696,35 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     return true;
   }
 
+  if (method === "POST" && pathname === "/api/send-question") {
+    const body = JSON.parse(await readBody(req));
+    const { text, options, message_id, session_key } = body as { text: string; options: unknown; message_id?: string; session_key?: string };
+    const opts = (Array.isArray(options) ? options : []).map((o) => String(o).trim()).filter(Boolean).slice(0, 10);
+    if (!text?.trim() || opts.length === 0) { json(res, { ok: false, error: "text 与 options 必填" }, 400); return true; }
+
+    const ch = resolveChannel(session_key);
+    if (ch.type === "error") { json(res, { ok: false, error: ch.message }, 400); return true; }
+
+    if (ch.type === "wechat") {
+      // 微信无交互卡片：降级为文本选项列表，用户直接回复编号或内容
+      const fallback = `${text}\n\n请回复编号或选项内容:\n${opts.map((o, i) => `${i + 1}. ${o}`).join("\n")}`;
+      json(res, { ok: await ch.rt.wechat!.sendText(ch.chatId, fallback), degraded: true });
+    } else {
+      const sender = ch.rt.sender!;
+      const title = resolveReplyTitle(ch, session_key);
+      const buttons: CardButton[] = opts.map((o) => ({ label: o, value: { kind: "question", opt: o } }));
+      const sentMsgId = await sender.sendCardWithButtons(text, buttons, message_id, ch.chatId, title);
+      if (sentMsgId) {
+        rememberCardQuestion(sentMsgId, { text, options: opts, sessionKey: session_key, createdAt: Date.now() });
+        if (session_key) trackMessageSession(sentMsgId, session_key);
+      }
+      json(res, { ok: !!sentMsgId, message_id: sentMsgId });
+    }
+    if (session_key) sessionLastReplyAt.set(session_key, Date.now());
+    ackOnReply(message_id, session_key);
+    return true;
+  }
+
   if (method === "POST" && pathname === "/api/send-image") {
     const body = JSON.parse(await readBody(req));
     const { image_path, message_id, session_key } = body as { image_path: string; message_id?: string; session_key?: string };
@@ -1635,7 +1793,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
   if (method === "DELETE" && pathname === "/api/active-session") {
     const qs = new URL(req.url ?? "", "http://localhost").searchParams;
     const chatId = qs.get("chatId");
-    if (chatId) activeSessionMap.delete(chatId);
+    if (chatId) { activeSessionMap.delete(chatId); scheduleRoutingSave(); }
     json(res, { ok: true });
     return true;
   }
@@ -1839,6 +1997,7 @@ export async function daemonMain(): Promise<void> {
   });
 
   initQueue();
+  loadRoutingMaps();
   startMediaCacheCleanup();
 
   // 超时兜底：Agent 崩溃不再 poll 时，超过 10 分钟的 pendingDone 自动打出

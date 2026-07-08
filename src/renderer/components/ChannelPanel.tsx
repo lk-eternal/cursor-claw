@@ -27,7 +27,6 @@ function emptyChannel(type: "feishu" | "wechat", defaultName: string): ChannelCo
     othersModelParams: "",
     mainUserEnabled: false,
     mainUserChatId: "",
-    mainUserNewSession: false,
     allowOthers: false,
     digitalIdentity: "",
     workspaceDir: "",
@@ -694,16 +693,6 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
                     </div>
                     {draft.workspaceDir && <button onClick={() => set({ workspaceDir: "" })} className="text-xs text-gray-500 hover:text-red-400">清除</button>}
                   </div>
-                </div>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-xs text-gray-400">主用户每次新会话</p>
-                    <p className="text-xs text-gray-600">开启后每次拉起 Agent 都创建新会话，不延续上下文</p>
-                  </div>
-                  <button onClick={() => set({ mainUserNewSession: !draft.mainUserNewSession })}
-                    className={`relative h-5 w-9 shrink-0 rounded-full transition ${draft.mainUserNewSession ? "bg-green-500" : "bg-gray-600"}`}>
-                    <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition ${draft.mainUserNewSession ? "left-[18px]" : "left-0.5"}`} />
-                  </button>
                 </div>
               </div>
             )}

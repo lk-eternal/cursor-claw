@@ -266,7 +266,6 @@ export function migrateLegacyConfig(hooks?: LegacyMigrationHooks): void {
         ...baseModel,
         mainUserEnabled: !!cfg.larkReceiveId?.trim(),
         mainUserChatId: cfg.larkReceiveId?.trim() ?? "",
-        mainUserNewSession: cfg.agentNewSession ?? false,
         workspaceDir: "",
       })
     }
@@ -297,7 +296,6 @@ export function migrateLegacyConfig(hooks?: LegacyMigrationHooks): void {
         ...baseModel,
         mainUserEnabled: !!lastChatId,
         mainUserChatId: lastChatId,
-        mainUserNewSession: cfg.agentNewSession ?? false,
         workspaceDir: "",
       })
       hooks?.moveWechatDataDir?.(id)
