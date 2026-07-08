@@ -1,6 +1,9 @@
 import { CronExpressionParser } from "cron-parser";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { readScheduledTasksFile, type ScheduledTask } from "./shared/scheduled-task.js";
+
+export type { ScheduledTask };
 
 const APP_DATA_DIR = process.env.APP_DATA_DIR || "";
 const TASKS_FILE = path.join(APP_DATA_DIR, "scheduled-tasks.json");
@@ -10,20 +13,6 @@ const WATCHDOG_MS = 5_000;
 const CATCHUP_MAX_MS = 30 * 60 * 1000;
 /** 单任务单次 tick 内最多向前迭代次数 */
 const MAX_FIRES_PER_TICK = 10_000;
-
-export interface ScheduledTask {
-  id: string;
-  name: string;
-  cron: string;
-  content: string;
-  enabled?: boolean;
-  independent?: boolean;
-  /** 所属消息通道；空 = 第一个可用通道 */
-  channelId?: string;
-  /** 任务模型，空 = 跟随通道主模型 */
-  model?: string;
-  modelParams?: string;
-}
 
 let scheduledTasksSnapshot: ScheduledTask[] = [];
 let watchdogTimer: ReturnType<typeof setInterval> | null = null;
@@ -43,27 +32,7 @@ function log(msg: string): void {
 }
 
 function readTasksFromFile(): ScheduledTask[] {
-  try {
-    if (!fs.existsSync(TASKS_FILE)) {
-      return [];
-    }
-    const raw = fs.readFileSync(TASKS_FILE, "utf-8");
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-    return parsed.filter(
-      (t: unknown): t is ScheduledTask =>
-        typeof t === "object" && t !== null &&
-        typeof (t as ScheduledTask).id === "string" &&
-        typeof (t as ScheduledTask).name === "string" &&
-        typeof (t as ScheduledTask).cron === "string" &&
-        typeof (t as ScheduledTask).content === "string",
-    ).map((t) => ({ ...t, enabled: t.enabled !== false }));
-  } catch (e) {
-    log(`读取任务文件失败: ${e instanceof Error ? e.message : String(e)}`);
-    return [];
-  }
+  return readScheduledTasksFile(TASKS_FILE);
 }
 
 function isValidCron(expression: string): boolean {

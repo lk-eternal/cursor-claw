@@ -21,44 +21,32 @@ export function quoteArg(a: string): string {
   return a
 }
 
-// ── PATH 刷新 ────────────────────────────────────────────
+// ── PATH 刷新（GUI 进程继承的 PATH 可能过旧，从系统/登录 shell 重新读取）──
+
+function pathRefreshCommand(): string {
+  if (os.platform() === "win32") {
+    return 'powershell -NoProfile -Command "[System.Environment]::GetEnvironmentVariable(\'Path\',\'Machine\') + \';\' + [System.Environment]::GetEnvironmentVariable(\'Path\',\'User\')"'
+  }
+  const shell = process.env.SHELL || "/bin/zsh"
+  return `${shell} -ilc 'echo $PATH'`
+}
+
+function applyFreshPath(stdout: string): void {
+  const freshPath = stdout.trim()
+  if (freshPath) process.env.PATH = freshPath
+}
 
 function refreshPath(): void {
-  if (os.platform() === "win32") {
-    try {
-      const freshPath = execSync(
-        'powershell -NoProfile -Command "[System.Environment]::GetEnvironmentVariable(\'Path\',\'Machine\') + \';\' + [System.Environment]::GetEnvironmentVariable(\'Path\',\'User\')"',
-        { encoding: "utf-8", timeout: 5000 },
-      ).trim()
-      if (freshPath) process.env.PATH = freshPath
-    } catch { /* ignore */ }
-  } else {
-    try {
-      const shell = process.env.SHELL || "/bin/zsh"
-      const freshPath = execSync(`${shell} -ilc 'echo $PATH'`, { encoding: "utf-8", timeout: 5000 }).trim()
-      if (freshPath) process.env.PATH = freshPath
-    } catch { /* ignore */ }
-  }
+  try {
+    applyFreshPath(execSync(pathRefreshCommand(), { encoding: "utf-8", timeout: 5000 }))
+  } catch { /* ignore */ }
 }
 
 export async function refreshPathAsync(): Promise<void> {
-  if (os.platform() === "win32") {
-    try {
-      const { stdout } = await execAsync(
-        'powershell -NoProfile -Command "[System.Environment]::GetEnvironmentVariable(\'Path\',\'Machine\') + \';\' + [System.Environment]::GetEnvironmentVariable(\'Path\',\'User\')"',
-        { timeout: 5000, maxBuffer: 2_000_000 },
-      )
-      const freshPath = String(stdout ?? "").trim()
-      if (freshPath) process.env.PATH = freshPath
-    } catch { /* ignore */ }
-  } else {
-    try {
-      const shell = process.env.SHELL || "/bin/zsh"
-      const { stdout } = await execAsync(`${shell} -ilc 'echo $PATH'`, { timeout: 5000, maxBuffer: 2_000_000 })
-      const freshPath = String(stdout ?? "").trim()
-      if (freshPath) process.env.PATH = freshPath
-    } catch { /* ignore */ }
-  }
+  try {
+    const { stdout } = await execAsync(pathRefreshCommand(), { timeout: 5000, maxBuffer: 2_000_000 })
+    applyFreshPath(String(stdout ?? ""))
+  } catch { /* ignore */ }
 }
 
 // ── CLI 发现 ─────────────────────────────────────────────
@@ -84,10 +72,7 @@ export function resolveAgentBinary(): boolean {
   } catch { return false }
 }
 
-/**
- * 确保 CLI 可用的统一守卫——消除"resolve → refresh → resolve"的重复模式。
- * sync=true 使用同步刷新（适用于 spawnSync 场景），否则异步。
- */
+/** 确保 CLI 可用的统一守卫——消除"resolve → refresh → resolve"的重复模式 */
 export async function ensureAgentBinary(): Promise<boolean> {
   if (resolveAgentBinary()) return true
   await refreshPathAsync()

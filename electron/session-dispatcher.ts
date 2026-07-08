@@ -6,7 +6,7 @@ import {
   resolveChannelModel, effectiveWorkspaceDir, mainChatScopeKey,
   type MessageChannel, type ModelScenario,
 } from "./config-store"
-import { parseChatKey } from "../src/shared/channel-types"
+import { parseChatKey, workspaceDirFromSessionKey } from "../src/shared/channel-types"
 import { broadcastLog } from "./ui-logger"
 import { readLockFile, httpGet, httpPost, syncActiveSession, getCurrentActiveSession, drainSessionMessages } from "./daemon-client"
 import { reportCommandResult } from "./command-handler"
@@ -22,7 +22,6 @@ import {
 import {
   launchSdkAgent, stopSdkSession, stopAllSdkSessions,
   isSdkSessionRunning, getSdkSessionList, setSdkIdleHandler, hasResumableSdkSession,
-  getSdkCooldownUntil,
 } from "./agent-sdk"
 import { injectWorkspaceToDir } from "./workspace-injector"
 
@@ -252,6 +251,8 @@ export interface QueueMessageItem {
   index: number
   fileId: string
   preview: string
+  /** pending = 排队待投递；processing = 已投递给 Agent 待回复确认 */
+  status?: "pending" | "processing"
   sessionKey?: string
   chatType?: string
   timestamp?: number
@@ -298,7 +299,7 @@ interface LaunchAgentParams {
   workingDirectory?: string
 }
 
-async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?: string; retryable?: boolean }> {
+async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?: string }> {
   const { sessionKey, chatType, meta, senderOpenId, chatName, taskMessage } = p
   const useMain = p.useMainWorkspace ?? (chatType === "p2p")
 
@@ -317,7 +318,10 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
     workDir = p.workingDirectory
     if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true })
   } else if (useMain || isOwnTask) {
-    workDir = effectiveWorkspaceDir(channel)
+    // sessionKey 自带工作目录后缀时优先（如切换 workspace 后旧会话被重新拉起，
+    // 必须回到原目录，否则 UI 目录显示错误且 Resume 目录匹配失败丢上下文）
+    const skDir = workspaceDirFromSessionKey(sessionKey)
+    workDir = skDir && fs.existsSync(skDir) ? skDir : effectiveWorkspaceDir(channel)
   } else {
     // 临时目录名含 chatKey 的通道前缀（ch_xxx_...），不同通道天然隔离
     const safeChatId = sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_")
@@ -371,7 +375,7 @@ export async function launchSessionAgent(
   sessionKey: string, chatType: ChatType,
   meta?: import("./agent-launcher").LaunchMeta,
   useMainWorkspace?: boolean, senderOpenId?: string,
-): Promise<{ ok: boolean; error?: string; retryable?: boolean }> {
+): Promise<{ ok: boolean; error?: string }> {
   return launchAgent({ sessionKey, chatType, meta, useMainWorkspace, senderOpenId })
 }
 
@@ -547,9 +551,6 @@ async function isZombieAgent(sessionKey: string): Promise<boolean> {
 
 let dispatching = false
 
-/** 每个冷却周期只向用户提示一次（记录已提示的冷却截止时间戳） */
-const cooldownNotifiedUntil = new Map<string, number>()
-
 export async function dispatchSessionAgents(): Promise<void> {
   if (dispatching) return
   dispatching = true
@@ -579,26 +580,12 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
       }
     }
 
-    // 失败冷却期内不启动也不丢消息：队列保留，下一轮调度自动重试
-    const cooldownUntil = getSdkCooldownUntil(sessionKey)
-    if (cooldownUntil > 0) {
-      if (cooldownNotifiedUntil.get(sessionKey) !== cooldownUntil) {
-        cooldownNotifiedUntil.set(sessionKey, cooldownUntil)
-        const secs = Math.ceil((cooldownUntil - Date.now()) / 1000)
-        broadcastLog(`[Agent] ${sessionKey} 冷却中，约 ${secs}s 后自动重试（消息保留在队列）`)
-        await notifyChat(sessionKey, `⏳ Agent 正在恢复，您的消息将在约 ${secs} 秒后自动处理`)
-      }
-      continue
-    }
-
     const chatId = extractChatId(sessionKey)
     const mainUser = isMainUser(chatId, chatType)
 
     if (feishuOn && chatType === "p2p" && senderOpenId?.startsWith("ou_") && !chatNameCache.has(senderOpenId)) {
       await fetchUserNames([senderOpenId], parseChatKey(chatId).channelId)
     }
-
-    await new Promise((r) => setTimeout(r, 500))
 
     const userName = senderOpenId ? chatNameCache.get(senderOpenId) : undefined
     const chatName = chatNameCache.get(chatId) || userName
@@ -618,11 +605,6 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
       if (lock?.port) await syncActiveSession(lock.port, chatId, sessionKey)
     }
     if (!result.ok) {
-      if (result.retryable) {
-        // 瞬态失败（如冷却竞态）：消息保留在队列，下一轮调度自动重试
-        broadcastLog(`[Agent] ${sessionKey} 本轮跳过: ${result.error}（消息保留待重试）`)
-        continue
-      }
       broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${result.error}`)
       await notifyChat(sessionKey, `⚠️ Agent 启动失败，本条消息未能处理，请稍后重发。\n原因: ${result.error ?? "未知错误"}`)
       const lock = cachedLock()

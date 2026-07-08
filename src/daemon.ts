@@ -31,10 +31,12 @@ import { LOCK_FILE_NAME } from "./shared/constants.js";
 import {
   makeChatKey,
   parseChatKey,
+  chatIdFromSessionKey,
   channelIdFromSessionKey,
   type DaemonChannelConfig,
   type ChannelStatusInfo,
 } from "./shared/channel-types.js";
+import { readScheduledTasksFile, writeScheduledTasksFile, type ScheduledTask } from "./shared/scheduled-task.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -96,19 +98,31 @@ function resolveKeepAlive(sessionKey: string): boolean {
   return channelKeepAlive.size === 1 ? [...channelKeepAlive.values()][0] : true;
 }
 
-const savedProxyKeys = stripProxyEnv();
+stripProxyEnv();
 
 // ── 活跃 MCP 连接追踪 ──
 let activeMcpConnections = 0;
 let lastMcpRequestTime = 0;
 
 // ── 日志 ─────────────────────────────────────────────────
+// 统一日志目录：{APP_DATA_DIR}/logs/（daemon.log = Daemon 进程；app.log = Electron 主进程）
 
-const LOG_FILE_PATH = path.join(APP_DATA_DIR, "daemon.log");
+const LOG_FILE_PATH = path.join(APP_DATA_DIR, "logs", "daemon.log");
 const MAX_LOG_SIZE = 2 * 1024 * 1024;
 const LOG_ROTATE_CHECK_INTERVAL = 100;
 let logWriteCount = 0;
 let logDirEnsured = false;
+
+/** 旧版本日志在 APP_DATA_DIR 根下，迁移到 logs/ 子目录（一次性，失败忽略） */
+function migrateLegacyLogFile(): void {
+  try {
+    const legacy = path.join(APP_DATA_DIR, "daemon.log");
+    if (fs.existsSync(legacy) && !fs.existsSync(LOG_FILE_PATH)) {
+      fs.mkdirSync(path.dirname(LOG_FILE_PATH), { recursive: true });
+      fs.renameSync(legacy, LOG_FILE_PATH);
+    }
+  } catch { /* ignore */ }
+}
 
 /** 换行用 ⏎ 标记（展示层还原），避免与 Windows 路径中 \n、\r 字面量冲突 */
 function escapeLogContentSingleLine(s: string): string {
@@ -377,10 +391,7 @@ function setActiveSession(chatId: string, sessionKey: string): void {
 
 function resolveRawChatId(sessionKey?: string): string | undefined {
   if (!sessionKey) return undefined;
-  const mapped = sessionToChatMap.get(sessionKey);
-  if (mapped) return mapped;
-  const idx = sessionKey.indexOf("::");
-  return idx > 0 ? sessionKey.slice(0, idx) : sessionKey;
+  return sessionToChatMap.get(sessionKey) ?? chatIdFromSessionKey(sessionKey);
 }
 
 function extractWorkspaceTitle(sessionKey?: string): string | undefined {
@@ -459,12 +470,22 @@ function trackMessageSession(messageId: string, sessionKey: string): void {
   messageSessionMap.set(messageId, sessionKey);
 }
 
-/** 记录消息归属会话，并返回首次投递（之前未见过）的 messageId——只对新消息打 Get，避免重投时重复打表情 */
+/** 已打过 Get 表情的消息——与路由映射解耦：映射在入队时即建立，表情只在首次投递时打 */
+const reactedMessageIds = new Set<string>();
+
+/** 记录消息归属会话，并返回首次投递（未打过表情）的 messageId，避免重投时重复打表情 */
 function collectFreshAndTrack(messages: QueueMessage[], sessionKey: string): string[] {
   const fresh: string[] = [];
   for (const m of messages) {
     if (!m.messageId) continue;
-    if (!messageSessionMap.has(m.messageId)) fresh.push(m.messageId);
+    if (!reactedMessageIds.has(m.messageId)) {
+      fresh.push(m.messageId);
+      reactedMessageIds.add(m.messageId);
+      if (reactedMessageIds.size > MSG_SESSION_MAP_MAX) {
+        const oldest = reactedMessageIds.values().next().value;
+        if (oldest) reactedMessageIds.delete(oldest);
+      }
+    }
     trackMessageSession(m.messageId, sessionKey);
   }
   return fresh;
@@ -501,7 +522,7 @@ function resolveRoutingKey(chatId?: string, replyMessageId?: string): string | u
     if (sk) {
       // 同一条消息（message_id 全局唯一）可能被多个通道分别接收（bot 协作 reply 链）。
       // messageId 映射仅在通道一致时生效，否则会把 A 通道的消息错投进 B 通道的会话。
-      const skChannel = parseChatKey(sk.includes("::") ? sk.slice(0, sk.indexOf("::")) : sk).channelId;
+      const skChannel = channelIdFromSessionKey(sk);
       const msgChannel = chatId ? parseChatKey(chatId).channelId : undefined;
       if (!skChannel || !msgChannel || skChannel === msgChannel) {
         log("INFO", `路由命中 messageId 映射: ${replyMessageId} → ${sk}`);
@@ -554,7 +575,10 @@ function pushMessage(content: string, messageId?: string, chatId?: string, chatT
   if (senderOpenId) fullMeta.senderOpenId = senderOpenId;
   const written = pushToFileQueue(content, messageId, `daemon-${process.pid}`, routedId, false, Object.keys(fullMeta).length > 0 ? fullMeta : undefined);
   if (written) {
-    log("INFO", `消息已写入共享队列: ${JSON.stringify(content)} (id=${messageId ?? "none"}, chat=${chatId ?? "none"}${routedId !== chatId ? ` → routed=${routedId}` : ""}${replyMessageId ? `, reply=${replyMessageId}` : ""})`);
+    // 入队即建立 messageId→会话映射：回复一条尚未被 Agent 领取的消息也能正确路由
+    if (messageId && routedId) trackMessageSession(messageId, routedId);
+    const preview = content.length > 200 ? `${content.slice(0, 200)} …(+${content.length - 200} chars)` : content;
+    log("INFO", `消息已写入共享队列: ${JSON.stringify(preview)} (id=${messageId ?? "none"}, chat=${chatId ?? "none"}${routedId !== chatId ? ` → routed=${routedId}` : ""}${replyMessageId ? `, reply=${replyMessageId}` : ""})`);
     broadcastQueueEvent(routedId);
   } else {
     log("INFO", `消息已跳过（重复或写入失败）: id=${messageId ?? "none"}`);
@@ -705,9 +729,10 @@ async function startFeishuChannel(rt: ChannelRuntime): Promise<void> {
         .then((result) => enqueue(result || cleanText))
         .catch(() => enqueue(cleanText));
     }
-  });
-  // WSClient.start 为异步建立；这里乐观置位，错误会在日志中体现
-  rt.feishuConnected = true;
+  }).then(
+    () => { rt.feishuConnected = true; },
+    () => { rt.feishuConnected = false; },
+  );
 }
 
 // ── 指令系统 ─────────────────────────────────────────────
@@ -1197,18 +1222,12 @@ function writeJsonSafe(filePath: string, data: unknown): void {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
 }
 
-interface TaskEntry {
-  id: string; name: string; cron: string; content: string; enabled: boolean; independent?: boolean
-  channelId?: string; model?: string; modelParams?: string
+function readTasks(): ScheduledTask[] {
+  return readScheduledTasksFile(TASKS_FILE);
 }
 
-function readTasks(): TaskEntry[] {
-  const data = readJsonSafe(TASKS_FILE);
-  return Array.isArray(data) ? data : [];
-}
-
-function writeTasks(tasks: TaskEntry[]): void {
-  writeJsonSafe(TASKS_FILE, tasks);
+function writeTasks(tasks: ScheduledTask[]): void {
+  writeScheduledTasksFile(TASKS_FILE, tasks);
 }
 
 // ── CRUD 子路由 ──────────────────────────────────────────
@@ -1364,7 +1383,7 @@ async function handleTasksAdmin(method: string, req: http.IncomingMessage, res: 
 
     if (action === "add") {
       if (!name || !cron || !content) { json(res, { ok: false, error: "name, cron, content required" }, 400); return true; }
-      const newTask: TaskEntry = {
+      const newTask: ScheduledTask = {
         id: crypto.randomUUID(), name: name.trim(), cron: cron.trim(), content,
         enabled: enabled ?? true, independent: independent ?? true,
         channelId: channelId || channels.keys().next().value, model, modelParams,
@@ -1796,6 +1815,7 @@ export async function daemonMain(): Promise<void> {
     process.exit(1);
   }
 
+  migrateLegacyLogFile();
   log("INFO", `Daemon v${PKG_VERSION} 启动`);
   log("INFO", `workspace: ${WORKSPACE_DIR}`);
   log("INFO", `通道(${CHANNEL_CONFIGS.length}): ${CHANNEL_CONFIGS.map((c) => `${c.name}[${c.type}]`).join(" + ")}`);

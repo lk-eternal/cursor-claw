@@ -17,7 +17,7 @@ import {
   execAgentAsync,
   applyProxyEnv,
   initDaemonManager,
-  cleanupDaemonManager,
+  shutdownDaemonManager,
   saveAppConfigFromRenderer,
   checkSdkApiKey,
   listSdkModels,
@@ -391,8 +391,19 @@ function logGlobalError(kind: string, raw: unknown): void {
 process.on("uncaughtException", (err) => logGlobalError("未捕获异常", err))
 process.on("unhandledRejection", (reason) => logGlobalError("未处理的 Promise 拒绝", reason))
 
-app.on("before-quit", () => {
+let quitCleanupDone = false
+
+app.on("before-quit", (e) => {
   isQuitting = true
+  if (quitCleanupDone) return
+  // 拦截首次退出：等 SDK run 取消落库再放行，否则会残留 active run 导致下次 Resume 卡死
+  e.preventDefault()
+  quitCleanupDone = true
+  const forceExit = setTimeout(() => app.exit(0), 8000)
+  void shutdownDaemonManager().finally(() => {
+    clearTimeout(forceExit)
+    app.quit()
+  })
 })
 
 app.whenReady().then(() => {
@@ -419,6 +430,5 @@ app.on("activate", () => {
 })
 
 app.on("will-quit", () => {
-  cleanupDaemonManager()
   destroyTray()
 })

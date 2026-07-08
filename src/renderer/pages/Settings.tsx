@@ -159,7 +159,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
   const [taskStatuses, setTaskStatuses] = useState<Record<string, { running: boolean; pid?: number; startedAt?: number }>>({})
 
   const loaded = useRef(false)
-  const saveTimer = useRef<ReturnType<typeof setTimeout>>()
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   const [mcpRefreshing, setMcpRefreshing] = useState(false)
   const refreshMcpServers = useCallback(async (force = false) => {
@@ -406,7 +406,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
   }, [taskModalOpen, taskIdForCronPreview, taskCronForPreview])
 
   /** 按任务所选通道的 Agent 资源拉取模型列表 */
-  const fetchTaskModels = async (channelId?: string) => {
+  const fetchTaskModels = async (channelId?: string, silent = false) => {
     const channel = taskChannels.find((c) => c.id === channelId) ?? taskChannels[0]
     const resource = agentResources.find((r) => r.id === channel?.agentResourceId)
     setLoadingTaskModels(true)
@@ -414,16 +414,26 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
       if (resource?.type === "sdk") {
         const r = await window.electronAPI.listSdkModels(resource.apiKey ?? "")
         if (r.ok && r.models.length > 0) setTaskModelOptions(r.models)
-        else if (!r.ok) void showAlert("错误", r.error || "获取模型列表失败")
+        else if (!r.ok && !silent) void showAlert("错误", r.error || "获取模型列表失败")
       } else {
         const r = await window.electronAPI.listModels()
         if (r.ok && r.models.length > 0) setTaskModelOptions(r.models.map((m) => ({ ...m, label: m.id, params: "" })))
-        else if (!r.ok) void showAlert("错误", r.error || "获取模型列表失败")
+        else if (!r.ok && !silent) void showAlert("错误", r.error || "获取模型列表失败")
       }
     } finally {
       setLoadingTaskModels(false)
     }
   }
+
+  // 任务弹窗打开与切换通道时自动加载模型列表（静默失败，按钮可手动重试）
+  const taskModalVisible = taskEditing !== null
+  const taskModelChannelId = taskEditing?.channelId
+  useEffect(() => {
+    if (!taskModalVisible) return
+    setTaskModelOptions([])
+    void fetchTaskModels(taskModelChannelId, true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskModalVisible, taskModelChannelId])
 
   const selectDir = async () => { const d = await window.electronAPI.selectDirectory(); if (d) setWorkspaceDir(d) }
 
@@ -1321,7 +1331,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
                   <div className="mb-1 flex items-center gap-2">
                     <label className="block text-xs text-gray-500">模型</label>
                     <button onClick={() => void fetchTaskModels(taskEditing.channelId)} disabled={loadingTaskModels} className="flex items-center gap-1 rounded px-1.5 py-0 text-[10px] text-gray-500 transition hover:bg-gray-800 hover:text-white disabled:opacity-50">
-                      {loadingTaskModels ? <Loader2 size={10} className="animate-spin" /> : <RefreshCw size={10} />}获取
+                      {loadingTaskModels ? <Loader2 size={10} className="animate-spin" /> : <RefreshCw size={10} />}{loadingTaskModels ? "加载中" : "刷新"}
                     </button>
                   </div>
                   {taskModelOptions.length > 0

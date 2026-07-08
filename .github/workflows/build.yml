@@ -42,6 +42,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Run tests
+        run: npm test
+
+      - name: Typecheck (electron + renderer)
+        run: npm run typecheck
+
       - name: Build app
         run: npm run build
 

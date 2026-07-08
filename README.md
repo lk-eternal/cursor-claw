@@ -90,6 +90,23 @@ Daemon ──┬── 主用户私聊 Agent（使用配置的工作目录）
 | macOS (Homebrew) | `brew install --cask` | 推荐，便于升级管理 |
 | Linux | `.deb` / `.AppImage` | 直接运行 |
 
+#### macOS 首次启动：信任应用（必读）
+
+应用未经过 Apple 公证，无论通过 `.dmg` 还是 Homebrew 安装，**首次打开都会被 Gatekeeper 拦截**（提示"无法打开，因为无法验证开发者"或"已损坏"）。建议安装完成后、首次启动前先解除：
+
+```bash
+# 方式一：命令行移除隔离属性（推荐先尝试）
+xattr -cr /Applications/Cursor\ Claw.app
+```
+
+如果命令执行失败（如提示 `Operation not permitted` / `No such xattr`），或执行后打开仍被拦截，请改走系统设置手动信任：
+
+1. 双击打开一次 **Cursor Claw**，触发拦截弹窗后点「完成」关闭（不要点「移到废纸篓」）
+2. 打开「系统设置 → 隐私与安全性」，滚动到「安全性」区域
+3. 找到"已阻止 Cursor Claw"的提示，点击「仍要打开」，在弹窗中再次确认
+
+完成后即可在「应用程序」中正常启动。
+
 #### macOS 通过 Homebrew 安装
 ##### 初次安装
 
@@ -97,11 +114,14 @@ Daemon ──┬── 主用户私聊 Agent（使用配置的工作目录）
 # 1. 添加 tap
 brew tap lk-eternal/tap
 
+# 2. 信任 tap
+brew trust --cask lk-eternal/tap/cursor-claw
+
 # 2. 安装
 brew install --cask cursor-claw
 ```
 
-安装完成后在「应用程序」中打开 **Cursor Claw** 即可。
+安装完成后按上方[「首次启动：信任应用」](#macos-首次启动信任应用必读)操作解除拦截，再在「应用程序」中打开 **Cursor Claw** 即可。
 
 ##### 更新到最新版本
 
@@ -129,6 +149,7 @@ brew untap lk-eternal/tap   # 可选，移除 tap 源
 # 方法 1：强制刷新 tap 后重装
 brew untap lk-eternal/tap
 brew tap lk-eternal/tap
+brew trust --cask lk-eternal/tap/cursor-claw
 brew upgrade --cask cursor-claw
 
 # 方法 2：直接强制重装
@@ -143,6 +164,7 @@ brew reinstall --cask cursor-claw
 # 删除损坏的 tap 并重新添加
 brew untap lk-eternal/tap
 brew tap lk-eternal/tap
+brew trust --cask lk-eternal/tap/cursor-claw
 ```
 
 如果 `untap` 报错 `Refusing to untap because it contains installed casks`，加上 `--force`：
@@ -150,6 +172,7 @@ brew tap lk-eternal/tap
 ```bash
 brew untap --force lk-eternal/tap
 brew tap lk-eternal/tap
+brew trust --cask lk-eternal/tap/cursor-claw
 brew upgrade --cask cursor-claw
 ```
 
@@ -169,14 +192,7 @@ brew info --cask cursor-claw
 
 ###### Q: macOS 提示"无法打开，因为无法验证开发者"？
 
-由于应用未经过 Apple 公证，首次打开时可能会被 Gatekeeper 拦截：
-
-```bash
-# 移除隔离属性
-xattr -cr /Applications/Cursor\ Claw.app
-```
-
-或者在「系统设置 → 隐私与安全性」中点击「仍要打开」。
+参见上方[「首次启动：信任应用」](#macos-首次启动信任应用必读)：先尝试 `xattr -cr /Applications/Cursor\ Claw.app`；命令失败或无效时，到「系统设置 → 隐私与安全性 → 安全性」找到被阻止的提示并点「仍要打开」。
 
 
 ## 快速开始

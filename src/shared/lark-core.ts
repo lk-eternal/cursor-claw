@@ -446,12 +446,13 @@ export class LarkSender {
 
   // ── WebSocket 连接 ────────────────────────────────────
 
+  /** 建立 WebSocket 长连接；返回的 Promise 反映连接建立结果（调用方可据此维护连接状态） */
   startConnection(
     appId: string,
     appSecret: string,
     encryptKey: string,
     onMessage: (event: LarkMessageEvent) => void,
-  ): void {
+  ): Promise<void> {
     const eventDispatcher = new Lark.EventDispatcher(encryptKey ? { encryptKey } : {}).register({
       "im.message.receive_v1": (data) => {
         try {
@@ -476,9 +477,12 @@ export class LarkSender {
       },
     });
     const wsClient = new Lark.WSClient({ appId, appSecret, loggerLevel: Lark.LoggerLevel.error });
-    wsClient.start({ eventDispatcher })
+    return wsClient.start({ eventDispatcher })
       .then(() => this.log("INFO", "飞书 WebSocket 连接建立成功"))
-      .catch((e: any) => this.log("ERROR", `飞书 WebSocket 连接失败: ${e?.message ?? e}`));
+      .catch((e: any) => {
+        this.log("ERROR", `飞书 WebSocket 连接失败: ${e?.message ?? e}`);
+        throw e;
+      });
   }
 }
 

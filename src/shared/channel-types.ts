@@ -96,9 +96,21 @@ export function parseChatKey(chatKey: string): { channelId?: string; chatId: str
   return { chatId: chatKey };
 }
 
+/** 从 sessionKey（`chatKey` 或 `chatKey::workspaceDir`）提取 chatKey 部分 */
+export function chatIdFromSessionKey(sessionKey: string): string {
+  const idx = sessionKey.indexOf("::");
+  return idx > 0 ? sessionKey.slice(0, idx) : sessionKey;
+}
+
 /** 从 sessionKey（`chatKey` 或 `chatKey::workspaceDir`）解析 channelId */
 export function channelIdFromSessionKey(sessionKey: string): string | undefined {
+  return parseChatKey(chatIdFromSessionKey(sessionKey)).channelId;
+}
+
+/** 从 sessionKey 提取 `::` 后缀的工作目录；仅路径形态有效（排除 wf_xxx 等非路径后缀） */
+export function workspaceDirFromSessionKey(sessionKey: string): string | undefined {
   const idx = sessionKey.indexOf("::");
-  const chatKey = idx > 0 ? sessionKey.slice(0, idx) : sessionKey;
-  return parseChatKey(chatKey).channelId;
+  if (idx < 0) return undefined;
+  const dir = sessionKey.slice(idx + 2);
+  return dir && /[\\/]/.test(dir) ? dir : undefined;
 }

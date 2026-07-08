@@ -1,49 +1,9 @@
 import { contextBridge, ipcRenderer } from "electron"
 import type { WorkflowDefinition, WorkflowInstance } from "../src/shared/workflow-types"
+import type { AgentResource, MessageChannel, ChannelStatusInfo } from "../src/shared/channel-types"
+import type { ScheduledTask } from "../src/shared/scheduled-task"
 
-export interface AgentResource {
-  id: string
-  type: "cli" | "sdk"
-  name: string
-  apiKey?: string
-  email?: string
-}
-
-export interface MessageChannel {
-  id: string
-  name: string
-  enabled: boolean
-  type: "feishu" | "wechat"
-  larkAppId?: string
-  larkAppSecret?: string
-  larkAppQuickCreated?: boolean
-  larkBotName?: string
-  wechatToken?: string
-  wechatAccountId?: string
-  agentResourceId: string
-  model: string
-  modelParams: string
-  othersModel: string
-  othersModelParams: string
-  mainUserEnabled: boolean
-  mainUserChatId: string
-  mainUserNewSession: boolean
-  allowOthers: boolean
-  digitalIdentity: string
-  workspaceDir: string
-  keepSession?: boolean
-  persistentPoll?: boolean
-}
-
-export interface ChannelStatusInfo {
-  id: string
-  name: string
-  type: "feishu" | "wechat"
-  connected: boolean
-  status: string
-  mainUserBound: boolean
-  botName?: string
-}
+export type { AgentResource, MessageChannel, ChannelStatusInfo, ScheduledTask }
 
 export interface AppConfig {
   agentResources: AgentResource[]
@@ -102,18 +62,6 @@ export interface ConfigSaveResult {
   existingSessions?: { sessionKey: string; chatName?: string }[]
   deferredSetupComplete?: boolean
   workspaceDirChanged?: boolean
-}
-
-export interface ScheduledTask {
-  id: string
-  name: string
-  cron: string
-  content: string
-  enabled: boolean
-  independent?: boolean
-  channelId?: string
-  model?: string
-  modelParams?: string
 }
 
 export interface InjectResult {
@@ -221,11 +169,15 @@ const api = {
   injectWorkspace: (): Promise<{ results: InjectResult[] }> => ipcRenderer.invoke("workspace:inject"),
   startDaemon: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("daemon:start"),
   stopAgent: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("agent:stop"),
-  getSessionAgents: (): Promise<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string }[]> =>
+  getSessionAgents: (): Promise<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string; workspaceDir?: string; source?: "cli" | "sdk" }[]> =>
     ipcRenderer.invoke("agent:sessions"),
+  getSessionDiagnostics: (sessionKey: string): Promise<{ running: boolean; resumeAgentId?: string; resumeUpdatedAt?: number; lastRun?: { status: string; endedAt: number; durationMs?: number; error?: string }; lastReplyAt: number | null }> =>
+    ipcRenderer.invoke("diagnostics:session", sessionKey),
+  exportDiagnostics: (): Promise<{ ok: boolean; path?: string; error?: string }> =>
+    ipcRenderer.invoke("diagnostics:export"),
   stopSessionAgent: (sessionKey: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("agent:stop-session", sessionKey),
   stopAllSessionAgents: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("agent:stop-all-sessions"),
-  onSessionAgents: (cb: (list: { sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string }[]) => void) => {
+  onSessionAgents: (cb: (list: { sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string; workspaceDir?: string; source?: "cli" | "sdk" }[]) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, list: Parameters<typeof cb>[0]) => cb(list)
     ipcRenderer.on("agent:sessions", handler)
     return () => { ipcRenderer.removeListener("agent:sessions", handler) }
@@ -233,7 +185,7 @@ const api = {
   stopDaemon: (): Promise<void> => ipcRenderer.invoke("daemon:stop"),
   getDaemonStatus: (): Promise<DaemonStatus> => ipcRenderer.invoke("daemon:status"),
   getLogBuffer: (): Promise<string[]> => ipcRenderer.invoke("daemon:get-log-buffer"),
-  getQueueMessages: (): Promise<{ index: number; fileId: string; preview: string; sessionKey?: string; chatType?: string; timestamp?: number; senderOpenId?: string }[]> => ipcRenderer.invoke("daemon:queue"),
+  getQueueMessages: (): Promise<{ index: number; fileId: string; preview: string; status?: "pending" | "processing"; sessionKey?: string; chatType?: string; timestamp?: number; senderOpenId?: string }[]> => ipcRenderer.invoke("daemon:queue"),
   deleteQueueMessage: (fileId: string): Promise<boolean> => ipcRenderer.invoke("daemon:queue-delete", fileId),
   clearQueueMessages: (): Promise<number> => ipcRenderer.invoke("daemon:queue-clear"),
   checkCli: (): Promise<boolean> => ipcRenderer.invoke("cli:check"),

@@ -2,22 +2,9 @@ import Store from "electron-store"
 import { randomBytes } from "node:crypto"
 import type { AgentResource, MessageChannel } from "../src/shared/channel-types"
 import { channelIdFromSessionKey } from "../src/shared/channel-types"
+import type { ScheduledTask } from "../src/shared/scheduled-task"
 
-export type { AgentResource, MessageChannel }
-
-export interface ScheduledTask {
-  id: string
-  name: string
-  cron: string
-  content: string
-  enabled: boolean
-  independent?: boolean
-  /** 所属消息通道；空 = 第一个启用的通道 */
-  channelId?: string
-  /** 任务模型，空 = 跟随通道主模型 */
-  model?: string
-  modelParams?: string
-}
+export type { AgentResource, MessageChannel, ScheduledTask }
 
 export interface AppConfig {
   // ── 新模型：Agent 资源池 + 消息通道 ──
@@ -120,7 +107,8 @@ export function saveConfig(partial: Partial<AppConfig>): void {
     Object.entries(partial).filter(([, v]) => v !== undefined),
   )
   if (Object.keys(cleaned).length > 0) {
-    getStore().set(cleaned as Partial<AppConfig>)
+    // electron-store 的 set(object) 重载要求完整 AppConfig，实际支持部分键合并
+    getStore().set(cleaned as unknown as AppConfig)
   }
 }
 

@@ -120,12 +120,13 @@ export function buildRetryPrompt(
   });
 }
 
+/** 推进节点的输入是前序产物（文档 URI），不是初始输入——下游按约定读产物文件 */
 function buildNextNodePrompt(
   def: WorkflowDefinition,
   node: WorkflowNode,
   instance: WorkflowInstance,
 ): string {
-  return buildStartPrompt(def, node, instance);
+  return buildNodePrompt(def, node, instance);
 }
 
 // ── 实例创建 ─────────────────────────────────────────────

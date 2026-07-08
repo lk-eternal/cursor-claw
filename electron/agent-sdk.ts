@@ -31,8 +31,6 @@ interface SdkSessionAgent {
 
 const sdkSessions = new Map<string, SdkSessionAgent>()
 const pendingLaunches = new Set<string>()
-const failedCooldowns = new Map<string, number>()
-const FAIL_COOLDOWN_MS = 30_000
 
 // ── 会话上下文恢复（Resume）──────────────────────────────
 // 不保留闲置 agent 进程：闲置连接会被代理/NAT 静默掐死，复用必报 SSL WRONG_VERSION_NUMBER。
@@ -207,6 +205,26 @@ async function streamRunEvents(session: SdkSessionAgent, run: Run): Promise<void
   }
 }
 
+// 工具入参摘要：按优先级挑最有信息量的字符串字段（Shell→command、Read→path、Grep→pattern…）
+const TOOL_ARG_SUMMARY_KEYS = ["command", "path", "target_notebook", "pattern", "glob_pattern", "file_path", "image_path", "url", "query", "question", "text", "description", "name"]
+const TOOL_SUMMARY_MAX = 120
+
+function summarizeToolArgs(args: unknown): string {
+  if (!args || typeof args !== "object") return ""
+  const rec = args as Record<string, unknown>
+  let text = ""
+  for (const key of TOOL_ARG_SUMMARY_KEYS) {
+    const v = rec[key]
+    if (typeof v === "string" && v.trim()) { text = v.trim(); break }
+  }
+  if (!text) {
+    try { text = JSON.stringify(rec) } catch { return "" }
+    if (text === "{}") return ""
+  }
+  text = text.replace(/\s+/g, " ")
+  return text.length > TOOL_SUMMARY_MAX ? `${text.slice(0, TOOL_SUMMARY_MAX)}…` : text
+}
+
 function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
   switch (event.type) {
     case "assistant":
@@ -217,10 +235,13 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
     case "thinking":
       if (event.text) appendSdkLog(session, "thinking", event.text)
       break
-    case "tool_call":
+    case "tool_call": {
       flushSdkLog(session)
-      pushUiLog("SDK", "INFO", `[${session.sessionKey}] [tool] ${event.name}: ${event.status}`)
+      // 摘要只随发起（running）打一次，完成/失败行保持简短避免刷屏
+      const summary = event.status === "running" ? summarizeToolArgs(event.args) : ""
+      pushUiLog("SDK", "INFO", `[${session.sessionKey}] [tool] ${event.name}: ${event.status}${summary ? ` · ${summary}` : ""}`)
       break
+    }
     case "status": {
       flushSdkLog(session)
       const isErr = event.status === "ERROR" || event.status === "EXPIRED"
@@ -247,15 +268,40 @@ export function hasResumableSdkSession(sessionKey: string): boolean {
   return getResumableMap().has(sessionKey)
 }
 
-/** 该会话失败冷却的截止时间戳；0 = 未在冷却 */
-export function getSdkCooldownUntil(sessionKey: string): number {
-  const until = failedCooldowns.get(sessionKey)
-  if (!until) return 0
-  if (Date.now() >= until) {
-    failedCooldowns.delete(sessionKey)
-    return 0
+// ── 会话诊断 ─────────────────────────────────────────────
+
+export interface SdkRunResult {
+  status: string
+  endedAt: number
+  durationMs?: number
+  error?: string
+}
+
+export interface SdkSessionDiagnostics {
+  running: boolean
+  resumeAgentId?: string
+  resumeUpdatedAt?: number
+  lastRun?: SdkRunResult
+}
+
+/** 每会话最近一次 run 的终态（内存，重启清零；诊断面板用） */
+const lastRunResults = new Map<string, SdkRunResult>()
+
+export function getSdkSessionDiagnostics(sessionKey: string): SdkSessionDiagnostics {
+  const resume = getResumableMap().get(sessionKey)
+  return {
+    running: isSdkSessionRunning(sessionKey),
+    resumeAgentId: resume?.agentId,
+    resumeUpdatedAt: resume?.updatedAt,
+    lastRun: lastRunResults.get(sessionKey),
   }
-  return until
+}
+
+/** 诊断包用：resume 映射概要（agentId 非敏感） */
+export function getResumableSummary(): { sessionKey: string; agentId: string; workspaceDir: string; updatedAt: number }[] {
+  return [...getResumableMap().entries()].map(([sessionKey, e]) => ({
+    sessionKey, agentId: e.agentId, workspaceDir: e.workspaceDir, updatedAt: e.updatedAt,
+  }))
 }
 
 export function getSdkSessionCount(): number {
@@ -310,15 +356,23 @@ function startRunLifecycle(session: SdkSessionAgent, run: Run): void {
     const sessionKey = session.sessionKey
     const level = run.status === "error" ? "ERROR" : "INFO"
 
+    let errorDetail: string | undefined
     if (run.status === "error") {
       // wait() 返回 RunResult 对象（出错时也不抛），真实原因藏在 RunResult.result / 终态状态事件里
       const wr = await run.wait().catch((e: unknown) => e)
       const detail = wr instanceof Error ? `${wr.constructor.name}: ${wr.message}` : JSON.stringify(wr)
       const last = session.lastStatus
       const lastStr = last ? `lastStatus=${last.status}${last.message ? ` msg=${last.message}` : ""} ` : ""
+      errorDetail = `${lastStr}${detail}`.slice(0, 500)
       pushUiLog("SDK", "ERROR", `[${sessionKey}] 运行错误详情: ${lastStr}waitResult=${detail}`)
-      failedCooldowns.set(sessionKey, Date.now() + FAIL_COOLDOWN_MS)
     }
+
+    lastRunResults.set(sessionKey, {
+      status: run.status ?? "unknown",
+      endedAt: Date.now(),
+      durationMs: run.durationMs ?? undefined,
+      error: errorDetail,
+    })
 
     const summary = [
       run.result && `result=${run.result}`,
@@ -329,12 +383,12 @@ function startRunLifecycle(session: SdkSessionAgent, run: Run): void {
     session.run = null
     closeAndRemoveSession(session)
     broadcastSdkSessionStatus()
-    // 运行期间可能已有积压消息，立即触发一次调度（异常场景由冷却期门控节奏）
+    // 运行期间可能已有积压消息，立即触发一次调度
     sdkIdleHandler?.(sessionKey)
   })
 }
 
-export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: boolean; error?: string; retryable?: boolean }> {
+export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: boolean; error?: string }> {
   const { sessionKey, chatType, meta, workspaceDir, senderOpenId, chatName, taskMessage } = opts
 
   if (isSdkSessionRunning(sessionKey) || pendingLaunches.has(sessionKey)) {
@@ -342,12 +396,6 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     if (s) s.lastActivityAt = Date.now()
     return { ok: true }
   }
-
-  const cooldownUntil = failedCooldowns.get(sessionKey)
-  if (cooldownUntil && Date.now() < cooldownUntil) {
-    return { ok: false, retryable: true, error: `冷却中，${Math.ceil((cooldownUntil - Date.now()) / 1000)}s 后自动重试` }
-  }
-  failedCooldowns.delete(sessionKey)
 
   pendingLaunches.add(sessionKey)
 
@@ -443,8 +491,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e)
     broadcastLog(`[SDK] 启动失败 ${sessionKey}: ${msg}`, "ERROR")
-    failedCooldowns.set(sessionKey, Date.now() + FAIL_COOLDOWN_MS)
-    // 不动 resume 映射：仍指向上一个可用的 agentId，冷却结束后重试可续上上下文
+    // 不动 resume 映射：仍指向上一个可用的 agentId，重试可续上上下文
     const failed = sdkSessions.get(sessionKey)
     if (failed) closeAndRemoveSession(failed)
     broadcastSdkSessionStatus()
@@ -455,18 +502,18 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
 }
 
 /** 停止并释放会话：先等 cancel 把 run 落为终态再关进程（直接 close 会残留 active run，拖垮下次 Resume） */
-function releaseSession(s: SdkSessionAgent): void {
+function releaseSession(s: SdkSessionAgent): Promise<void> {
   s.abortController.abort()
   const { agent, run } = s
-  if (run) {
-    const timeout = new Promise<void>((r) => setTimeout(r, 5000))
-    Promise.race([run.cancel().catch(() => {}), timeout]).finally(() => {
-      try { agent.close() } catch { /* best-effort */ }
-    })
-    sdkSessions.delete(s.sessionKey)
-  } else {
-    closeAndRemoveSession(s)
+  sdkSessions.delete(s.sessionKey)
+  if (!run) {
+    try { agent.close() } catch { /* best-effort */ }
+    return Promise.resolve()
   }
+  const timeout = new Promise<void>((r) => setTimeout(r, 5000))
+  return Promise.race([run.cancel().catch(() => {}), timeout]).then(() => {
+    try { agent.close() } catch { /* best-effort */ }
+  })
 }
 
 /** 停止会话进程（保留 resume 映射，下条消息仍可续上下文；清上下文用 resetSdkSessionContext） */
@@ -474,7 +521,7 @@ export function stopSdkSession(sessionKey: string): void {
   const s = sdkSessions.get(sessionKey)
   if (!s) return
   pushUiLog("SDK", "INFO", `[${sessionKey}] 会话已停止（队列有未回复消息时将自动重新拉起）`)
-  releaseSession(s)
+  void releaseSession(s)
   broadcastSdkSessionStatus()
 }
 
@@ -483,12 +530,15 @@ export function resetSdkSessionContext(sessionKey: string): void {
   forgetResumable(sessionKey)
 }
 
-/** 停止全部运行中的会话进程；保留 resume 映射（应用重启后上下文可恢复） */
-export function stopAllSdkSessions(): void {
-  for (const s of [...sdkSessions.values()]) releaseSession(s)
-  failedCooldowns.clear()
+/**
+ * 停止全部运行中的会话进程；保留 resume 映射（应用重启后上下文可恢复）。
+ * 返回的 Promise 在所有 run 取消落库（或超时）后 resolve——退出前 await 可避免残留 active run。
+ */
+export function stopAllSdkSessions(): Promise<void> {
+  const releases = [...sdkSessions.values()].map((s) => releaseSession(s))
   pendingLaunches.clear()
   broadcastSdkSessionStatus()
+  return Promise.all(releases).then(() => {})
 }
 
 export async function checkSdkApiKey(apiKey: string): Promise<{ ok: boolean; email?: string; error?: string }> {

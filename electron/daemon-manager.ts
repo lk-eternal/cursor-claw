@@ -1,31 +1,30 @@
 import { spawn, type ChildProcess } from "node:child_process"
 import { randomUUID, randomBytes } from "node:crypto"
 import * as http from "node:http"
-import * as https from "node:https"
 import * as path from "node:path"
 import * as fs from "node:fs"
 import * as os from "node:os"
-import { app, BrowserWindow, ipcMain, powerSaveBlocker } from "electron"
+import { app, BrowserWindow, ipcMain, powerSaveBlocker, shell } from "electron"
 import {
   getConfig, saveConfig, type AppConfig,
   getChannels, getEnabledChannels, getChannel,
   updateChannel, migrateLegacyConfig, effectiveWorkspaceDir,
-  mainChatScopeKey, type MessageChannel,
+  mainChatScopeKey, setMainChatIdForScope, type MessageChannel,
 } from "./config-store"
 import { parseChatKey, channelIdFromSessionKey, type DaemonChannelConfig, type ChannelStatusInfo } from "../src/shared/channel-types"
 import { validateCron, readTasksFromFile, writeTasksToFile, previewCronNextRuns, getNextCronFireLabel } from "./cron-scheduler"
 import { seedBuiltins, listDefinitions, saveDefinition, deleteDefinition, listInstances, getInstance, saveInstance, deleteInstance } from "./workflow-file"
 import { runWorkflowDefinition } from "./workflow-runner"
-import { pushLog, pushUiLog, broadcastLog, getLogBuffer, clearLogBuffer, logCursorAgentInvocation, escapeLogContentSingleLine, resetLogFilePath } from "./ui-logger"
-import { resolveAgentBinary, applyProxyEnv, quoteArg, getAgentPaths, execAgentSync } from "./agent-cli"
+import { pushLog, pushUiLog, broadcastLog, getLogBuffer, clearLogBuffer, escapeLogContentSingleLine } from "./ui-logger"
+import { applyProxyEnv } from "./agent-cli"
 import {
   stopAgent as _stopCliAgent,
   isAgentRunning as _isCliAgentRunning, getRunningSessionCount as _getCliRunningCount,
   getAgentChildPid, getSessionAgentCount as _getCliSessionCount, getIndependentTaskStatuses as _getCliTaskStatuses,
-  P2P_SESSION_KEY, setMainChatId, getMainChatId,
   type ChatType,
 } from "./agent-launcher"
-import { stopAllSdkSessions, resetSdkSessionContext, getSdkSessionCount, getSdkSessionList, checkSdkApiKey, listSdkModels } from "./agent-sdk"
+import { stopAllSdkSessions, resetSdkSessionContext, getSdkSessionCount, getSdkSessionList, checkSdkApiKey, listSdkModels, getSdkSessionDiagnostics, getResumableSummary } from "./agent-sdk"
+import { registerFeishuApp } from "./feishu-register"
 import {
   setDaemonPort,
   injectWorkspaceToDir, injectWorkspaceMcpAndRules, clearInjectionCache,
@@ -69,8 +68,9 @@ function getSessionAgentCount(): number {
   return _getCliSessionCount() + getSdkSessionCount()
 }
 
-function stopAgent(): void {
-  stopAllSdkSessions()
+async function stopAgent(): Promise<void> {
+  const timeout = new Promise<void>((r) => setTimeout(r, 5000))
+  await Promise.race([stopAllSdkSessions(), timeout])
   _stopCliAgent()
 }
 
@@ -265,38 +265,21 @@ function stopTempConnection(): void {
 
 
 
-function httpsPost(url: string, body: object, headers: Record<string, string> = {}, timeoutMs = 5000): Promise<any> {
-  return new Promise((resolve, reject) => {
-    const data = JSON.stringify(body)
-    const req = https.request(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data).toString(), ...headers },
-      timeout: timeoutMs,
-    }, (res) => {
-      const chunks: string[] = []
-      res.on("data", (c: Buffer) => chunks.push(c.toString()))
-      res.on("end", () => {
-        try { resolve(JSON.parse(chunks.join(""))) } catch { resolve(null) }
-      })
-    })
-    req.on("error", reject)
-    req.on("timeout", () => { req.destroy(); reject(new Error("timeout")) })
-    req.end(data)
+async function httpsPost(url: string, body: object, headers: Record<string, string> = {}, timeoutMs = 5000): Promise<any> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...headers },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
   })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json().catch(() => null)
 }
 
-function httpsGet(url: string, headers: Record<string, string> = {}, timeoutMs = 8000): Promise<any> {
-  return new Promise((resolve, reject) => {
-    const req = https.get(url, { headers, timeout: timeoutMs }, (res) => {
-      const chunks: string[] = []
-      res.on("data", (c: Buffer) => chunks.push(c.toString()))
-      res.on("end", () => {
-        try { resolve(JSON.parse(chunks.join(""))) } catch { resolve(null) }
-      })
-    })
-    req.on("error", reject)
-    req.on("timeout", () => { req.destroy(); reject(new Error("timeout")) })
-  })
+async function httpsGet(url: string, headers: Record<string, string> = {}, timeoutMs = 8000): Promise<any> {
+  const res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json().catch(() => null)
 }
 
 /** 用凭据获取飞书机器人应用信息（app_name / open_id），凭据无效时返回错误 */
@@ -710,7 +693,7 @@ export async function stopDaemon(): Promise<void> {
   daemonShouldRun = false
   if (daemonRestartTimer) { clearTimeout(daemonRestartTimer); daemonRestartTimer = null }
   stopStatusPolling()
-  stopAgent()
+  await stopAgent()
   clearLogBuffer()
 
   if (cachedPort) {
@@ -938,7 +921,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
         case "/stop": {
           if (isAdmin) {
             const wasRunning = isAgentRunning()
-            stopAgent()
+            await stopAgent()
             await reply(true, wasRunning ? "✅ Agent 已停止" : "❌ Agent 当前未运行")
           } else if (claimed.chatId && isSessionAgentRunning(claimed.chatId)) {
             stopSessionAgent(claimed.chatId)
@@ -1011,7 +994,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
 
         case "/restart": {
           if (!isAdmin) { await denyNonAdmin(); break }
-          stopAgent()
+          await stopAgent()
           const cleared = await clearMessageQueue()
           await reply(true, `✅ Agent 已停止，已清空 ${cleared} 条队列消息，正在重启 Daemon...`)
           await stopDaemon()
@@ -1038,7 +1021,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           if (sessionKey) resetSdkSessionContext(sessionKey)
           const wsDir = resolveResetWorkspaceDir(sessionKey, claimed.chatId, claimed.chatType)
           const cmdChannelId = claimed.chatId ? parseChatKey(claimed.chatId).channelId : undefined
-          if (wsDir && cmdChannelId) setMainChatId(mainChatScopeKey(cmdChannelId, wsDir), "")
+          if (wsDir && cmdChannelId) setMainChatIdForScope(mainChatScopeKey(cmdChannelId, wsDir), "")
           broadcastLog(`[指令 /reset] 已重置会话 ${sessionKey ?? claimed.chatId ?? "unknown"}`, "INFO")
           await reply(true, "✅ 当前会话已重置, 请重新发消息开启新会话")
           break
@@ -1146,7 +1129,6 @@ export async function applyWorkspaceSwitch(workspaceDir: string, stopOldSessions
   saveConfig({ workspaceDir: w })
   invalidateMcpEnabledCache()
   clearInjectionCache()
-  resetLogFilePath()
 
   if (!skipDaemonSync) {
     const lock = readLockFile()
@@ -1243,7 +1225,6 @@ export async function saveAppConfigFromRenderer(partial: Partial<AppConfig>): Pr
   const workspaceDirChanged = partial.workspaceDir !== undefined && nextW !== oldW
   if (workspaceDirChanged) {
     invalidateMcpEnabledCache()
-    resetLogFilePath()
   }
 
   saveConfig(partial)
@@ -1326,8 +1307,21 @@ export function initDaemonManager(): void {
   initSessionDispatcher()
   ipcMain.handle("config:apply-workspace-switch", (_, workspaceDir: string, stopOldSessions: boolean) => applyWorkspaceSwitch(workspaceDir, stopOldSessions))
   ipcMain.handle("daemon:get-log-buffer", () => getLogBuffer())
-  ipcMain.handle("agent:stop", () => { stopAgent(); return { ok: true } })
+  ipcMain.handle("agent:stop", async () => { await stopAgent(); return { ok: true } })
   ipcMain.handle("agent:sessions", () => getSessionAgentList())
+  ipcMain.handle("diagnostics:session", async (_e, sessionKey: string) => {
+    const diag = getSdkSessionDiagnostics(sessionKey)
+    let lastReplyAt: number | null = null
+    const lock = readLockFile()
+    if (lock?.port) {
+      try {
+        const r = (await httpGet(`http://127.0.0.1:${lock.port}/api/session-last-reply?sessionKey=${encodeURIComponent(sessionKey)}`)) as { lastReplyAt?: number | null }
+        lastReplyAt = r?.lastReplyAt ?? null
+      } catch { /* daemon 未运行 */ }
+    }
+    return { ...diag, lastReplyAt }
+  })
+  ipcMain.handle("diagnostics:export", () => exportDiagnostics())
   ipcMain.handle("bind:test", async (_e, channelId?: string) => {
     // Setup 向导（通道尚未创建）：用旧字段直接测试飞书
     if (!channelId) {
@@ -1512,13 +1506,13 @@ export function initDaemonManager(): void {
     feishuRegisterAbort = new AbortController()
     const signal = feishuRegisterAbort.signal
     try {
-      const lark = await import("@larksuiteoapi/node-sdk")
       const QRCode = await import("qrcode")
-      const result = await lark.registerApp({
+      const result = await registerFeishuApp({
+        name: preset?.name?.trim() || "Cursor Claw",
+        desc: preset?.desc?.trim() || "Cursor AI 协作助手",
         signal,
-        source: "cursor-claw",
-        onQRCodeReady(info) {
-          QRCode.toDataURL(info.url, { width: 280, margin: 2 })
+        onQrCodeUrl(url) {
+          QRCode.toDataURL(url, { width: 280, margin: 2 })
             .then((dataUrl) => {
               BrowserWindow.getAllWindows().forEach((w) =>
                 w.webContents.send("feishu:setup-qrcode", dataUrl),
@@ -1526,24 +1520,19 @@ export function initDaemonManager(): void {
             })
             .catch(() => {})
         },
-        onStatusChange(info) {
+        onStatus(status) {
           BrowserWindow.getAllWindows().forEach((w) =>
-            w.webContents.send("feishu:setup-status", info.status),
+            w.webContents.send("feishu:setup-status", status),
           )
-        },
-        appPreset: {
-          name: preset?.name?.trim() || "Cursor Claw",
-          desc: preset?.desc?.trim() || "Cursor AI 协作助手",
         },
       })
       feishuRegisterAbort = null
-      return { ok: true, appId: result.client_id, appSecret: result.client_secret }
+      return { ok: true, appId: result.appId, appSecret: result.appSecret }
     } catch (err: unknown) {
       feishuRegisterAbort = null
       if (signal.aborted) return { ok: false, error: "cancelled" }
-      const e = err as { code?: string; description?: string; message?: string }
-      if (e?.code === "abort") return { ok: false, error: "cancelled" }
-      return { ok: false, error: e?.description ?? e?.message ?? String(err) }
+      const e = err as { message?: string }
+      return { ok: false, error: e?.message ?? String(err) }
     }
   })
 
@@ -1611,11 +1600,94 @@ export function initDaemonManager(): void {
   void autoStartDaemonOnLaunch()
 }
 
-export function cleanupDaemonManager(): void {
+// ── 诊断包导出 ───────────────────────────────────────────
+
+function maskSecret(v?: string): string {
+  return v ? `${v.slice(0, 4)}***(len=${v.length})` : ""
+}
+
+function tailOfFile(p: string, lines = 400): string {
+  try {
+    return fs.readFileSync(p, "utf-8").split(/\r?\n/).slice(-lines).join("\n")
+  } catch {
+    return "(不存在或读取失败)"
+  }
+}
+
+/** 汇总日志、脱敏配置、会话/队列快照到单个文本文件，供远程排障（凭据不落盘） */
+async function exportDiagnostics(): Promise<{ ok: boolean; path?: string; error?: string }> {
+  try {
+    const dir = path.join(app.getPath("userData"), "diagnostics")
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+    const now = new Date()
+    const pad = (n: number) => String(n).padStart(2, "0")
+    const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+    const file = path.join(dir, `diagnostics-${stamp}.txt`)
+
+    const config = getConfig()
+    const sanitized = {
+      ...config,
+      larkAppSecret: maskSecret(config.larkAppSecret),
+      wechatToken: maskSecret(config.wechatToken),
+      cursorApiKey: maskSecret(config.cursorApiKey),
+      agentResources: (config.agentResources ?? []).map((r) => ({ ...r, apiKey: maskSecret(r.apiKey) })),
+      channels: (config.channels ?? []).map((c) => ({ ...c, larkAppSecret: maskSecret(c.larkAppSecret), wechatToken: maskSecret(c.wechatToken) })),
+    }
+
+    const lock = readLockFile()
+    let daemonHealth: unknown = null
+    let queueSnapshot: unknown = null
+    if (lock?.port) {
+      daemonHealth = await httpGet(`http://127.0.0.1:${lock.port}/health`).catch(() => null)
+      queueSnapshot = await httpGet(`http://127.0.0.1:${lock.port}/queue`).catch(() => null)
+    }
+
+    const logsDir = path.join(app.getPath("userData"), "logs")
+    const sections = [
+      "# Cursor Claw 诊断包",
+      `生成时间: ${now.toISOString()}`,
+      `应用版本: ${app.getVersion()}  平台: ${process.platform} ${os.release()}  Electron: ${process.versions.electron}`,
+      "",
+      "## 配置（凭据已脱敏）",
+      JSON.stringify(sanitized, null, 2),
+      "",
+      "## Daemon 状态",
+      JSON.stringify(daemonHealth, null, 2),
+      "",
+      "## 活跃会话",
+      JSON.stringify(getSessionAgentList(), null, 2),
+      "",
+      "## Resume 映射",
+      JSON.stringify(getResumableSummary(), null, 2),
+      "",
+      "## 消息队列快照",
+      JSON.stringify(queueSnapshot, null, 2),
+      "",
+      "## app.log（尾部 400 行）",
+      tailOfFile(path.join(logsDir, "app.log")),
+      "",
+      "## daemon.log（尾部 400 行）",
+      tailOfFile(path.join(logsDir, "daemon.log")),
+      "",
+    ]
+    fs.writeFileSync(file, sections.join("\n"), "utf-8")
+    shell.showItemInFolder(file)
+    return { ok: true, path: file }
+  } catch (e: unknown) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/**
+ * 应用退出前的收尾：等 SDK run 取消落库后再放行退出。
+ * fire-and-forget 的 kill 会让活跃 run 永远停在 active 状态（wedged），下次启动只能靠 force 自愈。
+ */
+export async function shutdownDaemonManager(): Promise<void> {
   daemonShouldRun = false
   if (daemonRestartTimer) { clearTimeout(daemonRestartTimer); daemonRestartTimer = null }
   stopStatusPolling()
-  stopAgent()
+  _stopCliAgent()
+  await stopAllSdkSessions()
   if (daemonProcess) {
     try { daemonProcess.kill() } catch { /* ignore */ }
     daemonProcess = null

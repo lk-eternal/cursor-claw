@@ -12,14 +12,16 @@ import {
   Clock,
   Loader2,
   Trash2,
-  Download,
   LogIn,
   AlertTriangle,
   CheckCircle2,
   Circle,
   ChevronRight,
+  ChevronDown,
   FolderOpen,
   Rocket,
+  Search,
+  X,
 } from "lucide-react"
 import logoUrl from "../assets/logo.png"
 import TitleBar from "../components/TitleBar"
@@ -43,12 +45,11 @@ export default function Dashboard({ onSettings, active }: Props) {
   const [starting, setStarting] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [actionError, setActionError] = useState("")
-  const [queueMessages, setQueueMessages] = useState<{ index: number; fileId: string; preview: string; sessionKey?: string; chatType?: string; timestamp?: number; senderOpenId?: string }[]>([])
+  const [queueMessages, setQueueMessages] = useState<{ index: number; fileId: string; preview: string; status?: "pending" | "processing"; sessionKey?: string; chatType?: string; timestamp?: number; senderOpenId?: string }[]>([])
   const [showQueue, setShowQueue] = useState(false)
   const [showChannels, setShowChannels] = useState(false)
   const [expandedSession, setExpandedSession] = useState<string | null>(null)
   const [cliStatus, setCliStatus] = useState<"checking" | "installed" | "missing" | "need-login">("checking")
-  const [cliInstalling, setCliInstalling] = useState(false)
   const [cliLoggingIn, setCliLoggingIn] = useState(false)
   const [cliMessage, setCliMessage] = useState("")
   const [stoppingAgent, setStoppingAgent] = useState(false)
@@ -75,8 +76,14 @@ export default function Dashboard({ onSettings, active }: Props) {
   useEffect(() => {
     if (active) void refreshOnboard()
   }, [active, refreshOnboard])
-  const [sessionList, setSessionList] = useState<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string; workspaceDir?: string }[]>([])
-  const logRef = useRef<HTMLPreElement>(null)
+  const [sessionList, setSessionList] = useState<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string; workspaceDir?: string; source?: "cli" | "sdk" }[]>([])
+  const [sessionDiag, setSessionDiag] = useState<Record<string, { running: boolean; resumeAgentId?: string; resumeUpdatedAt?: number; lastRun?: { status: string; endedAt: number; durationMs?: number; error?: string }; lastReplyAt: number | null }>>({})
+  const [exportingDiag, setExportingDiag] = useState(false)
+  const [logFilter, setLogFilter] = useState("")
+  const [logAtBottom, setLogAtBottom] = useState(true)
+  const logRef = useRef<HTMLDivElement>(null)
+  /** 是否贴底跟随：用户上翻后暂停自动滚动，回到底部（或点击按钮）后恢复 */
+  const logStickRef = useRef(true)
 
   useEffect(() => {
     const syncCliStatus = (s: DaemonStatus) => {
@@ -159,11 +166,29 @@ export default function Dashboard({ onSettings, active }: Props) {
     }
   }, [])
 
+  const filteredLogLines = logFilter.trim()
+    ? logLines.filter((l) => l.toLowerCase().includes(logFilter.trim().toLowerCase()))
+    : logLines
+
   useEffect(() => {
-    if (logRef.current) {
+    if (logRef.current && logStickRef.current) {
       logRef.current.scrollTop = logRef.current.scrollHeight
     }
-  }, [logLines])
+  }, [logLines, logFilter])
+
+  const handleLogScroll = () => {
+    const el = logRef.current
+    if (!el) return
+    const stick = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+    logStickRef.current = stick
+    setLogAtBottom(stick)
+  }
+
+  const scrollLogToBottom = () => {
+    logStickRef.current = true
+    setLogAtBottom(true)
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
+  }
 
   // CLI 已登录也视为 Agent 资源就绪
   useEffect(() => {
@@ -210,40 +235,6 @@ export default function Dashboard({ onSettings, active }: Props) {
     } else {
       setQueueMessages([])
     }
-  }
-
-  const handleInstallCli = async () => {
-    setCliInstalling(true)
-    setCliMessage("")
-    try {
-      const result = await window.electronAPI.installCli()
-      if (result.ok) {
-        setCliStatus("need-login")
-        setCliMessage("CLI 安装成功，正在打开浏览器进行授权...")
-        try {
-          const loginResult = await window.electronAPI.loginCli()
-          if (loginResult.ok) {
-            const st = await window.electronAPI.checkCliLogin()
-            if (st.loggedIn) {
-              setCliStatus("installed")
-              setCliMessage("")
-            } else {
-              setCliStatus("need-login")
-              setCliMessage(st.error ?? loginResult.output ?? "请重试登录")
-            }
-          } else {
-            setCliMessage(loginResult.output)
-          }
-        } catch (e: unknown) {
-          setCliMessage(`授权失败: ${e instanceof Error ? e.message : String(e)}`)
-        }
-      } else {
-        setCliMessage(result.output)
-      }
-    } catch (e: unknown) {
-      setCliMessage(e instanceof Error ? e.message : String(e))
-    }
-    setCliInstalling(false)
   }
 
   const handleLoginOnly = async () => {
@@ -320,8 +311,22 @@ export default function Dashboard({ onSettings, active }: Props) {
       setExpandedSession(null)
       return
     }
-    if (queueMessages.length === 0) await refreshQueueMessages()
     setExpandedSession(sessionKey)
+    if (queueMessages.length === 0) void refreshQueueMessages()
+    try {
+      const diag = await window.electronAPI.getSessionDiagnostics(sessionKey)
+      setSessionDiag((prev) => ({ ...prev, [sessionKey]: diag }))
+    } catch { /* daemon 未运行等，展开区显示占位 */ }
+  }
+
+  const handleExportDiagnostics = async () => {
+    setExportingDiag(true)
+    try {
+      const r = await window.electronAPI.exportDiagnostics()
+      if (!r.ok) setActionError(r.error ?? "诊断包导出失败")
+    } finally {
+      setExportingDiag(false)
+    }
   }
 
   const getSessionQueueMessages = (sessionKey: string) =>
@@ -591,8 +596,8 @@ export default function Dashboard({ onSettings, active }: Props) {
               return (
                 <div key={s.sessionKey}>
                   <div
-                    className={`flex items-center justify-between rounded-lg bg-gray-800/60 px-3 py-2 ${hasPending ? "cursor-pointer hover:bg-gray-800/80" : ""}`}
-                    onClick={() => hasPending && toggleSessionExpand(s.sessionKey)}
+                    className="flex cursor-pointer items-center justify-between rounded-lg bg-gray-800/60 px-3 py-2 hover:bg-gray-800/80"
+                    onClick={() => void toggleSessionExpand(s.sessionKey)}
                   >
                     <div className="flex items-center gap-2 overflow-hidden">
                       <span className={`h-2 w-2 rounded-full ${s.chatType === "group" ? "bg-green-400" : s.chatType === "task" ? "bg-yellow-400" : "bg-blue-400"}`} />
@@ -611,12 +616,30 @@ export default function Dashboard({ onSettings, active }: Props) {
                       <Square size={10} />
                     </button>
                   </div>
-                  {isExpanded && hasPending && (
-                    <div className="ml-4 mt-1 space-y-1 border-l-2 border-yellow-700/40 pl-3">
+                  {isExpanded && (
+                    <div className="ml-4 mt-1 space-y-1 border-l-2 border-gray-700/50 pl-3">
+                      {(() => {
+                        const d = sessionDiag[s.sessionKey]
+                        return (
+                          <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 rounded bg-gray-800/30 px-2.5 py-1.5 text-[10px] text-gray-500">
+                            <span>来源: {s.source === "cli" ? "CLI" : "SDK"} · 启动于 {formatTimestamp(s.startedAt)}</span>
+                            <span>最后回复: {d?.lastReplyAt ? formatTimestamp(d.lastReplyAt) : "—"}</span>
+                            <span title={d?.resumeAgentId}>Resume 上下文: {d?.resumeAgentId ? `${d.resumeAgentId.slice(0, 14)}…（${formatTimestamp(d.resumeUpdatedAt)}）` : "无"}</span>
+                            <span className={d?.lastRun?.status === "error" ? "text-red-400" : ""}>
+                              上次运行: {d?.lastRun ? `${d.lastRun.status}${d.lastRun.durationMs ? ` · ${Math.round(d.lastRun.durationMs / 1000)}s` : ""} · ${formatTimestamp(d.lastRun.endedAt)}` : "—"}
+                            </span>
+                            {d?.lastRun?.error && <span className="col-span-2 truncate text-red-400/80" title={d.lastRun.error}>错误: {d.lastRun.error}</span>}
+                            <span className="col-span-2">队列: 排队 {pendingMsgs.filter((m) => m.status !== "processing").length} · 处理中 {pendingMsgs.filter((m) => m.status === "processing").length}</span>
+                          </div>
+                        )
+                      })()}
                       {pendingMsgs.map((msg) => (
                         <div key={msg.fileId} className="group flex items-start justify-between gap-2 rounded bg-gray-800/40 px-2.5 py-1.5">
                           <div className="min-w-0 flex-1">
-                            <span className="text-[10px] text-gray-500">{formatTimestamp(msg.timestamp)}</span>
+                            <div className="flex items-center gap-1.5">
+                              <span className={`rounded px-1 text-[9px] ${msg.status === "processing" ? "bg-blue-600/25 text-blue-300" : "bg-gray-700/70 text-gray-400"}`}>{msg.status === "processing" ? "处理中" : "排队中"}</span>
+                              <span className="text-[10px] text-gray-500">{formatTimestamp(msg.timestamp)}</span>
+                            </div>
                             <p className="truncate text-xs text-gray-300">{msg.preview}</p>
                           </div>
                           <button
@@ -653,6 +676,7 @@ export default function Dashboard({ onSettings, active }: Props) {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
                       <span className="text-[10px] font-medium text-blue-400">{getSessionLabel(msg)}</span>
+                      <span className={`rounded px-1 text-[9px] ${msg.status === "processing" ? "bg-blue-600/25 text-blue-300" : "bg-gray-700/70 text-gray-400"}`}>{msg.status === "processing" ? "处理中" : "排队中"}</span>
                       <span className="text-[10px] text-gray-500">{formatTimestamp(msg.timestamp)}</span>
                     </div>
                     <p className="mt-0.5 truncate text-xs text-gray-300">{msg.preview}</p>
@@ -671,29 +695,7 @@ export default function Dashboard({ onSettings, active }: Props) {
         </div>
       )}
 
-      {/* CLI Status - only show when missing */}
-      {cliStatus === "missing" && (
-        <div className="mx-6 flex items-center justify-between rounded-lg border border-yellow-800/50 bg-yellow-950/20 px-4 py-2.5">
-          <div className="flex items-center gap-2">
-            <AlertTriangle size={14} className="text-yellow-400" />
-            <span className="text-xs text-yellow-300">
-              Cursor CLI 未安装 — 无法自动拉起会话
-            </span>
-          </div>
-          <button
-            onClick={handleInstallCli}
-            disabled={cliInstalling}
-            className="flex items-center gap-1.5 rounded-md bg-blue-600/20 px-3 py-1 text-xs font-medium text-blue-400 transition hover:bg-blue-600/30 disabled:opacity-50"
-          >
-            {cliInstalling ? (
-              <Loader2 size={12} className="animate-spin" />
-            ) : (
-              <Download size={12} />
-            )}
-            {cliInstalling ? "安装中..." : "一键安装"}
-          </button>
-        </div>
-      )}
+      {/* CLI 未安装不在首页提示（Agent 资源可选 CLI 或 SDK，向导内可安装） */}
       {cliStatus === "need-login" && (
         <div className="mx-6 flex items-center justify-between rounded-lg border border-yellow-800/50 bg-yellow-950/20 px-4 py-2.5">
           <div className="flex items-center gap-2">
@@ -731,16 +733,46 @@ export default function Dashboard({ onSettings, active }: Props) {
 
       {/* Logs */}
       <div className="flex min-h-0 flex-1 flex-col px-6 py-4">
-        <div className="mb-2 flex items-center justify-between text-sm text-gray-400">
-          <div className="flex items-center gap-2">
-            <Clock size={14} />
-            <span>日志</span>
+        <div className="mb-2 flex items-center justify-between gap-3 text-sm text-gray-400">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            <Clock size={14} className="shrink-0" />
+            <span className="shrink-0">日志</span>
+            <div className="relative ml-2 flex max-w-[260px] flex-1 items-center">
+              <Search size={12} className="pointer-events-none absolute left-2 text-gray-600" />
+              <input
+                value={logFilter}
+                onChange={(e) => setLogFilter(e.target.value)}
+                placeholder="搜索日志..."
+                className="w-full rounded-md border border-gray-800 bg-gray-900/60 py-1 pl-7 pr-7 text-xs text-gray-300 placeholder-gray-600 outline-none transition focus:border-gray-600"
+              />
+              {logFilter && (
+                <button
+                  onClick={() => setLogFilter("")}
+                  className="absolute right-1.5 rounded p-0.5 text-gray-600 transition hover:text-gray-300"
+                  title="清除搜索"
+                >
+                  <X size={11} />
+                </button>
+              )}
+            </div>
+            {logFilter.trim() && (
+              <span className="shrink-0 text-[10px] text-gray-600">{filteredLogLines.length}/{logLines.length} 条</span>
+            )}
           </div>
-          <div className="flex gap-2">
+          <div className="flex shrink-0 gap-2">
+            <button
+              onClick={() => void handleExportDiagnostics()}
+              disabled={exportingDiag}
+              className="rounded px-2 py-0.5 text-xs text-gray-500 transition hover:bg-gray-800 hover:text-gray-300 disabled:opacity-50"
+              title="汇总日志、脱敏配置、会话与队列快照到单个文件，用于远程排障"
+            >
+              {exportingDiag ? "导出中..." : "导出诊断包"}
+            </button>
             {logLines.length > 0 && (
               <button
-                onClick={() => { navigator.clipboard.writeText(logLines.join("\n")) }}
+                onClick={() => { navigator.clipboard.writeText(filteredLogLines.join("\n")) }}
                 className="rounded px-2 py-0.5 text-xs text-gray-500 transition hover:bg-gray-800 hover:text-gray-300"
+                title={logFilter.trim() ? "复制当前过滤结果" : "复制全部日志"}
               >
                 复制
               </button>
@@ -755,11 +787,26 @@ export default function Dashboard({ onSettings, active }: Props) {
             )}
           </div>
         </div>
-        <div
-          ref={logRef}
-          className="flex-1 overflow-auto rounded-lg border border-gray-800 bg-gray-900/50 p-3 font-mono text-xs leading-5"
-        >
-          {logLines.length > 0 ? logLines.map((line, i) => <LogLine key={i} line={line} />) : <span className="text-gray-600">暂无日志</span>}
+        <div className="relative min-h-0 flex-1">
+          <div
+            ref={logRef}
+            onScroll={handleLogScroll}
+            className="h-full overflow-auto rounded-lg border border-gray-800 bg-gray-900/50 p-3 font-mono text-xs leading-5"
+          >
+            {filteredLogLines.length > 0
+              ? filteredLogLines.map((line, i) => <LogLine key={i} line={line} highlight={logFilter.trim()} />)
+              : <span className="text-gray-600">{logFilter.trim() ? "无匹配日志" : "暂无日志"}</span>}
+          </div>
+          {!logAtBottom && (
+            <button
+              onClick={scrollLogToBottom}
+              className="absolute bottom-3 right-4 flex items-center gap-1 rounded-full border border-gray-700 bg-gray-800/95 px-2.5 py-1 text-[11px] text-gray-300 shadow-lg transition hover:bg-gray-700"
+              title="恢复自动滚动"
+            >
+              <ChevronDown size={12} />
+              回到底部
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -796,22 +843,40 @@ const CHANNEL_STATUS_TEXT: Record<string, string> = {
   error: "错误",
 }
 
-const LogLine = memo(function LogLine({ line }: { line: string }) {
+/** 命中片段高亮渲染（大小写不敏感） */
+function renderHighlighted(text: string, query: string): React.ReactNode {
+  if (!query) return text
+  const lower = text.toLowerCase()
+  const q = query.toLowerCase()
+  const parts: React.ReactNode[] = []
+  let i = 0
+  let idx: number
+  while ((idx = lower.indexOf(q, i)) >= 0) {
+    if (idx > i) parts.push(text.slice(i, idx))
+    parts.push(<mark key={idx} className="rounded-sm bg-yellow-500/40 text-yellow-100">{text.slice(idx, idx + q.length)}</mark>)
+    i = idx + q.length
+  }
+  if (parts.length === 0) return text
+  if (i < text.length) parts.push(text.slice(i))
+  return parts
+}
+
+const LogLine = memo(function LogLine({ line, highlight = "" }: { line: string; highlight?: string }) {
   const m = LOG_RE.exec(line)
   if (!m) {
-    return <div className="whitespace-pre-wrap break-all text-gray-400">{displayLogMessageBody(line)}</div>
+    return <div className="whitespace-pre-wrap break-all text-gray-400">{renderHighlighted(displayLogMessageBody(line), highlight)}</div>
   }
   const [, ts, proc, level, msg] = m
   const body = displayLogMessageBody(msg)
   return (
     <div className="whitespace-pre-wrap break-all">
-      <span className="text-gray-600">{ts}</span>
+      <span className="text-gray-600">{renderHighlighted(ts, highlight)}</span>
       {" "}
-      <span className={PROCESS_COLORS[proc] ?? "text-gray-400"}>[{proc}]</span>
+      <span className={PROCESS_COLORS[proc] ?? "text-gray-400"}>{renderHighlighted(`[${proc}]`, highlight)}</span>
       {" "}
-      <span className={LEVEL_COLORS[level] ?? "text-gray-400"}>{level}</span>
+      <span className={LEVEL_COLORS[level] ?? "text-gray-400"}>{renderHighlighted(level, highlight)}</span>
       {" "}
-      <span className={level === "ERROR" ? "text-red-300" : level === "WARN" ? "text-yellow-300" : "text-gray-300"}>{body}</span>
+      <span className={level === "ERROR" ? "text-red-300" : level === "WARN" ? "text-yellow-300" : "text-gray-300"}>{renderHighlighted(body, highlight)}</span>
     </div>
   )
 })

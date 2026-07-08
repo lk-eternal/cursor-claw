@@ -264,25 +264,28 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
 
   const resource = resources.find((r) => r.id === draft.agentResourceId) ?? resources[0]
 
-  const fetchModels = useCallback(async () => {
+  const fetchModels = useCallback(async (silent = false) => {
     setLoadingModels(true)
     try {
       if (resource?.type === "sdk") {
         const r = await window.electronAPI.listSdkModels(resource.apiKey ?? "", draft.model, draft.modelParams)
         if (r.ok && r.models.length > 0) setModelOptions(r.models)
-        else if (!r.ok) void showAlert("错误", r.error || "获取模型列表失败")
+        else if (!r.ok && !silent) void showAlert("错误", r.error || "获取模型列表失败")
       } else {
         const r = await window.electronAPI.listModels()
         if (r.ok && r.models.length > 0) setModelOptions(r.models.map((m) => ({ ...m, label: m.id, params: "" })))
-        else if (!r.ok) void showAlert("错误", r.error || "获取模型列表失败")
+        else if (!r.ok && !silent) void showAlert("错误", r.error || "获取模型列表失败")
       }
     } finally {
       setLoadingModels(false)
     }
   }, [resource, draft.model, draft.modelParams, showAlert])
 
+  // 打开弹窗与切换 Agent 资源时自动加载模型列表（静默失败，按钮可手动重试）
   useEffect(() => {
     setModelOptions([])
+    void fetchModels(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft.agentResourceId])
 
   // 飞书一键创建应用
@@ -479,11 +482,25 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
                   {feishuQrStatus === "loading"
                     ? <Loader2 size={22} className="animate-spin text-blue-400" />
                     : <img src={feishuQrUrl} alt="Feishu QR" className="h-40 w-40 rounded bg-white p-1" />}
-                  <p className="text-xs text-gray-400">{feishuQrStatus === "loading" ? "正在生成二维码..." : "请使用飞书扫码创建应用"}</p>
-                  <button onClick={async () => { await window.electronAPI.feishuRegisterAppCancel(); setFeishuQrStatus("idle"); setFeishuQrUrl("") }} className="text-xs text-gray-500 hover:text-red-400">取消</button>
+                  <p className="text-xs text-gray-400">{feishuQrStatus === "loading" ? "正在生成二维码..." : "请使用飞书扫码创建应用，完成后凭据将自动回填"}</p>
+                  <div className="flex items-center gap-3">
+                    <a href="https://open.feishu.cn/app" target="_blank" rel="noreferrer"
+                      className="flex items-center gap-1 text-xs text-gray-500 hover:text-blue-400"
+                      title="已创建成功但未自动回填时，可到开发者平台复制凭据手动填入">
+                      <ExternalLink size={11} />开发者平台
+                    </a>
+                    <button onClick={async () => { await window.electronAPI.feishuRegisterAppCancel(); setFeishuQrStatus("idle"); setFeishuQrUrl("") }} className="text-xs text-gray-500 hover:text-red-400">取消</button>
+                  </div>
                 </div>
               )}
-              {feishuQrStatus === "error" && <p className="text-xs text-red-400">{feishuQrMsg} <button onClick={openRegisterForm} className="text-blue-400 hover:underline">重试</button></p>}
+              {feishuQrStatus === "error" && (
+                <p className="text-xs text-red-400">
+                  {feishuQrMsg} <button onClick={openRegisterForm} className="text-blue-400 hover:underline">重试</button>
+                  <span className="text-gray-500"> · 若飞书侧已创建成功，可到</span>
+                  <a href="https://open.feishu.cn/app" target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">开发者平台</a>
+                  <span className="text-gray-500">复制凭据手动填入</span>
+                </p>
+              )}
               <div className="grid grid-cols-2 gap-3">
                 <div><label className="mb-1 block text-xs text-gray-500">App ID</label><input type="text" value={draft.larkAppId ?? ""} onChange={(e) => set({ larkAppId: e.target.value })} className={inputCls} /></div>
                 <div><label className="mb-1 block text-xs text-gray-500">App Secret</label>
@@ -538,7 +555,7 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
               <h4 className="text-xs font-medium text-gray-400">Agent 资源与模型</h4>
               <button onClick={() => void fetchModels()} disabled={loadingModels} className="flex items-center gap-1 rounded px-2 py-0.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white disabled:opacity-50">
                 {loadingModels ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
-                获取模型列表
+                {loadingModels ? "加载中..." : "刷新模型列表"}
               </button>
             </div>
             <div>

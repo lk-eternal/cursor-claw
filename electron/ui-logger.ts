@@ -1,7 +1,6 @@
 import { BrowserWindow, app } from "electron"
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { getConfig } from "./config-store"
 
 const LOG_BUFFER_MAX = 300
 const LOG_FILE_MAX_BYTES = 5 * 1024 * 1024
@@ -9,16 +8,13 @@ const logBuffer: string[] = []
 let logFilePath: string | null = null
 let logWriteCount = 0
 
-export function resetLogFilePath(): void {
-  logFilePath = null
-}
-
+// 统一日志目录：{userData}/logs/（app.log = Electron 主进程；daemon.log = Daemon 进程）
+// 固定位置，不随工作目录切换而漂移
 function getOrCreateLogFilePath(): string {
   if (logFilePath) return logFilePath
-  const config = getConfig()
-  const dir = config.workspaceDir ? path.join(config.workspaceDir, ".cursor") : path.join(app.getPath("userData"), "logs")
+  const dir = path.join(app.getPath("userData"), "logs")
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-  logFilePath = path.join(dir, "daemon.log")
+  logFilePath = path.join(dir, "app.log")
   rotateLogIfNeeded(logFilePath)
   return logFilePath
 }

@@ -296,18 +296,22 @@ export function getEarliestMessageTime(filterSessionKey?: string): number | null
   return null;
 }
 
+/** 未处理完的消息数（.qmsg 待投递 + .claimed 已投递未确认）。
+ * 计入 .claimed 是掉线自愈的关键：Agent 死后残留的未确认消息会让调度轮询继续触发，
+ * 否则消息被幽灵连接领走后队列长度归零，永远无人拉起新 Agent。 */
 export function getQueueLength(filterSessionKey?: string): number {
   if (!queueDir) return 0;
+  const isPending = (f: string) => f.endsWith(".qmsg") || f.endsWith(".claimed");
   if (filterSessionKey) {
     const dir = getSessionDir(filterSessionKey);
-    try { return fs.readdirSync(dir).filter((f) => f.endsWith(".qmsg")).length; } catch { return 0; }
+    try { return fs.readdirSync(dir).filter(isPending).length; } catch { return 0; }
   }
   try {
     let total = 0;
     for (const sub of listSessionDirs()) {
-      try { total += fs.readdirSync(sub).filter((f) => f.endsWith(".qmsg")).length; } catch { /* ignore */ }
+      try { total += fs.readdirSync(sub).filter(isPending).length; } catch { /* ignore */ }
     }
-    total += fs.readdirSync(queueDir).filter((f) => f.endsWith(".qmsg")).length;
+    total += fs.readdirSync(queueDir).filter(isPending).length;
     return total;
   } catch { return 0; }
 }
@@ -316,6 +320,8 @@ export interface QueueMessageView {
   index: number;
   fileId: string;
   preview: string;
+  /** pending = 排队待投递（.qmsg）；processing = 已投递给 Agent 待回复确认（.claimed） */
+  status?: "pending" | "processing";
   sessionKey?: string;
   chatType?: string;
   timestamp?: number;
@@ -328,15 +334,16 @@ export function getQueueMessages(filterSessionKey?: string): QueueMessageView[] 
   const result: QueueMessageView[] = [];
   for (const dir of dirs) {
     try {
-      const files = fs.readdirSync(dir).filter((f) => f.endsWith(".qmsg")).sort();
+      const files = fs.readdirSync(dir).filter((f) => f.endsWith(".qmsg") || f.endsWith(".claimed")).sort();
       for (const f of files) {
+        const status = f.endsWith(".claimed") ? "processing" as const : "pending" as const;
         try {
           const filePath = path.join(dir, f);
           const raw = fs.readFileSync(filePath, "utf-8");
           const parsed = JSON.parse(raw);
           const ts = parsed.timestamp || fs.statSync(filePath).mtimeMs;
           result.push({
-            index: result.length, fileId: f,
+            index: result.length, fileId: f, status,
             preview: (parsed.text ?? "").slice(0, 200),
             sessionKey: parsed.sessionKey || parsed.chatId || undefined,
             chatType: parsed.meta?.chatType || parsed.chatType || undefined,
@@ -344,18 +351,20 @@ export function getQueueMessages(filterSessionKey?: string): QueueMessageView[] 
             senderOpenId: parsed.meta?.senderOpenId || parsed.senderOpenId || undefined,
           });
         } catch {
-          result.push({ index: result.length, fileId: f, preview: "(unreadable)" });
+          result.push({ index: result.length, fileId: f, status, preview: "(unreadable)" });
         }
       }
     } catch { /* ignore */ }
   }
+  result.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
+  result.forEach((v, i) => { v.index = i; });
   return result;
 }
 
 export function deleteQueueMessage(fileId: string, filterSessionKey?: string): boolean {
   if (!queueDir || !fileId) return false;
   const basename = path.basename(fileId);
-  if (basename !== fileId || !fileId.endsWith(".qmsg")) return false;
+  if (basename !== fileId || !(fileId.endsWith(".qmsg") || fileId.endsWith(".claimed"))) return false;
   const dirs = filterSessionKey ? [getSessionDir(filterSessionKey)] : [queueDir, ...listSessionDirs()];
   for (const dir of dirs) {
     try {
@@ -372,13 +381,14 @@ export interface QueueSessionInfo {
   senderOpenId?: string;
 }
 
+/** 有未处理完消息的会话（含 .claimed 未确认：Agent 掉线后调度器据此重新拉起并重投） */
 export function getDistinctSessions(): QueueSessionInfo[] {
   if (!queueDir) return [];
   const map = new Map<string, { chatType: string; senderOpenId?: string }>();
   const dirs = [queueDir, ...listSessionDirs()];
   for (const dir of dirs) {
     try {
-      const files = fs.readdirSync(dir).filter((f) => f.endsWith(".qmsg"));
+      const files = fs.readdirSync(dir).filter((f) => f.endsWith(".qmsg") || f.endsWith(".claimed"));
       for (const f of files) {
         try {
           const raw = fs.readFileSync(path.join(dir, f), "utf-8");

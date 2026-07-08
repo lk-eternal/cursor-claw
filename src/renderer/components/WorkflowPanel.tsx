@@ -55,7 +55,9 @@ function DefEditor({ initial, onSave, onCancel }: DefEditorProps) {
     window.electronAPI.getConfig().then((cfg) => {
       setDefaultDir(cfg.workspaceDir || "未配置")
       setDefaultModel(cfg.model || "auto")
-      const fetcher = cfg.agentMode === "sdk" ? window.electronAPI.listSdkModels : window.electronAPI.listModels
+      // 优先用带 Key 的 SDK 资源拉模型（列表更全）；旧版 listSdkModels 不传 apiKey 必然失败
+      const sdkKey = cfg.agentResources?.find((r) => r.type === "sdk" && r.apiKey)?.apiKey
+      const fetcher = sdkKey ? () => window.electronAPI.listSdkModels(sdkKey) : () => window.electronAPI.listModels()
       fetcher().then((res) => {
         if (!res.ok) return
         // 工作流节点模型只存 id（不带 variant 参数），按 id 去重并直接以 id 展示

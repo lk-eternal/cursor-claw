@@ -1,9 +1,8 @@
-import * as fs from "node:fs"
 import * as path from "node:path"
 import cron from "node-cron"
 import { CronExpressionParser } from "cron-parser"
 import { app } from "electron"
-import { getConfig, type ScheduledTask } from "./config-store"
+import { readScheduledTasksFile, writeScheduledTasksFile, type ScheduledTask } from "../src/shared/scheduled-task"
 
 function resolveTasksFile(): string {
   return path.join(app.getPath("userData"), "scheduled-tasks.json")
@@ -14,31 +13,12 @@ export function getTasksFilePath(): string {
 }
 
 export function readTasksFromFile(): ScheduledTask[] {
-  try {
-    const file = resolveTasksFile()
-    if (!fs.existsSync(file)) return []
-    const raw = fs.readFileSync(file, "utf-8")
-    const parsed = JSON.parse(raw) as unknown
-    if (!Array.isArray(parsed)) return []
-    return parsed.filter(
-      (t: unknown): t is ScheduledTask =>
-        typeof t === "object" && t !== null &&
-        typeof (t as ScheduledTask).id === "string" &&
-        typeof (t as ScheduledTask).name === "string" &&
-        typeof (t as ScheduledTask).cron === "string" &&
-        typeof (t as ScheduledTask).content === "string",
-    ).map((t) => ({ ...t, enabled: t.enabled !== false }))
-  } catch {
-    return []
-  }
+  return readScheduledTasksFile(resolveTasksFile())
 }
 
 export function writeTasksToFile(tasks: ScheduledTask[]): void {
   try {
-    const file = resolveTasksFile()
-    const dir = path.dirname(file)
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(file, JSON.stringify(tasks, null, 2), "utf-8")
+    writeScheduledTasksFile(resolveTasksFile(), tasks)
   } catch { /* ignore */ }
 }
 

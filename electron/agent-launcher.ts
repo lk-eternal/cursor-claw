@@ -1,24 +1,16 @@
-import { spawn, type ChildProcess } from "node:child_process"
+import { type ChildProcess } from "node:child_process"
 import * as fs from "node:fs"
+import { getConfig, getMainChatIdForScope, setMainChatIdForScope } from "./config-store"
+import { chatIdFromSessionKey } from "../src/shared/channel-types"
 import {
-  getConfig, type AppConfig,
-  getMainChatIdForScope, setMainChatIdForScope,
-} from "./config-store"
-import {
-  resolveAgentBinary, getAgentPaths, applyProxyEnv, createAgentEnv,
-  spawnAgentChild, execAgentSync, execAgentAsync, ensureAgentBinary, quoteArg,
+  resolveAgentBinary, applyProxyEnv, createAgentEnv,
+  spawnAgentChild, execAgentSync, execAgentAsync, ensureAgentBinary,
   checkCliInstalled,
 } from "./agent-cli"
 import {
   broadcastLog, pushUiLog, flushAgentStreamChunk, logCursorAgentInvocation, logCursorAgentResponse,
   broadcastSessionStatus as broadcastSessionStatusToUi,
 } from "./ui-logger"
-
-export const P2P_SESSION_KEY = "__p2p__"
-export function makeMainP2pSessionKey(chatId: string, workspaceDir: string): string {
-  return `${chatId}::${workspaceDir}`
-}
-const AGENT_NO_PREVIOUS_CHATS = /no previous chats found/i
 
 // ── 会话 Agent ──────────────────────────────────────────
 
@@ -74,7 +66,7 @@ export function setSessionCloseHandler(fn: (sessionKey: string, chatType: ChatTy
 /** 广播时实时解析会话名：优先用会话自带名，否则按 chatId / senderOpenId 查缓存（群名异步解析后自愈），最后走兜底名 */
 export function resolveSessionChatName(sessionKey: string, chatName?: string, senderOpenId?: string): string | undefined {
   if (chatName) return chatName
-  const chatId = sessionKey.includes("::") ? sessionKey.split("::")[0] : sessionKey
+  const chatId = chatIdFromSessionKey(sessionKey)
   return chatNameResolver?.(chatId)
     || (senderOpenId ? chatNameResolver?.(senderOpenId) : undefined)
     || chatNameFallback?.(chatId)
@@ -152,13 +144,13 @@ export interface LaunchMeta { messageIds?: string[]; chatId?: string; chatType?:
 
 export function buildPrompt(meta?: LaunchMeta, taskMessage?: string, sessionKey?: string, useMainWorkspace?: boolean, keepAlive = true): string {
   const prompts: string[] = []
-  if (useMainWorkspace || meta?.chatType == 'workflow') {
+  if (useMainWorkspace || meta?.chatType === "workflow") {
     prompts.push("请绝对严格遵守工作流规则cursor-claw开始工作")
   } else {
     prompts.push("请按照digital-identity数字身份定义并绝对严格遵守工作流规则cursor-claw开始工作")
   }
 
-  if(taskMessage){
+  if (taskMessage) {
     prompts.push("---")
     prompts.push("任务内容:")
     prompts.push(taskMessage)
@@ -177,13 +169,6 @@ export function buildPrompt(meta?: LaunchMeta, taskMessage?: string, sessionKey?
 
 // ── 进程管理工具 ─────────────────────────────────────────
 
-function makeSpawnEnv(config: AppConfig, extras?: Record<string, string>): Record<string, string> {
-  const env: Record<string, string> = { ...process.env as Record<string, string>, CURSOR_INVOKED_AS: "agent", ...extras }
-  delete env.NODE_USE_ENV_PROXY
-  applyProxyEnv(env, config)
-  return env
-}
-
 function buildAgentLaunchArgs(workspaceDir: string, prompt: string, resumeChatId: string | false, model?: string): string[] {
   const args = [
     "--print", "--force",
@@ -194,15 +179,6 @@ function buildAgentLaunchArgs(workspaceDir: string, prompt: string, resumeChatId
   if (m && m !== "auto") args.push("--model", m)
   args.push(prompt)
   return args
-}
-
-/** scope = `${channelId}:${workspaceDir}`，主会话 resume 上下文按通道+目录隔离 */
-export function getMainChatId(scope: string): string {
-  return getMainChatIdForScope(scope)
-}
-
-export function setMainChatId(scope: string, chatId: string): void {
-  setMainChatIdForScope(scope, chatId)
 }
 
 function createChatId(workspaceDir: string, scope: string, spawnEnv: Record<string, string>): string | null {
@@ -232,19 +208,23 @@ function ensureMainChatId(workspaceDir: string, scope: string, spawnEnv: Record<
 
 function spawnAgentWithLogs(args: string[], env: Record<string, string>, label: string, cwd?: string): ChildProcess {
   logCursorAgentInvocation(label, args, cwd)
-  const { agentNodePath, agentIndexPath } = getAgentPaths()
-  const spawnOpts = { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] as ("ignore" | "pipe")[], env, cwd }
-  if (agentNodePath && agentIndexPath) {
-    return spawn(agentNodePath, [agentIndexPath, ...args], spawnOpts)
-  }
-  return spawn("agent", args.map(quoteArg), { ...spawnOpts, shell: process.platform === "win32" })
+  return spawnAgentChild(args, env, { cwd })
 }
 
-function attachStreamLoggers(child: ChildProcess): void {
+/** 挂接 stdout/stderr：按行推 UI 日志；onData 供调用方同步捕获原始输出（单次 decode，避免重复监听器） */
+function attachStreamLoggers(child: ChildProcess, onData?: (stream: "stdout" | "stderr", text: string) => void): void {
   const outBuf = { current: "" }
   const errBuf = { current: "" }
-  child.stdout?.on("data", (d: Buffer) => flushAgentStreamChunk(outBuf, d.toString(), "stdout"))
-  child.stderr?.on("data", (d: Buffer) => flushAgentStreamChunk(errBuf, d.toString(), "stderr"))
+  child.stdout?.on("data", (d: Buffer) => {
+    const s = d.toString()
+    onData?.("stdout", s)
+    flushAgentStreamChunk(outBuf, s, "stdout")
+  })
+  child.stderr?.on("data", (d: Buffer) => {
+    const s = d.toString()
+    onData?.("stderr", s)
+    flushAgentStreamChunk(errBuf, s, "stderr")
+  })
   child.on("close", () => {
     if (outBuf.current.trim()) { pushUiLog("Agent", "INFO", outBuf.current.trim()); outBuf.current = "" }
     if (errBuf.current.trim()) { pushUiLog("Agent", "WARN", errBuf.current.trim()); errBuf.current = "" }
@@ -286,7 +266,6 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
 
   pendingLaunches.add(sessionKey)
 
-  const config = getConfig()
   const workDir = opts.workspaceDir
 
   if (!workDir) { pendingLaunches.delete(sessionKey); return { ok: false, error: "工作目录未配置" } }
@@ -294,7 +273,7 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
   if (!resolveAgentBinary()) { pendingLaunches.delete(sessionKey); return { ok: false, error: "Cursor CLI 未安装" } }
 
   const prompt = buildPrompt(meta, taskMessage, sessionKey, useMainWorkspace, opts.persistentPoll ?? true)
-  const spawnEnv = makeSpawnEnv(config, { LARK_WORKSPACE_DIR: workDir })
+  const spawnEnv = createAgentEnv({ LARK_WORKSPACE_DIR: workDir })
 
   let resumeChatId: string | false = false
   if (needResume && opts.resumeScope) {
@@ -311,7 +290,6 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
   try {
     const ws = workDir.trim() || undefined
     const child = spawnAgentWithLogs(args, spawnEnv, `session-${sessionKey}`, ws)
-    attachStreamLoggers(child)
 
     const now = Date.now()
     const sa: SessionAgent = {
@@ -322,8 +300,11 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
 
     let stderrChunks = ""
     let stdoutChunks = ""
-    child.stderr?.on("data", (d: Buffer) => { stderrChunks = appendCapped(stderrChunks, d.toString()); sa.lastOutputAt = Date.now() })
-    child.stdout?.on("data", (d: Buffer) => { stdoutChunks = appendCapped(stdoutChunks, d.toString()); sa.lastOutputAt = Date.now() })
+    attachStreamLoggers(child, (stream, s) => {
+      if (stream === "stderr") stderrChunks = appendCapped(stderrChunks, s)
+      else stdoutChunks = appendCapped(stdoutChunks, s)
+      sa.lastOutputAt = Date.now()
+    })
 
     child.on("close", (code, signal) => {
       const isCurrent = sessionAgents.get(sessionKey) === sa
@@ -431,36 +412,21 @@ export function checkAgentLoggedIn(options?: { forceRefresh?: boolean }): Promis
   return agentLoggedInCheckInFlight
 }
 
-export function loginCli(): Promise<{ ok: boolean; output: string }> {
-  return new Promise(async (resolve) => {
-    if (!(await ensureAgentBinary())) {
-      if (!(await checkCliInstalled())) {
-        resolve({ ok: false, output: "Cursor CLI 未安装，请先安装" })
-        return
-      }
-    }
+export async function loginCli(): Promise<{ ok: boolean; output: string }> {
+  if (!(await ensureAgentBinary()) && !(await checkCliInstalled())) {
+    return { ok: false, output: "Cursor CLI 未安装，请先安装" }
+  }
 
-    const config = getConfig()
-    const spawnEnv = makeSpawnEnv(config)
+  const spawnEnv = createAgentEnv()
+  broadcastLog("[CLI Login] 正在打开浏览器进行 Cursor 账号授权...")
+  logCursorAgentInvocation("cli-login", ["login"], undefined)
+
+  return new Promise((resolve) => {
     let output = ""
     let settled = false
 
-    broadcastLog("[CLI Login] 正在打开浏览器进行 Cursor 账号授权...")
-    logCursorAgentInvocation("cli-login", ["login"], undefined)
-
     try {
-      const { agentNodePath, agentIndexPath } = getAgentPaths()
-      let child: ChildProcess
-      if (agentNodePath && agentIndexPath) {
-        child = spawn(agentNodePath, [agentIndexPath, "login"], {
-          windowsHide: false, stdio: ["ignore", "pipe", "pipe"], env: spawnEnv,
-        })
-      } else {
-        child = spawn("agent", ["login"], {
-          shell: process.platform === "win32", windowsHide: false,
-          stdio: ["ignore", "pipe", "pipe"], env: spawnEnv,
-        })
-      }
+      const child = spawnAgentChild(["login"], spawnEnv)
 
       child.stdout?.on("data", (d: Buffer) => {
         const s = d.toString().trim(); output += s + "\n"
