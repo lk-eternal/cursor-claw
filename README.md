@@ -524,8 +524,6 @@ MIT
 
 ## Star History
 
-## Star History
-
 <a href="https://www.star-history.com/?repos=lk-eternal%2Fcursor-claw&type=date&legend=top-left">
  <picture>
    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=lk-eternal/cursor-claw&type=date&theme=dark&legend=top-left&sealed_token=WIlkJeujXI5zTfjw5krA3Q7_WbJQKuq02Bez7x6u-nxdu5ObaFvIRY77eXpAH_8MHRkB0SAp0iuuP6EWA4FtdmATTM2YL8InZi3vF5ovFW8LUHFBhb7Wurk-5Zyru4XI64YFZ0yUC4_tqmIiY6W454b7hjNGbDMdOND5iQ01bBBII6XDq9XHUNgMGa3G" />
