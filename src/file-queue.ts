@@ -42,11 +42,15 @@ function listSessionDirs(): string[] {
   } catch { return []; }
 }
 
+/** 入队时间戳单调递增：同毫秒内连续入队（如 skipDedup 重投同 messageId）文件名不冲突、不被覆盖 */
+let lastPushTs = 0;
+
 export function pushToFileQueue(text: string, messageId?: string, source?: string, sessionKey?: string, skipDedup?: boolean, meta?: QueueMessageMeta): boolean {
   if (!queueDir || !text?.trim()) return false;
 
   const dir = getSessionDir(sessionKey);
-  const ts = Date.now();
+  const ts = Math.max(Date.now(), lastPushTs + 1);
+  lastPushTs = ts;
   const fileToken = messageId || `${ts}-${Math.random().toString(36).slice(2, 8)}`;
   const safeId = fileToken.replace(/[^a-zA-Z0-9_-]/g, "_");
   const filename = `${ts}_${safeId}.qmsg`;
