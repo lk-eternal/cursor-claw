@@ -502,7 +502,9 @@ export default function Dashboard({ onSettings, active }: Props) {
             label="消息队列"
             value={String(status.queueLength ?? 0)}
             color={status.queueLength ? "yellow" : "gray"}
-            sub={status.queueLength ? "点击查看详情" : "待处理消息"}
+            sub={status.queueLength
+              ? `排队 ${status.queueCounts?.pending ?? 0} · 处理中 ${status.queueCounts?.processing ?? 0}`
+              : "待处理消息"}
             action={status.queueLength ? (
               <button
                 onClick={handleClearQueue}

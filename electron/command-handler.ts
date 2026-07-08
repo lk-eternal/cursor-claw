@@ -465,7 +465,7 @@ export async function handleFeishuMcpCommand(port: number, messageId: string, ra
       const detail = s.type === "url" ? s.url : s.command
       return `  ${i + 1}. ${flag} ${src} ${s.name}  (${detail})`
     })
-    await reportCommandResult(port, messageId, true, `📦 MCP 服务器列表：\n${lines.join("\n")}`)
+    await reportCommandResult(port, messageId, true, `📦 MCP 服务器列表：\n${lines.join("\n")}\n\n💡 /mcp info|enable|disable|delete <序号|名称> | /mcp add {JSON}`)
     return
   }
 

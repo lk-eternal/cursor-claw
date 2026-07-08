@@ -71,6 +71,7 @@ declare global {
     version?: string
     uptime?: number
     queueLength?: number
+    queueCounts?: { pending: number; processing: number }
     hasChatId?: boolean
     agentRunning?: boolean
     agentPid?: number | null

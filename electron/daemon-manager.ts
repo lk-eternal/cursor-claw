@@ -103,6 +103,7 @@ export interface DaemonStatus {
   version?: string
   uptime?: number
   queueLength?: number
+  queueCounts?: { pending: number; processing: number }
   hasChatId?: boolean
   agentRunning?: boolean
   agentPid?: number | null
@@ -379,6 +380,7 @@ export async function getDaemonStatus(): Promise<DaemonStatus> {
       version: health.version as string,
       uptime: health.uptime as number,
       queueLength: health.queueLength as number,
+      queueCounts: health.queueCounts as { pending: number; processing: number } | undefined,
       hasChatId: health.hasChatId as boolean,
       agentRunning: isAgentRunning() || getSessionAgentCount() > 0,
       agentPid: getAgentChildPid(),
@@ -942,7 +944,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
             status.version ? `🔄 版本: ${status.version}` : "",
             status.uptime !== undefined ? `⌛️ 运行时间: ${Math.floor(status.uptime / 60)}分钟` : "",
             `🤖 Agent: ${isAgentRunning() ? `✅ 运行中 (PID: ${getAgentChildPid()})` : "❌ 未运行"}`,
-            `📭 队列消息: ${status.queueLength ?? 0} 条`,
+            `📭 队列消息: 排队 ${status.queueCounts?.pending ?? 0} · 处理中 ${status.queueCounts?.processing ?? 0}`,
             `⏰ 定时任务: 开启 ${schedEnabled} / 共 ${schedTotal} 条`,
           ].filter(Boolean)
           await reply(true, lines.join("\n"))

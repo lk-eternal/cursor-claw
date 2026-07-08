@@ -447,7 +447,8 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
       return `${idx} [${type}] ${name} | 启动:${started} | 时长:${dur} | dir:${dir} | pid:${pid}`
     })
     const chatBtns = sessions.slice(0, 8).map((s, i) => ({ label: `切换到 #${i + 1} ${s.chatName || path.basename(s.workspaceDir ?? "") || s.chatType}`, cmd: `/chat ${i + 1}` }))
-    await reply(true, `📋 活跃会话 (${sessions.length}):\n${lines.join("\n")}`, chatBtns)
+    const usage = "💡 /chat <序号> 切换 | /chat stop <序号> 停止 | /chat new <描述> 新临时会话"
+    await reply(true, `📋 活跃会话 (${sessions.length}):\n${lines.join("\n")}\n\n${usage}`, chatBtns)
     return
   }
 

@@ -320,6 +320,23 @@ export function getQueueLength(filterSessionKey?: string): number {
   } catch { return 0; }
 }
 
+/** 全局队列分状态计数：pending = 排队待投递（.qmsg）；processing = 已投递待确认（.claimed） */
+export function getQueueCounts(): { pending: number; processing: number } {
+  const counts = { pending: 0, processing: 0 };
+  if (!queueDir) return counts;
+  const tally = (dir: string) => {
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        if (f.endsWith(".qmsg")) counts.pending++;
+        else if (f.endsWith(".claimed")) counts.processing++;
+      }
+    } catch { /* ignore */ }
+  };
+  for (const sub of listSessionDirs()) tally(sub);
+  tally(queueDir);
+  return counts;
+}
+
 export interface QueueMessageView {
   index: number;
   fileId: string;

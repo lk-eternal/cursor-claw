@@ -20,6 +20,7 @@ import {
   waitForSessionMessages,
   ackMessages,
   getQueueLength as getFileQueueLength,
+  getQueueCounts,
   getQueueMessages as getFileQueueMessages,
   deleteQueueMessage as deleteFileQueueMessage,
   getDistinctSessions,
@@ -1150,6 +1151,7 @@ function startHttpServer(): Promise<number> {
             version: PKG_VERSION,
             uptime: Math.floor(process.uptime()),
             queueLength: getFileQueueLength(),
+            queueCounts: getQueueCounts(),
             channels: channelList,
             // 兼容字段（聚合视图）
             hasChatId: channelList.some((c) => c.connected),
