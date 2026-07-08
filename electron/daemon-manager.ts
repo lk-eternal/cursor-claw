@@ -1062,35 +1062,28 @@ async function checkAndExecutePendingCommands(): Promise<void> {
         }
 
         case "/help": {
+          // 全指令按钮化：label ≤8 字符时卡片按 3 列紧凑排布，正文只留一行说明
           const common = [
-            "🔹 /status 运行状态",
-            "🔹 /stop 停止Agent",
-            "🔹 /reset 重置会话",
-            "🔹 /help 指令列表",
+            { label: "📊 状态", cmd: "/status" },
+            { label: "⏹ 停止", cmd: "/stop" },
+            { label: "🔄 重置", cmd: "/reset" },
           ]
           const adminOnly = [
-            "🔹 /restart 重启应用",
-            "🔹 /list 消息队列",
-            "🔹 /clean 清空队列",
-            "🔹 /task 定时任务",
-            "🔹 /workflow 工作流管理",
-            "🔹 /model 模型设置",
-            "🔹 /mcp MCP服务器管理",
-            "🔹 /workspace 切换工作目录",
-            "🔹 /chat 会话管理",
+            { label: "💬 会话", cmd: "/chat ls" },
+            { label: "🧠 模型", cmd: "/model ls" },
+            { label: "⏰ 任务", cmd: "/task ls" },
+            { label: "🔀 工作流", cmd: "/workflow ls" },
+            { label: "📦 MCP", cmd: "/mcp ls" },
+            { label: "📁 目录", cmd: "/workspace" },
+            { label: "📋 队列", cmd: "/list" },
+            { label: "🧹 清队列", cmd: "/clean" },
+            { label: "♻️ 重启", cmd: "/restart" },
           ]
-          const lines = isAdmin
-            ? ["💡 可用指令（管理员）：", ...common, ...adminOnly]
-            : ["💡 可用指令：", ...common]
-          const helpBtns = isAdmin
-            ? [
-                { label: "📊 运行状态", cmd: "/status" },
-                { label: "💬 会话列表", cmd: "/chat ls" },
-                { label: "🧠 模型列表", cmd: "/model ls" },
-                { label: "⏰ 定时任务", cmd: "/task ls" },
-              ]
-            : [{ label: "📊 运行状态", cmd: "/status" }]
-          await reply(true, lines.join("\n"), helpBtns)
+          const helpBtns = isAdmin ? [...common, ...adminOnly] : common
+          const body = isAdmin
+            ? "💡 点按钮执行，或输入指令（子命令用文字，如 /chat new <描述>、/model set <序号>）"
+            : "💡 点按钮执行，或直接输入指令"
+          await reply(true, body, helpBtns)
           break
         }
 

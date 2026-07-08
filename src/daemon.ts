@@ -853,7 +853,9 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
     const cmd = String(value.cmd ?? "").trim();
     if (!cmd || !isCommand(cmd)) return { toast: { type: "error", content: "无效指令" } };
     log("INFO", `[${rt.cfg.name}] 卡片指令点击: ${cmd}`);
-    handleCommand(cmd, evt.messageId, chatKey, undefined).catch((e: any) => log("ERROR", `卡片指令失败: ${e?.message ?? e}`));
+    // 主用户私聊内点击按钮等价于主用户发指令（缺 chatType 会被 isMainUser 误判非管理员）
+    const chatType = rt.cfg.mainUserEnabled && rt.cfg.mainUserChatId === evt.chatId ? "p2p" : undefined;
+    handleCommand(cmd, evt.messageId, chatKey, chatType).catch((e: any) => log("ERROR", `卡片指令失败: ${e?.message ?? e}`));
     return { toast: { type: "info", content: `已执行 ${cmd}` } };
   }
 

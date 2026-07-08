@@ -137,17 +137,33 @@ export class LarkSender {
     return { content: JSON.stringify(LarkSender.buildCard(fullText, title)), msgType: "interactive" };
   }
 
-  /** 构造 schema 2.0 markdown 卡片；buttons 为回传交互按钮（点击触发 card.action.trigger） */
+  /** 构造 schema 2.0 markdown 卡片；buttons 为回传交互按钮（点击触发 card.action.trigger），按 label 长度自适应 1-3 列排布 */
   static buildCard(text: string, title?: string, buttons?: CardButton[]): any {
     const elements: any[] = [{ tag: "markdown", content: text.replace(/\\/g, "\\\\") }];
-    for (const b of buttons ?? []) {
-      elements.push({
+    const btns = buttons ?? [];
+    if (btns.length > 0) {
+      const maxLen = Math.max(...btns.map((b) => b.label.length));
+      const perRow = maxLen <= 8 ? 3 : maxLen <= 16 ? 2 : 1;
+      const toButton = (b: CardButton) => ({
         tag: "button",
         text: { tag: "plain_text", content: b.label.slice(0, 100) },
         type: b.type ?? "primary",
         width: "fill",
         behaviors: [{ type: "callback", value: b.value }],
       });
+      if (perRow === 1) {
+        for (const b of btns) elements.push(toButton(b));
+      } else {
+        for (let i = 0; i < btns.length; i += perRow) {
+          elements.push({
+            tag: "column_set",
+            horizontal_spacing: "8px",
+            columns: btns.slice(i, i + perRow).map((b) => ({
+              tag: "column", width: "weighted", weight: 1, elements: [toButton(b)],
+            })),
+          });
+        }
+      }
     }
     const card: any = {
       schema: "2.0",
