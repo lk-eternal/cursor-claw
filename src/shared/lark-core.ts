@@ -509,6 +509,18 @@ export class LarkSender {
 
   // ── WebSocket 连接 ────────────────────────────────────
 
+  private wsClient: Lark.WSClient | null = null;
+
+  /** 当前 WebSocket 连接状态快照（无连接时返回 null） */
+  getWsConnectionStatus(): Lark.WSConnectionStatus | null {
+    return this.wsClient?.getConnectionStatus() ?? null;
+  }
+
+  closeConnection(force = false): void {
+    try { this.wsClient?.close({ force }); } catch { /* best-effort */ }
+    this.wsClient = null;
+  }
+
   /** 建立 WebSocket 长连接；返回的 Promise 反映连接建立结果（调用方可据此维护连接状态） */
   startConnection(
     appId: string,
@@ -516,6 +528,7 @@ export class LarkSender {
     encryptKey: string,
     onMessage: (event: LarkMessageEvent) => void,
     onCardAction?: (event: LarkCardActionEvent) => Promise<unknown> | unknown,
+    lifecycle?: LarkWsLifecycle,
   ): Promise<void> {
     const eventDispatcher = new Lark.EventDispatcher(encryptKey ? { encryptKey } : {}).register({
       "im.message.receive_v1": (data) => {
@@ -556,14 +569,49 @@ export class LarkSender {
         }
       },
     });
-    const wsClient = new Lark.WSClient({ appId, appSecret, loggerLevel: Lark.LoggerLevel.error });
-    return wsClient.start({ eventDispatcher })
+    this.wsClient = new Lark.WSClient({
+      appId,
+      appSecret,
+      loggerLevel: Lark.LoggerLevel.error,
+      autoReconnect: true,
+      wsConfig: { pingTimeout: 10 },
+      onReady: () => {
+        this.log("INFO", "飞书 WebSocket 就绪");
+        lifecycle?.onReady?.();
+      },
+      onReconnecting: () => {
+        this.log("WARN", "飞书 WebSocket 断线，正在重连...");
+        lifecycle?.onDisconnected?.();
+        lifecycle?.onReconnecting?.();
+      },
+      onReconnected: () => {
+        this.log("INFO", "飞书 WebSocket 重连成功");
+        lifecycle?.onReconnected?.();
+        lifecycle?.onReady?.();
+      },
+      onError: (err: Error) => {
+        this.log("ERROR", `飞书 WebSocket 致命错误: ${err.message}`);
+        lifecycle?.onError?.(err);
+        lifecycle?.onDisconnected?.();
+      },
+    });
+    return this.wsClient.start({ eventDispatcher })
       .then(() => this.log("INFO", "飞书 WebSocket 连接建立成功"))
       .catch((e: any) => {
         this.log("ERROR", `飞书 WebSocket 连接失败: ${e?.message ?? e}`);
+        this.wsClient = null;
         throw e;
       });
   }
+}
+
+export interface LarkWsLifecycle {
+  onReady?: () => void;
+  onReconnecting?: () => void;
+  onReconnected?: () => void;
+  onError?: (err: Error) => void;
+  /** 连接不可用（重连中/失败） */
+  onDisconnected?: () => void;
 }
 
 // ── 类型导出 ──────────────────────────────────────────────

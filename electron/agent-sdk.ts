@@ -36,7 +36,7 @@ const pendingLaunches = new Set<string>()
 // 不保留闲置 agent 进程：闲置连接会被代理/NAT 静默掐死，复用必报 SSL WRONG_VERSION_NUMBER。
 // run 结束即释放进程，仅持久化 sessionKey→agentId 映射；新消息 Agent.resume 恢复——
 // 全新连接 + 历史上下文完整保留，应用重启后同样有效。
-interface ResumeEntry { agentId: string; workspaceDir: string; updatedAt: number }
+interface ResumeEntry { agentId: string; workspaceDir: string; updatedAt: number; senderOpenId?: string }
 
 const RESUME_ENTRY_TTL_MS = 14 * 24 * 60 * 60 * 1000
 let resumableAgents: Map<string, ResumeEntry> | null = null
@@ -77,6 +77,7 @@ function rememberResumable(session: SdkSessionAgent): void {
   if (!isResumeEligible(session) || !session.workspaceDir) return
   getResumableMap().set(session.sessionKey, {
     agentId: session.agentId, workspaceDir: session.workspaceDir, updatedAt: Date.now(),
+    senderOpenId: session.senderOpenId,
   })
   saveResumableMap()
 }
@@ -105,11 +106,18 @@ export function setSdkIdleHandler(fn: (sessionKey: string) => void): void {
   sdkIdleHandler = fn
 }
 
-let sdkRunErrorHandler: ((sessionKey: string, chatType: ChatType, errorDetail: string) => void) | null = null
+let sdkRunErrorHandler: ((sessionKey: string, chatType: ChatType, errorDetail: string, senderOpenId?: string) => void) | null = null
 
 /** run 以 error 终态结束时回调（调度器借此自动重试拉起 / 通知用户），在 idle 回调之前触发 */
-export function setSdkRunErrorHandler(fn: (sessionKey: string, chatType: ChatType, errorDetail: string) => void): void {
+export function setSdkRunErrorHandler(fn: (sessionKey: string, chatType: ChatType, errorDetail: string, senderOpenId?: string) => void): void {
   sdkRunErrorHandler = fn
+}
+
+let sdkRunSuccessHandler: ((sessionKey: string) => void) | null = null
+
+/** run 正常结束时回调（用于重置连续错误重试计数） */
+export function setSdkRunSuccessHandler(fn: (sessionKey: string) => void): void {
+  sdkRunSuccessHandler = fn
 }
 
 function closeAndRemoveSession(session: SdkSessionAgent): void {
@@ -394,7 +402,9 @@ function startRunLifecycle(session: SdkSessionAgent, run: Run): void {
     broadcastSdkSessionStatus()
     // 异常终态先交错误处理器（自动重试拉起/通知用户），再走 idle 调度消费积压消息
     if (run.status === "error") {
-      sdkRunErrorHandler?.(sessionKey, session.chatType, errorDetail ?? "unknown")
+      sdkRunErrorHandler?.(sessionKey, session.chatType, errorDetail ?? "unknown", session.senderOpenId)
+    } else {
+      sdkRunSuccessHandler?.(sessionKey)
     }
     // 运行期间可能已有积压消息，立即触发一次调度
     sdkIdleHandler?.(sessionKey)
@@ -406,7 +416,11 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
 
   if (isSdkSessionRunning(sessionKey) || pendingLaunches.has(sessionKey)) {
     const s = sdkSessions.get(sessionKey)
-    if (s) s.lastActivityAt = Date.now()
+    if (s) {
+      s.lastActivityAt = Date.now()
+      // 异常重启等路径可能丢失用户标识，随新消息自愈回填（否则会话名永远兜底为「通道名·访客」）
+      if (!s.senderOpenId && senderOpenId) s.senderOpenId = senderOpenId
+    }
     return { ok: true }
   }
 
@@ -469,7 +483,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       lastActivityAt: Date.now(),
       chatType,
       workspaceDir,
-      senderOpenId,
+      senderOpenId: senderOpenId ?? resumable?.senderOpenId,
       chatName,
       abortController,
       keepSession,

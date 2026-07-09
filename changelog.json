@@ -1,5 +1,14 @@
 [
   {
+    "version": "1.3.2",
+    "date": "2026-07-09",
+    "changes": [
+      "SDK run 异常自动重试上限提升至 5 次，run 正常结束重置计数",
+      "修复 SDK 会话异常重启后 senderOpenId 丢失，UI 永久显示「通道名·访客」",
+      "飞书 WebSocket 增强：开启 pingTimeout 看门狗、重连生命周期日志、60s 连接状态巡检"
+    ]
+  },
+  {
     "version": "1.3.1",
     "date": "2026-07-08",
     "changes": [

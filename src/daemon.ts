@@ -198,7 +198,7 @@ function getChannelStatusList(): ChannelStatusInfo[] {
     connected: isChannelConnected(rt),
     status: rt.cfg.type === "wechat"
       ? (rt.wechat?.getStatus() ?? "disconnected")
-      : (rt.feishuConnected ? "connected" : "connecting"),
+      : (rt.sender?.getWsConnectionStatus()?.state ?? (rt.feishuConnected ? "connected" : "connecting")),
     mainUserBound: !!(rt.cfg.mainUserEnabled && rt.cfg.mainUserChatId),
     botName: rt.botName,
   }));
@@ -672,6 +672,29 @@ function clearFileQueue(): number {
 
 // ── 飞书 WebSocket 长连接（每通道一条）───────────────────
 
+const FEISHU_WS_WATCHDOG_MS = 60_000;
+
+function startFeishuWsWatchdog(): void {
+  setInterval(() => {
+    for (const rt of channels.values()) {
+      if (rt.cfg.type !== "feishu" || !rt.sender) continue;
+      const st = rt.sender.getWsConnectionStatus();
+      if (!st) continue;
+      if (st.state === "connected") {
+        if (!rt.feishuConnected) {
+          rt.feishuConnected = true;
+          log("INFO", `[${rt.cfg.name}] WebSocket 状态恢复: connected`);
+        }
+      } else if (st.state === "reconnecting" || st.state === "failed") {
+        if (rt.feishuConnected) {
+          rt.feishuConnected = false;
+          log("WARN", `[${rt.cfg.name}] WebSocket 状态异常: ${st.state} (attempts=${st.reconnectAttempts})`);
+        }
+      }
+    }
+  }, FEISHU_WS_WATCHDOG_MS).unref();
+}
+
 function isBotMentioned(rt: ChannelRuntime, ev: LarkMessageEvent): boolean {
   if (!rt.botOpenId) return ev.mentions.length > 0;
   return ev.mentions.some((m) => m.id === rt.botOpenId || m.key === "@_all");
@@ -727,6 +750,13 @@ async function startFeishuChannel(rt: ChannelRuntime): Promise<void> {
   }
 
   const sender = rt.sender;
+  const wsLifecycle = {
+    onReady: () => { rt.feishuConnected = true; },
+    onReconnecting: () => { rt.feishuConnected = false; },
+    onReconnected: () => { rt.feishuConnected = true; },
+    onDisconnected: () => { rt.feishuConnected = false; },
+    onError: () => { rt.feishuConnected = false; },
+  };
   sender.startConnection(appId, appSecret, ENCRYPT_KEY, (ev) => {
     rt.feishuConnected = true;
     const { text, messageId, chatId, chatType, messageType, rawContent, senderOpenId, parentId } = ev;
@@ -792,7 +822,7 @@ async function startFeishuChannel(rt: ChannelRuntime): Promise<void> {
         .then((result) => enqueue(result || cleanText))
         .catch(() => enqueue(cleanText));
     }
-  }, (cardEvt) => handleCardAction(rt, cardEvt)).then(
+  }, (cardEvt) => handleCardAction(rt, cardEvt), wsLifecycle).then(
     () => { rt.feishuConnected = true; },
     () => { rt.feishuConnected = false; },
   );
@@ -2047,6 +2077,7 @@ export async function daemonMain(): Promise<void> {
       });
     }
   }
+  startFeishuWsWatchdog();
 
   daemonPort = await startHttpServer();
   process.env.LARK_DAEMON_PORT = String(daemonPort);
