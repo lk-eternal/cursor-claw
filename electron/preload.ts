@@ -9,6 +9,7 @@ export interface AppConfig {
   agentResources: AgentResource[]
   channels: MessageChannel[]
   workspaceDir: string
+  favoriteWorkspaces?: string[]
   allowOthers: boolean
   autoStart: boolean
   setupComplete: boolean
@@ -166,6 +167,9 @@ const api = {
   respondWindowClose: (payload: { action: "minimize" | "quit" | "cancel"; remember: boolean }): Promise<void> =>
     ipcRenderer.invoke("window:close-confirm-result", payload),
   selectDirectory: (): Promise<string | null> => ipcRenderer.invoke("dialog:selectDirectory"),
+  getToolboxStatus: (): Promise<{ larkCli: { installed: boolean; version?: string; loggedIn?: boolean; userName?: string }; meegle: { installed: boolean; version?: string } }> => ipcRenderer.invoke("toolbox:status"),
+  installToolboxTool: (key: "larkCli" | "meegle"): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("toolbox:install", key),
+  loginLarkCli: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("toolbox:login-lark"),
   injectWorkspace: (): Promise<{ results: InjectResult[] }> => ipcRenderer.invoke("workspace:inject"),
   startDaemon: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("daemon:start"),
   stopAgent: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("agent:stop"),

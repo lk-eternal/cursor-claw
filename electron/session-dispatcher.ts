@@ -109,22 +109,18 @@ export async function handleSessionClosed(sessionKey: string, chatType: ChatType
   const persistentPoll = (ch?.keepSession ?? true) && (ch?.persistentPoll ?? true)
 
   if (failed) {
-    const lock = cachedLock()
     const now = Date.now()
     const prevCrashAt = lastCrashAtMap.get(sessionKey) ?? 0
     lastCrashAtMap.set(sessionKey, now)
-    if (lock?.port) {
-      if (now - prevCrashAt < CRASH_LOOP_WINDOW_MS) {
-        // 短时间内连续崩溃：放弃排队消息，避免 crash-loop 无限重启
-        const drained = await drainSessionMessages(lock.port, sessionKey)
-        broadcastLog(`[System] Agent 连续异常退出(exit=${exitInfo.exitCode})，已放弃该会话 ${drained} 条消息`, "WARN")
-        if (!mainChat && drained > 0) {
-          await notifyChat(sessionKey, `⚠️ Agent 连续异常退出 (exit=${exitInfo.exitCode})，已放弃 ${drained} 条排队消息，请重新发送。`)
-        }
-      } else {
-        // 首次崩溃：保留队列消息，调度器轮询会自动重启 Agent 继续处理
-        broadcastLog(`[System] Agent 异常退出(exit=${exitInfo.exitCode})，保留队列消息等待自动重启`, "WARN")
+    if (now - prevCrashAt < CRASH_LOOP_WINDOW_MS) {
+      // 短时间内连续崩溃：仅告警，未处理消息保留在队列中（不静默丢弃）
+      broadcastLog(`[System] Agent 连续异常退出(exit=${exitInfo.exitCode})，未处理消息保留在队列中`, "WARN")
+      if (!mainChat) {
+        await notifyChat(sessionKey, `⚠️ Agent 连续异常退出 (exit=${exitInfo.exitCode})，消息保留在队列中，稍后自动重试。`)
       }
+    } else {
+      // 首次崩溃：保留队列消息，调度器轮询会自动重启 Agent 继续处理
+      broadcastLog(`[System] Agent 异常退出(exit=${exitInfo.exitCode})，保留队列消息等待自动重启`, "WARN")
     }
     if (mainChat) {
       const stderrContent = exitInfo.stderr?.trim() || ""
@@ -624,13 +620,21 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
 
 /** SDK run 异常终态处理：自动重试拉起（Resume 静默恢复），达上限或重试失败则通知用户 */
 async function handleSdkRunError(sessionKey: string, chatType: ChatType, errorDetail: string, senderOpenId?: string): Promise<void> {
+  // 队列空闲（无排队也无处理中）时不再拉起：没有活要干，重启只是浪费资源；新消息到达时调度器自会拉起
+  const hasPending = (await getQueueSessions()).some((s) => s.sessionKey === sessionKey)
+  if (!hasPending) {
+    sdkErrorRetryCountMap.delete(sessionKey)
+    broadcastLog(`[SDK] ${sessionKey} 运行异常结束(${errorDetail})，队列空闲，不自动拉起`, "WARN")
+    return
+  }
+
   const attempt = (sdkErrorRetryCountMap.get(sessionKey) ?? 0) + 1
   sdkErrorRetryCountMap.set(sessionKey, attempt)
 
   if (attempt > SDK_ERROR_RETRY_MAX) {
     sdkErrorRetryCountMap.delete(sessionKey)
     broadcastLog(`[SDK] ${sessionKey} 已连续异常 ${SDK_ERROR_RETRY_MAX} 次，停止自动重试`, "WARN")
-    await notifyChat(sessionKey, `⚠️ Agent 连续异常结束，已自动重试 ${SDK_ERROR_RETRY_MAX} 次仍失败。\n错误信息：${errorDetail}\n请稍后重新发消息唤醒，若持续失败请检查网络或 API Key。`)
+    await notifyChat(sessionKey, `⚠️ Agent 连续异常结束，已自动重试 ${SDK_ERROR_RETRY_MAX} 次仍失败。\n错误信息：${errorDetail}\n未处理消息保留在队列中，请稍后重新发消息唤醒，若持续失败请检查网络或 API Key。`)
     return
   }
 

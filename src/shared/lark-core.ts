@@ -137,13 +137,21 @@ export class LarkSender {
     return { content: JSON.stringify(LarkSender.buildCard(fullText, title)), msgType: "interactive" };
   }
 
-  /** 构造 schema 2.0 markdown 卡片；buttons 为回传交互按钮（点击触发 card.action.trigger），按 label 长度自适应 1-3 列排布 */
+  /** 按显示宽度计数（CJK/emoji 算 2，半角算 1）；.length 会低估中文导致窄屏按钮文字被截为 "..." */
+  private static displayWidth(s: string): number {
+    let w = 0;
+    for (const ch of s) w += (ch.codePointAt(0) ?? 0) > 0xff ? 2 : 1;
+    return w;
+  }
+
+  /** 构造 schema 2.0 markdown 卡片；buttons 为回传交互按钮（点击触发 card.action.trigger），按 label 显示宽度自适应 1-3 列排布 */
   static buildCard(text: string, title?: string, buttons?: CardButton[]): any {
     const elements: any[] = [{ tag: "markdown", content: text.replace(/\\/g, "\\\\") }];
     const btns = buttons ?? [];
     if (btns.length > 0) {
-      const maxLen = Math.max(...btns.map((b) => b.label.length));
-      const perRow = maxLen <= 8 ? 3 : maxLen <= 16 ? 2 : 1;
+      // 阈值按手机端卡片宽度（约 300px）保守取值，避免窄屏 3 列时文字显示不全
+      const maxLen = Math.max(...btns.map((b) => LarkSender.displayWidth(b.label)));
+      const perRow = maxLen <= 6 ? 3 : maxLen <= 12 ? 2 : 1;
       const toButton = (b: CardButton) => ({
         tag: "button",
         text: { tag: "plain_text", content: b.label.slice(0, 100) },

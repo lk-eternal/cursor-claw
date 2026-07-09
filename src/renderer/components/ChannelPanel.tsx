@@ -447,12 +447,11 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
               <div className="flex items-center justify-between">
                 <h4 className="text-xs font-medium text-gray-400">飞书凭据</h4>
                 <div className="flex items-center gap-2">
-                  {draft.larkAppId?.trim() && (
-                    <a href={`https://open.feishu.cn/app/${draft.larkAppId.trim()}`} target="_blank" rel="noreferrer"
-                      className="flex items-center gap-1 text-xs text-gray-500 hover:text-blue-400">
-                      <ExternalLink size={11} />开发者后台
-                    </a>
-                  )}
+                  <a href={draft.larkAppId?.trim() ? `https://open.feishu.cn/app/${draft.larkAppId.trim()}` : "https://open.feishu.cn/app"}
+                    target="_blank" rel="noreferrer"
+                    className="flex items-center gap-1 text-xs text-gray-500 hover:text-blue-400">
+                    <ExternalLink size={11} />开发者后台
+                  </a>
                   <button type="button" onClick={openRegisterForm} disabled={feishuQrStatus === "loading" || feishuQrStatus === "wait" || registerForm !== null}
                     className="flex items-center gap-1 rounded-md border border-blue-600/50 bg-blue-600/10 px-2 py-1 text-xs text-blue-300 hover:bg-blue-600/20 disabled:opacity-50">
                     <LogIn size={11} />一键创建应用
@@ -550,13 +549,7 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
 
           {/* ── Agent 资源与模型 ── */}
           <div className="space-y-3 rounded-lg border border-gray-800 p-3">
-            <div className="flex items-center gap-2">
-              <h4 className="text-xs font-medium text-gray-400">Agent 资源与模型</h4>
-              <button onClick={() => void fetchModels()} disabled={loadingModels} className="flex items-center gap-1 rounded px-2 py-0.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white disabled:opacity-50">
-                {loadingModels ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
-                {loadingModels ? "加载中..." : "刷新模型列表"}
-              </button>
-            </div>
+            <h4 className="text-xs font-medium text-gray-400">Agent 资源与模型</h4>
             <div>
               <label className="mb-1 block text-xs text-gray-500">Agent 资源</label>
               <select value={draft.agentResourceId} onChange={(e) => set({ agentResourceId: e.target.value })} className={inputCls}>
@@ -566,27 +559,31 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
             </div>
             <div>
               <label className="mb-1 block text-xs text-gray-500">主模型 <span className="text-gray-600">— 主用户私聊 / 定时任务默认</span></label>
-              {modelOptions.length > 0
-                ? <SearchableSelect
-                    value={modelKey(draft.model, draft.modelParams)}
-                    onChange={(key) => { const { id, params } = parseModelKey(key); set({ model: id, modelParams: params }) }}
-                    options={modelOptions.map((o) => ({ id: modelKey(o.id, o.params), label: o.label }))}
-                    placeholder="选择模型..."
-                    fallbackLabel={modelSlug(draft.model, draft.modelParams)}
-                  />
-                : <input type="text" value={modelSlug(draft.model, draft.modelParams)} onChange={(e) => set({ model: e.target.value, modelParams: "" })} placeholder="auto" className={inputCls} />}
+              {loadingModels
+                ? <div className={inputCls + " flex cursor-not-allowed items-center gap-2 text-gray-500"}><Loader2 size={13} className="animate-spin" />模型列表加载中...</div>
+                : modelOptions.length > 0
+                  ? <SearchableSelect
+                      value={modelKey(draft.model, draft.modelParams)}
+                      onChange={(key) => { const { id, params } = parseModelKey(key); set({ model: id, modelParams: params }) }}
+                      options={modelOptions.map((o) => ({ id: modelKey(o.id, o.params), label: o.label }))}
+                      placeholder="选择模型..."
+                      fallbackLabel={modelSlug(draft.model, draft.modelParams)}
+                    />
+                  : <input type="text" value={modelSlug(draft.model, draft.modelParams)} onChange={(e) => set({ model: e.target.value, modelParams: "" })} placeholder="auto" className={inputCls} />}
             </div>
             <div>
               <label className="mb-1 block text-xs text-gray-500">其他人模型 <span className="text-gray-600">— 其他用户私聊 & 群聊</span></label>
-              {modelOptions.length > 0
-                ? <SearchableSelect
-                    value={draft.othersModel ? modelKey(draft.othersModel, draft.othersModelParams) : ""}
-                    onChange={(key) => { if (!key) { set({ othersModel: "", othersModelParams: "" }); return } const { id, params } = parseModelKey(key); set({ othersModel: id, othersModelParams: params }) }}
-                    options={[{ id: "", label: "跟随主模型" }, ...modelOptions.map((o) => ({ id: modelKey(o.id, o.params), label: o.label }))]}
-                    placeholder="跟随主模型"
-                    fallbackLabel={modelSlug(draft.othersModel, draft.othersModelParams)}
-                  />
-                : <input type="text" value={modelSlug(draft.othersModel, draft.othersModelParams)} onChange={(e) => set({ othersModel: e.target.value, othersModelParams: "" })} placeholder="留空则跟随主模型" className={inputCls} />}
+              {loadingModels
+                ? <div className={inputCls + " flex cursor-not-allowed items-center gap-2 text-gray-500"}><Loader2 size={13} className="animate-spin" />模型列表加载中...</div>
+                : modelOptions.length > 0
+                  ? <SearchableSelect
+                      value={draft.othersModel ? modelKey(draft.othersModel, draft.othersModelParams) : ""}
+                      onChange={(key) => { if (!key) { set({ othersModel: "", othersModelParams: "" }); return } const { id, params } = parseModelKey(key); set({ othersModel: id, othersModelParams: params }) }}
+                      options={[{ id: "", label: "跟随主模型" }, ...modelOptions.map((o) => ({ id: modelKey(o.id, o.params), label: o.label }))]}
+                      placeholder="跟随主模型"
+                      fallbackLabel={modelSlug(draft.othersModel, draft.othersModelParams)}
+                    />
+                  : <input type="text" value={modelSlug(draft.othersModel, draft.othersModelParams)} onChange={(e) => set({ othersModel: e.target.value, othersModelParams: "" })} placeholder="留空则跟随主模型" className={inputCls} />}
             </div>
           </div>
 
@@ -620,8 +617,8 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
           <div className="space-y-3 rounded-lg border border-gray-800 p-3">
             <div className="flex items-center justify-between">
               <div>
-                <h4 className="text-xs font-medium text-gray-400">主用户绑定</h4>
-                <p className="text-xs text-gray-600">绑定后该用户私聊使用主工作目录并延续会话；不绑定则所有会话按"其他人"模式运行</p>
+                <h4 className="text-xs font-medium text-gray-400">主用户绑定 <span className="font-normal text-gray-600">— 让机器人认识"你"</span></h4>
+                <p className="text-xs text-gray-600">绑定你自己的账号后：你私聊机器人 = 直接指挥工作文件夹里的 AI，聊天记忆一直保留。不绑定的话，谁发消息都只能在临时文件夹里干活，碰不到你的项目</p>
               </div>
               <button onClick={() => set({ mainUserEnabled: !draft.mainUserEnabled })}
                 className={`relative h-5 w-9 shrink-0 rounded-full transition ${draft.mainUserEnabled ? "bg-blue-600" : "bg-gray-600"}`}>
@@ -660,7 +657,7 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
             <div className="flex items-center justify-between">
               <div>
                 <h4 className="text-xs font-medium text-gray-400">允许其他人使用</h4>
-                <p className="text-xs text-gray-600">开启后该通道响应其他人私聊及群聊 @消息（在按通道隔离的临时目录中运行）</p>
+                <p className="text-xs text-gray-600">开启后别人也能私聊机器人、在群里 @它。放心：他们的 AI 在单独的临时文件夹里干活，看不到也改不了你的项目文件</p>
               </div>
               <button onClick={() => set({ allowOthers: !draft.allowOthers })}
                 className={`relative h-5 w-9 shrink-0 rounded-full transition ${draft.allowOthers ? "bg-blue-600" : "bg-gray-600"}`}>

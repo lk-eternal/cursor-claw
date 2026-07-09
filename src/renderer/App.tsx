@@ -4,6 +4,7 @@ import Settings from "./pages/Settings"
 import CloseWindowModal from "./components/CloseWindowModal"
 import AppModalHost from "./components/AppModalHost"
 import UpdateDownloadBanner from "./components/UpdateDownloadBanner"
+import SetupWizard from "./components/SetupWizard"
 
 type Page = "dashboard" | "settings"
 
@@ -13,6 +14,7 @@ export default function App() {
   const [error, setError] = useState("")
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false)
   const [settingsInitTab, setSettingsInitTab] = useState<string | undefined>()
+  const [showWizard, setShowWizard] = useState(false)
 
   useEffect(() => {
     if (!window.electronAPI) {
@@ -22,7 +24,7 @@ export default function App() {
     }
     window.electronAPI
       .getConfig()
-      .then(() => setLoading(false))
+      .then((cfg) => { setLoading(false); if (!cfg.setupComplete) setShowWizard(true) })
       .catch((e: unknown) => {
         setError(String(e))
         setLoading(false)
@@ -69,6 +71,7 @@ export default function App() {
           onTabConsumed={() => setSettingsInitTab(undefined)}
         />
       </div>
+      <SetupWizard open={showWizard} onClose={() => setShowWizard(false)} />
       <CloseWindowModal open={closeConfirmOpen} onClose={() => setCloseConfirmOpen(false)} />
       <AppModalHost />
       <UpdateDownloadBanner />

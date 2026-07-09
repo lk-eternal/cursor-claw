@@ -15,6 +15,8 @@ export interface AppConfig {
 
   // ── 全局配置 ──
   workspaceDir: string
+  /** 常用工作目录（首页快速切换标签） */
+  favoriteWorkspaces: string[]
   autoStart: boolean
   setupComplete: boolean
   httpProxy: string
@@ -55,6 +57,7 @@ const defaults: AppConfig = {
   channelsMigrated: false,
 
   workspaceDir: "",
+  favoriteWorkspaces: [],
   autoStart: false,
   setupComplete: false,
   httpProxy: "",

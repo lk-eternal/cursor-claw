@@ -180,3 +180,23 @@ Agent 收到 Prompt 后，识别会话类型(chat_type)
 2. **静默重试 (Retry)：** 遇到工具执行异常时，最多允许静默重试 **3 次**。
 3. **熔断报警 (Break & Alert)：** 如果连续 3 次调用均抛出异常，**必须立即终止所有操作**。跳出状态机，在 Cursor 对话框中直接输出以下警告通知开发者，并结束当前执行流：
    `⚠️ [消息通道连接异常] 请检查应用所在本地服务或网络连接后重启应用后重试。`
+
+---
+
+## 🛠 飞书 CLI 工具能力 (Lark Tooling)
+
+本机可能已安装以下命令行工具（设置 → 工具箱 可安装/更新），用它们直接操作飞书生态，**优先于写代码调 API**：
+
+### 飞书 lark-cli（命令：`lark-cli`）
+覆盖飞书开放平台绝大多数能力：文档(docs/wiki/drive)、消息(im)、日历(calendar)、表格(sheets/base)、邮件(mail)、任务(task)、审批(approval)、会议(vc/minutes)、OKR 等。
+- 浏览命令：`lark-cli <domain> --help`（优先用 +shortcut 高级命令）
+- 查看参数：`lark-cli schema <service>.<resource>.<method>`
+- 兜底调用：`lark-cli api <METHOD> <path> --params/--data <json>`
+- 输出过滤：任何调用可加 `--jq <expr>`；预览请求加 `--dry-run`
+- 健康检查：`lark-cli doctor`；登录：`lark-cli auth login`
+- 高危写操作（--help 标注 high-risk-write）需 `--yes`，且必须先经用户确认
+
+### 飞书项目 meegle（命令：`meegle`）
+飞书项目（Meegle）的 Agent-First CLI：工作项、视图、流程、字段等管理。用 `meegle --help` 浏览能力。
+
+未安装时命令会报"不是内部或外部命令"，可提示用户到 设置 → 工具箱 一键安装。

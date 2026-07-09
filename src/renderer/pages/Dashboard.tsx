@@ -22,6 +22,7 @@ import {
   Rocket,
   Search,
   X,
+  Plus,
 } from "lucide-react"
 import logoUrl from "../assets/logo.png"
 import TitleBar from "../components/TitleBar"
@@ -57,6 +58,8 @@ export default function Dashboard({ onSettings, active }: Props) {
   const [showSessions, setShowSessions] = useState(false)
   const [onboard, setOnboard] = useState<OnboardState | null>(null)
   const [onboardDismissed, setOnboardDismissed] = useState(false)
+  const [wsTabs, setWsTabs] = useState<{ current: string; favorites: string[] }>({ current: "", favorites: [] })
+  const [wsSwitching, setWsSwitching] = useState("")
 
   const refreshOnboard = useCallback(async () => {
     const cfg = await window.electronAPI.getConfig()
@@ -70,12 +73,39 @@ export default function Dashboard({ onSettings, active }: Props) {
       agentReady: hasSdkKey || (prev?.agentReady ?? false),
       channelReady,
     }))
+    setWsTabs({ current: cfg.workspaceDir ?? "", favorites: cfg.favoriteWorkspaces ?? [] })
   }, [])
 
   // 从设置页返回时立即刷新清单状态
   useEffect(() => {
     if (active) void refreshOnboard()
   }, [active, refreshOnboard])
+
+  const switchWorkspace = async (dir: string) => {
+    if (dir === wsTabs.current || wsSwitching) return
+    setWsSwitching(dir)
+    try {
+      const r = await window.electronAPI.applyWorkspaceSwitch(dir, false)
+      if (r.ok) setWsTabs((t) => ({ ...t, current: dir }))
+      else setActionError(r.error ?? "切换工作目录失败")
+    } finally {
+      setWsSwitching("")
+    }
+  }
+
+  const addFavoriteWorkspace = async () => {
+    const dir = await window.electronAPI.selectDirectory()
+    if (!dir) return
+    const favorites = wsTabs.favorites.includes(dir) ? wsTabs.favorites : [...wsTabs.favorites, dir]
+    setWsTabs((t) => ({ ...t, favorites }))
+    await window.electronAPI.saveConfig({ favoriteWorkspaces: favorites })
+  }
+
+  const removeFavoriteWorkspace = async (dir: string) => {
+    const favorites = wsTabs.favorites.filter((d) => d !== dir)
+    setWsTabs((t) => ({ ...t, favorites }))
+    await window.electronAPI.saveConfig({ favoriteWorkspaces: favorites })
+  }
   const [sessionList, setSessionList] = useState<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string; workspaceDir?: string; source?: "cli" | "sdk" }[]>([])
   const [sessionDiag, setSessionDiag] = useState<Record<string, { running: boolean; resumeAgentId?: string; resumeUpdatedAt?: number; lastRun?: { status: string; endedAt: number; durationMs?: number; error?: string }; lastReplyAt: number | null }>>({})
   const [exportingDiag, setExportingDiag] = useState(false)
@@ -518,6 +548,38 @@ export default function Dashboard({ onSettings, active }: Props) {
             ) : undefined}
           />
         </div>
+      </div>
+
+      {/* Workspace quick-switch tabs */}
+      <div className="mx-6 mb-3 flex flex-wrap items-center gap-1.5">
+        <FolderOpen size={13} className="shrink-0 text-gray-500" />
+        {[...new Set([wsTabs.current, ...wsTabs.favorites])].filter(Boolean).map((dir) => {
+          const name = dir.split(/[\\/]/).filter(Boolean).pop() ?? dir
+          const isCurrent = dir === wsTabs.current
+          const isFav = wsTabs.favorites.includes(dir)
+          return (
+            <span key={dir} title={dir}
+              onClick={() => void switchWorkspace(dir)}
+              className={`group inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs transition ${
+                isCurrent ? "border-blue-500/70 bg-blue-950/40 text-blue-200"
+                : "cursor-pointer border-gray-700 text-gray-400 hover:border-blue-500 hover:text-blue-300"}`}
+            >
+              {wsSwitching === dir && <Loader2 size={11} className="animate-spin" />}
+              {name}
+              {isFav && !isCurrent && (
+                <button onClick={(e) => { e.stopPropagation(); void removeFavoriteWorkspace(dir) }}
+                  className="hidden text-gray-600 hover:text-red-400 group-hover:inline-flex" title="移除常用">
+                  <X size={11} />
+                </button>
+              )}
+            </span>
+          )
+        })}
+        <button onClick={() => void addFavoriteWorkspace()}
+          className="inline-flex items-center gap-0.5 rounded-md border border-dashed border-gray-700 px-2 py-1 text-xs text-gray-500 transition hover:border-blue-500 hover:text-blue-300"
+          title="添加常用目录（点击标签快速切换工作目录）">
+          <Plus size={11} />常用
+        </button>
       </div>
 
       {/* Onboarding checklist */}

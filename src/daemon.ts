@@ -368,7 +368,6 @@ function scheduleRoutingSave(): void {
 
 // ── 延迟 DONE 表情队列（等 Agent 下次 poll 时再打，标志任务真正完成）──
 const pendingDoneReactions = new Map<string, Map<string, number>>();
-const PENDING_DONE_TIMEOUT_MS = 10 * 60 * 1000;
 
 function enqueuePendingDone(sessionKey: string, messageIds: string[]): void {
   const now = Date.now();
@@ -2048,19 +2047,6 @@ export async function daemonMain(): Promise<void> {
   initQueue();
   loadRoutingMaps();
   startMediaCacheCleanup();
-
-  // 超时兜底：Agent 崩溃不再 poll 时，超过 10 分钟的 pendingDone 自动打出
-  setInterval(() => {
-    const now = Date.now();
-    for (const [sk, map] of pendingDoneReactions) {
-      const expired = [...map.entries()].filter(([, t]) => now - t > PENDING_DONE_TIMEOUT_MS);
-      if (expired.length === 0) continue;
-      for (const [mid] of expired) map.delete(mid);
-      addReactionToMessages(expired.map(([mid]) => mid), sk, "DONE");
-      log("INFO", `超时自动打 DONE 表情: ${expired.length} 条, session=${sk}`);
-      if (map.size === 0) pendingDoneReactions.delete(sk);
-    }
-  }, 60_000).unref();
 
   for (const cfg of CHANNEL_CONFIGS) {
     const rt: ChannelRuntime = { cfg, lastP2pChatId: null, bindArmed: false };

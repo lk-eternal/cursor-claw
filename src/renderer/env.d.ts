@@ -15,6 +15,7 @@ declare global {
     agentResources: AgentResource[]
     channels: ChannelConfig[]
     workspaceDir: string
+  favoriteWorkspaces?: string[]
     autoStart: boolean
     setupComplete: boolean
     httpProxy: string
@@ -142,6 +143,9 @@ declare global {
     applyWorkspaceSwitch(workspaceDir: string, stopOldSessions: boolean): Promise<{ ok: boolean; error?: string }>
     respondWindowClose(payload: { action: "minimize" | "quit" | "cancel"; remember: boolean }): Promise<void>
     selectDirectory(): Promise<string | null>
+    getToolboxStatus(): Promise<{ larkCli: { installed: boolean; version?: string; loggedIn?: boolean; userName?: string }; meegle: { installed: boolean; version?: string } }>
+    installToolboxTool(key: "larkCli" | "meegle"): Promise<{ ok: boolean; error?: string }>
+    loginLarkCli(): Promise<{ ok: boolean; error?: string }>
     injectWorkspace(): Promise<{ results: { file: string; action: "created" | "updated" | "skipped"; message: string }[] }>
     startDaemon(): Promise<{ ok: boolean; error?: string }>
     stopDaemon(): Promise<void>

@@ -147,11 +147,7 @@ export default function AgentPanel() {
           <div className="flex-1" />
           <button onClick={openAdd} className="flex items-center gap-1 rounded-md bg-blue-600 px-2.5 py-1 text-xs font-medium text-white transition hover:bg-blue-500"><Plus size={12} />添加 SDK Key</button>
         </div>
-        <p className="text-xs text-gray-600">
-          可添加多个 Cursor API Key（不同账号），消息通道可分别绑定。从{" "}
-          <a href="https://cursor.com/dashboard/api?section=user-keys#user-api-keys" target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">Cursor Dashboard</a>
-          {" "}获取 API Key。
-        </p>
+        <p className="text-xs text-gray-600">可添加多个 Cursor API Key（不同账号），消息通道可分别绑定。</p>
         <div className="space-y-2">
           {resources.map((r) => {
             const usedBy = channels.filter((c) => c.agentResourceId === r.id)
@@ -197,6 +193,11 @@ export default function AgentPanel() {
                   <input type={showKey ? "text" : "password"} value={editing.apiKey ?? ""} onChange={(e) => { setEditing({ ...editing, apiKey: e.target.value }); setVerifyResult(null) }} placeholder="crsr_..." className={inputCls + " pr-9"} />
                   <button type="button" onClick={() => setShowKey(!showKey)} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">{showKey ? <EyeOff size={14} /> : <Eye size={14} />}</button>
                 </div>
+                <p className="mt-1.5 text-xs text-gray-500">
+                  还没有 Key？前往{" "}
+                  <a href="https://cursor.com/dashboard/api?section=user-keys#user-api-keys" target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">Cursor Dashboard</a>
+                  {" "}创建一个（登录后点 Create API Key，复制以 crsr_ 开头的字符串填到这里）。
+                </p>
               </div>
               <div className="flex items-center gap-3">
                 <button onClick={() => void handleVerify()} disabled={verifying || !editing.apiKey?.trim()} className="flex items-center gap-1 rounded-md border border-gray-600 px-3 py-1.5 text-xs text-gray-300 transition hover:border-blue-500 hover:text-blue-400 disabled:opacity-50">

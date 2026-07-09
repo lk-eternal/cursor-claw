@@ -234,10 +234,22 @@ async function startTempConnection(appId: string, appSecret: string): Promise<{ 
   const Lark = await import("@larksuiteoapi/node-sdk")
   return new Promise((resolve, reject) => {
     let settled = false
+    // 任何终态（成功/超时/取消/失败）都必须关闭临时连接：飞书按连接负载均衡推送事件，
+    // 残留连接会截走 Daemon 正式连接的消息（且在主进程里，重启 Daemon 无法恢复）
+    const settle = (fn: () => void) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      tempConnAbort = null
+      if (tempWsClient) {
+        try { tempWsClient.close({ force: true }) } catch { /* ignore */ }
+        tempWsClient = null
+      }
+      fn()
+    }
     const timeout = setTimeout(() => {
-      if (!settled) { settled = true; stopTempConnection(); reject(new Error("绑定超时（90秒内未收到飞书私聊消息）")) }
+      settle(() => reject(new Error("绑定超时（90秒内未收到飞书私聊消息）")))
     }, 90_000)
-    const settle = (fn: () => void) => { if (!settled) { settled = true; clearTimeout(timeout); tempConnAbort = null; fn() } }
     tempConnAbort = () => settle(() => reject(new Error("cancelled")))
 
     const eventDispatcher = new Lark.EventDispatcher({}).register({
@@ -248,7 +260,7 @@ async function startTempConnection(appId: string, appSecret: string): Promise<{ 
       },
     })
 
-    const wsClient = new Lark.WSClient({ appId, appSecret, loggerLevel: Lark.LoggerLevel.error })
+    const wsClient = new Lark.WSClient({ appId, appSecret, loggerLevel: Lark.LoggerLevel.error, autoReconnect: false })
     tempWsClient = wsClient
     wsClient.start({ eventDispatcher })
       .then(() => pushLog("[TEMP_CONN] 飞书临时 WebSocket 连接建立成功"))

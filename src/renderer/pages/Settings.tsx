@@ -39,9 +39,9 @@ import {
 } from "lucide-react"
 import SearchableSelect from "../components/SearchableSelect"
 import WorkflowPanel from "../components/WorkflowPanel"
+import ToolboxPanel from "../components/ToolboxPanel"
 import AgentPanel from "../components/AgentPanel"
 import ChannelPanel from "../components/ChannelPanel"
-import WorkspaceSessionModal, { type SessionEntry } from "../components/WorkspaceSessionModal"
 import TitleBar from "../components/TitleBar"
 import useInlineModal from "../components/useInlineModal"
 import { REQUIRED_FEISHU_SCOPES, FEISHU_SCOPES_JSON } from "../constants"
@@ -49,7 +49,7 @@ import { modelSlug } from "../model-utils"
 
 interface Props { onBack: () => void; initialTab?: string; onTabConsumed?: () => void }
 
-type Tab = "general" | "channel" | "proxy" | "agent" | "mcp" | "rules" | "tasks" | "skills" | "workflows" | "setup" | "about"
+type Tab = "general" | "channel" | "proxy" | "agent" | "mcp" | "rules" | "tasks" | "skills" | "workflows" | "toolbox" | "setup" | "about"
 type CloseWindowAction = "ask" | "minimize" | "quit"
 
 interface McpEditForm {
@@ -77,6 +77,7 @@ const TABS: { id: Tab; label: string; icon: typeof SettingsIcon }[] = [
   { id: "skills", label: "Skills", icon: Sparkles },
   { id: "tasks", label: "定时任务", icon: Timer },
   { id: "workflows", label: "工作流", icon: Waypoints },
+  { id: "toolbox", label: "工具箱", icon: Wrench },
   { id: "setup", label: "帮助引导", icon: BookOpen },
   { id: "about", label: "关于", icon: Info },
 ]
@@ -96,7 +97,6 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
   const [noProxy, setNoProxy] = useState("localhost,127.0.0.1,feishu.cn")
   const [closeWindowAction, setCloseWindowAction] = useState<CloseWindowAction>("ask")
   const [autoLaunch, setAutoLaunch] = useState(false)
-  const [wsSwitch, setWsSwitch] = useState<{ old: string; new: string; sessions: SessionEntry[] } | null>(null)
   /** 帮助引导页飞书控制台链接用 */
   const [firstFeishuAppId, setFirstFeishuAppId] = useState("")
   const [taskChannels, setTaskChannels] = useState<ChannelConfig[]>([])
@@ -304,9 +304,15 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
         httpProxy: proxy.trim(), httpsProxy: proxy.trim(), noProxy: noProxy.trim(),
         closeWindowAction,
       })
-      if (r.needWorkspaceConfirm && r.oldWorkspaceDir !== undefined && r.newWorkspaceDir !== undefined) {
-        setWsSwitch({ old: r.oldWorkspaceDir, new: r.newWorkspaceDir, sessions: r.existingSessions ?? [] })
-        setWorkspaceDir(r.oldWorkspaceDir)
+      if (r.needWorkspaceConfirm && r.newWorkspaceDir) {
+        // 直接切换并保留旧会话，不弹窗打断（旧会话继续运行，新消息进新目录会话）
+        const res = await window.electronAPI.applyWorkspaceSwitch(r.newWorkspaceDir, false)
+        if (res.ok) {
+          void refreshMcpServers(true)
+        } else {
+          void showAlert("错误", res.error ?? "切换工作目录失败")
+          if (r.oldWorkspaceDir !== undefined) setWorkspaceDir(r.oldWorkspaceDir)
+        }
       }
       if (r.workspaceDirChanged) {
         void refreshMcpServers(true)
@@ -655,7 +661,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
                   <div onClick={selectDir} className="flex cursor-pointer items-center gap-3 rounded-lg border border-gray-700 px-4 py-3 transition hover:border-blue-500">
                     <FolderOpen size={18} className="text-blue-400" /><span className="truncate text-sm">{workspaceDir || "点击选择..."}</span>
                   </div>
-                  <p className="mt-1 text-xs text-gray-600">主用户私聊时使用此目录，群聊和其他用户使用自动创建的临时目录</p>
+                  <p className="mt-1 text-xs text-gray-600">AI 干活的文件夹（一般选你的代码项目）。你私聊机器人时 AI 就在这里工作；群聊和其他人则用各自的临时文件夹，不会碰这里</p>
                 </div>
               </section>
               <section className="space-y-3">
@@ -959,6 +965,9 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
 
             {/* ═══ Workflows ═══ */}
             {tab === "workflows" && <WorkflowPanel />}
+
+            {/* ═══ Toolbox ═══ */}
+            {tab === "toolbox" && <ToolboxPanel />}
 
             {/* ═══ Setup Guide ═══ */}
             {tab === "setup" && (<>
@@ -1392,24 +1401,6 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
         </div>
       )}
 
-      <WorkspaceSessionModal
-        open={wsSwitch !== null}
-        oldPath={wsSwitch?.old ?? ""}
-        newPath={wsSwitch?.new ?? ""}
-        sessions={wsSwitch?.sessions ?? []}
-        onCancel={() => setWsSwitch(null)}
-        onSwitch={async (stopOld) => {
-          const dir = wsSwitch?.new ?? ""
-          const res = await window.electronAPI.applyWorkspaceSwitch(dir, stopOld)
-          setWsSwitch(null)
-          if (!res.ok) {
-            void showAlert("错误", res.error ?? "切换工作目录失败")
-            return
-          }
-          setWorkspaceDir(dir)
-          void refreshMcpServers(true)
-        }}
-      />
       {ModalPortal}
     </div>
   )

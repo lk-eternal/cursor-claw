@@ -36,6 +36,7 @@ import {
 import { injectWorkspace } from "./workspace-injector"
 import { initTray, destroyTray } from "./tray"
 import { initAppUpdater } from "./updater"
+import { initToolbox } from "./toolbox"
 import { broadcastLog } from "./ui-logger"
 
 const profileArg = process.argv.find((a) => a.startsWith("--profile="))
@@ -413,6 +414,7 @@ app.whenReady().then(() => {
   initAppUpdater(() => mainWindow)
   initTray()
   initDaemonManager()
+  initToolbox()
 })
 
 app.on("window-all-closed", () => {
