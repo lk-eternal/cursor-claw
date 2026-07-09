@@ -1075,6 +1075,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           break
         }
 
+        case "/h":
         case "/help": {
           // 全指令按钮化：label ≤8 字符时卡片按 3 列紧凑排布，正文只留一行说明
           const common = [
@@ -1093,9 +1094,19 @@ async function checkAndExecutePendingCommands(): Promise<void> {
             { label: "🧹 清队列", cmd: "/clean" },
             { label: "♻️ 重启", cmd: "/restart" },
           ]
-          const helpBtns = isAdmin ? [...common, ...adminOnly] : common
+          // 常用工作目录快捷切换（末段重名时附父目录区分）
+          const favDirs = isAdmin ? (getConfig().favoriteWorkspaces ?? []) : []
+          const lastSeg = (d: string) => d.split(/[\\/]/).filter(Boolean).pop() ?? d
+          const wsBtns = favDirs.map((d) => {
+            const parts = d.split(/[\\/]/).filter(Boolean)
+            const name = parts.pop() ?? d
+            const dup = favDirs.some((o) => o !== d && lastSeg(o) === name)
+            const parent = parts.pop()
+            return { label: `📂 ${dup && parent ? `${name}·${parent}` : name}`, cmd: `/workspace set ${d}` }
+          })
+          const helpBtns = isAdmin ? [...common, ...adminOnly, ...wsBtns] : common
           const body = isAdmin
-            ? "💡 点按钮执行，或输入指令（子命令用文字，如 /chat new <描述>、/model set <序号>）"
+            ? "💡 点按钮执行，或输入指令（子命令用文字，如 /chat new <描述>、/model set <序号>）；📂 按钮一键切换工作目录"
             : "💡 点按钮执行，或直接输入指令"
           await reply(true, body, helpBtns)
           break
@@ -1155,6 +1166,9 @@ export async function applyWorkspaceSwitch(workspaceDir: string, stopOldSessions
       }
     }
   }
+
+  // Daemon 侧目录已随切换更新，同步内存记录，否则状态检查会误报"目录与设置不一致"
+  if (activeDaemonWorkspaceDir !== null) activeDaemonWorkspaceDir = w
 
   await injectWorkspaceMcpAndRules()
   broadcastStatus(await getDaemonStatus())

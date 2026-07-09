@@ -524,7 +524,7 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
 
 // ── 僵尸 Agent 检测 ──────────────────────────────────────
 
-const ZOMBIE_REPLY_SILENCE_MS = 10 * 60 * 1000
+const ZOMBIE_REPLY_SILENCE_MS = 20 * 60 * 1000
 
 async function isZombieAgent(sessionKey: string): Promise<boolean> {
   const lock = cachedLock()
@@ -625,6 +625,8 @@ async function handleSdkRunError(sessionKey: string, chatType: ChatType, errorDe
   if (!hasPending) {
     sdkErrorRetryCountMap.delete(sessionKey)
     broadcastLog(`[SDK] ${sessionKey} 运行异常结束(${errorDetail})，队列空闲，不自动拉起`, "WARN")
+    // 消息已回复确认但任务可能没做完，异常必须让用户有感知，否则以为还在处理中
+    await notifyChat(sessionKey, `⚠️ Agent 运行异常中断，处理中的事项可能未完成。\n错误：${errorDetail.slice(0, 200)}\n请重新发消息继续任务。`)
     return
   }
 

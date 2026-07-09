@@ -47,7 +47,7 @@ import useInlineModal from "../components/useInlineModal"
 import { REQUIRED_FEISHU_SCOPES, FEISHU_SCOPES_JSON } from "../constants"
 import { modelSlug } from "../model-utils"
 
-interface Props { onBack: () => void; initialTab?: string; onTabConsumed?: () => void }
+interface Props { onBack: () => void; initialTab?: string; onTabConsumed?: () => void; onReenterWizard?: () => void }
 
 type Tab = "general" | "channel" | "proxy" | "agent" | "mcp" | "rules" | "tasks" | "skills" | "workflows" | "toolbox" | "setup" | "about"
 type CloseWindowAction = "ask" | "minimize" | "quit"
@@ -82,7 +82,7 @@ const TABS: { id: Tab; label: string; icon: typeof SettingsIcon }[] = [
   { id: "about", label: "关于", icon: Info },
 ]
 
-export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
+export default function Settings({ onBack, initialTab, onTabConsumed, onReenterWizard }: Props) {
   const [tab, setTab] = useState<Tab>((initialTab as Tab) || "general")
 
   useEffect(() => {
@@ -972,15 +972,16 @@ export default function Settings({ onBack, initialTab, onTabConsumed }: Props) {
             {/* ═══ Setup Guide ═══ */}
             {tab === "setup" && (<>
               <section className="space-y-4">
-                <h3 className="text-sm font-medium text-gray-300">配置指引</h3>
-                <div className="rounded-lg border border-gray-700 p-4 space-y-2">
-                  <p className="text-sm text-gray-400">按以下顺序完成配置：</p>
-                  <ol className="list-decimal space-y-1 pl-5 text-xs text-gray-500">
-                    <li><button onClick={() => setTab("general")} className="text-blue-400 hover:underline">通用</button> — 选择主工作目录</li>
-                    <li><button onClick={() => setTab("agent")} className="text-blue-400 hover:underline">Agent</button> — 登录 Cursor CLI 或添加 SDK Key</li>
-                    <li><button onClick={() => setTab("channel")} className="text-blue-400 hover:underline">消息通道</button> — 接入飞书 / 微信，绑定 Agent 资源与模型</li>
-                  </ol>
-                  <p className="text-xs text-gray-600">完成后回到主页启动 Daemon 即可使用。以下为飞书手动建应用时需要的权限与事件配置参考。</p>
+                <h3 className="text-sm font-medium text-gray-300">新手引导</h3>
+                <div className="rounded-lg border border-gray-700 p-4 space-y-3">
+                  <p className="text-sm text-gray-400">从头走一遍五步引导：选工作目录 → 接入 AI → 连上飞书 → 绑定自己 → 装工具。已有配置会自动带入，不会被清空。</p>
+                  <button
+                    onClick={() => onReenterWizard?.()}
+                    className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500"
+                  >
+                    <BookOpen size={15} />重新进入引导
+                  </button>
+                  <p className="text-xs text-gray-600">以下为飞书手动建应用时需要的权限与事件配置参考。</p>
                 </div>
               </section>
 

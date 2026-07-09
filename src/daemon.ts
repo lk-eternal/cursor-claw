@@ -8,7 +8,7 @@ import {
   stopDaemonScheduledTasks,
   setDaemonSchedulerLogger,
 } from "./daemon-scheduled-tasks.js";
-import { stripProxyEnv, localTimestamp, createLarkClient, LarkSender, LarkMessageEvent, LarkCardActionEvent, CardButton, cleanupMediaCache } from "./shared/lark-core.js";
+import { stripProxyEnv, localTimestamp, createLarkClient, LarkSender, LarkMessageEvent, LarkCardActionEvent, CardButton, CardInput, cleanupMediaCache } from "./shared/lark-core.js";
 import { WeChatManager } from "./wechat-manager.js";
 import {
   initFileQueue,
@@ -366,7 +366,8 @@ function scheduleRoutingSave(): void {
   routingSaveTimer.unref?.();
 }
 
-// ── 延迟 DONE 表情队列（等 Agent 下次 poll 时再打，标志任务真正完成）──
+// ── 待完成 DONE 表情队列（回复确认时登记，Agent 显式调用 mark_done 时才打）──
+// 不再借"下次 poll"隐式打 DONE：异常中断后重新拉起也会 poll，会把没做完的事误标完成
 const pendingDoneReactions = new Map<string, Map<string, number>>();
 
 function enqueuePendingDone(sessionKey: string, messageIds: string[]): void {
@@ -378,13 +379,27 @@ function enqueuePendingDone(sessionKey: string, messageIds: string[]): void {
   }
 }
 
-function flushPendingDone(sessionKey: string): void {
+/** 打 DONE 表情标记完成；message_id 缺省时 flush 会话全部待完成项，指定时只打该条及更早登记的 */
+function markDone(sessionKey: string, messageId?: string): number {
   const map = pendingDoneReactions.get(sessionKey);
-  if (!map || map.size === 0) return;
-  const ids = [...map.keys()];
-  map.clear();
+  const ids: string[] = [];
+  if (map && map.size > 0) {
+    if (messageId && map.has(messageId)) {
+      const cutoff = map.get(messageId)!;
+      for (const [mid, ts] of map) {
+        if (ts <= cutoff) { ids.push(mid); map.delete(mid); }
+      }
+    } else {
+      ids.push(...map.keys());
+      map.clear();
+    }
+  }
+  // 指定的 message_id 未登记过（如 ack 前直接标记）也补打
+  if (messageId && !ids.includes(messageId) && !messageId.startsWith("internal_")) ids.push(messageId);
+  if (ids.length === 0) return 0;
   addReactionToMessages(ids, sessionKey, "DONE");
-  log("INFO", `延迟打 DONE 表情: ${ids.length} 条, session=${sessionKey}`);
+  log("INFO", `标记完成 DONE 表情: ${ids.length} 条, session=${sessionKey}`);
+  return ids.length;
 }
 
 // ── Agent-Poll 生命周期追踪 ─────────────────────────────────
@@ -511,6 +526,17 @@ function resolveChannel(sessionKey?: string): ResolvedChannel {
   return { type: "error", message: "无可用消息通道" };
 }
 
+/**
+ * 拒绝无路由凭据的发送请求：session_key 与 message_id 都缺失时，大概率是
+ * 用户在 Cursor IDE 中人工打开项目、AI 误读注入规则后调用——不能兜底发给主用户。
+ */
+function rejectUnroutedSend(res: http.ServerResponse, api: string, sessionKey?: string, messageId?: string): boolean {
+  if (sessionKey?.trim() || messageId?.trim()) return false;
+  log("WARN", `[${api}] 已拒绝无 session_key/message_id 的发送请求（疑似 IDE 人工会话误调用）`);
+  json(res, { ok: false, error: "session_key 或 message_id 必须至少提供一个；IDE 人工会话请勿调用 cursor-claw 发送工具" }, 400);
+  return true;
+}
+
 function trackMessageSession(messageId: string, sessionKey: string): void {
   if (!messageId || !sessionKey) return;
   if (messageSessionMap.size >= MSG_SESSION_MAP_MAX) {
@@ -553,8 +579,8 @@ function addReactionToMessages(messageIds: string[], sessionKey: string, emojiTy
 
 /**
  * Agent 回复确认（ack）：删除该 message_id 及更早的未确认消息。
- * DONE 表情不在此处打 —— 而是延迟到 Agent 下次 poll-message 时才打，
- * 这样 "DONE" 代表 "任务真正完成"，而非 "Agent 刚收到就标记完成"。
+ * DONE 表情不在此处打 —— 只登记为待完成项，等 Agent 完成事项后
+ * 显式调用 mark_done（MCP / POST /api/mark-done）才打，代表"任务真正完成"。
  */
 function ackOnReply(messageId?: string, sessionKey?: string): void {
   if (!messageId) return;
@@ -844,6 +870,7 @@ const COMMANDS: Record<string, string> = {
   "/reset": "下次拉起 Agent 时不使用 --continue（新 CLI 会话），不删除本地文件",
   "/restart": "停止 Agent + 清空队列 + 重启 Daemon",
   "/help": "显示可用指令列表",
+  "/h": "同 /help",
 };
 
 function isCommand(text: string): boolean {
@@ -865,13 +892,34 @@ function rememberCardQuestion(messageId: string, entry: CardQuestionEntry): void
   cardQuestionMap.set(messageId, entry);
 }
 
+/** internal 消息（卡片点击/输入框提交）→ 来源聊天 chatKey；回复 internal 消息时按此路由回原聊天，防止 chat 直发窜台 */
+const internalMsgChatMap = new Map<string, string>();
+
+function trackInternalMsgChat(messageId: string, chatKey: string): void {
+  if (internalMsgChatMap.size >= CARD_QUESTION_MAX) {
+    const oldest = internalMsgChatMap.keys().next().value;
+    if (oldest) internalMsgChatMap.delete(oldest);
+  }
+  internalMsgChatMap.set(messageId, chatKey);
+}
+
+/** 发送目标解析：回复 internal 消息时优先路由回其来源聊天（session_key 解析的默认目标可能是别的聊天） */
+function routeTargetKey(sessionKey?: string, messageId?: string): string | undefined {
+  if (messageId?.startsWith("internal_")) {
+    const chatKey = internalMsgChatMap.get(messageId);
+    if (chatKey) return chatKey;
+  }
+  return sessionKey;
+}
+
 /** 卡片按钮点击回调；返回值作为 card.action.trigger 响应（toast + 更新卡片） */
 async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): Promise<unknown> {
   const value = evt.value as { kind?: string; opt?: string; cmd?: string } | undefined;
   const chatKey = makeChatKey(rt.cfg.id, evt.chatId);
 
   if (value?.kind === "question") {
-    const opt = String(value.opt ?? "").trim();
+    // 按钮点击取 opt；输入框提交取 input_value（自由输入）
+    const opt = String(value.opt ?? "").trim() || (evt.inputValue ?? "").trim();
     const entry = cardQuestionMap.get(evt.messageId);
     // daemon 重启或登记淘汰后问题上下文已丢失：标记过期，引导用户直接发消息
     if (!entry || !opt) {
@@ -882,7 +930,10 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
     }
     log("INFO", `[${rt.cfg.name}] 问题卡片选择: ${opt} (msg=${evt.messageId})`);
     if (entry.sessionKey) trackMessageSession(evt.messageId, entry.sessionKey);
-    pushMessage(opt, `internal_card_${Date.now()}`, chatKey, undefined, evt.operatorOpenId, evt.messageId, { senderType: "user" });
+    const internalId = `internal_card_${Date.now()}`;
+    // 记录来源聊天：Agent 回复这条 internal 消息时按此路由回原聊天（防止 send_question 直发窜台）
+    trackInternalMsgChat(internalId, chatKey);
+    pushMessage(opt, internalId, chatKey, undefined, evt.operatorOpenId, evt.messageId, { senderType: "user" });
     cardQuestionMap.delete(evt.messageId);
     return {
       toast: { type: "success", content: `已选择: ${opt.slice(0, 30)}` },
@@ -912,7 +963,8 @@ async function replyToMessage(messageId: string, text: string, chatId?: string, 
   }
   const sender = ch.rt.sender!;
   if (buttons && buttons.length > 0) {
-    const btns: CardButton[] = buttons.slice(0, 10).map((b) => ({ label: b.label, value: { kind: "cmd", cmd: b.cmd }, type: "default" as const }));
+    // 上限 20：/help 全量指令 + 常用目录快捷按钮
+    const btns: CardButton[] = buttons.slice(0, 20).map((b) => ({ label: b.label, value: { kind: "cmd", cmd: b.cmd }, type: "default" as const }));
     await sender.sendCardWithButtons(text, btns, ch.chatId ? undefined : messageId, ch.chatId);
     return;
   }
@@ -1141,6 +1193,25 @@ function createMcpServer(): McpServer {
         return { content: [{ type: "text" as const, text: r.degraded ? "问题已发送（微信文本降级），用户将直接回复文字" : "问题卡片已发送，用户点击选项后会以普通消息进入队列，请继续 poll-message 等待" }] };
       } catch (e: any) {
         log("ERROR", `send_question 异常: ${e?.message ?? e}`);
+        return { content: [{ type: "text" as const, text: `[error] ${e?.message ?? "unknown error"}` }] };
+      }
+    },
+  );
+
+  s.tool(
+    "mark_done",
+    "标记事项处理完成：给对应的用户消息打 DONE 表情。仅在事项【真正完成】后调用（发送完成结果之后）；处理中、仅回复 ACK 时严禁调用。",
+    {
+      session_key: z.string().describe("当前会话 sessionKey，不可省略"),
+      message_id: z.string().optional().describe("已完成事项对应的消息ID；缺省时标记该会话所有已回复的消息为完成"),
+    },
+    async ({ session_key, message_id }) => {
+      try {
+        const r = await httpJson<{ ok: boolean; marked: number }>(localDaemonUrl("/api/mark-done"), { session_key, message_id });
+        if (!r?.ok) return { content: [{ type: "text" as const, text: "[mark_failed] 标记完成失败" }] };
+        return { content: [{ type: "text" as const, text: `已标记完成（${r.marked} 条）` }] };
+      } catch (e: any) {
+        log("ERROR", `mark_done 异常: ${e?.message ?? e}`);
         return { content: [{ type: "text" as const, text: `[error] ${e?.message ?? "unknown error"}` }] };
       }
     },
@@ -1718,8 +1789,9 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const body = JSON.parse(await readBody(req));
     const { text, message_id, session_key } = body as { text: string; message_id?: string; session_key?: string };
     if (!text) { json(res, { ok: false, error: "text is required" }, 400); return true; }
+    if (rejectUnroutedSend(res, "send-text", session_key, message_id)) return true;
 
-    const ch = resolveChannel(session_key);
+    const ch = resolveChannel(routeTargetKey(session_key, message_id));
     if (ch.type === "error") { json(res, { ok: false, error: ch.message }, 400); return true; }
     if (ch.type === "wechat") {
       json(res, { ok: await ch.rt.wechat!.sendText(ch.chatId, text) });
@@ -1749,8 +1821,9 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const { text, options, message_id, session_key } = body as { text: string; options: unknown; message_id?: string; session_key?: string };
     const opts = (Array.isArray(options) ? options : []).map((o) => String(o).trim()).filter(Boolean).slice(0, 10);
     if (!text?.trim() || opts.length === 0) { json(res, { ok: false, error: "text 与 options 必填" }, 400); return true; }
+    if (rejectUnroutedSend(res, "send-question", session_key, message_id)) return true;
 
-    const ch = resolveChannel(session_key);
+    const ch = resolveChannel(routeTargetKey(session_key, message_id));
     if (ch.type === "error") { json(res, { ok: false, error: ch.message }, 400); return true; }
 
     if (ch.type === "wechat") {
@@ -1761,7 +1834,9 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       const sender = ch.rt.sender!;
       const title = resolveReplyTitle(ch, session_key);
       const buttons: CardButton[] = opts.map((o) => ({ label: o, value: { kind: "question", opt: o } }));
-      const sentMsgId = await sender.sendCardWithButtons(text, buttons, message_id, ch.chatId, title);
+      // 末尾自由输入框：选项都不符合时用户直接输入提交（提交走同一 question 回调，取 input_value）
+      const input: CardInput = { placeholder: "其他答复：输入后按回车提交", value: { kind: "question" } };
+      const sentMsgId = await sender.sendCardWithButtons(text, buttons, message_id, ch.chatId, title, input);
       if (sentMsgId) {
         rememberCardQuestion(sentMsgId, { text, options: opts, sessionKey: session_key, createdAt: Date.now() });
         if (session_key) trackMessageSession(sentMsgId, session_key);
@@ -1777,7 +1852,8 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const body = JSON.parse(await readBody(req));
     const { image_path, message_id, session_key } = body as { image_path: string; message_id?: string; session_key?: string };
     if (!image_path) { json(res, { ok: false, error: "image_path is required" }, 400); return true; }
-    const ch = resolveChannel(session_key);
+    if (rejectUnroutedSend(res, "send-image", session_key, message_id)) return true;
+    const ch = resolveChannel(routeTargetKey(session_key, message_id));
     if (ch.type === "error") { json(res, { ok: false, error: ch.message }, 400); return true; }
     if (ch.type === "wechat") {
       await ch.rt.wechat!.sendMedia(ch.chatId, image_path);
@@ -1794,7 +1870,8 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const body = JSON.parse(await readBody(req));
     const { file_path, message_id, session_key } = body as { file_path: string; message_id?: string; session_key?: string };
     if (!file_path) { json(res, { ok: false, error: "file_path is required" }, 400); return true; }
-    const ch = resolveChannel(session_key);
+    if (rejectUnroutedSend(res, "send-file", session_key, message_id)) return true;
+    const ch = resolveChannel(routeTargetKey(session_key, message_id));
     if (ch.type === "error") { json(res, { ok: false, error: ch.message }, 400); return true; }
     if (ch.type === "wechat") {
       await ch.rt.wechat!.sendMedia(ch.chatId, file_path);
@@ -1804,6 +1881,15 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     json(res, { ok: true });
     if (session_key) sessionLastReplyAt.set(session_key, Date.now());
     ackOnReply(message_id, session_key);
+    return true;
+  }
+
+  if (method === "POST" && pathname === "/api/mark-done") {
+    const body = JSON.parse(await readBody(req));
+    const { message_id, session_key } = body as { message_id?: string; session_key?: string };
+    if (!session_key) { json(res, { ok: false, error: "session_key is required" }, 400); return true; }
+    const count = markDone(session_key, message_id);
+    json(res, { ok: true, marked: count });
     return true;
   }
 
@@ -1860,9 +1946,6 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
 
     // 新一轮 poll 开始：销毁该会话残留的旧挂起连接，避免同会话多连接竞争
     terminateSession(sessionKeyFilter);
-
-    // 上一轮 Agent 回复后积攒的 DONE 表情，此时批量打出（代表任务真正完成）
-    flushPendingDone(sessionKeyFilter);
 
     const keepAlive = resolveKeepAlive(sessionKeyFilter);
 

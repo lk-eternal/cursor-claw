@@ -17,7 +17,8 @@ export interface InjectResult {
 
 let daemonPort: number | null = null
 let lastMcpHash = ""
-const fullyInjectedDirs = new Set<string>()
+/** 仅控制 Skills 注入日志频率（每目录首次打一条），不做注入短路 */
+const skillsLoggedDirs = new Set<string>()
 
 const HOME_DIR = os.homedir()
 const GLOBAL_MCP_PATH = path.join(HOME_DIR, ".cursor", "mcp.json")
@@ -32,10 +33,10 @@ export function setDaemonPort(port: number | null): void {
 
 export function clearInjectionCache(dir?: string): void {
   if (dir) {
-    fullyInjectedDirs.delete(norm(dir))
+    skillsLoggedDirs.delete(norm(dir))
   } else {
     lastMcpHash = ""
-    fullyInjectedDirs.clear()
+    skillsLoggedDirs.clear()
   }
 }
 
@@ -93,6 +94,14 @@ export async function injectMcpGlobal(): Promise<boolean> {
 
 // ── Rules injection ────────────────────────────────────────────
 
+/** 内容一致时跳过写盘不打日志；变化才写并记录（规则更新可追溯，重复拉起不刷屏） */
+function writeFileIfChanged(filePath: string, content: string, logLabel: string): void {
+  const prev = fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf-8") : null
+  if (prev === content) return
+  fs.writeFileSync(filePath, content, "utf-8")
+  broadcastLog(`${logLabel}: ${filePath}`)
+}
+
 export function injectRulesToDir(wsDir: string, skipIdentity = false, identityOverride?: string): boolean {
   try {
     const rulesDir = path.join(wsDir, ".cursor", "rules")
@@ -105,8 +114,7 @@ export function injectRulesToDir(wsDir: string, skipIdentity = false, identityOv
       return false
     }
     if (daemonPort) ruleContent = ruleContent.replace(/\{\{DAEMON_PORT\}\}/g, String(daemonPort))
-    fs.writeFileSync(rulePath, ruleContent, "utf-8")
-    broadcastLog(`规则已注入: ${rulePath}`)
+    writeFileIfChanged(rulePath, ruleContent, "规则已注入")
 
     const identityPath = path.join(rulesDir, "digital-identity.mdc")
     if (skipIdentity) {
@@ -123,7 +131,7 @@ export function injectRulesToDir(wsDir: string, skipIdentity = false, identityOv
           "",
           identity,
         ].join("\r\n")
-        fs.writeFileSync(identityPath, identityMdc, "utf-8")
+        writeFileIfChanged(identityPath, identityMdc, "身份规则已注入")
       } else if (fs.existsSync(identityPath)) {
         fs.unlinkSync(identityPath)
       }
@@ -155,7 +163,10 @@ export function injectSkillsToDir(wsDir: string): boolean {
         if (fs.statSync(s).isFile()) fs.copyFileSync(s, d)
       }
     }
-    broadcastLog(`Skills 已注入: ${destBase}`)
+    if (!skillsLoggedDirs.has(norm(wsDir))) {
+      skillsLoggedDirs.add(norm(wsDir))
+      broadcastLog(`Skills 已注入: ${destBase}`)
+    }
     return true
   } catch (e: unknown) {
     broadcastLog(`Skills 注入失败: ${e instanceof Error ? e.message : e}`, "ERROR")
@@ -192,14 +203,11 @@ function cleanProjectMcpStale(wsDir: string): void {
 
 // ── Composite: inject all into a directory ─────────────────────
 
+// 不做"已注入过就跳过"的短路：模板/身份规则随时可能更新（如 /reset、改身份），
+// 每次拉起都重新对齐；writeFileIfChanged 保证内容一致时零写盘、零日志
 export async function injectWorkspaceToDir(dir: string, skipIdentity = false, identityOverride?: string): Promise<boolean> {
-  const key = norm(dir)
-  if (fullyInjectedDirs.has(key)) return true
-
   injectSkillsToDir(dir)
-  const ok = injectRulesToDir(dir, skipIdentity, identityOverride)
-  if (ok) fullyInjectedDirs.add(key)
-  return ok
+  return injectRulesToDir(dir, skipIdentity, identityOverride)
 }
 
 export async function injectWorkspaceMcpAndRules(): Promise<{ mcpOk: boolean; ruleOk: boolean; skillOk: boolean }> {
@@ -209,7 +217,6 @@ export async function injectWorkspaceMcpAndRules(): Promise<{ mcpOk: boolean; ru
   cleanProjectMcpStale(config.workspaceDir)
   const ruleOk = injectRulesToDir(config.workspaceDir, true)
   const skillOk = injectSkillsToDir(config.workspaceDir)
-  if (mcpOk && ruleOk) fullyInjectedDirs.add(norm(config.workspaceDir))
   return { mcpOk, ruleOk, skillOk }
 }
 

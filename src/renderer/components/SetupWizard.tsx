@@ -58,6 +58,8 @@ export default function SetupWizard({ open, onClose }: Props) {
 
   useEffect(() => {
     if (!open) return
+    setStep(0)
+    setMaxStep(0)
     void window.electronAPI.getConfig().then((cfg) => {
       setWsDir(cfg.workspaceDir ?? "")
       const feishu = (cfg.channels ?? []).find((c) => c.type === "feishu")

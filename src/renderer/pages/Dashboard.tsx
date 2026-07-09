@@ -73,7 +73,14 @@ export default function Dashboard({ onSettings, active }: Props) {
       agentReady: hasSdkKey || (prev?.agentReady ?? false),
       channelReady,
     }))
-    setWsTabs({ current: cfg.workspaceDir ?? "", favorites: cfg.favoriteWorkspaces ?? [] })
+    // 打开过的目录自动收入常用列表，切换工作目录后标签不丢失
+    const current = cfg.workspaceDir ?? ""
+    let favorites = cfg.favoriteWorkspaces ?? []
+    if (current.trim() && !favorites.includes(current)) {
+      favorites = [...favorites, current]
+      void window.electronAPI.saveConfig({ favoriteWorkspaces: favorites })
+    }
+    setWsTabs({ current, favorites })
   }, [])
 
   // 从设置页返回时立即刷新清单状态
@@ -86,8 +93,21 @@ export default function Dashboard({ onSettings, active }: Props) {
     setWsSwitching(dir)
     try {
       const r = await window.electronAPI.applyWorkspaceSwitch(dir, false)
-      if (r.ok) setWsTabs((t) => ({ ...t, current: dir }))
-      else setActionError(r.error ?? "切换工作目录失败")
+      if (r.ok) {
+        // 新旧目录都留在常用里，切换不丢标签
+        setWsTabs((t) => {
+          const favorites = [...t.favorites]
+          for (const d of [t.current, dir]) {
+            if (d && !favorites.includes(d)) favorites.push(d)
+          }
+          if (favorites.length !== t.favorites.length) {
+            void window.electronAPI.saveConfig({ favoriteWorkspaces: favorites })
+          }
+          return { current: dir, favorites }
+        })
+      } else {
+        setActionError(r.error ?? "切换工作目录失败")
+      }
     } finally {
       setWsSwitching("")
     }
@@ -395,6 +415,17 @@ export default function Dashboard({ onSettings, active }: Props) {
 
   const isStarting = starting || !!status.starting
 
+  const wsTabDirs = [...new Set([wsTabs.current, ...wsTabs.favorites])].filter(Boolean)
+  const wsLastSegment = (dir: string) => dir.split(/[\\/]/).filter(Boolean).pop() ?? dir
+  /** 末段目录名重名时附加父目录区分（如 cp-scheduling·bugfix） */
+  const wsTabLabel = (dir: string) => {
+    const parts = dir.split(/[\\/]/).filter(Boolean)
+    const name = parts.pop() ?? dir
+    const dup = wsTabDirs.some((d) => d !== dir && wsLastSegment(d) === name)
+    const parent = parts.pop()
+    return dup && parent ? `${name}·${parent}` : name
+  }
+
   return (
     <div className="flex h-screen flex-col">
       <TitleBar>
@@ -553,8 +584,8 @@ export default function Dashboard({ onSettings, active }: Props) {
       {/* Workspace quick-switch tabs */}
       <div className="mx-6 mb-3 flex flex-wrap items-center gap-1.5">
         <FolderOpen size={13} className="shrink-0 text-gray-500" />
-        {[...new Set([wsTabs.current, ...wsTabs.favorites])].filter(Boolean).map((dir) => {
-          const name = dir.split(/[\\/]/).filter(Boolean).pop() ?? dir
+        {wsTabDirs.map((dir) => {
+          const name = wsTabLabel(dir)
           const isCurrent = dir === wsTabs.current
           const isFav = wsTabs.favorites.includes(dir)
           return (

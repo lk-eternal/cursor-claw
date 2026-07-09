@@ -18,9 +18,10 @@ export interface ToolboxStatus {
   meegle: ToolboxToolStatus
 }
 
-const TOOL_PACKAGES: Record<string, { pkg: string; bin: string }> = {
-  larkCli: { pkg: "@larksuite/cli", bin: "lark-cli" },
-  meegle: { pkg: "@lark-project/meegle", bin: "meegle" },
+const TOOL_PACKAGES: Record<string, { pkg: string; bin: string; versionArgs: string[] }> = {
+  larkCli: { pkg: "@larksuite/cli", bin: "lark-cli", versionArgs: ["--version"] },
+  // meegle 不支持 --version，只认 version 子命令
+  meegle: { pkg: "@lark-project/meegle", bin: "meegle", versionArgs: ["version"] },
 }
 
 /** Windows 下 npm 全局 bin 是 .ps1/.cmd，须经 shell 解析；输出统一按 UTF-8 处理 */
@@ -37,8 +38,8 @@ async function runCommand(cmd: string, args: string[], timeoutMs = 15_000): Prom
 }
 
 async function detectTool(key: "larkCli" | "meegle"): Promise<ToolboxToolStatus> {
-  const { bin } = TOOL_PACKAGES[key]
-  const r = await runCommand(bin, ["--version"])
+  const { bin, versionArgs } = TOOL_PACKAGES[key]
+  const r = await runCommand(bin, versionArgs)
   const merged = `${r.stdout}\n${r.stderr}`
   const version = merged.match(/(\d+\.\d+\.\d+)/)?.[1]
   if (!r.ok && !version) return { installed: false }

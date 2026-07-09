@@ -5,6 +5,17 @@ alwaysApply: true
 
 # 🚨 异步长连接协议 (Persistent Loop Protocol)
 
+## ⛔ 适用范围判定（最先执行，不满足则整篇失效）
+
+本协议**仅**对 cursor-claw 调度启动的会话生效。判定标准：**Prompt / 会话上下文中是否携带 `[session_key=...]` 会话元数据**。
+
+- ✅ **有 `[session_key=...]`**：cursor-claw 后台会话，严格遵守下方全部协议。
+- 🚫 **没有 `[session_key=...]`**：用户在 Cursor IDE 中人工打开的普通会话——**本规则整篇作废**：
+  - 正常在 IDE 中直接回复对话，一切照常；
+  - **严禁**调用 `send_text` / `send_question` 等 cursor-claw MCP 工具向飞书/微信发送任何消息；
+  - **严禁**调用 poll-message 拉取或消费消息队列（会偷走后台会话的消息）；
+  - **严禁**把回复"兜底"发给主用户。
+
 > **[SYSTEM OVERRIDE]** 你当前处于"非对称异步通信模式"。飞书或微信是用户交互界面。你必须通过 `cursor-claw` MCP 工具主动维护会话。**正常情况下严禁以任何理由终止会话、空转或输出结束语。**
 
 ## 🛠 核心工具定义
@@ -37,6 +48,21 @@ alwaysApply: true
 | `session_key` | 是 | 当前会话 sessionKey，用户点击的选项按此路由回你的队列 |
 
 发出后**继续 poll-message 等待**；用户点击按钮后，所选选项文本会作为一条普通用户消息进入队列（messageId 为 internal_ 前缀）。用户也可能不点按钮直接回复文字，两种都按普通消息处理。
+
+### 标记完成：`mark_done`（MCP）
+
+事项**真正处理完成**后调用，给对应用户消息打 DONE 表情。回复消息（send_text）≠ 完成——只有调用 `mark_done` 才代表完成。
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `session_key` | 是 | 当前会话 sessionKey |
+| `message_id` | 否 | 已完成事项对应的消息ID；缺省时标记该会话所有已回复消息为完成 |
+
+**调用时机（必须遵守）：**
+- ✅ 任务做完、已用 `send_text` 发送完成结果之后 → 立即调用 `mark_done`
+- ✅ 简单问答（回复即完成）→ 回复后调用 `mark_done`
+- 🚫 仅发送了 ACK（"收到，正在处理"）→ **严禁调用**，事项还没做完
+- 🚫 任务进行中、发送进度同步消息时 → **严禁调用**
 
 ### 拉取消息：HTTP `/api/poll-message`（Shell）
 
@@ -83,6 +109,7 @@ curl -G -s "http://127.0.0.1:{{DAEMON_PORT}}/api/poll-message" --data-urlencode 
 | 提问选择 | `POST /api/send-question` body: `{text, options[], message_id?, session_key}` |
 | 发送图片 | `POST /api/send-image` body: `{image_path, message_id?, session_key?}` |
 | 发送文件 | `POST /api/send-file` body: `{file_path, message_id?, session_key?}` |
+| 标记完成 | `POST /api/mark-done` body: `{session_key, message_id?}` |
 
 ---
 
@@ -121,8 +148,8 @@ Agent 收到 Prompt 后，识别会话类型(chat_type)
 
 ### 1. 响应阶段 (ACK)
 收到指令（从冷启动或轮询中跳出）后，分析指令内容
-如果是比较简单的对话或问候之类的指令, 可以直接调用 `send_text` 回复结果并进入保活轮询。
-如果是比较耗时或者需要多步骤的任务, 需要先响应用户, 调用 `send_text(text="收到，正在处理<具体的事项>", message_id="...", session_key="...")`。
+如果是比较简单的对话或问候之类的指令, 可以直接调用 `send_text` 回复结果，再调用 `mark_done` 标记完成，然后进入保活轮询。
+如果是比较耗时或者需要多步骤的任务, 需要先响应用户, 调用 `send_text(text="收到，正在处理<具体的事项>", message_id="...", session_key="...")`。此时事项未完成，**不要**调用 `mark_done`。
 *🚫 禁令：严禁在未发送 ACK 确认前，开始执行长耗时的代码编写或搜索任务。*
 *🚫 禁令：无论消息是否完整，收到消息后一定要及时回复用户，不能无视用户消息或直接进入保活。*
 
@@ -132,11 +159,13 @@ Agent 收到 Prompt 后，识别会话类型(chat_type)
 *🚫 禁令：严禁长时间无任何消息输出，导致用户以为程序卡死了。*
 
 ### 3. 锚点阶段 (ANCHOR)
-任务完成，需要等待用户反馈或下一步指示时，发送结果并按 `keep_alive` 收尾：
-- `keep_alive=true`：**立即进入【阶段 4 保活轮询】**。
-- `keep_alive=false`：再做一次 `wait=false` 非阻塞检查——有新消息回到【阶段 1】继续处理；确认为空后**直接结束回合**（后台按需唤醒）。
-*示例：* `send_text(text="任务已完成。请指示下一步。", message_id="...", session_key="...")`
+任务完成，需要等待用户反馈或下一步指示时，发送结果、标记完成，再按 `keep_alive` 收尾：
+1. `send_text` 发送完成结果；
+2. **调用 `mark_done(session_key, message_id)` 标记事项完成**（给用户消息打 DONE 表情）——只有这一步才代表事项完成，漏掉会让用户以为任务还没做完；
+3. 收尾：`keep_alive=true` **立即进入【阶段 4 保活轮询】**；`keep_alive=false` 再做一次 `wait=false` 非阻塞检查——有新消息回到【阶段 1】继续处理；确认为空后**直接结束回合**（后台按需唤醒）。
+*示例：* `send_text(text="任务已完成。请指示下一步。", message_id="...", session_key="...")` → `mark_done(session_key="...", message_id="...")`
 *🚫 禁令：严禁在未发送结果确认前收尾（无论哪种模式）。*
+*🚫 禁令：任务只做了一半（仅 ACK / 进度同步）严禁调用 mark_done。*
 
 ### 4. 保活轮询阶段 (KEEP-ALIVE) [🔥 核心存亡点｜仅 keep_alive=true]
 **动作：** 仅通过 Shell 调用 `GET /api/poll-message?sessionKey=...`（无限挂起，直到收到用户消息）。

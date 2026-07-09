@@ -69,6 +69,7 @@ export default function App() {
           onBack={() => setPage("dashboard")}
           initialTab={settingsInitTab}
           onTabConsumed={() => setSettingsInitTab(undefined)}
+          onReenterWizard={() => setShowWizard(true)}
         />
       </div>
       <SetupWizard open={showWizard} onClose={() => setShowWizard(false)} />

@@ -83,6 +83,12 @@ export interface CardButton {
   type?: "primary" | "default" | "danger";
 }
 
+export interface CardInput {
+  placeholder: string;
+  /** 回传交互数据，用户提交输入时随 input_value 一起返回 */
+  value: unknown;
+}
+
 export interface LarkSenderOptions {
   client: Lark.Client;
   chatId: string;
@@ -144,8 +150,8 @@ export class LarkSender {
     return w;
   }
 
-  /** 构造 schema 2.0 markdown 卡片；buttons 为回传交互按钮（点击触发 card.action.trigger），按 label 显示宽度自适应 1-3 列排布 */
-  static buildCard(text: string, title?: string, buttons?: CardButton[]): any {
+  /** 构造 schema 2.0 markdown 卡片；buttons 为回传交互按钮（点击触发 card.action.trigger），按 label 显示宽度自适应 1-3 列排布；input 为末尾自由输入框（提交随 input_value 回传） */
+  static buildCard(text: string, title?: string, buttons?: CardButton[], input?: CardInput): any {
     const elements: any[] = [{ tag: "markdown", content: text.replace(/\\/g, "\\\\") }];
     const btns = buttons ?? [];
     if (btns.length > 0) {
@@ -173,6 +179,15 @@ export class LarkSender {
         }
       }
     }
+    if (input) {
+      elements.push({
+        tag: "input",
+        name: "custom_input",
+        placeholder: { tag: "plain_text", content: input.placeholder.slice(0, 100) },
+        label_position: "top",
+        behaviors: [{ type: "callback", value: input.value }],
+      });
+    }
     const card: any = {
       schema: "2.0",
       config: { wide_screen_mode: true },
@@ -185,8 +200,8 @@ export class LarkSender {
   }
 
   /** 发送带回传按钮的交互卡片（优先回复，退避 chat 直发），返回 message_id */
-  async sendCardWithButtons(text: string, buttons: CardButton[], replyMessageId?: string, chatId?: string, title?: string): Promise<string | undefined> {
-    const card = LarkSender.buildCard(`${this.messagePrefix}${text}`, title, buttons);
+  async sendCardWithButtons(text: string, buttons: CardButton[], replyMessageId?: string, chatId?: string, title?: string, input?: CardInput): Promise<string | undefined> {
+    const card = LarkSender.buildCard(`${this.messagePrefix}${text}`, title, buttons, input);
     const content = JSON.stringify(card);
     if (replyMessageId && !replyMessageId.startsWith("internal_")) {
       try {
@@ -567,6 +582,7 @@ export class LarkSender {
             chatId: data?.context?.open_chat_id ?? data?.open_chat_id ?? "",
             operatorOpenId: data?.operator?.open_id,
             value: data?.action?.value,
+            inputValue: typeof data?.action?.input_value === "string" ? data.action.input_value : undefined,
           };
           this.log("INFO", `卡片按钮点击: msg=${evt.messageId} value=${JSON.stringify(evt.value)?.slice(0, 200)}`);
           if (!onCardAction) return {};
@@ -642,6 +658,8 @@ export interface LarkCardActionEvent {
   operatorOpenId?: string;
   /** 按钮 behaviors callback 配置的自定义回传数据 */
   value: unknown;
+  /** 输入框组件提交的文本（tag=input 时返回） */
+  inputValue?: string;
 }
 
 export interface LarkMessageEvent {
