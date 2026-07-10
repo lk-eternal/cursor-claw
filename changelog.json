@@ -7,7 +7,8 @@
       "keep_alive=false 收尾统一走阻塞 poll：有新消息立即返回，空队列秒回结束指令（不真挂起）",
       "send 系接口校验 session_key 白名单，禁止兜底发主用户，堵住 IDE 捏造 key 误发",
       "修复 send_question 卡片窜台（reply 成功不再二次 create）；按钮内嵌 session_key 保证点击可路由",
-      "SDK/CLI 启动与 Resume 日志、活跃会话列表展示实际模型；异常结束改由 idle 调度拉起，队列空闲不再打扰用户"
+      "SDK/CLI 启动与 Resume 日志、活跃会话列表展示实际模型；异常结束改由 idle 调度拉起，队列空闲不再打扰用户",
+      "send 白名单拒绝改为 HTTP 200 + ok:false，MCP 原样返回提醒文案供 AI 反省（不再只显示「发送失败」）"
     ]
   },
   {

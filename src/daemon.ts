@@ -556,7 +556,7 @@ function rejectUnroutedSend(res: http.ServerResponse, api: string, sessionKey?: 
 
   if (!sk && !mid) {
     log("WARN", `[${api}] 已拒绝无 session_key/message_id 的发送请求（疑似 IDE 人工会话误调用）`);
-    json(res, { ok: false, error: `缺少 session_key 与 message_id。${SEND_REJECT_HINT}` }, 400);
+    json(res, { ok: false, error: `缺少 session_key 与 message_id。${SEND_REJECT_HINT}` });
     return true;
   }
 
@@ -564,12 +564,12 @@ function rejectUnroutedSend(res: http.ServerResponse, api: string, sessionKey?: 
     // 旧版路由格式 / 明显捏造
     if (sk.startsWith("agent:") || /^agent:main:/.test(sk)) {
       log("WARN", `[${api}] 已拒绝旧版/捏造 session_key: ${sk.slice(0, 80)}`);
-      json(res, { ok: false, error: `session_key 格式非法（疑似凭空捏造的旧版路由键）。${SEND_REJECT_HINT}` }, 400);
+      json(res, { ok: false, error: `session_key 格式非法（疑似凭空捏造的旧版路由键）。${SEND_REJECT_HINT}` });
       return true;
     }
     if (!isKnownSessionKey(sk)) {
       log("WARN", `[${api}] 已拒绝未知 session_key: ${sk.slice(0, 120)}`);
-      json(res, { ok: false, error: `session_key 不在系统记录中（未由 cursor-claw 调度启动）。${SEND_REJECT_HINT}` }, 400);
+      json(res, { ok: false, error: `session_key 不在系统记录中（未由 cursor-claw 调度启动）。${SEND_REJECT_HINT}` });
       return true;
     }
     return false;
@@ -581,7 +581,7 @@ function rejectUnroutedSend(res: http.ServerResponse, api: string, sessionKey?: 
   }
   if (messageSessionMap.has(mid)) return false;
   log("WARN", `[${api}] 已拒绝无法路由的 message_id（无 session_key）: ${mid.slice(0, 60)}`);
-  json(res, { ok: false, error: `仅提供 message_id 时无法路由到已知会话，请同时传入 session_key。${SEND_REJECT_HINT}` }, 400);
+  json(res, { ok: false, error: `仅提供 message_id 时无法路由到已知会话，请同时传入 session_key。${SEND_REJECT_HINT}` });
   return true;
 }
 
@@ -1178,10 +1178,11 @@ function createMcpServer(): McpServer {
     },
     async ({ text, message_id, session_key }) => {
       try {
-        const r = await httpJson<{ ok: boolean }>(localDaemonUrl("/api/send-text"), { text, message_id, session_key });
+        const r = await httpJson<{ ok: boolean; error?: string }>(localDaemonUrl("/api/send-text"), { text, message_id, session_key });
         if (!r?.ok) {
-          log("WARN", `send_text 发送失败: message_id=${message_id}`);
-          return { content: [{ type: "text" as const, text: "[send_failed] 消息发送失败" }] };
+          const detail = r?.error?.trim() || "消息发送失败";
+          log("WARN", `send_text 发送失败: message_id=${message_id} error=${detail.slice(0, 160)}`);
+          return { content: [{ type: "text" as const, text: `[send_failed] ${detail}` }] };
         }
         return { content: [{ type: "text" as const, text: "消息已发送" }] };
       } catch (e: any) {
@@ -1201,7 +1202,8 @@ function createMcpServer(): McpServer {
     },
     async ({ image_path, message_id, session_key }) => {
       try {
-        await httpJson(localDaemonUrl("/api/send-image"), { image_path, message_id, session_key });
+        const r = await httpJson<{ ok: boolean; error?: string }>(localDaemonUrl("/api/send-image"), { image_path, message_id, session_key });
+        if (!r?.ok) return { content: [{ type: "text" as const, text: `[send_failed] ${r?.error?.trim() || "图片发送失败"}` }] };
         return { content: [{ type: "text" as const, text: "图片已发送" }] };
       } catch (e: any) {
         log("ERROR", `send_image 异常: ${e?.message ?? e}`);
@@ -1220,7 +1222,8 @@ function createMcpServer(): McpServer {
     },
     async ({ file_path, message_id, session_key }) => {
       try {
-        await httpJson(localDaemonUrl("/api/send-file"), { file_path, message_id, session_key });
+        const r = await httpJson<{ ok: boolean; error?: string }>(localDaemonUrl("/api/send-file"), { file_path, message_id, session_key });
+        if (!r?.ok) return { content: [{ type: "text" as const, text: `[send_failed] ${r?.error?.trim() || "文件发送失败"}` }] };
         return { content: [{ type: "text" as const, text: "文件已发送" }] };
       } catch (e: any) {
         log("ERROR", `send_file 异常: ${e?.message ?? e}`);
@@ -1241,7 +1244,7 @@ function createMcpServer(): McpServer {
     async ({ text, options, message_id, session_key }) => {
       try {
         const r = await httpJson<{ ok: boolean; degraded?: boolean }>(localDaemonUrl("/api/send-question"), { text, options, message_id, session_key });
-        if (!r?.ok) return { content: [{ type: "text" as const, text: "[send_failed] 问题发送失败" }] };
+        if (!r?.ok) return { content: [{ type: "text" as const, text: `[send_failed] ${(r as any)?.error?.trim() || "问题发送失败"}` }] };
         return { content: [{ type: "text" as const, text: r.degraded ? "问题已发送（微信文本降级），用户将直接回复文字" : "问题卡片已发送，用户点击选项后会以普通消息进入队列，请继续 poll-message 等待" }] };
       } catch (e: any) {
         log("ERROR", `send_question 异常: ${e?.message ?? e}`);
