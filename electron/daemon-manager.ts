@@ -40,7 +40,7 @@ import {
   McpServerEntry,
 } from "./mcp-manager"
 import { FileCommand, reportCommandResult, handleFeishuModelCommand, handleFeishuMcpCommand, handleFeishuTaskCommand, handleFeishuWorkflowCommand, parseListModelsStdout, type TaskRunFn } from "./command-handler"
-import { handleFeishuProjectCommand, handleProjectSyncSignal } from "./project-commands"
+import { handleFeishuProjectCommand, handleProjectSyncSignal, fillProjectNewFromText } from "./project-commands"
 import { initProjectStore } from "../src/shared/project-store.js"
 import { readLockFile, getLockFilePath, httpGet, httpPost, syncActiveSession, getCurrentActiveSession, enqueueToMainSession } from "./daemon-client"
 import {
@@ -627,6 +627,18 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
           try {
             const payload = JSON.parse(line.slice("__PROJECT_SYNC__:".length))
             void handleProjectSyncSignal(payload)
+          } catch { /* ignore */ }
+          continue
+        }
+        if (line.startsWith("__PROJECT_NEW_FILL__:")) {
+          try {
+            const payload = JSON.parse(line.slice("__PROJECT_NEW_FILL__:".length)) as {
+              chatId: string; messageId: string; text: string
+            }
+            const port = cachedPort ?? readLockFile()?.port
+            if (port && payload.chatId && payload.messageId) {
+              void fillProjectNewFromText(port, payload.messageId, payload.chatId, payload.text || "")
+            }
           } catch { /* ignore */ }
           continue
         }

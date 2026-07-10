@@ -165,4 +165,49 @@ export function resolveProjectRef(token: string | undefined, projects?: Project[
   return list.find((p) => p.id === token || p.name === token)
 }
 
+/** /p new 交互向导草稿（按 chatKey） */
+export type ProjectNewStep = "name" | "repo" | "base" | "branch" | "goal"
+
+export interface ProjectNewDraft {
+  chatKey: string
+  step: ProjectNewStep
+  name?: string
+  repoPath?: string
+  baseBranch?: string
+  featureBranch?: string
+  goal?: string
+  storyUrl?: string
+  updatedAt: number
+}
+
+function pendingNewPath(): string {
+  return path.join(baseDir, "pending-new.json")
+}
+
+export function getProjectNewDraft(chatKey: string): ProjectNewDraft | undefined {
+  if (!baseDir || !chatKey) return undefined
+  const all = readJsonSafe<Record<string, ProjectNewDraft>>(pendingNewPath(), {})
+  return all[chatKey]
+}
+
+export function saveProjectNewDraft(draft: ProjectNewDraft): void {
+  if (!baseDir) throw new Error("project store not initialized")
+  const all = readJsonSafe<Record<string, ProjectNewDraft>>(pendingNewPath(), {})
+  draft.updatedAt = Date.now()
+  all[draft.chatKey] = draft
+  writeJson(pendingNewPath(), all)
+}
+
+export function clearProjectNewDraft(chatKey: string): void {
+  if (!baseDir || !chatKey) return
+  const all = readJsonSafe<Record<string, ProjectNewDraft>>(pendingNewPath(), {})
+  if (!all[chatKey]) return
+  delete all[chatKey]
+  writeJson(pendingNewPath(), all)
+}
+
+export function hasProjectNewDraft(chatKey: string): boolean {
+  return !!getProjectNewDraft(chatKey)
+}
+
 export type { ProjectActionStatus }

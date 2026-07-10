@@ -46,7 +46,7 @@ import { z } from "zod";
 import { registerAdminTools } from "./server-admin.js";
 import { registerWorkflowAgentTools, registerWorkflowAdminTools } from "./server-workflow.js";
 import { registerProjectAgentTools } from "./server-project.js";
-import { initProjectStore } from "./shared/project-store.js";
+import { initProjectStore, hasProjectNewDraft } from "./shared/project-store.js";
 
 const _require = createRequire(import.meta.url);
 const PKG_VERSION: string = (_require("../package.json") as { version: string }).version;
@@ -304,6 +304,10 @@ function initWeChatChannel(rt: ChannelRuntime): WeChatManager {
         handleCommand(msg.text, msg.messageId, chatKey, msg.chatType).catch((e: any) =>
           log("ERROR", `[WeChat:${rt.cfg.name}] 指令处理失败: ${e?.message ?? e}`),
         );
+        return;
+      }
+      if (hasProjectNewDraft(chatKey)) {
+        process.stdout.write(`__PROJECT_NEW_FILL__:${JSON.stringify({ chatId: chatKey, messageId: msg.messageId, text: msg.text })}\n`);
         return;
       }
       pushMessage(msg.text, msg.messageId, chatKey, msg.chatType, msg.senderOpenId);
@@ -890,6 +894,11 @@ async function startFeishuChannel(rt: ChannelRuntime): Promise<void> {
       handleCommand(cleanText, messageId, chatKey, chatType).catch((e: any) =>
         log("ERROR", `指令处理失败: ${e?.message ?? e}`),
       );
+      return;
+    }
+
+    if (messageType === "text" && hasProjectNewDraft(chatKey)) {
+      process.stdout.write(`__PROJECT_NEW_FILL__:${JSON.stringify({ chatId: chatKey, messageId, text: cleanText })}\n`);
       return;
     }
 
