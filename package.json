@@ -37,7 +37,9 @@
     "dist:mac": "npm run build && electron-builder --mac",
     "pack:win": "npm run build && electron-builder --win --dir",
     "pack:mac": "npm run build && electron-builder --mac --dir",
-    "pack:linux": "npm run build && electron-builder --linux --dir"
+    "pack:linux": "npm run build && electron-builder --linux --dir",
+    "pack:local": "node scripts/pack-local-detached.cjs",
+    "pack:local:fg": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/pack-local.ps1"
   },
   "dependencies": {
     "@cursor/sdk": "^1.0.12",
