@@ -3,13 +3,14 @@
     "version": "1.3.4",
     "date": "2026-07-10",
     "changes": [
-      "完成确认改为阻塞 poll 隐式触发：去掉 mark_done；非阻塞拉取只重投不确认，阻塞拉取进入时删 .claimed 并打 DONE",
-      "keep_alive=false 收尾统一走阻塞 poll：有新消息立即返回，空队列秒回结束指令（不真挂起）",
-      "send 系接口校验 session_key 白名单，禁止兜底发主用户，堵住 IDE 捏造 key 误发",
-      "修复 send_question 卡片窜台（reply 成功不再二次 create）；按钮内嵌 session_key 保证点击可路由",
-      "SDK/CLI 启动与 Resume 日志、活跃会话列表展示实际模型；异常结束改由 idle 调度拉起，队列空闲不再打扰用户",
-      "send 白名单拒绝改为 HTTP 200 + ok:false，MCP 原样返回提醒文案供 AI 反省（不再只显示「发送失败」）",
-      "新增 npm run pack:local：分离进程打包并同步到 release/local 后重启，避免 Agent 会话被自己杀掉"
+      "完成确认改为阻塞 poll 隐式触发（去掉 mark_done）；keep_alive=false 空队列秒回结束",
+      "send 白名单防 IDE 误发；修复问题卡片 / internal_ 窜台与表情 400",
+      "会话级快速切模型（/model + Dashboard 常用模型标签/搜索）；仅作用于当前工作目录",
+      "同名工作目录在卡片 title 与活跃会话中附父目录区分",
+      "切换工作目录通知主用户，并附带当前 git 分支",
+      "send_question 多行输入且 width=fill 顶满卡片宽度",
+      "新增 pack:local：分离打包同步到 release/local 并重启",
+      "SDK/CLI 展示实际模型；静默 reaction 未订阅告警；异常结束由 idle 调度拉起"
     ]
   },
   {

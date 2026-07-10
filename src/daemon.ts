@@ -38,6 +38,7 @@ import {
   type DaemonChannelConfig,
   type ChannelStatusInfo,
 } from "./shared/channel-types.js";
+import { disambiguatePathLabel } from "./shared/path-label.js";
 import { readScheduledTasksFile, writeScheduledTasksFile, type ScheduledTask } from "./shared/scheduled-task.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -422,15 +423,38 @@ function resolveRawChatId(sessionKey?: string): string | undefined {
   return sessionToChatMap.get(sessionKey) ?? chatIdFromSessionKey(sessionKey);
 }
 
-function extractWorkspaceTitle(sessionKey?: string): string | undefined {
+function extractWorkspaceDir(sessionKey?: string): string | undefined {
   if (!sessionKey) return undefined;
   const idx = sessionKey.indexOf("::");
   if (idx < 0) return undefined;
   const wsDir = sessionKey.slice(idx + 2);
   // 仅路径形态的后缀才是工作目录（排除 wf_xxx 等非路径会话后缀）
   if (!wsDir || !/[\\/]/.test(wsDir)) return undefined;
-  const name = wsDir.replace(/\\/g, "/").split("/").filter(Boolean).pop();
-  return name || undefined;
+  return wsDir;
+}
+
+/** 该聊天下已知工作目录（poll 连接 + 近 30 分钟有回复的会话） */
+function listChatWorkspaceDirs(chatKey: string): string[] {
+  const prefix = chatKey + "::";
+  const dirs = new Set<string>();
+  const consider = (sk: string) => {
+    if (!(sk === chatKey || sk.startsWith(prefix))) return;
+    const ws = extractWorkspaceDir(sk);
+    if (ws) dirs.add(ws);
+  };
+  for (const k of activePollConnections.keys()) consider(k);
+  const now = Date.now();
+  for (const [k, t] of sessionLastReplyAt) {
+    if (now - t < 30 * 60_000) consider(k);
+  }
+  for (const sk of sessionToChatMap.keys()) consider(sk);
+  return [...dirs];
+}
+
+function extractWorkspaceTitle(sessionKey?: string, peers?: string[]): string | undefined {
+  const wsDir = extractWorkspaceDir(sessionKey);
+  if (!wsDir) return undefined;
+  return disambiguatePathLabel(wsDir, peers ?? [wsDir]);
 }
 
 /** 该聊天下活跃目录会话数（挂起的 poll 连接 + 近 30 分钟有回复的会话，去重） */
@@ -455,7 +479,7 @@ function resolveReplyTitle(ch: ResolvedChannel, sessionKey?: string): string | u
   // 单会话时引用回复已足够定位，标题反而头重；仅同一聊天多个目录会话并行时才需要目录标题区分
   const chatKey = makeChatKey(ch.rt.cfg.id, ch.chatId ?? mainUserChatId);
   if (chatActiveSessionCount(chatKey) < 2) return undefined;
-  return extractWorkspaceTitle(sessionKey);
+  return extractWorkspaceTitle(sessionKey, listChatWorkspaceDirs(chatKey));
 }
 
 type ResolvedChannel =
@@ -621,7 +645,9 @@ function addReactionToMessages(messageIds: string[], sessionKey: string, emojiTy
   if (ch.type !== "feishu" || !ch.rt.sender) return;
   const sender = ch.rt.sender;
   for (const mid of messageIds) {
-    if (mid) sender.addReaction(mid, emojiType).catch(() => {});
+    // internal_（卡片点击等）不是飞书 message_id，调 reaction API 会 400
+    if (!mid || mid.startsWith("internal_")) continue;
+    sender.addReaction(mid, emojiType).catch(() => {});
   }
 }
 
@@ -916,7 +942,7 @@ function isCommand(text: string): boolean {
 
 // ── 卡片按钮回调 ─────────────────────────────────────────
 
-interface CardQuestionEntry { text: string; options: string[]; sessionKey?: string; createdAt: number }
+interface CardQuestionEntry { text: string; options: string[]; sessionKey?: string; createdAt: number; title?: string }
 const cardQuestionMap = new Map<string, CardQuestionEntry>();
 const CARD_QUESTION_MAX = 500;
 
@@ -987,9 +1013,11 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
     pushMessage(opt, internalId, chatKey, chatType, evt.operatorOpenId, evt.messageId, { senderType: "user" });
     if (entry) cardQuestionMap.delete(evt.messageId);
     const questionText = entry?.text ?? "问题";
+    // 更新卡片必须带回原 title，否则多会话时 header 工作区名会被抹掉
+    const title = entry?.title ?? (sessionKey ? extractWorkspaceTitle(sessionKey, listChatWorkspaceDirs(chatKey)) : undefined);
     return {
       toast: { type: "success", content: `已选择: ${opt.slice(0, 30)}` },
-      card: { type: "raw", data: LarkSender.buildCard(`${questionText}\n\n✅ 已选择: **${opt}**`) },
+      card: { type: "raw", data: LarkSender.buildCard(`${questionText}\n\n✅ 已选择: **${opt}**`, title) },
     };
   }
 
@@ -1835,13 +1863,15 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       const sender = ch.rt.sender!;
       const title = resolveReplyTitle(ch, session_key);
       let sentMsgId: string | undefined;
-      if (message_id) {
+      // internal_（卡片点击）不可 reply：必须按 chatId 直发，禁止落到 sender 默认主用户私聊
+      if (message_id && !message_id.startsWith("internal_")) {
         sentMsgId = await sender.sendMessage(text, message_id, undefined, title);
         if (!sentMsgId) {
-          log("INFO", `回复退避: message_id=${message_id} → ${ch.chatId ? `chat_id=${ch.chatId}` : "默认发送"}`);
-          sentMsgId = await sender.sendMessage(text, undefined, ch.chatId, title);
+          log("INFO", `回复退避: message_id=${message_id} → ${ch.chatId ? `chat_id=${ch.chatId}` : "无目标"}`);
+          if (ch.chatId) sentMsgId = await sender.sendMessage(text, undefined, ch.chatId, title);
         }
       } else {
+        if (!ch.chatId) { json(res, { ok: false, error: "无法解析发送目标 chatId" }, 400); return true; }
         sentMsgId = await sender.sendMessage(text, undefined, ch.chatId, title);
       }
       if (sentMsgId && session_key) trackMessageSession(sentMsgId, session_key);
@@ -1884,7 +1914,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       }
       const ok = sentMsgId !== undefined; // null 也算成功（已回复到原聊天）
       if (typeof sentMsgId === "string" && sentMsgId) {
-        rememberCardQuestion(sentMsgId, { text, options: opts, sessionKey: session_key, createdAt: Date.now() });
+        rememberCardQuestion(sentMsgId, { text, options: opts, sessionKey: session_key, createdAt: Date.now(), title });
         if (session_key) trackMessageSession(sentMsgId, session_key);
       }
       json(res, { ok, message_id: typeof sentMsgId === "string" ? sentMsgId : undefined });
@@ -1903,7 +1933,9 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     if (ch.type === "wechat") {
       await ch.rt.wechat!.sendMedia(ch.chatId, image_path);
     } else {
-      await ch.rt.sender!.sendImage(image_path, message_id, ch.chatId);
+      const replyId = message_id?.startsWith("internal_") ? undefined : message_id;
+      if (!replyId && !ch.chatId) { json(res, { ok: false, error: "无法解析发送目标 chatId" }, 400); return true; }
+      await ch.rt.sender!.sendImage(image_path, replyId, ch.chatId);
     }
     json(res, { ok: true });
     if (session_key) sessionLastReplyAt.set(session_key, Date.now());
@@ -1920,7 +1952,9 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     if (ch.type === "wechat") {
       await ch.rt.wechat!.sendMedia(ch.chatId, file_path);
     } else {
-      await ch.rt.sender!.sendFile(file_path, message_id, ch.chatId);
+      const replyId = message_id?.startsWith("internal_") ? undefined : message_id;
+      if (!replyId && !ch.chatId) { json(res, { ok: false, error: "无法解析发送目标 chatId" }, 400); return true; }
+      await ch.rt.sender!.sendFile(file_path, replyId, ch.chatId);
     }
     json(res, { ok: true });
     if (session_key) sessionLastReplyAt.set(session_key, Date.now());

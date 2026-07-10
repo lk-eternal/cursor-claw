@@ -17,6 +17,8 @@ export interface AppConfig {
   workspaceDir: string
   /** 常用工作目录（首页快速切换标签） */
   favoriteWorkspaces: string[]
+  /** 常用模型（飞书/Dashboard 快捷切会话模型） */
+  favoriteModels: { model: string; modelParams?: string; label?: string }[]
   autoStart: boolean
   setupComplete: boolean
   httpProxy: string
@@ -58,6 +60,7 @@ const defaults: AppConfig = {
 
   workspaceDir: "",
   favoriteWorkspaces: [],
+  favoriteModels: [],
   autoStart: false,
   setupComplete: false,
   httpProxy: "",

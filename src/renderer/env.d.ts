@@ -15,7 +15,8 @@ declare global {
     agentResources: AgentResource[]
     channels: ChannelConfig[]
     workspaceDir: string
-  favoriteWorkspaces?: string[]
+    favoriteWorkspaces?: string[]
+    favoriteModels?: { model: string; modelParams?: string; label?: string }[]
     autoStart: boolean
     setupComplete: boolean
     httpProxy: string
@@ -140,7 +141,7 @@ declare global {
     getConfig(): Promise<AppConfig>
     saveConfig(config: Partial<AppConfig>): Promise<ConfigSaveResult>
     setAutoStart(enabled: boolean): Promise<{ ok: boolean }>
-    applyWorkspaceSwitch(workspaceDir: string, stopOldSessions: boolean): Promise<{ ok: boolean; error?: string }>
+    applyWorkspaceSwitch(workspaceDir: string, stopOldSessions: boolean, notifyMain?: boolean): Promise<{ ok: boolean; error?: string }>
     respondWindowClose(payload: { action: "minimize" | "quit" | "cancel"; remember: boolean }): Promise<void>
     selectDirectory(): Promise<string | null>
     getToolboxStatus(): Promise<{ larkCli: { installed: boolean; version?: string; loggedIn?: boolean; userName?: string }; meegle: { installed: boolean; version?: string } }>
@@ -154,6 +155,8 @@ declare global {
     getSessionDiagnostics(sessionKey: string): Promise<{ running: boolean; resumeAgentId?: string; resumeUpdatedAt?: number; lastRun?: { status: string; endedAt: number; durationMs?: number; error?: string }; lastReplyAt: number | null }>
     exportDiagnostics(): Promise<{ ok: boolean; path?: string; error?: string }>
     stopSessionAgent(sessionKey: string): Promise<{ ok: boolean }>
+    setSessionModel(sessionKey: string, model: string, modelParams?: string): Promise<{ ok: boolean; deferred?: boolean; error?: string }>
+    listQuickModels(): Promise<{ ok: boolean; models: { model: string; modelParams?: string; label?: string }[] }>
     stopAllSessionAgents(): Promise<{ ok: boolean }>
     onSessionAgents(cb: (list: { sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string; workspaceDir?: string; source?: "cli" | "sdk" }[]) => void): () => void
     getDaemonStatus(): Promise<DaemonStatus>

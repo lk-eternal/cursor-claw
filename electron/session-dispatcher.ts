@@ -329,7 +329,7 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
   const skipIdentity = chatType === "workflow"
   await injectWorkspaceToDir(workDir, useMain || skipIdentity, channel?.digitalIdentity)
 
-  // 模型解析：显式覆盖 > 通道场景模型
+  // 模型解析：显式覆盖 > 会话 override/pending > 通道场景模型
   let model: string
   let modelParams: string
   if (p.modelOverride?.trim()) {
@@ -340,6 +340,13 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
     const resolved = resolveChannelModel(channel, scenario)
     model = resolved.model
     modelParams = resolved.modelParams
+    try {
+      const { resolveModelForSession, initSessionModelStore } = await import("../src/shared/session-model-store.js")
+      initSessionModelStore(app.getPath("userData"))
+      const eff = resolveModelForSession(sessionKey, { model, modelParams })
+      model = eff.model
+      modelParams = eff.modelParams ?? ""
+    } catch { /* store 未就绪时沿用通道模型 */ }
   }
 
   // 会话模式：保留会话（run 结束持久化 agentId，新消息 Resume 续上下文）+ 长连接（无限 poll）

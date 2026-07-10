@@ -162,8 +162,8 @@ const api = {
   getConfig: (): Promise<AppConfig> => ipcRenderer.invoke("config:get"),
   saveConfig: (config: Partial<AppConfig>): Promise<ConfigSaveResult> => ipcRenderer.invoke("config:save", config),
   setAutoStart: (enabled: boolean): Promise<{ ok: boolean }> => ipcRenderer.invoke("app:set-auto-start", enabled),
-  applyWorkspaceSwitch: (workspaceDir: string, stopOldSessions: boolean): Promise<{ ok: boolean; error?: string }> =>
-    ipcRenderer.invoke("config:apply-workspace-switch", workspaceDir, stopOldSessions),
+  applyWorkspaceSwitch: (workspaceDir: string, stopOldSessions: boolean, notifyMain?: boolean): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("config:apply-workspace-switch", workspaceDir, stopOldSessions, notifyMain),
   respondWindowClose: (payload: { action: "minimize" | "quit" | "cancel"; remember: boolean }): Promise<void> =>
     ipcRenderer.invoke("window:close-confirm-result", payload),
   selectDirectory: (): Promise<string | null> => ipcRenderer.invoke("dialog:selectDirectory"),
@@ -180,6 +180,10 @@ const api = {
   exportDiagnostics: (): Promise<{ ok: boolean; path?: string; error?: string }> =>
     ipcRenderer.invoke("diagnostics:export"),
   stopSessionAgent: (sessionKey: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("agent:stop-session", sessionKey),
+  setSessionModel: (sessionKey: string, model: string, modelParams?: string): Promise<{ ok: boolean; deferred?: boolean; error?: string }> =>
+    ipcRenderer.invoke("session:set-model", sessionKey, model, modelParams),
+  listQuickModels: (): Promise<{ ok: boolean; models: { model: string; modelParams?: string; label?: string }[] }> =>
+    ipcRenderer.invoke("session:list-quick-models"),
   stopAllSessionAgents: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("agent:stop-all-sessions"),
   onSessionAgents: (cb: (list: { sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string; workspaceDir?: string; source?: "cli" | "sdk"; model?: string; modelParams?: string }[]) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, list: Parameters<typeof cb>[0]) => cb(list)

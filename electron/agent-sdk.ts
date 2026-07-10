@@ -6,6 +6,13 @@ import { createHash } from "node:crypto"
 import { createRequire } from "node:module"
 import { pushUiLog, broadcastLog, broadcastSessionStatus } from "./ui-logger"
 import { type ChatType, type LaunchMeta, buildPrompt, resolveSessionChatName } from "./agent-launcher"
+import { getAgentResource, resolveChannelForSession } from "./config-store"
+import {
+  initSessionModelStore,
+  resolveModelForSession,
+  setSessionOverride,
+  pushRecentModel,
+} from "../src/shared/session-model-store.js"
 
 interface SdkSessionAgent {
   sessionKey: string
@@ -64,6 +71,10 @@ let resumableAgents: Map<string, ResumeEntry> | null = null
 
 function resumeStorePath(): string {
   return join(app.getPath("userData"), "sdk-resume-map.json")
+}
+
+function ensureModelStore(): void {
+  try { initSessionModelStore(app.getPath("userData")) } catch { /* tests / early */ }
 }
 
 function getResumableMap(): Map<string, ResumeEntry> {
@@ -449,12 +460,19 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
 
   try {
     ensureSdkBinaryPaths()
+    ensureModelStore()
 
-    const modelId = opts.model?.trim() && opts.model.trim() !== "auto" ? opts.model.trim() : "composer-2"
+    const fallbackModel = opts.model?.trim() && opts.model.trim() !== "auto" ? opts.model.trim() : "composer-2"
+    const resolvedRef = resolveModelForSession(sessionKey, {
+      model: fallbackModel,
+      modelParams: opts.modelParams ?? "",
+    })
+    const modelId = resolvedRef.model?.trim() && resolvedRef.model.trim() !== "auto" ? resolvedRef.model.trim() : "composer-2"
+    const modelParams = resolvedRef.modelParams ?? ""
     const modelSelection: { id: string; params?: { id: string; value: string }[] } = { id: modelId }
-    if (opts.modelParams?.trim()) {
+    if (modelParams.trim()) {
       try {
-        modelSelection.params = JSON.parse(opts.modelParams)
+        modelSelection.params = JSON.parse(modelParams)
       } catch { /* ignore bad JSON */ }
     }
 
@@ -501,13 +519,14 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       keepSession,
       persistentPoll,
       model: modelId,
-      modelParams: opts.modelParams,
+      modelParams,
       logAgg: { kind: null, buf: "" },
     }
 
     sdkSessions.set(sessionKey, session)
     broadcastLog(`[SDK] 会话 ${sessionKey} 已${resumed ? "恢复" : "创建"}, agentId=${agent.agentId}, model=${JSON.stringify(modelSelection)}`)
     broadcastSdkSessionStatus()
+    pushRecentModel({ model: modelId, modelParams })
 
     // Resume 会话的规则是创建时快照：规则文件变过则在唤醒 prompt 里硬指令重读
     const rulesUpdated = resumed && !!resumable?.rulesHash
@@ -568,6 +587,60 @@ export function stopSdkSession(sessionKey: string): void {
   pushUiLog("SDK", "INFO", `[${sessionKey}] 会话已停止（队列有未回复消息时将自动重新拉起）`)
   void releaseSession(s)
   broadcastSdkSessionStatus()
+}
+
+/**
+ * 仅本会话切换模型：写 override；有 live/resumable 则停当前 run 后 Resume（禁止 Create 丢上下文）。
+ * 无可恢复会话时只写 override，返回 deferred=true（下次唤醒生效）。
+ */
+export async function switchSdkSessionModel(
+  sessionKey: string,
+  model: string,
+  modelParams?: string,
+): Promise<{ ok: boolean; deferred?: boolean; error?: string }> {
+  const mid = model?.trim()
+  if (!mid) return { ok: false, error: "model 不能为空" }
+  ensureModelStore()
+  const params = modelParams ?? ""
+  setSessionOverride(sessionKey, { model: mid, modelParams: params })
+  pushRecentModel({ model: mid, modelParams: params })
+
+  const live = sdkSessions.get(sessionKey)
+  const resumable = getResumableMap().get(sessionKey)
+  if (!live && !resumable) {
+    pushUiLog("SDK", "INFO", `[${sessionKey}] 会话未拉起，已记下模型 ${mid}（下次唤醒生效）`)
+    return { ok: true, deferred: true }
+  }
+
+  const channel = resolveChannelForSession(sessionKey)
+  const resource = getAgentResource(channel?.agentResourceId)
+  if (resource.type !== "sdk" || !resource.apiKey?.trim()) {
+    return { ok: false, error: "通道未绑定 SDK 资源或缺少 API Key" }
+  }
+
+  const workspaceDir = live?.workspaceDir || resumable!.workspaceDir
+  if (!workspaceDir) return { ok: false, error: "无法解析会话工作目录" }
+
+  if (live) {
+    pushUiLog("SDK", "INFO", `[${sessionKey}] 换模：停止当前 run，准备 Resume → ${mid}`)
+    await releaseSession(live)
+    broadcastSdkSessionStatus()
+  }
+
+  const r = await launchSdkAgent({
+    sessionKey,
+    chatType: live?.chatType ?? "p2p",
+    workspaceDir,
+    apiKey: resource.apiKey,
+    model: mid,
+    modelParams: params,
+    keepSession: live?.keepSession ?? channel?.keepSession ?? true,
+    persistentPoll: live?.persistentPoll ?? (channel?.keepSession !== false && (channel?.persistentPoll ?? true)),
+    senderOpenId: live?.senderOpenId ?? resumable?.senderOpenId,
+    chatName: live?.chatName,
+  })
+  if (!r.ok) return { ok: false, error: r.error || "Resume 换模失败" }
+  return { ok: true }
 }
 
 /** 显式重置会话上下文（/reset）：丢弃 resume 映射，下条消息全新会话 */

@@ -23,10 +23,12 @@ import {
   Search,
   X,
   Plus,
+  Cpu,
 } from "lucide-react"
 import logoUrl from "../assets/logo.png"
 import TitleBar from "../components/TitleBar"
 import { modelSlug } from "../model-utils"
+import { disambiguatePathLabel } from "../../shared/path-label"
 
 interface Props {
   /** 打开设置页，可指定初始 Tab */
@@ -51,6 +53,8 @@ export default function Dashboard({ onSettings, active }: Props) {
   const [showQueue, setShowQueue] = useState(false)
   const [showChannels, setShowChannels] = useState(false)
   const [expandedSession, setExpandedSession] = useState<string | null>(null)
+  const [modelMenuSession, setModelMenuSession] = useState<string | null>(null)
+  const [quickModels, setQuickModels] = useState<{ model: string; modelParams?: string; label?: string }[]>([])
   const [cliStatus, setCliStatus] = useState<"checking" | "installed" | "missing" | "need-login">("checking")
   const [cliLoggingIn, setCliLoggingIn] = useState(false)
   const [cliMessage, setCliMessage] = useState("")
@@ -61,6 +65,37 @@ export default function Dashboard({ onSettings, active }: Props) {
   const [onboardDismissed, setOnboardDismissed] = useState(false)
   const [wsTabs, setWsTabs] = useState<{ current: string; favorites: string[] }>({ current: "", favorites: [] })
   const [wsSwitching, setWsSwitching] = useState("")
+  const [modelTabs, setModelTabs] = useState<{ model: string; modelParams?: string; label?: string }[]>([])
+  const [modelSwitching, setModelSwitching] = useState("")
+  const [activeSessionModel, setActiveSessionModel] = useState<{ model: string; modelParams?: string } | null>(null)
+  const [modelFavPickerOpen, setModelFavPickerOpen] = useState(false)
+  const [modelFavLoading, setModelFavLoading] = useState(false)
+  const [modelFavOptions, setModelFavOptions] = useState<{ model: string; modelParams?: string; label?: string; used?: boolean }[]>([])
+  const [modelFavQuery, setModelFavQuery] = useState("")
+  const modelFavPickerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!actionError) return
+    const t = window.setTimeout(() => setActionError(""), 4000)
+    return () => window.clearTimeout(t)
+  }, [actionError])
+
+  useEffect(() => {
+    if (!modelFavPickerOpen) return
+    const onDoc = (e: MouseEvent) => {
+      if (modelFavPickerRef.current && !modelFavPickerRef.current.contains(e.target as Node)) {
+        setModelFavPickerOpen(false)
+        setModelFavQuery("")
+      }
+    }
+    document.addEventListener("mousedown", onDoc)
+    return () => document.removeEventListener("mousedown", onDoc)
+  }, [modelFavPickerOpen])
+
+  const refreshModelTabs = useCallback(async () => {
+    const r = await window.electronAPI.listQuickModels()
+    if (r.ok) setModelTabs(r.models)
+  }, [])
 
   const refreshOnboard = useCallback(async () => {
     const cfg = await window.electronAPI.getConfig()
@@ -82,7 +117,8 @@ export default function Dashboard({ onSettings, active }: Props) {
       void window.electronAPI.saveConfig({ favoriteWorkspaces: favorites })
     }
     setWsTabs({ current, favorites })
-  }, [])
+    await refreshModelTabs()
+  }, [refreshModelTabs])
 
   // 从设置页返回时立即刷新清单状态
   useEffect(() => {
@@ -93,7 +129,7 @@ export default function Dashboard({ onSettings, active }: Props) {
     if (dir === wsTabs.current || wsSwitching) return
     setWsSwitching(dir)
     try {
-      const r = await window.electronAPI.applyWorkspaceSwitch(dir, false)
+      const r = await window.electronAPI.applyWorkspaceSwitch(dir, false, true)
       if (r.ok) {
         // 新旧目录都留在常用里，切换不丢标签
         setWsTabs((t) => {
@@ -127,8 +163,140 @@ export default function Dashboard({ onSettings, active }: Props) {
     setWsTabs((t) => ({ ...t, favorites }))
     await window.electronAPI.saveConfig({ favoriteWorkspaces: favorites })
   }
+
   const [sessionList, setSessionList] = useState<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string; workspaceDir?: string; source?: "cli" | "sdk"; model?: string; modelParams?: string }[]>([])
   const [sessionDiag, setSessionDiag] = useState<Record<string, { running: boolean; resumeAgentId?: string; resumeUpdatedAt?: number; lastRun?: { status: string; endedAt: number; durationMs?: number; error?: string }; lastReplyAt: number | null }>>({})
+
+  /** 首页切模型目标：仅当前工作目录下的会话；无则写 pending key，禁止落到其他目录会话 */
+  const resolveModelTargetSession = useCallback(async (): Promise<string | null> => {
+    const ws = wsTabs.current
+    if (!ws?.trim()) return null
+    const hit = sessionList.find((s) => s.workspaceDir && s.workspaceDir === ws)
+    if (hit) return hit.sessionKey
+    const cfg = await window.electronAPI.getConfig()
+    const ch = (cfg.channels ?? []).find((c) => c.enabled && c.mainUserEnabled && c.mainUserChatId?.trim())
+    if (!ch) return null
+    return `${ch.id}|${ch.mainUserChatId}::${ws}`
+  }, [sessionList, wsTabs.current])
+
+  const switchSessionModel = async (m: { model: string; modelParams?: string; label?: string }) => {
+    const key = `${m.model}\0${m.modelParams ?? ""}`
+    if (modelSwitching) return
+    setModelSwitching(key)
+    try {
+      const sk = await resolveModelTargetSession()
+      if (!sk) {
+        setActionError("无法解析目标会话：请先有活跃会话，或绑定主用户并配置工作目录")
+        return
+      }
+      const r = await window.electronAPI.setSessionModel(sk, m.model, m.modelParams)
+      if (!r.ok) {
+        setActionError(r.error ?? "切换模型失败")
+        return
+      }
+      setActionError("")
+      setActiveSessionModel({ model: m.model, modelParams: m.modelParams })
+      await refreshModelTabs()
+    } finally {
+      setModelSwitching("")
+    }
+  }
+
+  const addFavoriteModel = async () => {
+    setActionError("")
+    if (modelFavPickerOpen) {
+      setModelFavPickerOpen(false)
+      setModelFavQuery("")
+      return
+    }
+    setModelFavPickerOpen(true)
+    setModelFavQuery("")
+    setModelFavLoading(true)
+    try {
+      const cfg = await window.electronAPI.getConfig()
+      const favs = cfg.favoriteModels ?? []
+      const favKeys = new Set(favs.map((f) => `${f.model}\0${f.modelParams ?? ""}`))
+      const out: { model: string; modelParams?: string; label?: string; used?: boolean }[] = []
+      const seen = new Set<string>()
+      const push = (m: { model: string; modelParams?: string; label?: string }, used?: boolean) => {
+        if (!m.model) return
+        const k = `${m.model}\0${m.modelParams ?? ""}`
+        if (favKeys.has(k) || seen.has(k)) return
+        seen.add(k)
+        out.push({ model: m.model, modelParams: m.modelParams, label: m.label || modelSlug(m.model, m.modelParams), used })
+      }
+
+      const quick = await window.electronAPI.listQuickModels()
+      if (quick.ok) {
+        for (const m of quick.models) push(m, true)
+      }
+      for (const s of sessionList) {
+        if (s.model) push({ model: s.model, modelParams: s.modelParams, label: modelSlug(s.model, s.modelParams) }, true)
+      }
+      if (activeSessionModel?.model) {
+        push({ ...activeSessionModel, label: modelSlug(activeSessionModel.model, activeSessionModel.modelParams) }, true)
+      }
+
+      const sdkRes = (cfg.agentResources ?? []).find((r) => r.type === "sdk" && r.apiKey?.trim())
+      if (sdkRes?.apiKey) {
+        const r = await window.electronAPI.listSdkModels(sdkRes.apiKey, activeSessionModel?.model, activeSessionModel?.modelParams)
+        if (r.ok) {
+          for (const m of r.models) {
+            push({ model: m.id, modelParams: m.params, label: m.label }, false)
+          }
+        }
+      } else {
+        const r = await window.electronAPI.listModels()
+        if (r.ok) {
+          for (const m of r.models) push({ model: m.id, modelParams: "", label: m.label || m.id }, false)
+        }
+      }
+
+      // 用过的置顶
+      out.sort((a, b) => Number(!!b.used) - Number(!!a.used))
+      setModelFavOptions(out)
+      if (out.length === 0) {
+        setModelFavPickerOpen(false)
+        setActionError(favs.length > 0 ? "可用模型均已在常用中" : "暂无模型可收藏：请先配置 Agent SDK Key 或产生过会话")
+      }
+    } finally {
+      setModelFavLoading(false)
+    }
+  }
+
+  const pickFavoriteModel = async (m: { model: string; modelParams?: string; label?: string }) => {
+    setActionError("")
+    const cfg = await window.electronAPI.getConfig()
+    const favs = [...(cfg.favoriteModels ?? [])]
+    if (favs.some((f) => f.model === m.model && (f.modelParams ?? "") === (m.modelParams ?? ""))) {
+      setActionError("该模型已在常用列表中")
+      setModelFavPickerOpen(false)
+      setModelFavQuery("")
+      return
+    }
+    favs.push({ model: m.model, modelParams: m.modelParams, label: m.label || modelSlug(m.model, m.modelParams) })
+    await window.electronAPI.saveConfig({ favoriteModels: favs })
+    setModelFavPickerOpen(false)
+    setModelFavQuery("")
+    await refreshModelTabs()
+  }
+
+  const removeFavoriteModel = async (m: { model: string; modelParams?: string }) => {
+    const cfg = await window.electronAPI.getConfig()
+    const favs = (cfg.favoriteModels ?? []).filter(
+      (f) => !(f.model === m.model && (f.modelParams ?? "") === (m.modelParams ?? "")),
+    )
+    await window.electronAPI.saveConfig({ favoriteModels: favs })
+    await refreshModelTabs()
+  }
+
+  useEffect(() => {
+    const ws = wsTabs.current
+    const hit = sessionList.find((s) => s.workspaceDir && ws && s.workspaceDir === ws && s.model)
+      || sessionList.find((s) => s.model)
+    if (hit?.model) setActiveSessionModel({ model: hit.model, modelParams: hit.modelParams })
+  }, [sessionList, wsTabs.current])
+
   const [exportingDiag, setExportingDiag] = useState(false)
   const [logFilter, setLogFilter] = useState("")
   const [logAtBottom, setLogAtBottom] = useState(true)
@@ -401,7 +569,12 @@ export default function Dashboard({ onSettings, active }: Props) {
   const getSessionLabel = (msg: { sessionKey?: string; chatType?: string }) => {
     if (!msg.sessionKey) return "未知会话"
     const parts = msg.sessionKey.split("::")
-    const dir = parts[1]?.split(/[\\/]/).pop() || ""
+    const wsDir = parts[1] || ""
+    const peers = [
+      ...sessionList.map((s) => s.workspaceDir),
+      ...queueMessages.map((m) => m.sessionKey?.split("::")[1]),
+    ].filter((d): d is string => !!d)
+    const dir = wsDir ? disambiguatePathLabel(wsDir, peers.length ? peers : [wsDir]) : ""
     const chatLabel = msg.chatType === "group" ? "群聊" : msg.chatType === "task" ? "定时" : "私聊"
     return `${chatLabel}${dir ? ` 📁${dir}` : ""}`
   }
@@ -417,15 +590,9 @@ export default function Dashboard({ onSettings, active }: Props) {
   const isStarting = starting || !!status.starting
 
   const wsTabDirs = [...new Set([wsTabs.current, ...wsTabs.favorites])].filter(Boolean)
-  const wsLastSegment = (dir: string) => dir.split(/[\\/]/).filter(Boolean).pop() ?? dir
   /** 末段目录名重名时附加父目录区分（如 cp-scheduling·bugfix） */
-  const wsTabLabel = (dir: string) => {
-    const parts = dir.split(/[\\/]/).filter(Boolean)
-    const name = parts.pop() ?? dir
-    const dup = wsTabDirs.some((d) => d !== dir && wsLastSegment(d) === name)
-    const parent = parts.pop()
-    return dup && parent ? `${name}·${parent}` : name
-  }
+  const wsTabLabel = (dir: string) => disambiguatePathLabel(dir, wsTabDirs)
+  const sessionWsDirs = sessionList.map((s) => s.workspaceDir).filter((d): d is string => !!d)
 
   return (
     <div className="flex h-screen flex-col">
@@ -629,6 +796,103 @@ export default function Dashboard({ onSettings, active }: Props) {
         </button>
       </div>
 
+      {/* Model quick-switch tabs（仅本会话） */}
+      <div className="relative mx-6 mb-3 flex flex-wrap items-center gap-1.5" ref={modelFavPickerRef}>
+        <Cpu size={13} className="shrink-0 text-gray-500" />
+        {modelTabs.map((m) => {
+          const key = `${m.model}\0${m.modelParams ?? ""}`
+          const label = (m.label || modelSlug(m.model, m.modelParams)).slice(0, 28)
+          const isCurrent = !!activeSessionModel
+            && activeSessionModel.model === m.model
+            && (activeSessionModel.modelParams ?? "") === (m.modelParams ?? "")
+          return (
+            <span key={key} title={`切换本会话模型: ${m.model}`}
+              onClick={() => void switchSessionModel(m)}
+              className={`group inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs transition ${
+                isCurrent ? "border-violet-500/70 bg-violet-950/40 text-violet-200"
+                : "cursor-pointer border-gray-700 text-gray-400 hover:border-violet-500 hover:text-violet-300"}`}
+            >
+              {modelSwitching === key && <Loader2 size={11} className="animate-spin" />}
+              {label}
+              {!isCurrent && (
+                <button onClick={(e) => { e.stopPropagation(); void removeFavoriteModel(m) }}
+                  className="hidden text-gray-600 hover:text-red-400 group-hover:inline-flex" title="从常用移除">
+                  <X size={11} />
+                </button>
+              )}
+            </span>
+          )
+        })}
+        <button onClick={() => void addFavoriteModel()}
+          className={`inline-flex items-center gap-0.5 rounded-md border border-dashed px-2 py-1 text-xs transition ${
+            modelFavPickerOpen ? "border-violet-500 text-violet-300" : "border-gray-700 text-gray-500 hover:border-violet-500 hover:text-violet-300"}`}
+          title="从模型列表添加常用（用过的优先；点击标签切换本会话模型）">
+          <Plus size={11} />常用模型
+        </button>
+        {modelFavPickerOpen && (
+          <div className="absolute left-0 top-full z-30 mt-1 flex max-h-64 w-72 flex-col overflow-hidden rounded-lg border border-gray-700 bg-gray-900 shadow-xl">
+            <div className="sticky top-0 border-b border-gray-800 bg-gray-900 p-2">
+              <div className="relative flex items-center">
+                <Search size={12} className="pointer-events-none absolute left-2 text-gray-600" />
+                <input
+                  autoFocus
+                  value={modelFavQuery}
+                  onChange={(e) => setModelFavQuery(e.target.value)}
+                  onClick={(e) => e.stopPropagation()}
+                  placeholder="搜索模型…"
+                  className="w-full rounded border border-gray-700 bg-gray-950 py-1.5 pl-7 pr-2 text-xs text-gray-200 outline-none placeholder:text-gray-600 focus:border-violet-500"
+                />
+              </div>
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto py-1">
+              {modelFavLoading && (
+                <div className="flex items-center gap-2 px-3 py-2 text-xs text-gray-500">
+                  <Loader2 size={12} className="animate-spin" />加载模型列表…
+                </div>
+              )}
+              {!modelFavLoading && (() => {
+                const q = modelFavQuery.trim().toLowerCase()
+                const filtered = q
+                  ? modelFavOptions.filter((m) =>
+                      (m.label || "").toLowerCase().includes(q)
+                      || m.model.toLowerCase().includes(q)
+                      || (m.modelParams || "").toLowerCase().includes(q))
+                  : modelFavOptions
+                const used = filtered.filter((m) => m.used)
+                const rest = filtered.filter((m) => !m.used)
+                if (filtered.length === 0) {
+                  return <div className="px-3 py-2 text-xs text-gray-500">{modelFavOptions.length === 0 ? "暂无可添加的模型" : "无匹配模型"}</div>
+                }
+                return (
+                  <>
+                    {used.length > 0 && (
+                      <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-gray-600">用过的</div>
+                    )}
+                    {used.map((m) => (
+                      <button key={`u:${m.model}\0${m.modelParams ?? ""}`} type="button"
+                        className="block w-full truncate px-3 py-1.5 text-left text-xs text-violet-200 hover:bg-gray-800"
+                        onClick={() => void pickFavoriteModel(m)}>
+                        {m.label || m.model}
+                      </button>
+                    ))}
+                    {rest.length > 0 && (
+                      <div className={`px-3 py-1 text-[10px] uppercase tracking-wide text-gray-600 ${used.length ? "mt-1 border-t border-gray-800" : ""}`}>全部模型</div>
+                    )}
+                    {rest.map((m) => (
+                      <button key={`a:${m.model}\0${m.modelParams ?? ""}`} type="button"
+                        className="block w-full truncate px-3 py-1.5 text-left text-xs text-gray-300 hover:bg-gray-800"
+                        onClick={() => void pickFavoriteModel(m)}>
+                        {m.label || m.model}
+                      </button>
+                    ))}
+                  </>
+                )
+              })()}
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Onboarding checklist */}
       {onboard && !onboardDismissed && !(onboard.workspaceReady && onboard.agentReady && onboard.channelReady) && (
         <div className="mx-6 mb-3 rounded-xl border border-blue-800/50 bg-blue-950/20 p-4">
@@ -724,10 +988,68 @@ export default function Dashboard({ onSettings, active }: Props) {
                       <span className={`h-2 w-2 rounded-full ${s.chatType === "group" ? "bg-green-400" : s.chatType === "task" ? "bg-yellow-400" : "bg-blue-400"}`} />
                       <span className="truncate text-xs text-gray-300" title={s.sessionKey}>
                         {s.chatType === "group" ? "群聊" : s.chatType === "task" ? "定时" : "私聊"} {s.chatName || (s.sessionKey.length > 20 ? s.sessionKey.slice(0, 20) + "…" : s.sessionKey)}
-                        {s.workspaceDir && s.chatType === "p2p" && <span className="ml-1 text-[10px] text-gray-500" title={s.workspaceDir}>📁{s.workspaceDir.split(/[\\/]/).pop()}</span>}
+                        {s.workspaceDir && s.chatType === "p2p" && (
+                          <span className="ml-1 text-[10px] text-gray-500" title={s.workspaceDir}>
+                            📁{disambiguatePathLabel(s.workspaceDir, sessionWsDirs)}
+                          </span>
+                        )}
                       </span>
                       <span className="text-xs text-gray-600">PID:{s.pid || "sdk"}</span>
-                      {s.model && <span className="truncate text-[10px] text-violet-400" title={modelSlug(s.model, s.modelParams)}>{modelSlug(s.model, s.modelParams)}</span>}
+                      {s.model && (
+                        <span className="relative" onClick={(e) => e.stopPropagation()}>
+                          <button
+                            type="button"
+                            className="truncate text-[10px] text-violet-400 hover:text-violet-300"
+                            title="切换本会话模型"
+                            onClick={async () => {
+                              if (modelMenuSession === s.sessionKey) { setModelMenuSession(null); return }
+                              const r = await window.electronAPI.listQuickModels()
+                              if (r.ok) setQuickModels(r.models)
+                              setModelMenuSession(s.sessionKey)
+                            }}
+                          >
+                            {modelSlug(s.model, s.modelParams)} ▾
+                          </button>
+                          {modelMenuSession === s.sessionKey && (
+                            <div className="absolute left-0 top-full z-20 mt-1 max-h-48 w-48 overflow-auto rounded border border-gray-700 bg-gray-900 py-1 shadow-lg">
+                              {quickModels.length === 0 && (
+                                <div className="px-2 py-1 text-[10px] text-gray-500">暂无常用/最近模型，先在设置收藏或 /model ls</div>
+                              )}
+                              {quickModels.map((m) => (
+                                <button
+                                  key={`${m.model}\0${m.modelParams ?? ""}`}
+                                  type="button"
+                                  className="block w-full truncate px-2 py-1 text-left text-[10px] text-gray-300 hover:bg-gray-800"
+                                  onClick={async () => {
+                                    setModelMenuSession(null)
+                                    const r = await window.electronAPI.setSessionModel(s.sessionKey, m.model, m.modelParams)
+                                    if (!r.ok) window.alert(r.error || "切换失败")
+                                  }}
+                                >
+                                  {m.label || m.model}
+                                </button>
+                              ))}
+                              {s.model && (
+                                <button
+                                  type="button"
+                                  className="mt-1 block w-full border-t border-gray-700 px-2 py-1 text-left text-[10px] text-amber-400 hover:bg-gray-800"
+                                  onClick={async () => {
+                                    const cfg = await window.electronAPI.getConfig()
+                                    const favs = [...(cfg.favoriteModels ?? [])]
+                                    if (!favs.some((f) => f.model === s.model && (f.modelParams ?? "") === (s.modelParams ?? ""))) {
+                                      favs.push({ model: s.model!, modelParams: s.modelParams, label: modelSlug(s.model, s.modelParams) })
+                                      await window.electronAPI.saveConfig({ favoriteModels: favs })
+                                    }
+                                    setModelMenuSession(null)
+                                  }}
+                                >
+                                  ☆ 收藏当前模型
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </span>
+                      )}
                       {processingCount > 0 && (
                         <span className="ml-1 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-blue-500/90 px-1 text-[10px] font-bold text-gray-900" title={`处理中 ${processingCount} 条`}>
                           {processingCount}
@@ -853,8 +1175,12 @@ export default function Dashboard({ onSettings, active }: Props) {
 
       {/* Error message */}
       {actionError && (
-        <div className="mx-6 mt-3 rounded-lg border border-red-800 bg-red-950/50 px-4 py-2 text-sm text-red-300">
-          {actionError}
+        <div className="mx-6 mt-3 flex items-start gap-2 rounded-lg border border-red-800 bg-red-950/50 px-4 py-2 text-sm text-red-300">
+          <span className="min-w-0 flex-1">{actionError}</span>
+          <button type="button" onClick={() => setActionError("")}
+            className="shrink-0 rounded px-1 text-red-400 hover:bg-red-900/50 hover:text-red-200" title="关闭">
+            <X size={14} />
+          </button>
         </div>
       )}
 

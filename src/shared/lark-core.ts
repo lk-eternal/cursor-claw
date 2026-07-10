@@ -183,6 +183,11 @@ export class LarkSender {
       elements.push({
         tag: "input",
         name: "custom_input",
+        input_type: "multiline_text",
+        width: "fill",
+        rows: 4,
+        auto_resize: true,
+        max_rows: 8,
         placeholder: { tag: "plain_text", content: input.placeholder.slice(0, 100) },
         label_position: "top",
         behaviors: [{ type: "callback", value: input.value }],
@@ -254,6 +259,11 @@ export class LarkSender {
 
   async sendMessage(text: string, replyMessageId?: string, chatId?: string, title?: string): Promise<string | undefined> {
     if (replyMessageId && !replyMessageId.startsWith("internal_")) { return this.replyMessage(replyMessageId, text, title); }
+    // internal_ 不可 reply：必须显式 chatId，禁止回落到 this.chatId（主用户）造成窜台
+    if (replyMessageId?.startsWith("internal_") && !chatId) {
+      this.log("WARN", `internal 消息回复缺少 chatId，已拒绝默认私聊兜底 (${replyMessageId})`);
+      return undefined;
+    }
     const targetChatId = chatId ?? this.chatId;
     if (!targetChatId) { this.log("WARN", "无发送目标"); return undefined; }
     try {
@@ -269,16 +279,17 @@ export class LarkSender {
   }
 
   async addReaction(messageId: string, emojiType: string = "Get"): Promise<boolean> {
+    if (!messageId || messageId.startsWith("internal_")) return false;
     try {
       const res = await this.client.im.messageReaction.create({
         path: { message_id: messageId },
         data: { reaction_type: { emoji_type: emojiType } },
       });
       if ((res as any).code === 0 || (res as any).code === undefined) return true;
-      this.log("WARN", `添加表情失败: code=${(res as any).code}`);
+      this.log("WARN", `添加表情失败: code=${(res as any).code} msg=${messageId}`);
       return false;
     } catch (e: any) {
-      this.log("WARN", `添加表情异常: ${e?.message ?? e}`);
+      this.log("WARN", `添加表情异常: ${e?.message ?? e} msg=${messageId}`);
       return false;
     }
   }
@@ -299,6 +310,10 @@ export class LarkSender {
         } catch (e: any) { this.log("WARN", `图片回复退避 (${replyMessageId}): ${e?.message}`); }
       }
       if (!sent) {
+        if (replyMessageId?.startsWith("internal_") && !chatId) {
+          this.log("WARN", `internal 图片回复缺少 chatId，已拒绝默认私聊兜底 (${replyMessageId})`);
+          return;
+        }
         const targetChatId = chatId ?? this.chatId;
         if (!targetChatId) { this.log("WARN", "无发送目标"); return; }
         await this.client.im.message.create({ params: { receive_id_type: "chat_id" as any }, data: { receive_id: targetChatId, content, msg_type: "image" } });
@@ -324,6 +339,10 @@ export class LarkSender {
         } catch (e: any) { this.log("WARN", `文件回复退避 (${replyMessageId}): ${e?.message}`); }
       }
       if (!sent) {
+        if (replyMessageId?.startsWith("internal_") && !chatId) {
+          this.log("WARN", `internal 文件回复缺少 chatId，已拒绝默认私聊兜底 (${replyMessageId})`);
+          return;
+        }
         const targetChatId = chatId ?? this.chatId;
         if (!targetChatId) { this.log("WARN", "无发送目标"); return; }
         await this.client.im.message.create({ params: { receive_id_type: "chat_id" as any }, data: { receive_id: targetChatId, content, msg_type: "file" } });
@@ -567,7 +586,7 @@ export class LarkSender {
     onCardAction?: (event: LarkCardActionEvent) => Promise<unknown> | unknown,
     lifecycle?: LarkWsLifecycle,
   ): Promise<void> {
-    const eventDispatcher = new Lark.EventDispatcher(encryptKey ? { encryptKey } : {}).register({
+    const eventDispatcher = new Lark.EventDispatcher({ encryptKey: encryptKey || undefined, logger: SILENT_LOGGER, loggerLevel: Lark.LoggerLevel.error }).register({
       "im.message.receive_v1": (data) => {
         try {
           const msg = (data as any)?.message;
@@ -610,6 +629,7 @@ export class LarkSender {
     this.wsClient = new Lark.WSClient({
       appId,
       appSecret,
+      logger: SILENT_LOGGER,
       loggerLevel: Lark.LoggerLevel.error,
       autoReconnect: true,
       wsConfig: { pingTimeout: 10 },

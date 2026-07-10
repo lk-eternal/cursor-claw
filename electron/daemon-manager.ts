@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process"
+import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import { randomUUID, randomBytes } from "node:crypto"
 import * as http from "node:http"
 import * as path from "node:path"
@@ -23,7 +23,8 @@ import {
   getAgentChildPid, getSessionAgentCount as _getCliSessionCount, getIndependentTaskStatuses as _getCliTaskStatuses,
   type ChatType,
 } from "./agent-launcher"
-import { stopAllSdkSessions, resetSdkSessionContext, getSdkSessionCount, getSdkSessionList, checkSdkApiKey, listSdkModels, getSdkSessionDiagnostics, getResumableSummary } from "./agent-sdk"
+import { stopAllSdkSessions, resetSdkSessionContext, getSdkSessionCount, getSdkSessionList, checkSdkApiKey, listSdkModels, getSdkSessionDiagnostics, getResumableSummary, switchSdkSessionModel } from "./agent-sdk"
+import { initSessionModelStore, listQuickModels } from "../src/shared/session-model-store.js"
 import { registerFeishuApp } from "./feishu-register"
 import {
   setDaemonPort,
@@ -1046,7 +1047,11 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           const wsArgs = cmdTokens.slice(1)
           if (wsArgs.length === 0 || wsArgs[0] === "info") {
             const cfg = getConfig()
-            await reply(true, `📂 当前工作目录: ${cfg.workspaceDir || "(未配置)"}`)
+            await reply(true, (() => {
+              const d = cfg.workspaceDir || "(未配置)"
+              const b = cfg.workspaceDir ? readGitBranch(cfg.workspaceDir) : undefined
+              return b ? `📂 当前工作目录: ${d}\n🌿 分支: ${b}` : `📂 当前工作目录: ${d}`
+            })())
           } else if (wsArgs[0] === "set" && wsArgs.length >= 2) {
             const newDir = wsArgs.slice(1).join(" ").trim()
             const cfg = getConfig()
@@ -1057,7 +1062,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
               const wsResult = await applyWorkspaceSwitch(newDir, false)
               if (wsResult.ok) {
                 broadcastLog(`[指令 /workspace] 已切换到 ${newDir}`, "INFO")
-                await reply(true, `✅ 工作目录已切换到: ${newDir} 会话上下文已切换`)
+                await reply(true, formatWorkspaceSwitchText(newDir))
               } else {
                 broadcastLog(`[指令 /workspace] 切换失败: ${wsResult.error}`, "ERROR")
                 await reply(false, `❌ 切换失败: ${wsResult.error}`)
@@ -1104,9 +1109,18 @@ async function checkAndExecutePendingCommands(): Promise<void> {
             const parent = parts.pop()
             return { label: `📂 ${dup && parent ? `${name}·${parent}` : name}`, cmd: `/workspace set ${d}` }
           })
-          const helpBtns = isAdmin ? [...common, ...adminOnly, ...wsBtns] : common
+          const favModels = isAdmin ? (getConfig().favoriteModels ?? []) : []
+          let modelBtns: { label: string; cmd: string }[] = []
+          try {
+            const { listQuickModels } = await import("../src/shared/session-model-store.js")
+            modelBtns = listQuickModels(favModels, 6).map((m) => ({
+              label: `⚡ ${(m.label || m.model)}`.slice(0, 20),
+              cmd: `/model use ${m.model}`,
+            }))
+          } catch { /* ignore */ }
+          const helpBtns = isAdmin ? [...common, ...adminOnly, ...wsBtns, ...modelBtns] : common
           const body = isAdmin
-            ? "💡 点按钮执行，或输入指令（子命令用文字，如 /chat new <描述>、/model set <序号>）；📂 按钮一键切换工作目录"
+            ? "💡 点按钮执行；📂 切换工作目录；⚡ 切换本会话模型（不改通道默认）"
             : "💡 点按钮执行，或直接输入指令"
           await reply(true, body, helpBtns)
           break
@@ -1144,7 +1158,7 @@ export interface ConfigSaveResult {
 /**
  * 切换工作目录：可选地停止旧会话，然后热更新到新目录。
  */
-export async function applyWorkspaceSwitch(workspaceDir: string, stopOldSessions: boolean, skipDaemonSync = false): Promise<{ ok: boolean; error?: string }> {
+export async function applyWorkspaceSwitch(workspaceDir: string, stopOldSessions: boolean, skipDaemonSync = false, notifyMain = false): Promise<{ ok: boolean; error?: string }> {
   const w = workspaceDir.trim()
   if (!w) return { ok: false, error: "工作目录为空" }
 
@@ -1172,12 +1186,56 @@ export async function applyWorkspaceSwitch(workspaceDir: string, stopOldSessions
 
   await injectWorkspaceMcpAndRules()
   broadcastStatus(await getDaemonStatus())
+  if (notifyMain) void notifyMainUsersWorkspaceSwitched(w)
   return { ok: true }
 }
 
-/**
- * 保存配置；若工作目录变更且旧目录有活跃会话，返回会话列表供渲染进程展示确认弹窗。
- */
+function readGitBranch(dir: string): string | undefined {
+  try {
+    const r = spawnSync("git", ["-C", dir, "rev-parse", "--abbrev-ref", "HEAD"], {
+      encoding: "utf8",
+      timeout: 3000,
+      windowsHide: true,
+    })
+    const b = (r.stdout || "").trim()
+    if (r.status === 0 && b && b !== "HEAD") return b
+    if (r.status === 0 && b === "HEAD") {
+      const sh = spawnSync("git", ["-C", dir, "rev-parse", "--short", "HEAD"], {
+        encoding: "utf8",
+        timeout: 3000,
+        windowsHide: true,
+      })
+      const sha = (sh.stdout || "").trim()
+      return sha ? `HEAD(${sha})` : "HEAD"
+    }
+  } catch { /* not a git repo */ }
+  return undefined
+}
+
+function formatWorkspaceSwitchText(dir: string): string {
+  const label = dir.split(/[\\/]/).filter(Boolean).pop() ?? dir
+  const branch = readGitBranch(dir)
+  const branchPart = branch ? ` · 🌿 ${branch}` : ""
+  return `✅ 工作目录已切换到: ${dir}\n📂 ${label}${branchPart} · 会话上下文已切换`
+}
+
+async function notifyMainUsersWorkspaceSwitched(dir: string): Promise<void> {
+  const lock = readLockFile()
+  if (!lock?.port) return
+  const text = formatWorkspaceSwitchText(dir)
+  for (const c of getConfig().channels ?? []) {
+    if (!c.enabled || !c.mainUserEnabled) continue
+    const chatId = c.mainUserChatId?.trim()
+    if (!chatId) continue
+    const sessionKey = `${c.id}|${chatId}`
+    try {
+      await httpPost(`http://127.0.0.1:${lock.port}/api/send-text`, { text, session_key: sessionKey }, 5000)
+    } catch (e: unknown) {
+      broadcastLog(`[Workspace] 切换通知发送失败(${c.name || c.id}): ${e instanceof Error ? e.message : e}`, "WARN")
+    }
+  }
+}
+
 /** 通道中影响 Daemon 连接的字段子集（变更后才需要重启 Daemon）；配置类字段走热更新，不入此名单 */
 function daemonRelevantChannelView(channels: MessageChannel[]): string {
   return JSON.stringify(channels.map((c) => ({
@@ -1331,10 +1389,11 @@ async function autoStartDaemonOnLaunch(): Promise<void> {
 
 export function initDaemonManager(): void {
   process.env.APP_DATA_DIR = app.getPath("userData")
+  initSessionModelStore(app.getPath("userData"))
   runLegacyConfigMigration()
   seedBuiltins()
   initSessionDispatcher()
-  ipcMain.handle("config:apply-workspace-switch", (_, workspaceDir: string, stopOldSessions: boolean) => applyWorkspaceSwitch(workspaceDir, stopOldSessions))
+  ipcMain.handle("config:apply-workspace-switch", (_, workspaceDir: string, stopOldSessions: boolean, notifyMain?: boolean) => applyWorkspaceSwitch(workspaceDir, stopOldSessions, false, !!notifyMain))
   ipcMain.handle("daemon:get-log-buffer", () => getLogBuffer())
   ipcMain.handle("agent:stop", async () => { await stopAgent(); return { ok: true } })
   ipcMain.handle("agent:sessions", () => getSessionAgentList())
@@ -1476,6 +1535,13 @@ export function initDaemonManager(): void {
   ipcMain.handle("feishu:app-info", (_e, appId: string, appSecret: string) =>
     fetchLarkBotInfo(appId?.trim() ?? "", appSecret?.trim() ?? ""))
   ipcMain.handle("agent:stop-session", (_e, sessionKey: string) => { stopSessionAgent(sessionKey); return { ok: true } })
+  ipcMain.handle("session:set-model", async (_e, sessionKey: string, model: string, modelParams?: string) => {
+    return switchSdkSessionModel(sessionKey, model, modelParams)
+  })
+  ipcMain.handle("session:list-quick-models", () => {
+    initSessionModelStore(app.getPath("userData"))
+    return { ok: true as const, models: listQuickModels(getConfig().favoriteModels ?? [], 8) }
+  })
   ipcMain.handle("agent:stop-all-sessions", () => { stopAllSessionAgents(); return { ok: true } })
 
   ipcMain.handle("temp-conn:start", async (_e, appId: string, appSecret: string) => {
