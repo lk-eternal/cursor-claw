@@ -561,11 +561,26 @@ export default function Dashboard({ onSettings, active }: Props) {
           <StatusCard
             icon={MessageSquare}
             label="消息队列"
-            value={String(status.queueLength ?? 0)}
-            color={status.queueLength ? "yellow" : "gray"}
-            sub={status.queueLength
-              ? `排队 ${status.queueCounts?.pending ?? 0} · 处理中 ${status.queueCounts?.processing ?? 0}`
-              : "待处理消息"}
+            value={(() => {
+              const processing = status.queueCounts?.processing ?? 0
+              const pending = status.queueCounts?.pending ?? 0
+              if (processing === 0 && pending === 0) return "0"
+              return (
+                <span className="flex items-baseline gap-2.5">
+                  {processing > 0 && (
+                    <span className="flex items-baseline gap-1 text-blue-400" title="处理中">
+                      {processing}<span className="text-[10px] text-blue-500/70">处理中</span>
+                    </span>
+                  )}
+                  {pending > 0 && (
+                    <span className="flex items-baseline gap-1 text-yellow-400" title="排队中">
+                      {pending}<span className="text-[10px] text-yellow-500/70">排队</span>
+                    </span>
+                  )}
+                </span>
+              )
+            })()}
+            color={(status.queueCounts?.processing ?? 0) > 0 ? "blue" : (status.queueCounts?.pending ?? 0) > 0 ? "yellow" : "gray"}
             action={status.queueLength ? (
               <button
                 onClick={handleClearQueue}
@@ -695,7 +710,8 @@ export default function Dashboard({ onSettings, active }: Props) {
           <div className="space-y-1.5">
             {sessionList.map((s) => {
               const pendingMsgs = getSessionQueueMessages(s.sessionKey)
-              const hasPending = pendingMsgs.length > 0
+              const processingCount = pendingMsgs.filter((m) => m.status === "processing").length
+              const queuedCount = pendingMsgs.length - processingCount
               const isExpanded = expandedSession === s.sessionKey
               return (
                 <div key={s.sessionKey}>
@@ -710,9 +726,14 @@ export default function Dashboard({ onSettings, active }: Props) {
                         {s.workspaceDir && s.chatType === "p2p" && <span className="ml-1 text-[10px] text-gray-500" title={s.workspaceDir}>📁{s.workspaceDir.split(/[\\/]/).pop()}</span>}
                       </span>
                       <span className="text-xs text-gray-600">PID:{s.pid}</span>
-                      {hasPending && (
-                        <span className="ml-1 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-yellow-500/90 px-1 text-[10px] font-bold text-gray-900">
-                          {pendingMsgs.length}
+                      {processingCount > 0 && (
+                        <span className="ml-1 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-blue-500/90 px-1 text-[10px] font-bold text-gray-900" title={`处理中 ${processingCount} 条`}>
+                          {processingCount}
+                        </span>
+                      )}
+                      {queuedCount > 0 && (
+                        <span className="ml-1 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-yellow-500/90 px-1 text-[10px] font-bold text-gray-900" title={`排队中 ${queuedCount} 条`}>
+                          {queuedCount}
                         </span>
                       )}
                     </div>
@@ -995,7 +1016,7 @@ function StatusCard({
 }: {
   icon: typeof Wifi
   label: string
-  value: string
+  value: React.ReactNode
   color: "green" | "red" | "blue" | "yellow" | "gray"
   sub?: string
   action?: React.ReactNode

@@ -1,7 +1,8 @@
 import { Agent, type SDKAgent, type Run, type SDKMessage } from "@cursor/sdk"
 import { app } from "electron"
 import { resolve, join, dirname } from "node:path"
-import { existsSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs"
+import { createHash } from "node:crypto"
 import { createRequire } from "node:module"
 import { pushUiLog, broadcastLog, broadcastSessionStatus } from "./ui-logger"
 import { type ChatType, type LaunchMeta, buildPrompt, resolveSessionChatName } from "./agent-launcher"
@@ -36,7 +37,23 @@ const pendingLaunches = new Set<string>()
 // 不保留闲置 agent 进程：闲置连接会被代理/NAT 静默掐死，复用必报 SSL WRONG_VERSION_NUMBER。
 // run 结束即释放进程，仅持久化 sessionKey→agentId 映射；新消息 Agent.resume 恢复——
 // 全新连接 + 历史上下文完整保留，应用重启后同样有效。
-interface ResumeEntry { agentId: string; workspaceDir: string; updatedAt: number; senderOpenId?: string }
+interface ResumeEntry { agentId: string; workspaceDir: string; updatedAt: number; senderOpenId?: string; rulesHash?: string }
+
+/** 工作区 rules 目录内容 hash：Resume 会话的规则是创建时的快照，靠它感知规则更新 */
+function computeRulesHash(workspaceDir: string): string {
+  try {
+    const rulesDir = join(workspaceDir, ".cursor", "rules")
+    if (!existsSync(rulesDir)) return ""
+    const h = createHash("md5")
+    for (const f of readdirSync(rulesDir).filter((n) => n.endsWith(".mdc")).sort()) {
+      h.update(f)
+      try { h.update(readFileSync(join(rulesDir, f))) } catch { /* ignore */ }
+    }
+    return h.digest("hex").slice(0, 16)
+  } catch {
+    return ""
+  }
+}
 
 const RESUME_ENTRY_TTL_MS = 14 * 24 * 60 * 60 * 1000
 let resumableAgents: Map<string, ResumeEntry> | null = null
@@ -78,6 +95,7 @@ function rememberResumable(session: SdkSessionAgent): void {
   getResumableMap().set(session.sessionKey, {
     agentId: session.agentId, workspaceDir: session.workspaceDir, updatedAt: Date.now(),
     senderOpenId: session.senderOpenId,
+    rulesHash: computeRulesHash(session.workspaceDir),
   })
   saveResumableMap()
 }
@@ -86,17 +104,23 @@ function forgetResumable(sessionKey: string): void {
   if (getResumableMap().delete(sessionKey)) saveResumableMap()
 }
 
-function buildWakePrompt(session: SdkSessionAgent): string {
-  return [
+function buildWakePrompt(session: SdkSessionAgent, rulesUpdated = false): string {
+  const lines = [
     "[SESSION_RESUME / 系统指令] 会话已由后台唤醒（历史上下文完整保留），有新消息待处理。",
     "立即执行：非阻塞检查 poll-message（wait=false），按 cursor-claw 协议处理所有消息并逐条回复，然后按 keep_alive 模式收尾。",
     "禁止向用户发送问候、唤醒说明等任何多余消息。",
+  ]
+  if (rulesUpdated) {
+    lines.push("⚠️ 工作区规则已更新（你上下文中的规则是旧版快照）：处理消息前必须先重读 .cursor/rules/ 目录下全部 .mdc 规则文件，并严格按最新规则执行。")
+  }
+  lines.push(
     "---",
     "会话元数据:",
     `[session_key=${session.sessionKey}]`,
     `[chat_type=${session.chatType}]`,
     `[keep_alive=${session.persistentPoll}]`,
-  ].join("\n")
+  )
+  return lines.join("\n")
 }
 
 let sdkIdleHandler: ((sessionKey: string) => void) | null = null
@@ -495,8 +519,12 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     broadcastLog(`[SDK] 会话 ${sessionKey} 已${resumed ? "恢复" : "创建"}, agentId=${agent.agentId}`)
     broadcastSdkSessionStatus()
 
+    // Resume 会话的规则是创建时快照：规则文件变过则在唤醒 prompt 里硬指令重读
+    const rulesUpdated = resumed && !!resumable?.rulesHash
+      && resumable.rulesHash !== computeRulesHash(workspaceDir)
+    if (rulesUpdated) pushUiLog("SDK", "INFO", `[${sessionKey}] 检测到规则更新，唤醒时要求重读规则`)
     const prompt = resumed
-      ? buildWakePrompt(session)
+      ? buildWakePrompt(session, rulesUpdated)
       : buildPrompt(meta, taskMessage, sessionKey, opts.useMainWorkspace, persistentPoll)
     pushUiLog("SDK", "INFO", `[${sessionKey}] ${resumed ? "恢复" : "启动"} Prompt:\n${prompt}`)
     let run: Run
