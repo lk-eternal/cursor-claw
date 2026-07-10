@@ -3,20 +3,11 @@
     "version": "1.3.4",
     "date": "2026-07-10",
     "changes": [
-      "移除 mark_done 显式完成标记（AI 经常漏调导致消息反复重投唤醒、DONE 表情失效）",
-      "完成确认全自动：Agent 挂阻塞 poll 即声明手头事项全部处理完，系统自动删除队列消息并打 DONE 表情",
-      "非阻塞拉取（wait=false）语义不变：返回全部待处理消息（含上轮未确认的重投），不确认任何消息",
-      "keep_alive=false 会话收尾统一为阻塞 poll：有新消息立即返回继续处理，队列空秒回「结束回合」指令，不再真挂起",
-      "send 系接口增加 session_key 白名单校验：未知/捏造/旧版路由键一律拒绝，并返回引导 AI 反省的错误提示",
-      "resolveChannel 发送路径禁止兜底到主用户，堵住 IDE 人工会话误发飞书的最后一道口",
-      "poll-message 进入时登记 session_key，保证按协议先 poll 再 send 的合法会话可放行",
-      "彻底删除 /api/mark-done 与 mark_done MCP 工具，完成确认仅由阻塞 poll 隐式触发",
-      "SDK/CLI 启动与 Resume 日志输出实际使用的 model（含 params）",
-      "活跃会话列表展示当前模型 slug",
-      "修复 send_question 卡片窜台：reply 成功后不再二次 create 到其他聊天（群聊+主用户双发）",
-      "send_question 改为两段式发送（先 reply 再 chat），与 send_text 一致；按钮 value 内嵌 session_key 保证点击可路由",
-      "SDK 异常结束且队列空闲时不再向用户发送失败通知（仅记日志，不自动拉起）",
-      "移除 SDK 异常结束专用自动重试拉起：未处理消息留在队列，由 idle→dispatch 统一调度即可"
+      "完成确认改为阻塞 poll 隐式触发：去掉 mark_done；非阻塞拉取只重投不确认，阻塞拉取进入时删 .claimed 并打 DONE",
+      "keep_alive=false 收尾统一走阻塞 poll：有新消息立即返回，空队列秒回结束指令（不真挂起）",
+      "send 系接口校验 session_key 白名单，禁止兜底发主用户，堵住 IDE 捏造 key 误发",
+      "修复 send_question 卡片窜台（reply 成功不再二次 create）；按钮内嵌 session_key 保证点击可路由",
+      "SDK/CLI 启动与 Resume 日志、活跃会话列表展示实际模型；异常结束改由 idle 调度拉起，队列空闲不再打扰用户"
     ]
   },
   {
