@@ -1,5 +1,15 @@
 [
   {
+    "version": "1.3.6",
+    "date": "2026-07-11",
+    "changes": [
+      "新增项目工作区 /project（/p）：git worktree 隔离、plan/build/review/ship、HITL 与本地 md artifact",
+      "设置页「项目工作区」：GitLab token/host、主仓列表、worktree 根目录",
+      "MCP project_action_done / project_get / project_list；accepted 后尝试飞书文档同步",
+      "ship：push feature 分支并对基线开 GitLab MR"
+    ]
+  },
+  {
     "version": "1.3.5",
     "date": "2026-07-10",
     "changes": [

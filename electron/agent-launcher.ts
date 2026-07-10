@@ -14,7 +14,7 @@ import {
 
 // ── 会话 Agent ──────────────────────────────────────────
 
-export type ChatType = "p2p" | "group" | "task" | "temp" | "workflow"
+export type ChatType = "p2p" | "group" | "task" | "temp" | "workflow" | "project"
 
 interface SessionAgent {
   sessionKey: string

@@ -39,6 +39,10 @@ declare global {
     wechatAccountId: string
     agentMode: "cli" | "sdk"
     cursorApiKey: string
+    gitlabToken?: string
+    gitlabHost?: string
+    repoRoots?: string[]
+    worktreeRoot?: string
   }
 
   interface CliLoginStatus {

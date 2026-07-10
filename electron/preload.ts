@@ -32,6 +32,10 @@ export interface AppConfig {
   wechatAccountId: string
   agentMode: "cli" | "sdk"
   cursorApiKey: string
+  gitlabToken?: string
+  gitlabHost?: string
+  repoRoots?: string[]
+  worktreeRoot?: string
 }
 
 export interface DaemonStatus {

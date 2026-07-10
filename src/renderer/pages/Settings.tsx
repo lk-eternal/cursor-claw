@@ -49,7 +49,7 @@ import { modelSlug } from "../model-utils"
 
 interface Props { onBack: () => void; initialTab?: string; onTabConsumed?: () => void; onReenterWizard?: () => void }
 
-type Tab = "general" | "channel" | "proxy" | "agent" | "mcp" | "rules" | "tasks" | "skills" | "workflows" | "toolbox" | "setup" | "about"
+type Tab = "general" | "channel" | "proxy" | "agent" | "mcp" | "rules" | "tasks" | "skills" | "workflows" | "projects" | "toolbox" | "setup" | "about"
 type CloseWindowAction = "ask" | "minimize" | "quit"
 
 interface McpEditForm {
@@ -77,6 +77,7 @@ const TABS: { id: Tab; label: string; icon: typeof SettingsIcon }[] = [
   { id: "skills", label: "Skills", icon: Sparkles },
   { id: "tasks", label: "定时任务", icon: Timer },
   { id: "workflows", label: "工作流", icon: Waypoints },
+  { id: "projects", label: "项目工作区", icon: FolderOpen },
   { id: "toolbox", label: "工具箱", icon: Wrench },
   { id: "setup", label: "帮助引导", icon: BookOpen },
   { id: "about", label: "关于", icon: Info },
@@ -104,6 +105,10 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
   const { showAlert, ModalPortal } = useInlineModal()
 
   const [appVersion, setAppVersion] = useState("")
+  const [gitlabToken, setGitlabToken] = useState("")
+  const [gitlabHost, setGitlabHost] = useState("")
+  const [repoRootsText, setRepoRootsText] = useState("")
+  const [worktreeRoot, setWorktreeRoot] = useState("")
   const [updateBusy, setUpdateBusy] = useState(false)
   const [updateCheck, setUpdateCheck] = useState<Awaited<ReturnType<typeof window.electronAPI.checkAppUpdate>> | null>(null)
   const [updateMsg, setUpdateMsg] = useState<string | null>(null)
@@ -291,6 +296,14 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
       window.electronAPI.getConfig().then((cfg) => {
         setTaskChannels(cfg.channels ?? [])
         setAgentResources(cfg.agentResources ?? [])
+      })
+    }
+    if (tab === "projects") {
+      window.electronAPI.getConfig().then((config) => {
+        setGitlabToken(config.gitlabToken ?? "")
+        setGitlabHost(config.gitlabHost ?? "")
+        setRepoRootsText((config.repoRoots ?? []).join("\n"))
+        setWorktreeRoot(config.worktreeRoot ?? "")
       })
     }
   }, [tab, refreshMcpServers, refreshRules, refreshSkills, refreshTasks])
@@ -965,6 +978,55 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
 
             {/* ═══ Workflows ═══ */}
             {tab === "workflows" && <WorkflowPanel />}
+
+            {/* ═══ Projects ═══ */}
+            {tab === "projects" && (<>
+              <section className="space-y-4">
+                <h3 className="text-sm font-medium text-gray-300">项目工作区（/p）</h3>
+                <p className="text-xs text-gray-500">一条需求一个 git worktree；ship 使用 GitLab token 开 MR。飞书指令：/p new|ls|use|plan|build|review|ship|sync</p>
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">GitLab Token</label>
+                  <input type="password" value={gitlabToken} onChange={(e) => setGitlabToken(e.target.value)} placeholder="glpat-..." className={inputCls} />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">GitLab Host（可空，默认从 origin 推断）</label>
+                  <input type="text" value={gitlabHost} onChange={(e) => setGitlabHost(e.target.value)} placeholder="https://gitlab.com" className={inputCls} />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">主仓本地路径（每行一个，须为 git 根目录）</label>
+                  <textarea value={repoRootsText} onChange={(e) => setRepoRootsText(e.target.value)} rows={4} placeholder={"D:\\repos\\foo\nD:\\repos\\bar"} className={inputCls} />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">worktree 根目录</label>
+                  <div className="flex gap-2">
+                    <input type="text" value={worktreeRoot} onChange={(e) => setWorktreeRoot(e.target.value)} placeholder="D:\\claw-projects" className={inputCls} />
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const dir = await window.electronAPI.selectDirectory()
+                        if (dir) setWorktreeRoot(dir)
+                      }}
+                      className="shrink-0 rounded-md border border-gray-700 px-3 text-xs text-gray-300 hover:bg-gray-800"
+                    >浏览</button>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const repoRoots = repoRootsText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+                    await window.electronAPI.saveConfig({
+                      gitlabToken: gitlabToken.trim(),
+                      gitlabHost: gitlabHost.trim(),
+                      repoRoots,
+                      worktreeRoot: worktreeRoot.trim(),
+                    })
+                    setSaved(true)
+                    setTimeout(() => setSaved(false), 1500)
+                  }}
+                  className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500"
+                >保存项目设置</button>
+              </section>
+            </>)}
 
             {/* ═══ Toolbox ═══ */}
             {tab === "toolbox" && <ToolboxPanel />}

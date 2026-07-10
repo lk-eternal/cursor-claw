@@ -304,7 +304,7 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
   const resource = getAgentResource(channel?.agentResourceId)
 
   // 其他人会话需要通道显式开启
-  const isOwnTask = chatType === "task" || chatType === "temp" || chatType === "workflow"
+  const isOwnTask = chatType === "task" || chatType === "temp" || chatType === "workflow" || chatType === "project"
   if (!useMain && !isOwnTask && !channel?.allowOthers) {
     return { ok: false, error: `通道「${channel?.name ?? "未知"}」未启用其他人使用` }
   }
@@ -326,7 +326,7 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
   }
   if (!workDir) return { ok: false, error: "工作目录未配置" }
 
-  const skipIdentity = chatType === "workflow"
+  const skipIdentity = chatType === "workflow" || chatType === "project"
   await injectWorkspaceToDir(workDir, useMain || skipIdentity, channel?.digitalIdentity)
 
   // 模型解析：显式覆盖 > 会话 override/pending > 通道场景模型
@@ -404,6 +404,27 @@ export async function launchWorkflowAgent(p: {
     workingDirectory: p.workingDirectory,
     meta: { chatId: p.notifyChatId || sessionKey, chatType: "workflow" },
     channelId: p.notifyChatId ? parseChatKey(extractChatId(p.notifyChatId)).channelId : undefined,
+    modelOverride: p.model,
+  })
+}
+
+export async function launchProjectAgent(p: {
+  projectId: string
+  projectName: string
+  prompt: string
+  workingDirectory: string
+  notifyChatId: string
+  model?: string
+}): Promise<{ ok: boolean; error?: string }> {
+  const sessionKey = `${p.notifyChatId}::project_${p.projectId}`
+  return launchAgent({
+    sessionKey,
+    chatType: "project",
+    chatName: `P: ${p.projectName}`,
+    taskMessage: p.prompt,
+    workingDirectory: p.workingDirectory,
+    meta: { chatId: p.notifyChatId, chatType: "project" },
+    channelId: parseChatKey(extractChatId(p.notifyChatId)).channelId,
     modelOverride: p.model,
   })
 }

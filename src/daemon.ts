@@ -45,6 +45,8 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { registerAdminTools } from "./server-admin.js";
 import { registerWorkflowAgentTools, registerWorkflowAdminTools } from "./server-workflow.js";
+import { registerProjectAgentTools } from "./server-project.js";
+import { initProjectStore } from "./shared/project-store.js";
 
 const _require = createRequire(import.meta.url);
 const PKG_VERSION: string = (_require("../package.json") as { version: string }).version;
@@ -570,7 +572,7 @@ function isKnownSessionKey(sessionKey: string): boolean {
   if (channelId && channels.has(channelId)) {
     if (sessionKey === chatKey) return true;
     const suffix = sessionKey.slice(chatKey.length + 2); // after "::"
-    if (suffix.startsWith("wf_")) return true;
+    if (suffix.startsWith("wf_") || suffix.startsWith("project_")) return true;
   }
   return false;
 }
@@ -944,6 +946,8 @@ const COMMANDS: Record<string, string> = {
   "/t": "同 /task",
   "/workflow": "工作流管理（/workflow ls | info | run | status | delete）",
   "/wf": "同 /workflow",
+  "/project": "项目工作区（/project 查看；/p new|ls|use|plan|build|review|ship|sync）",
+  "/p": "同 /project",
   "/model": "Cursor CLI 模型（/model ls | info | set <序号>）",
   "/m": "同 /model",
   "/mcp": "MCP 服务器管理（/mcp ls | info | enable | disable | delete | add）",
@@ -1409,6 +1413,7 @@ function createMcpServer(): McpServer {
   );
 
   registerWorkflowAgentTools(s);
+  registerProjectAgentTools(s);
   return s;
 }
 
@@ -2359,6 +2364,7 @@ export async function daemonMain(): Promise<void> {
   initQueue();
   loadRoutingMaps();
   loadCardQuestions();
+  if (APP_DATA_DIR) initProjectStore(APP_DATA_DIR);
   startMediaCacheCleanup();
 
   for (const cfg of CHANNEL_CONFIGS) {

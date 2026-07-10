@@ -40,6 +40,8 @@ import {
   McpServerEntry,
 } from "./mcp-manager"
 import { FileCommand, reportCommandResult, handleFeishuModelCommand, handleFeishuMcpCommand, handleFeishuTaskCommand, handleFeishuWorkflowCommand, parseListModelsStdout, type TaskRunFn } from "./command-handler"
+import { handleFeishuProjectCommand, handleProjectSyncSignal } from "./project-commands"
+import { initProjectStore } from "../src/shared/project-store.js"
 import { readLockFile, getLockFilePath, httpGet, httpPost, syncActiveSession, getCurrentActiveSession, enqueueToMainSession } from "./daemon-client"
 import {
   isSessionAgentRunning, stopSessionAgent, stopAllSessionAgents,
@@ -614,6 +616,20 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
           } catch { /* ignore */ }
           continue
         }
+        if (line.startsWith("__PROJECT_NOTIFY__:")) {
+          try {
+            const { chatId, text } = JSON.parse(line.slice("__PROJECT_NOTIFY__:".length))
+            if (chatId && text) void notifyWorkflowChat(chatId, text)
+          } catch { /* ignore */ }
+          continue
+        }
+        if (line.startsWith("__PROJECT_SYNC__:")) {
+          try {
+            const payload = JSON.parse(line.slice("__PROJECT_SYNC__:".length))
+            void handleProjectSyncSignal(payload)
+          } catch { /* ignore */ }
+          continue
+        }
         if (line.startsWith("__BIND_RESULT__:")) {
           try {
             const payload = JSON.parse(line.slice("__BIND_RESULT__:".length))
@@ -1070,6 +1086,13 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           break
         }
 
+        case "/project":
+        case "/p": {
+          if (!isAdmin) { await denyNonAdmin(); break }
+          await handleFeishuProjectCommand(lock.port, claimed.messageId, rawCmd, claimed.chatId)
+          break
+        }
+
         case "/rr":
         case "/restart": {
           if (!isAdmin) { await denyNonAdmin(); break }
@@ -1177,6 +1200,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
             { label: "💬 会话 /c", cmd: "/c", section: "▶ 编排" },
             { label: "⏰ 任务 /t", cmd: "/t", section: "▶ 编排" },
             { label: "🔀 工作流 /wf", cmd: "/wf", section: "▶ 编排" },
+            { label: "📦 项目 /p", cmd: "/p", section: "▶ 编排" },
           ]
           const infra = [
             { label: "📦 MCP /mc", cmd: "/mc", section: "▶ 基础设施" },
@@ -1457,6 +1481,7 @@ async function autoStartDaemonOnLaunch(): Promise<void> {
 export function initDaemonManager(): void {
   process.env.APP_DATA_DIR = app.getPath("userData")
   initSessionModelStore(app.getPath("userData"))
+  initProjectStore(app.getPath("userData"))
   runLegacyConfigMigration()
   seedBuiltins()
   initSessionDispatcher()
@@ -1607,6 +1632,7 @@ export function initDaemonManager(): void {
   })
   ipcMain.handle("session:list-quick-models", () => {
     initSessionModelStore(app.getPath("userData"))
+  initProjectStore(app.getPath("userData"))
     return { ok: true as const, models: listQuickModels(getConfig().favoriteModels ?? [], 8) }
   })
   ipcMain.handle("agent:stop-all-sessions", () => { stopAllSessionAgents(); return { ok: true } })

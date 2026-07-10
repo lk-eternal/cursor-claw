@@ -31,6 +31,15 @@ export interface AppConfig {
   /** Daemon 固定端口（0 = 随机） */
   daemonPort: number
 
+  /** 项目工作区：GitLab token（ship / 私有仓 fetch） */
+  gitlabToken: string
+  /** GitLab Host，如 https://gitlab.com 或自建 */
+  gitlabHost: string
+  /** 已 clone 的主仓本地路径列表 */
+  repoRoots: string[]
+  /** 新建 worktree 的父目录 */
+  worktreeRoot: string
+
   // ── 旧字段（仅用于迁移，新代码不应再读取）──
   allowOthers: boolean
   digitalIdentity: string
@@ -69,6 +78,11 @@ const defaults: AppConfig = {
   closeWindowAction: "ask",
   mainChatIds: {},
   daemonPort: 19528,
+
+  gitlabToken: "",
+  gitlabHost: "",
+  repoRoots: [],
+  worktreeRoot: "",
 
   allowOthers: false,
   digitalIdentity: "",
