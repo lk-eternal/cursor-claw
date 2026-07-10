@@ -18,7 +18,7 @@ import {
   claimNextMessage,
   claimSessionMessages,
   waitForSessionMessages,
-  ackMessages,
+  markDoneMessages,
   getQueueLength as getFileQueueLength,
   getQueueCounts,
   getQueueMessages as getFileQueueMessages,
@@ -366,40 +366,20 @@ function scheduleRoutingSave(): void {
   routingSaveTimer.unref?.();
 }
 
-// ── 待完成 DONE 表情队列（回复确认时登记，Agent 显式调用 mark_done 时才打）──
-// 不再借"下次 poll"隐式打 DONE：异常中断后重新拉起也会 poll，会把没做完的事误标完成
-const pendingDoneReactions = new Map<string, Map<string, number>>();
-
-function enqueuePendingDone(sessionKey: string, messageIds: string[]): void {
-  const now = Date.now();
-  let map = pendingDoneReactions.get(sessionKey);
-  if (!map) { map = new Map(); pendingDoneReactions.set(sessionKey, map); }
-  for (const mid of messageIds) {
-    if (mid && !mid.startsWith("internal_")) map.set(mid, now);
-  }
-}
-
-/** 打 DONE 表情标记完成；message_id 缺省时 flush 会话全部待完成项，指定时只打该条及更早登记的 */
+// ── 显式完成标记（mark_done）────────────────────────────
+// 回复（send-xxx）不再删除队列消息：消息保持 .claimed「处理中」直到 Agent 显式 mark_done。
+// mark_done 直接删除队列文件并打 DONE 表情——文件即状态，daemon 重启不丢。
 function markDone(sessionKey: string, messageId?: string): number {
-  const map = pendingDoneReactions.get(sessionKey);
-  const ids: string[] = [];
-  if (map && map.size > 0) {
-    if (messageId && map.has(messageId)) {
-      const cutoff = map.get(messageId)!;
-      for (const [mid, ts] of map) {
-        if (ts <= cutoff) { ids.push(mid); map.delete(mid); }
-      }
-    } else {
-      ids.push(...map.keys());
-      map.clear();
-    }
+  const done = markDoneMessages(messageId, sessionKey);
+  // 指定的 message_id 不在队列（如已被清理）也补打表情，保证幂等体验
+  if (messageId && !done.includes(messageId)) done.push(messageId);
+  const ids = done.filter((mid) => mid && !mid.startsWith("internal_"));
+  if (done.length > 0) broadcastQueueEvent(sessionKey);
+  if (ids.length > 0) {
+    addReactionToMessages(ids, sessionKey, "DONE");
+    log("INFO", `标记完成: 删除 ${done.length} 条队列消息, DONE 表情 ${ids.length} 条, session=${sessionKey}`);
   }
-  // 指定的 message_id 未登记过（如 ack 前直接标记）也补打
-  if (messageId && !ids.includes(messageId) && !messageId.startsWith("internal_")) ids.push(messageId);
-  if (ids.length === 0) return 0;
-  addReactionToMessages(ids, sessionKey, "DONE");
-  log("INFO", `标记完成 DONE 表情: ${ids.length} 条, session=${sessionKey}`);
-  return ids.length;
+  return done.length;
 }
 
 // ── Agent-Poll 生命周期追踪 ─────────────────────────────────
@@ -577,21 +557,8 @@ function addReactionToMessages(messageIds: string[], sessionKey: string, emojiTy
   }
 }
 
-/**
- * Agent 回复确认（ack）：删除该 message_id 及更早的未确认消息。
- * DONE 表情不在此处打 —— 只登记为待完成项，等 Agent 完成事项后
- * 显式调用 mark_done（MCP / POST /api/mark-done）才打，代表"任务真正完成"。
- */
-function ackOnReply(messageId?: string, sessionKey?: string): void {
-  if (!messageId) return;
-  const acked = ackMessages(messageId, sessionKey);
-  if (acked.length === 0) return;
-  log("INFO", `回复确认 ${acked.length} 条消息: session=${sessionKey ?? "?"} (via ${messageId})`);
-  if (sessionKey) {
-    enqueuePendingDone(sessionKey, acked);
-    broadcastQueueEvent(sessionKey);
-  }
-}
+// 回复不再确认删除消息：消息保持 .claimed「处理中」直到 mark_done。
+// 挂起判断只看新消息（.qmsg），空转最多一轮——重复投递会促使 Agent 补 mark_done（协议自愈）。
 
 function resolveRoutingKey(chatId?: string, replyMessageId?: string): { sessionKey?: string; viaReply: boolean } {
   if (replyMessageId) {
@@ -618,6 +585,8 @@ function initQueue(): void {
   const dir = initFileQueue();
   log("INFO", `共享文件队列: ${dir}`);
   cleanupStaleMessages();
+  // 周期清理：.tmp 孤儿 + 超 72h 未 mark_done 的 .claimed（死会话兜底）
+  setInterval(() => cleanupStaleMessages(), 6 * 60 * 60 * 1000).unref();
 }
 
 /** 媒体缓存清理：启动清一次 + 每 6 小时清一次，删除 24 小时前的旧文件 */
@@ -1812,7 +1781,6 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       json(res, { ok: !!sentMsgId, message_id: sentMsgId });
     }
     if (session_key) sessionLastReplyAt.set(session_key, Date.now());
-    ackOnReply(message_id, session_key);
     return true;
   }
 
@@ -1844,7 +1812,6 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       json(res, { ok: !!sentMsgId, message_id: sentMsgId });
     }
     if (session_key) sessionLastReplyAt.set(session_key, Date.now());
-    ackOnReply(message_id, session_key);
     return true;
   }
 
@@ -1862,7 +1829,6 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     }
     json(res, { ok: true });
     if (session_key) sessionLastReplyAt.set(session_key, Date.now());
-    ackOnReply(message_id, session_key);
     return true;
   }
 
@@ -1880,7 +1846,6 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     }
     json(res, { ok: true });
     if (session_key) sessionLastReplyAt.set(session_key, Date.now());
-    ackOnReply(message_id, session_key);
     return true;
   }
 
@@ -1949,8 +1914,8 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
 
     const keepAlive = resolveKeepAlive(sessionKeyFilter);
 
-    // 领取不删：.qmsg→.claimed，返回该会话全部未确认消息（含历史未回复的，按时间升序）。
-    // 消息只有 Agent 回复（ackOnReply）后才删除；未确认下次 poll 重投，幽灵连接领走也不丢。
+    // 领取不删：.qmsg→.claimed，返回该会话全部处理中消息（含已回复未完成的，按时间升序）。
+    // 消息只有 Agent 显式 mark_done 后才删除；重复投递会促使 Agent 补 mark_done（协议自愈）。
     if (!blocking) {
       const messages = claimSessionMessages(sessionKeyFilter);
       if (messages.length > 0) {

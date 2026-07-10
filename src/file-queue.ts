@@ -165,10 +165,11 @@ export function claimNextMessage(filterSessionKey?: string): QueueMessage | null
   return null;
 }
 
-/** 会话目录下是否存在未确认消息（.qmsg 待投递 或 .claimed 已投递待回复确认） */
-function hasPendingMessages(dir: string): boolean {
+/** 会话目录下是否存在待投递的新消息（仅 .qmsg；.claimed 是处理中不算新，
+ * 否则回复后未 mark_done 就挂 poll 会立即返回同一批消息造成空转） */
+function hasNewMessages(dir: string): boolean {
   try {
-    return fs.readdirSync(dir).some((f) => f.endsWith(".qmsg") || f.endsWith(".claimed"));
+    return fs.readdirSync(dir).some((f) => f.endsWith(".qmsg"));
   } catch {
     return false;
   }
@@ -229,14 +230,14 @@ export function waitForSessionMessages(
 ): Promise<QueueMessage[]> {
   return new Promise((resolve) => {
     const dir = getSessionDir(filterSessionKey);
-    if (hasPendingMessages(dir)) { resolve(claimSessionMessages(filterSessionKey)); return; }
+    if (hasNewMessages(dir)) { resolve(claimSessionMessages(filterSessionKey)); return; }
     if (timeoutMs === 0) { resolve([]); return; }
 
     const infinite = timeoutMs < 0;
     const deadline = infinite ? Number.POSITIVE_INFINITY : Date.now() + timeoutMs;
     const timer = setInterval(() => {
       if (isCancelled?.()) { clearInterval(timer); resolve([]); return; }
-      if (hasPendingMessages(dir)) { clearInterval(timer); resolve(claimSessionMessages(filterSessionKey)); return; }
+      if (hasNewMessages(dir)) { clearInterval(timer); resolve(claimSessionMessages(filterSessionKey)); return; }
       if (!infinite && Date.now() >= deadline) { clearInterval(timer); resolve([]); }
     }, intervalMs);
     timer.unref();
@@ -244,33 +245,22 @@ export function waitForSessionMessages(
 }
 
 /**
- * 回复确认（ack）：Agent 回复某条 message_id 即视为该消息及更早的全部已处理。
- * 删除该会话中「时间戳 ≤ 目标消息」的所有 .claimed（仅已投递的；未投递的 .qmsg 不动，
- * 防止时钟乱序误删新消息），返回被确认消息的 messageId（用于打表情）。
- * 找不到目标消息（已被确认过）返回空数组。session_key 缺省时遍历所有会话兜底。
+ * 标记完成（mark_done）：删除会话中已投递的 .claimed 并返回其 messageId（用于打 DONE 表情）。
+ * 回复（send-xxx）不再删除消息——消息保持「处理中」直到 Agent 显式 mark_done。
+ * messageId 指定时删除「时间戳 ≤ 目标消息」的 .claimed；缺省删除该会话全部 .claimed。
+ * 未投递的 .qmsg 永不删除（防时钟乱序误删新消息）。session_key 缺省时全局兜底。
  */
-export function ackMessages(messageId: string, filterSessionKey?: string): string[] {
-  if (!queueDir || !messageId) return [];
-  const safeId = messageId.replace(/[^a-zA-Z0-9_-]/g, "_");
+export function markDoneMessages(messageId?: string, filterSessionKey?: string): string[] {
+  if (!queueDir) return [];
+  const safeId = messageId ? messageId.replace(/[^a-zA-Z0-9_-]/g, "_") : "";
   // 指定会话目录优先（快路径）；未命中时全局兜底——messageId 全局唯一，
-  // 防止调用方 session_key 形态偏差（转义/大小写）导致 ack 静默失败、消息反复重投
+  // 防止调用方 session_key 形态偏差（转义/大小写）导致标记静默失败、消息反复重投
   const dirs = [...new Set(filterSessionKey
     ? [getSessionDir(filterSessionKey), queueDir, ...listSessionDirs()]
     : [queueDir, ...listSessionDirs()])];
 
-  for (const dir of dirs) {
-    let files: string[];
-    try {
-      files = fs.readdirSync(dir).filter((f) => f.endsWith(".claimed"));
-    } catch {
-      continue;
-    }
-
-    const target = files.find((f) => matchesSafeId(f, safeId));
-    if (!target) continue;
-    const cutoff = fileTimestamp(target);
-
-    const acked: string[] = [];
+  const removeClaimed = (dir: string, files: string[], cutoff: number): string[] => {
+    const done: string[] = [];
     for (const f of files) {
       if (fileTimestamp(f) > cutoff) continue;
       const filePath = path.join(dir, f);
@@ -280,10 +270,32 @@ export function ackMessages(messageId: string, filterSessionKey?: string): strin
       } catch { /* ignore */ }
       try {
         fs.unlinkSync(filePath);
-        if (mid) acked.push(mid);
+        if (mid) done.push(mid);
       } catch { /* ignore */ }
     }
-    return acked;
+    return done;
+  };
+
+  for (const dir of dirs) {
+    let files: string[];
+    try {
+      files = fs.readdirSync(dir).filter((f) => f.endsWith(".claimed"));
+    } catch {
+      continue;
+    }
+    if (files.length === 0) continue;
+
+    if (!safeId) {
+      // 无 messageId：只清指定会话目录（全局兜底不适用，防误删他会话）
+      if (filterSessionKey && dir === getSessionDir(filterSessionKey)) {
+        return removeClaimed(dir, files, Number.POSITIVE_INFINITY);
+      }
+      continue;
+    }
+
+    const target = files.find((f) => matchesSafeId(f, safeId));
+    if (!target) continue;
+    return removeClaimed(dir, files, fileTimestamp(target));
   }
   return [];
 }
@@ -433,7 +445,9 @@ export function getDistinctSessions(): QueueSessionInfo[] {
   }));
 }
 
-/** 仅清理写入中断遗留的 .tmp 孤儿文件；.claimed 不超时删除（靠 Agent 回复确认） */
+const STALE_CLAIMED_MS = 72 * 60 * 60 * 1000;
+
+/** 清理写入中断遗留的 .tmp 孤儿 + 超过 72h 未 mark_done 的 .claimed（死会话兜底，防无限堆积） */
 export function cleanupStaleMessages(): void {
   if (!queueDir) return;
   const now = Date.now();
@@ -441,10 +455,13 @@ export function cleanupStaleMessages(): void {
   for (const dir of dirs) {
     try {
       for (const f of fs.readdirSync(dir)) {
-        if (!f.endsWith(".tmp")) continue;
+        const isTmp = f.endsWith(".tmp");
+        const isClaimed = f.endsWith(".claimed");
+        if (!isTmp && !isClaimed) continue;
         const filePath = path.join(dir, f);
+        const maxAge = isTmp ? STALE_TMP_MS : STALE_CLAIMED_MS;
         try {
-          if (now - fs.statSync(filePath).mtimeMs > STALE_TMP_MS) {
+          if (now - fs.statSync(filePath).mtimeMs > maxAge) {
             fs.unlinkSync(filePath);
           }
         } catch { /* ignore */ }
