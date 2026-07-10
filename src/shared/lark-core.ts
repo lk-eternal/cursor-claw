@@ -81,6 +81,8 @@ export interface CardButton {
   /** 回传交互数据，card.action.trigger 回调中原样返回 */
   value: unknown;
   type?: "primary" | "default" | "danger";
+  /** 分组标题：与上一按钮不同时，在该按钮前插入 markdown 分段 */
+  section?: string;
 }
 
 export interface CardInput {
@@ -150,32 +152,46 @@ export class LarkSender {
     return w;
   }
 
-  /** 构造 schema 2.0 markdown 卡片；buttons 为回传交互按钮（点击触发 card.action.trigger），按 label 显示宽度自适应 1-3 列排布；input 为末尾自由输入框（提交随 input_value 回传） */
-  static buildCard(text: string, title?: string, buttons?: CardButton[], input?: CardInput): any {
-    const elements: any[] = [{ tag: "markdown", content: text.replace(/\\/g, "\\\\") }];
+  /** 构造 schema 2.0 markdown 卡片；buttons 为回传交互按钮；input 为末尾自由输入；footer 在正文后、选项前（经 hr 分隔），用于已选/关闭状态 */
+  static buildCard(text: string, title?: string, buttons?: CardButton[], input?: CardInput, template?: string, footer?: string): any {
+    const elements: any[] = [];
+    const body = text.replace(/\\/g, "\\\\").replace(/\s+$/u, "");
+    elements.push({ tag: "markdown", content: body });
     const btns = buttons ?? [];
+    const foot = footer?.replace(/\\/g, "\\\\").replace(/^\s+|\s+$/gu, "");
+    // 正文与状态/选项之间统一一条分隔线（待选 / 已选 / 关闭同结构）
+    if (foot || (input && btns.length > 0)) elements.push({ tag: "hr" });
+    if (foot) elements.push({ tag: "markdown", content: foot });
     if (btns.length > 0) {
-      // 阈值按手机端卡片宽度（约 300px）保守取值，避免窄屏 3 列时文字显示不全
-      const maxLen = Math.max(...btns.map((b) => LarkSender.displayWidth(b.label)));
-      const perRow = maxLen <= 6 ? 3 : maxLen <= 12 ? 2 : 1;
+      // 一律 default 宽度 + 左对齐；fill 会把文字居中
+      // 无 input 时仍按文案宽度分列，但列宽 auto、整行左对齐；按 section 分段
+      const groups: { section?: string; items: CardButton[] }[] = [];
+      for (const b of btns) {
+        const last = groups[groups.length - 1];
+        if (!last || last.section !== b.section) groups.push({ section: b.section, items: [b] });
+        else last.items.push(b);
+      }
       const toButton = (b: CardButton) => ({
         tag: "button",
         text: { tag: "plain_text", content: b.label.slice(0, 100) },
         type: b.type ?? "primary",
-        width: "fill",
+        width: "default",
         behaviors: [{ type: "callback", value: b.value }],
       });
-      if (perRow === 1) {
-        for (const b of btns) elements.push(toButton(b));
-      } else {
-        for (let i = 0; i < btns.length; i += perRow) {
-          elements.push({
-            tag: "column_set",
-            horizontal_spacing: "8px",
-            columns: btns.slice(i, i + perRow).map((b) => ({
-              tag: "column", width: "weighted", weight: 1, elements: [toButton(b)],
-            })),
-          });
+      const leftRow = (row: CardButton[]) => ({
+        tag: "column_set",
+        horizontal_align: "left",
+        horizontal_spacing: "8px",
+        columns: row.map((b) => ({
+          tag: "column", width: "auto", elements: [toButton(b)],
+        })),
+      });
+      for (const g of groups) {
+        if (g.section) elements.push({ tag: "markdown", content: `**${g.section.replace(/\\/g, "\\\\")}**` });
+        const maxLen = Math.max(...g.items.map((b) => LarkSender.displayWidth(b.label)));
+        const perRow = input ? 1 : maxLen <= 6 ? 3 : maxLen <= 12 ? 2 : 1;
+        for (let i = 0; i < g.items.length; i += perRow) {
+          elements.push(leftRow(g.items.slice(i, i + perRow)));
         }
       }
     }
@@ -185,7 +201,7 @@ export class LarkSender {
         name: "custom_input",
         input_type: "multiline_text",
         width: "fill",
-        rows: 4,
+        rows: 1,
         auto_resize: true,
         max_rows: 8,
         placeholder: { tag: "plain_text", content: input.placeholder.slice(0, 100) },
@@ -195,11 +211,11 @@ export class LarkSender {
     }
     const card: any = {
       schema: "2.0",
-      config: { wide_screen_mode: true },
-      body: { elements },
+      config: { wide_screen_mode: true, update_multi: true },
+      body: { horizontal_align: "left", elements },
     };
     if (title) {
-      card.header = { title: { tag: "plain_text", content: title }, template: "turquoise" };
+      card.header = { title: { tag: "plain_text", content: title }, template: template || "turquoise" };
     }
     return card;
   }
@@ -208,8 +224,8 @@ export class LarkSender {
    * 发送带回传按钮的交互卡片。
    * @returns message_id；回复成功但飞书未回 message_id 时返回 null（调用方不得再 create）；失败返回 undefined
    */
-  async sendCardWithButtons(text: string, buttons: CardButton[], replyMessageId?: string, chatId?: string, title?: string, input?: CardInput): Promise<string | null | undefined> {
-    const card = LarkSender.buildCard(`${this.messagePrefix}${text}`, title, buttons, input);
+  async sendCardWithButtons(text: string, buttons: CardButton[], replyMessageId?: string, chatId?: string, title?: string, input?: CardInput, template?: string, footer?: string): Promise<string | null | undefined> {
+    const card = LarkSender.buildCard(`${this.messagePrefix}${text}`, title, buttons, input, template, footer);
     const content = JSON.stringify(card);
     // 有 replyMessageId 时只走回复，成功即返回——禁止再 create 到 chatId（否则群消息 reply + 主用户 chat 直发 = 窜台）
     if (replyMessageId && !replyMessageId.startsWith("internal_")) {
@@ -242,6 +258,28 @@ export class LarkSender {
       this.log("INFO", `飞书按钮卡片已发送(${buttons.length}个按钮)`);
       return (res as any)?.data?.message_id;
     } catch (e: any) { this.log("ERROR", `按钮卡片发送异常: ${e?.message ?? e}`); return undefined; }
+  }
+
+  /** 主动更新已发送的交互卡片（需 config.update_multi=true） */
+  async patchCard(messageId: string, text: string, title?: string, template?: string, footer?: string): Promise<boolean> {
+    if (!messageId || messageId.startsWith("internal_")) return false;
+    try {
+      const card = LarkSender.buildCard(`${this.messagePrefix}${text}`, title, undefined, undefined, template, footer);
+      const res = await this.client.im.message.patch({
+        path: { message_id: messageId },
+        data: { content: JSON.stringify(card) },
+      });
+      const code = (res as any)?.code;
+      if (code !== undefined && code !== 0) {
+        this.log("WARN", `卡片更新失败 code=${code} (${messageId})`);
+        return false;
+      }
+      this.log("INFO", `飞书卡片已更新 (${messageId})`);
+      return true;
+    } catch (e: any) {
+      this.log("WARN", `卡片更新异常 (${messageId}): ${e?.message ?? e}`);
+      return false;
+    }
   }
 
   async replyMessage(messageId: string, text: string, title?: string): Promise<string | undefined> {

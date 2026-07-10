@@ -433,22 +433,28 @@ function extractWorkspaceDir(sessionKey?: string): string | undefined {
   return wsDir;
 }
 
+/** 工作目录去重键：规范化 + 去尾部分隔符 + 小写，避免同目录被计成两个 */
+function workspaceDirKey(ws: string): string {
+  return path.normalize(ws.trim()).replace(/[\\/]+$/, "").toLowerCase();
+}
+
 /** 该聊天下已知工作目录（poll 连接 + 近 30 分钟有回复的会话） */
 function listChatWorkspaceDirs(chatKey: string): string[] {
   const prefix = chatKey + "::";
-  const dirs = new Set<string>();
+  const dirs = new Map<string, string>(); // norm -> original
   const consider = (sk: string) => {
     if (!(sk === chatKey || sk.startsWith(prefix))) return;
     const ws = extractWorkspaceDir(sk);
-    if (ws) dirs.add(ws);
+    if (!ws) return;
+    const norm = workspaceDirKey(ws);
+    if (!dirs.has(norm)) dirs.set(norm, ws);
   };
   for (const k of activePollConnections.keys()) consider(k);
   const now = Date.now();
   for (const [k, t] of sessionLastReplyAt) {
     if (now - t < 30 * 60_000) consider(k);
   }
-  for (const sk of sessionToChatMap.keys()) consider(sk);
-  return [...dirs];
+  return [...dirs.values()];
 }
 
 function extractWorkspaceTitle(sessionKey?: string, peers?: string[]): string | undefined {
@@ -457,16 +463,22 @@ function extractWorkspaceTitle(sessionKey?: string, peers?: string[]): string | 
   return disambiguatePathLabel(wsDir, peers ?? [wsDir]);
 }
 
-/** 该聊天下活跃目录会话数（挂起的 poll 连接 + 近 30 分钟有回复的会话，去重） */
+/** 该聊天下活跃「工作目录」数（挂起 poll + 近 30 分钟有回复；按规范化路径去重，同目录多会话不计多） */
 function chatActiveSessionCount(chatKey: string): number {
   const prefix = chatKey + "::";
-  const keys = new Set<string>();
-  for (const k of activePollConnections.keys()) { if (k.startsWith(prefix)) keys.add(k); }
+  const dirs = new Set<string>();
+  const add = (sk: string) => {
+    if (!sk.startsWith(prefix)) return;
+    const ws = extractWorkspaceDir(sk);
+    if (!ws) return;
+    dirs.add(workspaceDirKey(ws));
+  };
+  for (const k of activePollConnections.keys()) add(k);
   const now = Date.now();
   for (const [k, t] of sessionLastReplyAt) {
-    if (k.startsWith(prefix) && now - t < 30 * 60_000) keys.add(k);
+    if (now - t < 30 * 60_000) add(k);
   }
-  return keys.size;
+  return dirs.size;
 }
 
 /** 仅主用户私聊显示工作目录标题（只有主用户可能在多个工作目录间切换），群聊/其他人不显示 */
@@ -641,7 +653,7 @@ function collectFreshAndTrack(messages: QueueMessage[], sessionKey: string): str
 }
 
 function addReactionToMessages(messageIds: string[], sessionKey: string, emojiType = "Get"): void {
-  const ch = resolveChannel(sessionKey);
+  const ch = resolveChannel(sessionKey, { allowDefault: false });
   if (ch.type !== "feishu" || !ch.rt.sender) return;
   const sender = ch.rt.sender;
   for (const mid of messageIds) {
@@ -727,6 +739,10 @@ function pushMessage(content: string, messageId?: string, chatId?: string, chatT
   if (written) {
     // 入队即建立 messageId→会话映射：回复一条尚未被 Agent 领取的消息也能正确路由
     if (messageId && routedId) trackMessageSession(messageId, routedId);
+    // 用户直接发消息（非卡片点击）时关闭同聊天未决问题卡片
+    if (chatId && messageId && !messageId.startsWith("internal_")) {
+      expireOpenCardQuestions(chatId, "已通过新消息处理（卡片已关闭）");
+    }
     const preview = content.length > 200 ? `${content.slice(0, 200)} …(+${content.length - 200} chars)` : content;
     log("INFO", `消息已写入共享队列: ${JSON.stringify(preview)} (id=${messageId ?? "none"}, chat=${chatId ?? "none"}${routedId !== chatId ? ` → routed=${routedId}` : ""}${replyMessageId ? `, reply=${replyMessageId}` : ""})`);
     broadcastQueueEvent(routedId);
@@ -919,18 +935,29 @@ async function startFeishuChannel(rt: ChannelRuntime): Promise<void> {
 
 const COMMANDS: Record<string, string> = {
   "/stop": "停止当前运行中的 Agent",
+  "/x": "同 /stop",
   "/status": "查看 Agent / Daemon 状态",
+  "/s": "同 /status",
   "/list": "查看消息队列列表（不消费）",
+  "/ls": "同 /list",
   "/task": "定时任务（/task 查看子命令说明；如 /task ls）",
+  "/t": "同 /task",
   "/workflow": "工作流管理（/workflow ls | info | run | status | delete）",
   "/wf": "同 /workflow",
   "/model": "Cursor CLI 模型（/model ls | info | set <序号>）",
+  "/m": "同 /model",
   "/mcp": "MCP 服务器管理（/mcp ls | info | enable | disable | delete | add）",
+  "/mc": "同 /mcp",
   "/workspace": "切换工作目录（/workspace 查看当前 | /workspace set <路径>）",
+  "/w": "同 /workspace",
   "/chat": "会话管理（/chat ls | /chat <序号> | /chat stop <序号> | /chat new <描述>）",
+  "/c": "同 /chat",
   "/clean": "清空消息队列",
+  "/cl": "同 /clean",
   "/reset": "下次拉起 Agent 时不使用 --continue（新 CLI 会话），不删除本地文件",
+  "/r": "同 /reset",
   "/restart": "停止 Agent + 清空队列 + 重启 Daemon",
+  "/rr": "同 /restart",
   "/help": "显示可用指令列表",
   "/h": "同 /help",
 };
@@ -942,9 +969,43 @@ function isCommand(text: string): boolean {
 
 // ── 卡片按钮回调 ─────────────────────────────────────────
 
-interface CardQuestionEntry { text: string; options: string[]; sessionKey?: string; createdAt: number; title?: string }
+interface CardQuestionEntry { text: string; options: string[]; sessionKey?: string; chatKey?: string; createdAt: number; title?: string }
 const cardQuestionMap = new Map<string, CardQuestionEntry>();
 const CARD_QUESTION_MAX = 500;
+const CARD_QUESTION_FILE = path.join(APP_DATA_DIR, "card-questions.json");
+let cardQuestionSaveTimer: NodeJS.Timeout | null = null;
+
+function loadCardQuestions(): void {
+  try {
+    if (!APP_DATA_DIR || !fs.existsSync(CARD_QUESTION_FILE)) return;
+    const raw = JSON.parse(fs.readFileSync(CARD_QUESTION_FILE, "utf-8")) as Record<string, CardQuestionEntry>;
+    const now = Date.now();
+    let n = 0;
+    for (const [id, entry] of Object.entries(raw)) {
+      if (!entry?.text || !id) continue;
+      // 丢弃超过 24h 的未决卡，避免永久堆积
+      if (entry.createdAt && now - entry.createdAt > 24 * 3600_000) continue;
+      cardQuestionMap.set(id, entry);
+      n++;
+    }
+    log("INFO", `[CardQ] 未决问题卡已恢复: ${n}`);
+  } catch (e: any) {
+    log("WARN", `[CardQ] 恢复失败: ${e?.message ?? e}`);
+  }
+}
+
+function scheduleCardQuestionSave(): void {
+  if (!APP_DATA_DIR || cardQuestionSaveTimer) return;
+  cardQuestionSaveTimer = setTimeout(() => {
+    cardQuestionSaveTimer = null;
+    try {
+      const data = Object.fromEntries(cardQuestionMap);
+      fs.writeFileSync(CARD_QUESTION_FILE + ".tmp", JSON.stringify(data));
+      fs.renameSync(CARD_QUESTION_FILE + ".tmp", CARD_QUESTION_FILE);
+    } catch { /* ignore */ }
+  }, 500);
+  cardQuestionSaveTimer.unref?.();
+}
 
 function rememberCardQuestion(messageId: string, entry: CardQuestionEntry): void {
   if (cardQuestionMap.size >= CARD_QUESTION_MAX) {
@@ -952,6 +1013,44 @@ function rememberCardQuestion(messageId: string, entry: CardQuestionEntry): void
     if (oldest) cardQuestionMap.delete(oldest);
   }
   cardQuestionMap.set(messageId, entry);
+  scheduleCardQuestionSave();
+}
+
+/** 用户未点卡片、直接发消息时，关闭同聊天未决问题卡片 */
+function expireOpenCardQuestions(chatKey: string, note: string): void {
+  if (!chatKey) return;
+  const targets: { messageId: string; entry: CardQuestionEntry }[] = [];
+  for (const [messageId, entry] of cardQuestionMap) {
+    const ck = entry.chatKey || (entry.sessionKey ? chatIdFromSessionKey(entry.sessionKey) : undefined);
+    if (ck === chatKey) targets.push({ messageId, entry });
+  }
+  if (targets.length === 0) {
+    if (cardQuestionMap.size > 0) {
+      log("INFO", `关闭问题卡片: 本聊天无登记 (chat=${chatKey}, map=${cardQuestionMap.size})`);
+    }
+    return;
+  }
+  const ch = resolveChannel(chatKey, { allowDefault: false });
+  if (ch.type !== "feishu" || !ch.rt.sender) {
+    log("WARN", `关闭问题卡片: 通道不可用，保留登记以便重试 (chat=${chatKey}, n=${targets.length})`);
+    return;
+  }
+  const sender = ch.rt.sender;
+  let closed = 0;
+  for (const { messageId, entry } of targets) {
+    sender.patchCard(messageId, entry.text, entry.title, entry.title ? "grey" : undefined, `⏹ ${note}`)
+      .then((ok) => {
+        if (ok) {
+          cardQuestionMap.delete(messageId);
+          scheduleCardQuestionSave();
+        } else {
+          log("WARN", `关闭问题卡片 patch 未成功，保留登记: ${messageId}`);
+        }
+      })
+      .catch((e: any) => log("WARN", `关闭问题卡片失败: ${e?.message ?? e}`));
+    closed++;
+  }
+  log("INFO", `已请求关闭 ${closed} 张未决问题卡片 (chat=${chatKey})`);
 }
 
 /** internal 消息（卡片点击/输入框提交）→ 来源聊天 chatKey；回复 internal 消息时按此路由回原聊天，防止 chat 直发窜台 */
@@ -1011,13 +1110,16 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
     const chatType = rt.cfg.mainUserEnabled && rt.cfg.mainUserChatId === evt.chatId ? "p2p"
       : (evt.chatId?.startsWith("oc_") || evt.chatId?.startsWith("on_") ? "group" : "p2p");
     pushMessage(opt, internalId, chatKey, chatType, evt.operatorOpenId, evt.messageId, { senderType: "user" });
-    if (entry) cardQuestionMap.delete(evt.messageId);
+    if (entry) {
+      cardQuestionMap.delete(evt.messageId);
+      scheduleCardQuestionSave();
+    }
     const questionText = entry?.text ?? "问题";
-    // 更新卡片必须带回原 title，否则多会话时 header 工作区名会被抹掉
-    const title = entry?.title ?? (sessionKey ? extractWorkspaceTitle(sessionKey, listChatWorkspaceDirs(chatKey)) : undefined);
+    // 只保留发送时记下的 title：无 title 的卡点选后不得再补工作区名（否则会「突然出现标题」）
+    const title = entry?.title;
     return {
       toast: { type: "success", content: `已选择: ${opt.slice(0, 30)}` },
-      card: { type: "raw", data: LarkSender.buildCard(`${questionText}\n\n✅ 已选择: **${opt}**`, title) },
+      card: { type: "raw", data: LarkSender.buildCard(questionText, title, undefined, undefined, title ? "green" : undefined, `✅ 已选择: **${opt}**`) },
     };
   }
 
@@ -1034,17 +1136,41 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
   return {};
 }
 
-async function replyToMessage(messageId: string, text: string, chatId?: string, buttons?: { label: string; cmd: string }[]): Promise<void> {
-  const ch = resolveChannel(chatId);
-  if (ch.type === "error") { log("WARN", `回复失败: ${ch.message}`); return; }
+async function replyToMessage(messageId: string, text: string, chatId?: string, buttons?: { label: string; cmd: string; section?: string }[]): Promise<void> {
+  // 优先显式 chatId；缺省时从消息路由表找回，禁止 allowDefault 兜底到别的通道（防微信指令回飞书）
+  const routeKey = chatId
+    || (messageId ? messageSessionMap.get(messageId) : undefined)
+    || (messageId?.startsWith("internal_") ? internalMsgChatMap.get(messageId) : undefined);
+  const ch = resolveChannel(routeKey, { allowDefault: false });
+  if (ch.type === "error") {
+    log("WARN", `回复失败: ${ch.message} (messageId=${messageId}, chatId=${chatId ?? "-"})`);
+    return;
+  }
   if (ch.type === "wechat") {
-    try { await ch.rt.wechat!.sendText(ch.chatId, text); } catch (e: any) { log("WARN", `微信回复失败: ${e?.message}`); }
+    // 微信无交互卡片：把按钮降级为可直接发送的指令列表（按 section 分段）
+    let body = text;
+    if (buttons && buttons.length > 0) {
+      const lines: string[] = [];
+      let n = 1;
+      let lastSec: string | undefined;
+      for (const b of buttons.slice(0, 20)) {
+        if (b.section && b.section !== lastSec) {
+          lines.push(b.section);
+          lastSec = b.section;
+        }
+        lines.push(`${n++}. ${b.label || b.cmd}`);
+      }
+      body = `${text}\n\n${lines.join("\n")}`;
+    }
+    try { await ch.rt.wechat!.sendText(ch.chatId, body); } catch (e: any) { log("WARN", `微信回复失败: ${e?.message}`); }
     return;
   }
   const sender = ch.rt.sender!;
   if (buttons && buttons.length > 0) {
     // 上限 20：/help 全量指令 + 常用目录快捷按钮
-    const btns: CardButton[] = buttons.slice(0, 20).map((b) => ({ label: b.label, value: { kind: "cmd", cmd: b.cmd }, type: "default" as const }));
+    const btns: CardButton[] = buttons.slice(0, 20).map((b) => ({
+      label: b.label, value: { kind: "cmd", cmd: b.cmd }, type: "default" as const, section: b.section,
+    }));
     await sender.sendCardWithButtons(text, btns, ch.chatId ? undefined : messageId, ch.chatId);
     return;
   }
@@ -1075,6 +1201,7 @@ function pushCommandToQueue(command: string, messageId: string, source: string, 
     const finalPath = path.join(queueDir, filename);
     fs.writeFileSync(tmpPath, data, "utf-8");
     fs.renameSync(tmpPath, finalPath);
+    if (messageId && chatId) trackMessageSession(messageId, chatId);
     log("INFO", `指令已入队: ${command} (msgId=${messageId}, source=${source})`);
     return true;
   } catch { return false; }
@@ -1125,7 +1252,7 @@ function cleanExpiredCommands(): void {
           fs.unlinkSync(path.join(queueDir, f));
           log("WARN", `指令超时已清除: ${parsed.command} (msgId=${parsed.messageId})`);
           if (parsed.messageId) {
-            replyToMessage(parsed.messageId, `⚠️ 指令 ${parsed.command} 执行超时`).catch(() => {});
+            replyToMessage(parsed.messageId, `⚠️ 指令 ${parsed.command} 执行超时`, parsed.chatId).catch(() => {});
           }
         }
       } catch { /* ignore */ }
@@ -1465,7 +1592,7 @@ function startHttpServer(): Promise<number> {
         }
 
         if (method === "POST" && pathname === "/cmd/result") {
-          const body = JSON.parse(await readBody(req)) as { messageId: string; ok: boolean; message: string; chatId?: string; buttons?: { label: string; cmd: string }[] };
+          const body = JSON.parse(await readBody(req)) as { messageId: string; ok: boolean; message: string; chatId?: string; buttons?: { label: string; cmd: string; section?: string }[] };
           log("INFO", `指令执行完成: ok=${body.ok}, msgId=${body.messageId}, chatId=${body.chatId ?? "N/A"}`);
           if (body.messageId) await replyToMessage(body.messageId, body.message, body.chatId, body.buttons);
           json(res, { ok: true });
@@ -1810,7 +1937,16 @@ async function handleAgentAdmin(_method: string, req: http.IncomingMessage, res:
       }
     }
     const msgId = `api-${Date.now()}`;
-    pushCommandToQueue(`/${action}`, msgId, `mcp-api`);
+    // 带上任一已绑定主用户的 chatKey，否则 electron 侧 isMainUser 会判非管理员拒绝 /restart 等
+    let adminChatId: string | undefined;
+    let adminChatType: string | undefined = "p2p";
+    for (const rt of channels.values()) {
+      if (rt.cfg.mainUserEnabled && rt.cfg.mainUserChatId?.trim()) {
+        adminChatId = makeChatKey(rt.cfg.id, rt.cfg.mainUserChatId.trim());
+        break;
+      }
+    }
+    pushCommandToQueue(`/${action}`, msgId, `mcp-api`, adminChatId, adminChatType);
     json(res, { ok: true, message: `/${action} command queued` });
     return true;
   }
@@ -1898,23 +2034,27 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     } else {
       const sender = ch.rt.sender!;
       const title = resolveReplyTitle(ch, session_key);
+      // 正文 | hr | ❓状态 | 选项 | 输入；有工作区标题才用色板
+      const pendingText = text;
+      const pendingFooter = "❓ 请选择下方选项或直接输入";
+      const pendingTemplate = title ? "orange" : undefined;
       // session_key 打进按钮 value：即使 reply 未返回 message_id 导致 cardQuestionMap 未登记，点击仍能路由回原会话
-      const buttons: CardButton[] = opts.map((o) => ({ label: o, value: { kind: "question", opt: o, sk: session_key } }));
-      const input: CardInput = { placeholder: "其他答复：输入后按回车提交", value: { kind: "question", sk: session_key } };
+      const buttons: CardButton[] = opts.map((o, i) => ({ label: `${i + 1}. ${o}`, value: { kind: "question", opt: o, sk: session_key } }));
+      const input: CardInput = { placeholder: "其他答复：输入后点发送", value: { kind: "question", sk: session_key } };
       // 两段式：先按 message_id 回复（落在原聊天）；仅失败(undefined)才 chat 直发——null 表示已回复成功勿再发
       let sentMsgId: string | null | undefined;
       if (message_id && !message_id.startsWith("internal_")) {
-        sentMsgId = await sender.sendCardWithButtons(text, buttons, message_id, undefined, title, input);
+        sentMsgId = await sender.sendCardWithButtons(pendingText, buttons, message_id, undefined, title, input, pendingTemplate, pendingFooter);
         if (sentMsgId === undefined) {
           log("INFO", `问题卡片回复退避: message_id=${message_id} → ${ch.chatId ? `chat_id=${ch.chatId}` : "无目标"}`);
-          if (ch.chatId) sentMsgId = await sender.sendCardWithButtons(text, buttons, undefined, ch.chatId, title, input);
+          if (ch.chatId) sentMsgId = await sender.sendCardWithButtons(pendingText, buttons, undefined, ch.chatId, title, input, pendingTemplate, pendingFooter);
         }
       } else {
-        sentMsgId = await sender.sendCardWithButtons(text, buttons, undefined, ch.chatId, title, input);
+        sentMsgId = await sender.sendCardWithButtons(pendingText, buttons, undefined, ch.chatId, title, input, pendingTemplate, pendingFooter);
       }
       const ok = sentMsgId !== undefined; // null 也算成功（已回复到原聊天）
       if (typeof sentMsgId === "string" && sentMsgId) {
-        rememberCardQuestion(sentMsgId, { text, options: opts, sessionKey: session_key, createdAt: Date.now(), title });
+        rememberCardQuestion(sentMsgId, { text, options: opts, sessionKey: session_key, chatKey: session_key ? chatIdFromSessionKey(session_key) : (ch.chatId ? makeChatKey(ch.rt.cfg.id, ch.chatId) : undefined), createdAt: Date.now(), title });
         if (session_key) trackMessageSession(sentMsgId, session_key);
       }
       json(res, { ok, message_id: typeof sentMsgId === "string" ? sentMsgId : undefined });
@@ -2218,6 +2358,7 @@ export async function daemonMain(): Promise<void> {
 
   initQueue();
   loadRoutingMaps();
+  loadCardQuestions();
   startMediaCacheCleanup();
 
   for (const cfg of CHANNEL_CONFIGS) {

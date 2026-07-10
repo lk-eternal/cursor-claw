@@ -449,15 +449,19 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
       const dur = s.startedAt ? formatDuration(now - s.startedAt) : "-"
       return `${idx} [${type}] ${name} | 启动:${started} | 时长:${dur} | dir:${dir} | pid:${pid}`
     })
-    const chatBtns = sessions.slice(0, 8).map((s, i) => ({ label: `切换到 #${i + 1} ${s.chatName || path.basename(s.workspaceDir ?? "") || s.chatType}`, cmd: `/chat ${i + 1}` }))
-    const usage = "💡 /chat <序号> 切换 | /chat stop <序号> 停止 | /chat new <描述> 新临时会话"
+    const chatBtns = sessions.slice(0, 8).map((s, i) => {
+      const cmd = `/c ${i + 1}`
+      const name = s.chatName || path.basename(s.workspaceDir ?? "") || s.chatType
+      return { label: `${cmd} ${name}`.slice(0, 40), cmd }
+    })
+    const usage = "💡 /c <序号> 切换 | /c stop <序号> 停止 | /c new <描述> 新临时会话"
     await reply(true, `📋 活跃会话 (${sessions.length}):\n${lines.join("\n")}\n\n${usage}`, chatBtns)
     return
   }
 
   if (sub === "new") {
     const taskMsg = tokens.slice(2).join(" ").trim()
-    if (!taskMsg) { await reply(false, "💡 用法：/chat new <任务描述>\n例如：/chat new 帮我检查一下服务器状态"); return }
+    if (!taskMsg) { await reply(false, "💡 用法：/c new <任务描述>\n例如：/c new 帮我检查一下服务器状态"); return }
     const taskId = `temp_${Date.now()}`
     const result = await launchIndependentAgent(taskId, "临时会话", taskMsg, "temp", chatId)
     if (result.ok && chatId) {
@@ -524,7 +528,7 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
     return
   }
 
-  await reply(false, "💡 /chat 用法:\n  /chat ls — 列出所有活跃会话\n  /chat <序号> — 切换到指定会话\n  /chat stop <序号> — 停止指定会话\n  /chat new <描述> — 创建新临时会话")
+  await reply(false, ["💡 /c 子命令（全称 /chat）","🔹 /c ls — 列出所有活跃会话","🔹 /c <序号> — 切换到指定会话","🔹 /c stop <序号> — 停止指定会话","🔹 /c new <描述> — 创建新临时会话"].join("\n"))
 }
 
 // ── 僵尸 Agent 检测 ──────────────────────────────────────

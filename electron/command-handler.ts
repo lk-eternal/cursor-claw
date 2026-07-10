@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import {
-  getConfig, getEnabledChannels, getAgentResource, updateChannel,
+  getConfig, getAgentResource, updateChannel,
   resolveChannelForSession, effectiveWorkspaceDir, type MessageChannel, type ScheduledTask,
 } from "./config-store"
 import { validateCron, readTasksFromFile, writeTasksToFile, previewCronNextRuns, getNextCronFireLabel } from "./cron-scheduler"
@@ -18,7 +18,7 @@ import type { WorkflowDefinition } from "../src/shared/workflow-types"
 
 export interface FileCommand { id: string; command: string; messageId: string; chatId?: string; chatType?: string }
 
-export interface CommandButton { label: string; cmd: string }
+export interface CommandButton { label: string; cmd: string; /** 分组标题（飞书插在按钮前，微信列表分段） */ section?: string }
 
 export async function reportCommandResult(port: number, messageId: string, ok: boolean, message: string, chatId?: string, buttons?: CommandButton[]): Promise<void> {
   try {
@@ -69,12 +69,13 @@ async function listCursorModelsForCommands(channel?: MessageChannel): Promise<{ 
   return { ok: true, models }
 }
 
-const MODEL_SUBCMD_HELP =
-  "💡 /model 子命令（切换仅影响本会话，不改通道默认）\n" +
-  "🔹 /model ls — 列出可用模型与序号\n" +
-  "🔹 /model info — 查看本会话有效模型 / 通道默认\n" +
-  "🔹 /model set <序号> — 按 /model ls 的 # 切换本会话模型\n" +
-  "🔹 /model use <序号|id> — 同 set（快捷按钮用）"
+const MODEL_SUBCMD_HELP = [
+  "💡 /m 子命令（切换仅影响本会话，不改通道默认；全称 /model）",
+  "🔹 /m ls — 列出可用模型与序号",
+  "🔹 /m info — 查看本会话有效模型 / 通道默认",
+  "🔹 /m set <序号> — 按 /m ls 的 # 切换本会话模型",
+  "🔹 /m use <序号|id> — 同 set（快捷按钮用）",
+].join("\n")
 
 function resolveModelSessionKey(chatId?: string, channel?: MessageChannel): string | undefined {
   if (!chatId) return undefined
@@ -94,12 +95,12 @@ async function applySessionModelPick(
 ): Promise<void> {
   const sessionKey = resolveModelSessionKey(chatId, channel)
   if (!sessionKey) {
-    await reportCommandResult(port, messageId, false, "❌ 无法解析会话（缺少 chatId）")
+    await reportCommandResult(port, messageId, false, "❌ 无法解析会话（缺少 chatId）", chatId)
     return
   }
   const r = await switchSdkSessionModel(sessionKey, picked.id, picked.params ?? "")
   if (!r.ok) {
-    await reportCommandResult(port, messageId, false, `❌ 切换失败: ${r.error}`)
+    await reportCommandResult(port, messageId, false, `❌ 切换失败: ${r.error}`, chatId)
     return
   }
   const lines = [
@@ -112,33 +113,37 @@ async function applySessionModelPick(
     `session · ${sessionKey}`,
     `通道默认仍为 · ${channel.model?.trim() || "auto"}（未改）`,
   ].filter(Boolean) as string[]
-  await reportCommandResult(port, messageId, true, lines.join("\n"))
+  await reportCommandResult(port, messageId, true, lines.join("\n"), chatId)
 }
 
 export async function handleFeishuModelCommand(port: number, messageId: string, raw: string, chatId?: string): Promise<void> {
   const parts = raw.trim().split(/\s+/).filter((p) => p.length > 0)
   const low = (s: string) => s.toLowerCase()
 
-  const channel = chatId ? resolveChannelForSession(chatId) : getEnabledChannels()[0]
+  const channel = chatId ? resolveChannelForSession(chatId) : undefined
   if (!channel) {
-    await reportCommandResult(port, messageId, false, "❌ 未找到当前会话所属的消息通道")
+    await reportCommandResult(port, messageId, false, "❌ 未找到当前会话所属的消息通道", chatId)
     return
   }
 
   if (parts.length <= 1) {
     const favs = (getConfig().favoriteModels ?? []) as ModelEntry[]
     const quick = listQuickModels(favs, 6)
-    const btns = quick.map((m) => ({
-      label: `⚡ ${m.label || m.model}`.slice(0, 40),
-      cmd: `/model use ${m.model}`,
-    }))
-    await reportCommandResult(port, messageId, true, MODEL_SUBCMD_HELP, undefined, btns.length ? btns : undefined)
+    const subBtns = [
+      { label: "/m ls", cmd: "/m ls" },
+      { label: "/m info", cmd: "/m info" },
+    ]
+    const favBtns = quick.map((m) => {
+      const cmd = `/m use ${m.model}`
+      return { label: `⚡ ${cmd}`.slice(0, 40), cmd }
+    })
+    await reportCommandResult(port, messageId, true, MODEL_SUBCMD_HELP, chatId, [...subBtns, ...favBtns])
     return
   }
 
   const sub = low(parts[1])
   if (sub === "help" || sub === "-h" || sub === "--help") {
-    await reportCommandResult(port, messageId, true, MODEL_SUBCMD_HELP)
+    await reportCommandResult(port, messageId, true, MODEL_SUBCMD_HELP, chatId)
     return
   }
 
@@ -154,14 +159,14 @@ export async function handleFeishuModelCommand(port: number, messageId: string, 
         ? "状态: 可 Resume / 运行中"
         : "状态: 未拉起（切换将记为下次唤醒生效）",
     ]
-    await reportCommandResult(port, messageId, true, lines.join("\n"))
+    await reportCommandResult(port, messageId, true, lines.join("\n"), chatId)
     return
   }
 
   if (sub === "ls") {
     const lr = await listCursorModelsForCommands(channel)
     if (!lr.ok) {
-      await reportCommandResult(port, messageId, false, `❌ ${lr.error}`)
+      await reportCommandResult(port, messageId, false, `❌ ${lr.error}`, chatId)
       return
     }
     const blocks = lr.models.map((m, i) => {
@@ -169,20 +174,23 @@ export async function handleFeishuModelCommand(port: number, messageId: string, 
       const tag = m.current ? "  ⭐current" : ""
       return [`#${n}`, `\t id · ${m.id}`, `\t说明 · ${m.label}${tag}`].join("\n")
     })
-    const body = [`🧠 模型列表（共 ${lr.models.length} 个）`, "", ...blocks, "", "💡 仅本会话：/model set <序号>"].join("\n")
-    const btns = lr.models.slice(0, 6).map((m, i) => ({ label: `本会话 #${i + 1} ${m.id}`.slice(0, 40), cmd: `/model set ${i + 1}` }))
-    await reportCommandResult(port, messageId, true, body, undefined, btns)
+    const body = [`🧠 模型列表（共 ${lr.models.length} 个）`, "", ...blocks, "", "💡 仅本会话：/m set <序号>"].join("\n")
+    const btns = lr.models.slice(0, 6).map((m, i) => {
+      const cmd = `/m set ${i + 1}`
+      return { label: `${cmd} ${m.id}`.slice(0, 40), cmd }
+    })
+    await reportCommandResult(port, messageId, true, body, chatId, btns)
     return
   }
 
   if (sub === "set" || sub === "use") {
     const lr = await listCursorModelsForCommands(channel)
     if (!lr.ok) {
-      await reportCommandResult(port, messageId, false, `❌ ${lr.error}`)
+      await reportCommandResult(port, messageId, false, `❌ ${lr.error}`, chatId)
       return
     }
     if (parts.length < 3) {
-      await reportCommandResult(port, messageId, false, `💡 用法：/model ${sub} <序号|id>`)
+      await reportCommandResult(port, messageId, false, `💡 用法：/m ${sub} <序号|id>`, chatId)
       return
     }
     const token = parts[2]
@@ -191,7 +199,7 @@ export async function handleFeishuModelCommand(port: number, messageId: string, 
     let idxLabel: string | undefined
     if (Number.isInteger(idx) && idx >= 1 && String(idx) === token) {
       if (idx > lr.models.length) {
-        await reportCommandResult(port, messageId, false, `😅 序号须为 1～${lr.models.length} 之间的整数（先 /model ls）`)
+        await reportCommandResult(port, messageId, false, `😅 序号须为 1～${lr.models.length} 之间的整数（先 /m ls）`, chatId)
         return
       }
       picked = lr.models[idx - 1]
@@ -207,7 +215,7 @@ export async function handleFeishuModelCommand(port: number, messageId: string, 
         }
       }
       if (!picked) {
-        await reportCommandResult(port, messageId, false, `😅 未找到模型: ${token}（先 /model ls）`)
+        await reportCommandResult(port, messageId, false, `😅 未找到模型: ${token}（先 /m ls）`, chatId)
         return
       }
     }
@@ -223,22 +231,22 @@ export async function handleFeishuModelCommand(port: number, messageId: string, 
     return
   }
 
-  await reportCommandResult(port, messageId, false, `😅 未知子命令: ${parts[1]}\n\n${MODEL_SUBCMD_HELP}`)
+  await reportCommandResult(port, messageId, false, `😅 未知子命令: ${parts[1]}\n\n${MODEL_SUBCMD_HELP}`, chatId)
 }
 
 // ── Task 命令 ──────────────────────────────────────────────
 
-const TASK_SUBCMD_HELP =
-  "💡 可用指令\n" +
-  "🔹 /task 显示本说明\n" +
-  "🔹 /task ls 列出所有任务\n" +
-  "🔹 /task info <序号> 查看详情\n" +
-  "🔹 /task run <序号> 立即触发一次\n" +
-  "🔹 /task stop <序号> 停止任务\n" +
-  "🔹 /task start <序号> 启动任务\n" +
-  "🔹 /task delete <序号> 删除任务\n" +
-  "🔹 /task create <名称> <cron> <内容> 创建任务\n" +
-  "🔹 /task update <序号> [-name 值] [-cron 值] [-content 值] 更新任务"
+const TASK_SUBCMD_HELP = [
+  "💡 /t 子命令（全称 /task）",
+  "🔹 /t ls — 列出所有任务",
+  "🔹 /t info <序号> — 查看详情",
+  "🔹 /t run <序号> — 立即触发一次",
+  "🔹 /t stop <序号> — 停止任务",
+  "🔹 /t start <序号> — 启动任务",
+  "🔹 /t delete <序号> — 删除任务",
+  "🔹 /t create <名称> <cron> <内容> — 创建任务",
+  "🔹 /t update <序号> [-name 值] [-cron 值] [-content 值] — 更新任务",
+].join("\n")
 
 function parseTaskOneBasedIndex(s: string | undefined): number | null {
   if (s === undefined || s === "") return null
@@ -252,7 +260,7 @@ function parseTaskCreateArgs(parts: string[]):
   | { ok: false; error: string } {
   const afterCreate = parts.slice(2)
   if (afterCreate.length < 1 + 5 + 1) {
-    return { ok: false, error: "❌ 参数不足：/task create <名称> <cron五或六段> <内容>" }
+    return { ok: false, error: "❌ 参数不足：/t create <名称> <cron五或六段> <内容>" }
   }
   for (const cronLen of [6, 5] as const) {
     if (afterCreate.length < cronLen + 2) continue
@@ -274,7 +282,7 @@ function parseTaskUpdateArgs(parts: string[]):
   | { ok: true; oneBasedIndex: number; updates: { name?: string; cron?: string; content?: string } }
   | { ok: false; error: string } {
   if (parts.length < 4) {
-    return { ok: false, error: "💡 用法：/task update <序号> [-name 值] [-cron 值] [-content 值]" }
+    return { ok: false, error: "💡 用法：/t update <序号> [-name 值] [-cron 值] [-content 值]" }
   }
   const idx = parseTaskOneBasedIndex(parts[2])
   if (idx === null) return { ok: false, error: "❌ 序号须为正整数" }
@@ -319,15 +327,18 @@ export async function handleFeishuTaskCommand(
   const parts = raw.trim().split(/\s+/).filter((p) => p.length > 0)
   const low = (s: string) => s.toLowerCase()
 
-  if (parts.length <= 1) { await reportCommandResult(port, messageId, true, TASK_SUBCMD_HELP); return }
+  const taskHelpBtns = [
+    { label: "/t ls", cmd: "/t ls" },
+  ]
+  if (parts.length <= 1) { await reportCommandResult(port, messageId, true, TASK_SUBCMD_HELP, chatId, taskHelpBtns); return }
   const sub = low(parts[1])
-  if (sub === "help" || sub === "-h" || sub === "--help") { await reportCommandResult(port, messageId, true, TASK_SUBCMD_HELP); return }
+  if (sub === "help" || sub === "-h" || sub === "--help") { await reportCommandResult(port, messageId, true, TASK_SUBCMD_HELP, chatId, taskHelpBtns); return }
 
   let tasks = readTasksFromFile()
 
   if (sub === "ls") {
     if (tasks.length === 0) {
-      await reportCommandResult(port, messageId, true, "📭 当前还没有定时任务～\n\n💡 需要的话可以用：\n   /task create <名称> <cron> <内容>")
+      await reportCommandResult(port, messageId, true, "📭 当前还没有定时任务～\n\n💡 需要的话可以用：\n   /t create <名称> <cron> <内容>", chatId)
       return
     }
     const blocks = tasks.map((t, i) => {
@@ -341,15 +352,15 @@ export async function handleFeishuTaskCommand(
       ].join("\n")
     })
     const header = `⏰ 定时任务一览（共 ${tasks.length} 条）`
-    await reportCommandResult(port, messageId, true, `${header}\n\n${blocks.join("\n\n")}\n\n✨ 看某条详情：/task info <序号>`)
+    await reportCommandResult(port, messageId, true, `${header}\n\n${blocks.join("\n\n")}\n\n✨ 看某条详情：/t info <序号>`, chatId)
     return
   }
 
   if (sub === "info") {
     const idx = parseTaskOneBasedIndex(parts[2])
-    if (idx === null) { await reportCommandResult(port, messageId, false, "💡 用法：/task info <序号>（数字见 /task ls 的 #）"); return }
-    if (tasks.length === 0) { await reportCommandResult(port, messageId, false, "📭 还没有任何任务，先用 /task ls 确认一下吧～"); return }
-    if (idx > tasks.length) { await reportCommandResult(port, messageId, false, `😅 序号 ${idx} 对应的任务不存在哦（当前共 ${tasks.length} 条）`); return }
+    if (idx === null) { await reportCommandResult(port, messageId, false, "💡 用法：/t info <序号>（数字见 /t ls 的 #）", chatId); return }
+    if (tasks.length === 0) { await reportCommandResult(port, messageId, false, "📭 还没有任何任务，先用 /t ls 确认一下吧～", chatId); return }
+    if (idx > tasks.length) { await reportCommandResult(port, messageId, false, `😅 序号 ${idx} 对应的任务不存在哦（当前共 ${tasks.length} 条）`, chatId); return }
     const t = tasks[idx - 1]
     let scheduleSection = ""
     const prev = previewCronNextRuns(t.cron)
@@ -365,23 +376,23 @@ export async function handleFeishuTaskCommand(
       scheduleSection, "",
       "✉️ 任务内容", "────────────", t.content,
     ].join("\n")
-    await reportCommandResult(port, messageId, true, body)
+    await reportCommandResult(port, messageId, true, body, chatId)
     return
   }
 
   if (sub === "run") {
     const idx = parseTaskOneBasedIndex(parts[2])
-    if (idx === null) { await reportCommandResult(port, messageId, false, "💡 用法：/task run <序号>（数字见 /task ls 的 #）"); return }
-    if (idx > tasks.length) { await reportCommandResult(port, messageId, false, `😅 序号 ${idx} 对应的任务不存在哦（共 ${tasks.length} 条）`); return }
+    if (idx === null) { await reportCommandResult(port, messageId, false, "💡 用法：/t run <序号>（数字见 /t ls 的 #）", chatId); return }
+    if (idx > tasks.length) { await reportCommandResult(port, messageId, false, `😅 序号 ${idx} 对应的任务不存在哦（共 ${tasks.length} 条）`, chatId); return }
     const t = tasks[idx - 1]
     const nowStr = new Date().toLocaleString("zh-CN")
     const content = `[定时任务: ${t.name}] (手动触发: ${nowStr})\n\n${t.content}`
     if (t.independent !== false) {
       const result = await taskRunFn(t, content)
       if (result.ok) {
-        await reportCommandResult(port, messageId, true, `🚀 已独立启动任务 #${idx} ${t.name}`)
+        await reportCommandResult(port, messageId, true, `🚀 已独立启动任务 #${idx} ${t.name}`, chatId)
       } else {
-        await reportCommandResult(port, messageId, false, `❌ 独立启动失败: ${result.error}`)
+        await reportCommandResult(port, messageId, false, `❌ 独立启动失败: ${result.error}`, chatId)
       }
     } else {
       const enqueue = taskEnqueueFn ?? (async (c) => {
@@ -390,9 +401,9 @@ export async function handleFeishuTaskCommand(
       })
       const result = await enqueue(content, chatId)
       if (result.ok) {
-        await reportCommandResult(port, messageId, true, `🚀 已手动触发任务 #${idx} ${t.name}`)
+        await reportCommandResult(port, messageId, true, `🚀 已手动触发任务 #${idx} ${t.name}`, chatId)
       } else {
-        await reportCommandResult(port, messageId, false, `❌ 触发失败: ${result.error}`)
+        await reportCommandResult(port, messageId, false, `❌ 触发失败: ${result.error}`, chatId)
       }
     }
     return
@@ -400,56 +411,60 @@ export async function handleFeishuTaskCommand(
 
   if (sub === "stop") {
     const idx = parseTaskOneBasedIndex(parts[2])
-    if (idx === null) { await reportCommandResult(port, messageId, false, "💡 用法：/task stop <序号>（数字见 /task ls 的 #）"); return }
-    if (idx > tasks.length) { await reportCommandResult(port, messageId, false, `😅 序号 ${idx} 对应的任务不存在哦（共 ${tasks.length} 条）`); return }
+    if (idx === null) { await reportCommandResult(port, messageId, false, "💡 用法：/t stop <序号>（数字见 /t ls 的 #）", chatId); return }
+    if (idx > tasks.length) { await reportCommandResult(port, messageId, false, `😅 序号 ${idx} 对应的任务不存在哦（共 ${tasks.length} 条）`, chatId); return }
     const name = tasks[idx - 1].name
     tasks = tasks.map((t, j) => (j === idx - 1 ? { ...t, enabled: false } : t))
     writeTasksToFile(tasks)
-    await reportCommandResult(port, messageId, true, `⏸️ 已停止任务 #${idx} ${name}`)
+    await reportCommandResult(port, messageId, true, `⏸️ 已停止任务 #${idx} ${name}`, chatId)
     return
   }
 
   if (sub === "start") {
     const idx = parseTaskOneBasedIndex(parts[2])
-    if (idx === null) { await reportCommandResult(port, messageId, false, "💡 用法：/task start <序号>（数字见 /task ls 的 #）"); return }
-    if (idx > tasks.length) { await reportCommandResult(port, messageId, false, `😅 序号 ${idx} 对应的任务不存在哦（共 ${tasks.length} 条）`); return }
+    if (idx === null) { await reportCommandResult(port, messageId, false, "💡 用法：/t start <序号>（数字见 /t ls 的 #）", chatId); return }
+    if (idx > tasks.length) { await reportCommandResult(port, messageId, false, `😅 序号 ${idx} 对应的任务不存在哦（共 ${tasks.length} 条）`, chatId); return }
     const name = tasks[idx - 1].name
     const cron = tasks[idx - 1].cron
     tasks = tasks.map((t, j) => (j === idx - 1 ? { ...t, enabled: true } : t))
     writeTasksToFile(tasks)
     const next = getNextCronFireLabel(cron)
-    await reportCommandResult(port, messageId, true, `✅ 已启动任务 #${idx} ${name}\n下次执行: ${next}`)
+    await reportCommandResult(port, messageId, true, `✅ 已启动任务 #${idx} ${name}\n下次执行: ${next}`, chatId)
     return
   }
 
   if (sub === "delete") {
     const idx = parseTaskOneBasedIndex(parts[2])
-    if (idx === null) { await reportCommandResult(port, messageId, false, "💡 用法：/task delete <序号>（数字见 /task ls 的 #）"); return }
-    if (idx > tasks.length) { await reportCommandResult(port, messageId, false, `😅 序号 ${idx} 对应的任务不存在哦（共 ${tasks.length} 条）`); return }
+    if (idx === null) { await reportCommandResult(port, messageId, false, "💡 用法：/t delete <序号>（数字见 /t ls 的 #）", chatId); return }
+    if (idx > tasks.length) { await reportCommandResult(port, messageId, false, `😅 序号 ${idx} 对应的任务不存在哦（共 ${tasks.length} 条）`, chatId); return }
     const name = tasks[idx - 1].name
     tasks = tasks.filter((_, j) => j !== idx - 1)
     writeTasksToFile(tasks)
-    await reportCommandResult(port, messageId, true, `🗑️ 已删除任务 #${idx} ${name}`)
+    await reportCommandResult(port, messageId, true, `🗑️ 已删除任务 #${idx} ${name}`, chatId)
     return
   }
 
   if (sub === "create") {
     const parsed = parseTaskCreateArgs(parts)
-    if (!parsed.ok) { await reportCommandResult(port, messageId, false, parsed.error); return }
-    const taskChannel = chatId ? resolveChannelForSession(chatId) : getEnabledChannels()[0]
-    const newTask: ScheduledTask = { id: randomUUID(), name: parsed.name, cron: parsed.cron, content: parsed.content, enabled: true, channelId: taskChannel?.id }
+    if (!parsed.ok) { await reportCommandResult(port, messageId, false, parsed.error, chatId); return }
+    const taskChannel = chatId ? resolveChannelForSession(chatId) : undefined
+    if (!taskChannel) {
+      await reportCommandResult(port, messageId, false, "❌ 未找到当前会话所属的消息通道，无法创建任务", chatId)
+      return
+    }
+    const newTask: ScheduledTask = { id: randomUUID(), name: parsed.name, cron: parsed.cron, content: parsed.content, enabled: true, channelId: taskChannel.id }
     tasks = [...tasks, newTask]
     writeTasksToFile(tasks)
     const next = getNextCronFireLabel(parsed.cron)
-    await reportCommandResult(port, messageId, true, `✅ 已创建并启动：${parsed.name}\n下次执行: ${next}`)
+    await reportCommandResult(port, messageId, true, `✅ 已创建并启动：${parsed.name}\n下次执行: ${next}`, chatId)
     return
   }
 
   if (sub === "update") {
     const pu = parseTaskUpdateArgs(parts)
-    if (!pu.ok) { await reportCommandResult(port, messageId, false, pu.error); return }
+    if (!pu.ok) { await reportCommandResult(port, messageId, false, pu.error, chatId); return }
     if (pu.oneBasedIndex > tasks.length) {
-      await reportCommandResult(port, messageId, false, `😅 序号 ${pu.oneBasedIndex} 对应的任务不存在哦（共 ${tasks.length} 条）`)
+      await reportCommandResult(port, messageId, false, `😅 序号 ${pu.oneBasedIndex} 对应的任务不存在哦（共 ${tasks.length} 条）`, chatId)
       return
     }
     const t = tasks[pu.oneBasedIndex - 1]
@@ -458,7 +473,7 @@ export async function handleFeishuTaskCommand(
     if (pu.updates.cron !== undefined) nextCron = pu.updates.cron
     if (pu.updates.content !== undefined) nextContent = pu.updates.content
     if (pu.updates.cron !== undefined && !validateCron(nextCron)) {
-      await reportCommandResult(port, messageId, false, "😅 新 Cron 表达式无效")
+      await reportCommandResult(port, messageId, false, "😅 新 Cron 表达式无效", chatId)
       return
     }
     const updated: ScheduledTask = { ...t, name: nextName, cron: nextCron, content: nextContent }
@@ -478,24 +493,23 @@ export async function handleFeishuTaskCommand(
       scheduleSection, "",
       "✉️ 任务内容", "────────────", updated.content,
     ].join("\n")
-    await reportCommandResult(port, messageId, true, body)
+    await reportCommandResult(port, messageId, true, body, chatId)
     return
   }
 
-  await reportCommandResult(port, messageId, false, `😅 未知子命令: ${parts[1]}\n\n${TASK_SUBCMD_HELP}`)
+  await reportCommandResult(port, messageId, false, `😅 未知子命令: ${parts[1]}\n\n${TASK_SUBCMD_HELP}`, chatId)
 }
 
 // ── MCP 命令 ──────────────────────────────────────────────
 
 const MCP_SUBCMD_HELP = [
-  "📦 MCP 服务器管理",
-  "",
-  "  /mcp ls              列出所有 MCP 服务器",
-  "  /mcp info <序号|名称>  查看详情",
-  "  /mcp enable <序号|名称> 启用",
-  "  /mcp disable <序号|名称> 禁用",
-  "  /mcp delete <序号|名称> 删除",
-  '  /mcp add <json>       添加（如 /mcp add {"name":"test","command":"npx","args":["-y","xxx"]}）',
+  "💡 /mc 子命令（全称 /mcp）",
+  "🔹 /mc ls — 列出所有 MCP 服务器",
+  "🔹 /mc info <序号|名称> — 查看详情",
+  "🔹 /mc enable <序号|名称> — 启用",
+  "🔹 /mc disable <序号|名称> — 禁用",
+  "🔹 /mc delete <序号|名称> — 删除",
+  '🔹 /mc add <json> — 添加（如 /mc add {"name":"test","command":"npx","args":["-y","xxx"]}）',
 ].join("\n")
 
 function resolveMcpTarget(list: McpServerEntry[], token: string): McpServerEntry | null {
@@ -507,30 +521,31 @@ function resolveMcpTarget(list: McpServerEntry[], token: string): McpServerEntry
 export async function handleFeishuMcpCommand(port: number, messageId: string, raw: string, chatId?: string): Promise<void> {
   const parts = raw.trim().split(/\s+/).filter((p) => p.length > 0)
 
-  if (parts.length <= 1) { await reportCommandResult(port, messageId, true, MCP_SUBCMD_HELP); return }
+  const mcpHelpBtns = [{ label: "/mc ls", cmd: "/mc ls" }]
+  if (parts.length <= 1) { await reportCommandResult(port, messageId, true, MCP_SUBCMD_HELP, chatId, mcpHelpBtns); return }
   const sub = parts[1].toLowerCase()
-  if (sub === "help" || sub === "-h") { await reportCommandResult(port, messageId, true, MCP_SUBCMD_HELP); return }
+  if (sub === "help" || sub === "-h") { await reportCommandResult(port, messageId, true, MCP_SUBCMD_HELP, chatId, mcpHelpBtns); return }
 
   if (sub === "ls" || sub === "list") {
     const list = getMcpServerList()
     const enabledMap = await getMcpEnabledMap()
-    if (list.length === 0) { await reportCommandResult(port, messageId, true, "📭 暂无 MCP 服务器"); return }
+    if (list.length === 0) { await reportCommandResult(port, messageId, true, "📭 暂无 MCP 服务器", chatId); return }
     const lines = list.map((s, i) => {
       const flag = enabledMap[s.name] === false ? "🔴" : "🟢"
       const src = s.source === "global" ? "[G]" : "[P]"
       const detail = s.type === "url" ? s.url : s.command
       return `  ${i + 1}. ${flag} ${src} ${s.name}  (${detail})`
     })
-    await reportCommandResult(port, messageId, true, `📦 MCP 服务器列表：\n${lines.join("\n")}\n\n💡 /mcp info|enable|disable|delete <序号|名称> | /mcp add {JSON}`)
+    await reportCommandResult(port, messageId, true, `📦 MCP 服务器列表：\n${lines.join("\n")}\n\n💡 用法：/mc info|enable|disable|delete <序号|名称> · /mc add {JSON}`, chatId)
     return
   }
 
   if (sub === "info") {
     const list = getMcpServerList()
     const token = parts[2]
-    if (!token) { await reportCommandResult(port, messageId, false, "用法: /mcp info <序号|名称>"); return }
+    if (!token) { await reportCommandResult(port, messageId, false, "用法: /mc info <序号|名称>", chatId); return }
     const target = resolveMcpTarget(list, token)
-    if (!target) { await reportCommandResult(port, messageId, false, `❌ 找不到: ${token}`); return }
+    if (!target) { await reportCommandResult(port, messageId, false, `❌ 找不到: ${token}`, chatId); return }
     const enabledMap = await getMcpEnabledMap()
     const lines = [
       `📦 ${target.name}`,
@@ -543,65 +558,66 @@ export async function handleFeishuMcpCommand(port: number, messageId: string, ra
     if (target.env && Object.keys(target.env).length > 0) {
       lines.push(`  环境变量: ${Object.keys(target.env).join(", ")}`)
     }
-    await reportCommandResult(port, messageId, true, lines.join("\n"))
+    await reportCommandResult(port, messageId, true, lines.join("\n"), chatId)
     return
   }
 
   if (sub === "enable" || sub === "disable") {
     const list = getMcpServerList()
     const token = parts[2]
-    if (!token) { await reportCommandResult(port, messageId, false, `用法: /mcp ${sub} <序号|名称>`); return }
+    if (!token) { await reportCommandResult(port, messageId, false, `用法: /mc ${sub} <序号|名称>`, chatId); return }
     const target = resolveMcpTarget(list, token)
-    if (!target) { await reportCommandResult(port, messageId, false, `❌ 找不到: ${token}`); return }
+    if (!target) { await reportCommandResult(port, messageId, false, `❌ 找不到: ${token}`, chatId); return }
     const enabled = sub === "enable"
     const result = await toggleMcpServer(target.name, enabled)
     await reportCommandResult(port, messageId, result.ok,
-      result.ok ? `✅ ${target.name} 已${enabled ? "启用" : "禁用"}` : `❌ 操作失败: ${result.output}`)
+      result.ok ? `✅ ${target.name} 已${enabled ? "启用" : "禁用"}` : `❌ 操作失败: ${result.output}`, chatId)
     return
   }
 
   if (sub === "delete" || sub === "rm") {
     const list = getMcpServerList()
     const token = parts[2]
-    if (!token) { await reportCommandResult(port, messageId, false, "用法: /mcp delete <序号|名称>"); return }
+    if (!token) { await reportCommandResult(port, messageId, false, "用法: /mc delete <序号|名称>", chatId); return }
     const target = resolveMcpTarget(list, token)
-    if (!target) { await reportCommandResult(port, messageId, false, `❌ 找不到: ${token}`); return }
+    if (!target) { await reportCommandResult(port, messageId, false, `❌ 找不到: ${token}`, chatId); return }
     deleteMcpServer(target.name, target.source as "global" | "project")
-    await reportCommandResult(port, messageId, true, `🗑️ ${target.name} 已删除`)
+    await reportCommandResult(port, messageId, true, `🗑️ ${target.name} 已删除`, chatId)
     return
   }
 
   if (sub === "add") {
     const jsonStr = raw.replace(/^\/mcp\s+add\s*/i, "").trim()
     if (!jsonStr) {
-      await reportCommandResult(port, messageId, false, '用法: /mcp add {"name":"xxx","command":"npx","args":[...]}')
+      await reportCommandResult(port, messageId, false, '用法: /mc add {"name":"xxx","command":"npx","args":[...]}', chatId)
       return
     }
     try {
       const parsed = JSON.parse(jsonStr)
       const name = parsed.name as string
-      if (!name) { await reportCommandResult(port, messageId, false, "❌ 缺少 name 字段"); return }
+      if (!name) { await reportCommandResult(port, messageId, false, "❌ 缺少 name 字段", chatId); return }
       const { name: _, ...entry } = parsed
       saveMcpServer(name, entry, "project")
-      await reportCommandResult(port, messageId, true, `✅ ${name} 已添加`)
+      await reportCommandResult(port, messageId, true, `✅ ${name} 已添加`, chatId)
     } catch (e: unknown) {
-      await reportCommandResult(port, messageId, false, `❌ JSON 解析失败: ${e instanceof Error ? e.message : e}`)
+      await reportCommandResult(port, messageId, false, `❌ JSON 解析失败: ${e instanceof Error ? e.message : e}`, chatId)
     }
     return
   }
 
-  await reportCommandResult(port, messageId, false, `😅 未知子命令: ${sub}\n\n${MCP_SUBCMD_HELP}`)
+  await reportCommandResult(port, messageId, false, `😅 未知子命令: ${sub}\n\n${MCP_SUBCMD_HELP}`, chatId)
 }
 
 // ── Workflow 命令 ────────────────────────────────────────────
 
-const WORKFLOW_SUBCMD_HELP =
-  "💡 /workflow 子命令\n" +
-  "🔹 /workflow ls — 列出工作流定义\n" +
-  "🔹 /workflow info <序号|ID> — 查看定义详情\n" +
-  "🔹 /workflow run <序号|ID> [初始输入] — 启动工作流\n" +
-  "🔹 /workflow status [实例ID] — 查看实例状态\n" +
-  "🔹 /workflow delete <序号|ID> — 删除工作流定义"
+const WORKFLOW_SUBCMD_HELP = [
+  "💡 /wf 子命令（全称 /workflow）",
+  "🔹 /wf ls — 列出工作流定义",
+  "🔹 /wf info <序号|ID> — 查看定义详情",
+  "🔹 /wf run <序号|ID> [初始输入] — 启动工作流",
+  "🔹 /wf status [实例ID] — 查看实例状态",
+  "🔹 /wf delete <序号|ID> — 删除工作流定义",
+].join("\n")
 
 function resolveWorkflowDef(defs: WorkflowDefinition[], token: string | undefined): WorkflowDefinition | null {
   if (!token) return null
@@ -620,13 +636,19 @@ export async function handleFeishuWorkflowCommand(
   const low = (s: string) => s.toLowerCase()
 
   if (parts.length <= 1) {
-    await reportCommandResult(port, messageId, true, WORKFLOW_SUBCMD_HELP)
+    await reportCommandResult(port, messageId, true, WORKFLOW_SUBCMD_HELP, chatId, [
+      { label: "/wf ls", cmd: "/wf ls" },
+      { label: "/wf status", cmd: "/wf status" },
+    ])
     return
   }
 
   const sub = low(parts[1])
   if (sub === "help" || sub === "-h" || sub === "--help") {
-    await reportCommandResult(port, messageId, true, WORKFLOW_SUBCMD_HELP)
+    await reportCommandResult(port, messageId, true, WORKFLOW_SUBCMD_HELP, chatId, [
+      { label: "/wf ls", cmd: "/wf ls" },
+      { label: "/wf status", cmd: "/wf status" },
+    ])
     return
   }
 
@@ -634,18 +656,18 @@ export async function handleFeishuWorkflowCommand(
 
   if (sub === "ls" || sub === "list") {
     if (defs.length === 0) {
-      await reportCommandResult(port, messageId, true, "📭 当前还没有工作流定义～")
+      await reportCommandResult(port, messageId, true, "📭 当前还没有工作流定义～", chatId)
       return
     }
     const lines = defs.map((d, i) => `#${i + 1}\t📋 ${d.name} · ${d.nodes.length} 节点 · ID: ${d.id}`)
-    await reportCommandResult(port, messageId, true, `🔀 工作流一览（共 ${defs.length} 条）\n\n${lines.join("\n")}\n\n✨ 详情：/workflow info <序号>`)
+    await reportCommandResult(port, messageId, true, `🔀 工作流一览（共 ${defs.length} 条）\n\n${lines.join("\n")}\n\n✨ 详情：/wf info <序号>`, chatId)
     return
   }
 
   if (sub === "info" || sub === "get") {
     const target = resolveWorkflowDef(defs, parts[2])
     if (!target) {
-      await reportCommandResult(port, messageId, false, "💡 用法：/workflow info <序号|ID>")
+      await reportCommandResult(port, messageId, false, "💡 用法：/wf info <序号|ID>", chatId)
       return
     }
     const idx = defs.findIndex((d) => d.id === target.id) + 1
@@ -659,20 +681,20 @@ export async function handleFeishuWorkflowCommand(
       `🧩 节点 (${target.nodes.length})`,
       nodeLines,
     ].filter(Boolean).join("\n")
-    await reportCommandResult(port, messageId, true, body)
+    await reportCommandResult(port, messageId, true, body, chatId)
     return
   }
 
   if (sub === "run") {
     const target = resolveWorkflowDef(defs, parts[2])
     if (!target) {
-      await reportCommandResult(port, messageId, false, "💡 用法：/workflow run <序号|ID> [初始输入]")
+      await reportCommandResult(port, messageId, false, "💡 用法：/wf run <序号|ID> [初始输入]", chatId)
       return
     }
     const input = parts.slice(3).join(" ").trim() || undefined
     const result = await runWorkflowDefinition(target.id, { input, notifyChatId: chatId })
     if (!result.ok) {
-      await reportCommandResult(port, messageId, false, `❌ 启动失败: ${result.error}`)
+      await reportCommandResult(port, messageId, false, `❌ 启动失败: ${result.error}`, chatId)
       return
     }
     await reportCommandResult(
@@ -693,7 +715,7 @@ export async function handleFeishuWorkflowCommand(
       const inst = instances.find((i) => i.id === token)
         ?? (idx !== null && idx >= 1 && idx <= instances.length ? instances[idx - 1] : undefined)
       if (!inst) {
-        await reportCommandResult(port, messageId, false, "❌ 找不到该实例")
+        await reportCommandResult(port, messageId, false, "❌ 找不到该实例", chatId)
         return
       }
       const def = getDefinition(inst.workflowId)
@@ -706,34 +728,34 @@ export async function handleFeishuWorkflowCommand(
         `📈 步数 · ${inst.stepCount}/${inst.maxSteps}`,
         inst.input ? `✉️ 输入 · ${inst.input}` : "",
       ].filter(Boolean).join("\n")
-      await reportCommandResult(port, messageId, true, body)
+      await reportCommandResult(port, messageId, true, body, chatId)
       return
     }
     if (instances.length === 0) {
-      await reportCommandResult(port, messageId, true, "📭 暂无工作流实例")
+      await reportCommandResult(port, messageId, true, "📭 暂无工作流实例", chatId)
       return
     }
     const lines = instances.slice(0, 10).map((inst, i) => {
       const def = getDefinition(inst.workflowId)
       return `#${i + 1}\t${def?.name || inst.workflowId} · ${inst.status} · ${inst.id.slice(0, 8)}…`
     })
-    await reportCommandResult(port, messageId, true, `📊 工作流实例（最近 ${lines.length} 条）\n\n${lines.join("\n")}\n\n✨ 详情：/workflow status <实例ID>`)
+    await reportCommandResult(port, messageId, true, `📊 工作流实例（最近 ${lines.length} 条）\n\n${lines.join("\n")}\n\n✨ 详情：/wf status <实例ID>`, chatId)
     return
   }
 
   if (sub === "delete" || sub === "del") {
     const target = resolveWorkflowDef(defs, parts[2])
     if (!target) {
-      await reportCommandResult(port, messageId, false, "💡 用法：/workflow delete <序号|ID>")
+      await reportCommandResult(port, messageId, false, "💡 用法：/wf delete <序号|ID>", chatId)
       return
     }
     if (!deleteDefinition(target.id)) {
-      await reportCommandResult(port, messageId, false, "❌ 删除失败")
+      await reportCommandResult(port, messageId, false, "❌ 删除失败", chatId)
       return
     }
-    await reportCommandResult(port, messageId, true, `✅ 工作流「${target.name}」已删除`)
+    await reportCommandResult(port, messageId, true, `✅ 工作流「${target.name}」已删除`, chatId)
     return
   }
 
-  await reportCommandResult(port, messageId, false, `😅 未知子命令: ${sub}\n\n${WORKFLOW_SUBCMD_HELP}`)
+  await reportCommandResult(port, messageId, false, `😅 未知子命令: ${sub}\n\n${WORKFLOW_SUBCMD_HELP}`, chatId)
 }

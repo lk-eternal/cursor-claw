@@ -149,10 +149,10 @@ export function getChannel(id?: string): MessageChannel | undefined {
   return getChannels().find((c) => c.id === id)
 }
 
-/** 解析会话所属通道；解析不到时回退到第一个启用通道 */
+/** 解析会话所属通道；解析不到时返回 undefined（禁止静默回退到「第一个启用通道」，防微信会话读到飞书配置） */
 export function resolveChannelForSession(sessionKey: string): MessageChannel | undefined {
   const id = channelIdFromSessionKey(sessionKey)
-  return getChannel(id) ?? getEnabledChannels()[0]
+  return id ? getChannel(id) : undefined
 }
 
 export function getAgentResources(): AgentResource[] {

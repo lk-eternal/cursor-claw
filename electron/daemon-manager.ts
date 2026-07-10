@@ -9,6 +9,7 @@ import {
   getConfig, saveConfig, type AppConfig,
   getChannels, getEnabledChannels, getChannel,
   updateChannel, migrateLegacyConfig, effectiveWorkspaceDir,
+  resolveChannelForSession,
   mainChatScopeKey, setMainChatIdForScope, type MessageChannel,
 } from "./config-store"
 import { parseChatKey, channelIdFromSessionKey, type DaemonChannelConfig, type ChannelStatusInfo } from "../src/shared/channel-types"
@@ -24,7 +25,7 @@ import {
   type ChatType,
 } from "./agent-launcher"
 import { stopAllSdkSessions, resetSdkSessionContext, getSdkSessionCount, getSdkSessionList, checkSdkApiKey, listSdkModels, getSdkSessionDiagnostics, getResumableSummary, switchSdkSessionModel } from "./agent-sdk"
-import { initSessionModelStore, listQuickModels } from "../src/shared/session-model-store.js"
+import { initSessionModelStore, listQuickModels, getSessionOverride } from "../src/shared/session-model-store.js"
 import { registerFeishuApp } from "./feishu-register"
 import {
   setDaemonPort,
@@ -933,6 +934,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
     broadcastLog(`[指令] 执行 ${rawCmd} (msgId=${claimed.messageId} admin=${isAdmin})`)
     try {
       switch (head) {
+        case "/x":
         case "/stop": {
           if (isAdmin) {
             const wasRunning = isAgentRunning()
@@ -947,23 +949,81 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           break
         }
 
+        case "/s":
         case "/status": {
+          const sessionKey = resolveCommandSessionKey(claimed.chatId, claimed.chatType)
+          const sessions = getSessionAgentList()
+          const matched = (sessionKey
+            ? sessions.find((s) => s.sessionKey === sessionKey)
+            : undefined)
+            ?? (claimed.chatId
+              ? sessions.find((s) => s.sessionKey === claimed.chatId || s.sessionKey.startsWith(`${claimed.chatId}::`))
+              : undefined)
           const status = await getDaemonStatus()
+          // 队列按当前会话统计（与 /ls 过滤规则一致）
+          const qMsgs = await getQueueMessages()
+          const qMine = claimed.chatId
+            ? qMsgs.filter((m) => m.sessionKey === claimed.chatId || m.sessionKey?.startsWith(`${claimed.chatId}::`))
+            : qMsgs
+          const qProcessing = qMine.filter((m) => m.status === "processing").length
+          const qPending = qMine.length - qProcessing
+          const queueLine = `📭 队列: 排队 ${qPending} · 处理中 ${qProcessing}`
+
+          if (!isAdmin) {
+            // 非主用户：只看本会话 Agent + 队列
+            let agentLine: string
+            if (matched) {
+              const detail = matched.pid
+                ? `PID ${matched.pid}`
+                : `SDK${matched.model ? ` · ${matched.model}` : ""}`
+              agentLine = `🤖 当前会话: ✅ 运行中（${detail}）`
+            } else {
+              agentLine = "🤖 当前会话: ❌ 未运行"
+            }
+            await reply(true, `${agentLine}\n${queueLine}`)
+            break
+          }
+
           const schedTasks = readTasksFromFile()
           const schedTotal = schedTasks.length
           const schedEnabled = schedTasks.filter((t) => t.enabled).length
+          const channel = claimed.chatId
+            ? (getChannel(parseChatKey(claimed.chatId).channelId) ?? resolveChannelForSession(sessionKey ?? claimed.chatId))
+            : undefined
+          if (!channel && claimed.chatId) {
+            await reply(false, "❌ 未找到当前会话所属的消息通道")
+            break
+          }
+          const wsDir = (channel ? effectiveWorkspaceDir(channel) : undefined) || getConfig().workspaceDir || undefined
+          const branch = wsDir ? readGitBranch(wsDir) : undefined
+          const ov = sessionKey ? getSessionOverride(sessionKey) : undefined
+          const model = ov?.model?.trim() || channel?.model?.trim() || "auto"
+          let agentLine: string
+          if (matched) {
+            agentLine = matched.pid
+              ? `🤖 Agent: ✅ 运行中 (PID: ${matched.pid})`
+              : `🤖 Agent: ✅ 运行中（SDK${matched.model ? ` · ${matched.model}` : ""}）`
+          } else if (isAgentRunning()) {
+            agentLine = `🤖 Agent: ✅ 其他会话运行中 (${getRunningSessionCount()} 个)`
+          } else {
+            agentLine = "🤖 Agent: ❌ 未运行"
+          }
           const lines = [
             `🛡️ Daemon: ${status.running ? "✅ 运行中" : "❌ 未运行"}`,
             status.version ? `🔄 版本: ${status.version}` : "",
             status.uptime !== undefined ? `⌛️ 运行时间: ${Math.floor(status.uptime / 60)}分钟` : "",
-            `🤖 Agent: ${isAgentRunning() ? `✅ 运行中 (PID: ${getAgentChildPid()})` : "❌ 未运行"}`,
-            `📭 队列消息: 排队 ${status.queueCounts?.pending ?? 0} · 处理中 ${status.queueCounts?.processing ?? 0}`,
+            agentLine,
+            wsDir ? `📁 工作目录: ${wsDir}` : "",
+            branch ? `🌿 分支: ${branch}` : (wsDir ? "🌿 分支: （非 git 或无法读取）" : ""),
+            `🧠 模型: ${model}${ov ? "（本会话）" : "（通道默认）"}`,
+            queueLine,
             `⏰ 定时任务: 开启 ${schedEnabled} / 共 ${schedTotal} 条`,
           ].filter(Boolean)
           await reply(true, lines.join("\n"))
           break
         }
 
+        case "/ls":
         case "/list": {
           const msgs = await getQueueMessages()
           const filtered = isAdmin ? msgs : msgs.filter((m) =>
@@ -977,6 +1037,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           break
         }
 
+        case "/t":
         case "/task": {
           if (!isAdmin) { await denyNonAdmin(); break }
           await handleFeishuTaskCommand(
@@ -988,12 +1049,14 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           break
         }
 
+        case "/m":
         case "/model": {
           if (!isAdmin) { await denyNonAdmin(); break }
           await handleFeishuModelCommand(lock.port, claimed.messageId, rawCmd, claimed.chatId)
           break
         }
 
+        case "/mc":
         case "/mcp": {
           if (!isAdmin) { await denyNonAdmin(); break }
           await handleFeishuMcpCommand(lock.port, claimed.messageId, rawCmd, claimed.chatId)
@@ -1007,6 +1070,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           break
         }
 
+        case "/rr":
         case "/restart": {
           if (!isAdmin) { await denyNonAdmin(); break }
           await stopAgent()
@@ -1019,6 +1083,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           break
         }
 
+        case "/cl":
         case "/clean": {
           if (!isAdmin) { await denyNonAdmin(); break }
           const cleared = await clearMessageQueue()
@@ -1027,6 +1092,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           break
         }
 
+        case "/r":
         case "/reset": {
           const sessionKey = resolveCommandSessionKey(claimed.chatId, claimed.chatType)
           if (sessionKey && isSessionAgentRunning(sessionKey)) {
@@ -1042,23 +1108,35 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           break
         }
 
+        case "/w":
         case "/workspace": {
           if (!isAdmin) { await denyNonAdmin(); break }
           const wsArgs = cmdTokens.slice(1)
           if (wsArgs.length === 0 || wsArgs[0] === "info") {
             const cfg = getConfig()
-            await reply(true, (() => {
-              const d = cfg.workspaceDir || "(未配置)"
-              const b = cfg.workspaceDir ? readGitBranch(cfg.workspaceDir) : undefined
-              return b ? `📂 当前工作目录: ${d}\n🌿 分支: ${b}` : `📂 当前工作目录: ${d}`
-            })())
+            const d = cfg.workspaceDir || "(未配置)"
+            const b = cfg.workspaceDir ? readGitBranch(cfg.workspaceDir) : undefined
+            const info = b ? `📁 当前工作目录: ${d}\n🌿 分支: ${b}` : `📁 当前工作目录: ${d}`
+            const favDirs = cfg.favoriteWorkspaces ?? []
+            const lastSeg = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() ?? p
+            const wsBtns = favDirs.map((dir) => {
+              const parts = dir.split(/[\\/]/).filter(Boolean)
+              const name = parts.pop() ?? dir
+              const dup = favDirs.some((o) => o !== dir && lastSeg(o) === name)
+              const parent = parts.pop()
+              const short = dup && parent ? `${name}·${parent}` : name
+              return { label: `📂 /w set ${short}`.slice(0, 40), cmd: `/w set ${dir}` }
+            })
+            const body = wsBtns.length
+              ? `${info}\n\n💡 /w set <路径> — 切换；下方为常用目录快捷按钮`
+              : `${info}\n\n💡 /w — 查看当前 · /w set <路径> — 切换`
+            await reply(true, body, wsBtns.length ? wsBtns : undefined)
           } else if (wsArgs[0] === "set" && wsArgs.length >= 2) {
             const newDir = wsArgs.slice(1).join(" ").trim()
             const cfg = getConfig()
             if (newDir === cfg.workspaceDir) {
               await reply(true, `📂 工作目录未变化: ${newDir}`)
             } else {
-              await reply(true, `📂 正在切换工作目录到: ${newDir}\n⏳ 切换中...`)
               const wsResult = await applyWorkspaceSwitch(newDir, false)
               if (wsResult.ok) {
                 broadcastLog(`[指令 /workspace] 已切换到 ${newDir}`, "INFO")
@@ -1069,11 +1147,12 @@ async function checkAndExecutePendingCommands(): Promise<void> {
               }
             }
           } else {
-            await reply(false, "用法：/workspace 查看当前 | /workspace set <路径>")
+            await reply(false, "💡 /w 子命令（全称 /workspace）\n🔹 /w — 查看当前目录\n🔹 /w set <路径> — 切换工作目录")
           }
           break
         }
 
+        case "/c":
         case "/chat": {
           if (!isAdmin) { await denyNonAdmin(); break }
           await handleChatCommand(cmdTokens, lock.port, claimed!.messageId, claimed!.chatId)
@@ -1082,46 +1161,31 @@ async function checkAndExecutePendingCommands(): Promise<void> {
 
         case "/h":
         case "/help": {
-          // 全指令按钮化：label ≤8 字符时卡片按 3 列紧凑排布，正文只留一行说明
-          const common = [
-            { label: "📊 状态", cmd: "/status" },
-            { label: "⏹ 停止", cmd: "/stop" },
-            { label: "🔄 重置", cmd: "/reset" },
+          // 按作用域分组（方案 C）：当前上下文 / 队列 / 编排 / 基础设施
+          const ctx = [
+            { label: "📊 状态 /s", cmd: "/s", section: "▶ 当前上下文" },
+            { label: "⏹ 停止 /x", cmd: "/x", section: "▶ 当前上下文" },
+            { label: "🔄 重置 /r", cmd: "/r", section: "▶ 当前上下文" },
+            { label: "🧠 模型 /m", cmd: "/m", section: "▶ 当前上下文" },
+            { label: "📁 目录 /w", cmd: "/w", section: "▶ 当前上下文" },
           ]
-          const adminOnly = [
-            { label: "💬 会话", cmd: "/chat ls" },
-            { label: "🧠 模型", cmd: "/model ls" },
-            { label: "⏰ 任务", cmd: "/task ls" },
-            { label: "🔀 工作流", cmd: "/workflow ls" },
-            { label: "📦 MCP", cmd: "/mcp ls" },
-            { label: "📁 目录", cmd: "/workspace" },
-            { label: "📋 队列", cmd: "/list" },
-            { label: "🧹 清队列", cmd: "/clean" },
-            { label: "♻️ 重启", cmd: "/restart" },
+          const queue = [
+            { label: "📋 队列 /ls", cmd: "/ls", section: "▶ 队列" },
+            { label: "🧹 清队列 /cl", cmd: "/cl", section: "▶ 队列" },
           ]
-          // 常用工作目录快捷切换（末段重名时附父目录区分）
-          const favDirs = isAdmin ? (getConfig().favoriteWorkspaces ?? []) : []
-          const lastSeg = (d: string) => d.split(/[\\/]/).filter(Boolean).pop() ?? d
-          const wsBtns = favDirs.map((d) => {
-            const parts = d.split(/[\\/]/).filter(Boolean)
-            const name = parts.pop() ?? d
-            const dup = favDirs.some((o) => o !== d && lastSeg(o) === name)
-            const parent = parts.pop()
-            return { label: `📂 ${dup && parent ? `${name}·${parent}` : name}`, cmd: `/workspace set ${d}` }
-          })
-          const favModels = isAdmin ? (getConfig().favoriteModels ?? []) : []
-          let modelBtns: { label: string; cmd: string }[] = []
-          try {
-            const { listQuickModels } = await import("../src/shared/session-model-store.js")
-            modelBtns = listQuickModels(favModels, 6).map((m) => ({
-              label: `⚡ ${(m.label || m.model)}`.slice(0, 20),
-              cmd: `/model use ${m.model}`,
-            }))
-          } catch { /* ignore */ }
-          const helpBtns = isAdmin ? [...common, ...adminOnly, ...wsBtns, ...modelBtns] : common
-          const body = isAdmin
-            ? "💡 点按钮执行；📂 切换工作目录；⚡ 切换本会话模型（不改通道默认）"
-            : "💡 点按钮执行，或直接输入指令"
+          const orch = [
+            { label: "💬 会话 /c", cmd: "/c", section: "▶ 编排" },
+            { label: "⏰ 任务 /t", cmd: "/t", section: "▶ 编排" },
+            { label: "🔀 工作流 /wf", cmd: "/wf", section: "▶ 编排" },
+          ]
+          const infra = [
+            { label: "📦 MCP /mc", cmd: "/mc", section: "▶ 基础设施" },
+            { label: "♻️ 重启 /rr", cmd: "/rr", section: "▶ 基础设施" },
+          ]
+          const helpBtns = isAdmin
+            ? [...ctx, ...queue, ...orch, ...infra]
+            : ctx.filter((b) => ["/s", "/x", "/r"].includes(b.cmd))
+          const body = "💡 发送短指令；有子命令的先进二级说明"
           await reply(true, body, helpBtns)
           break
         }
@@ -1215,8 +1279,11 @@ function readGitBranch(dir: string): string | undefined {
 function formatWorkspaceSwitchText(dir: string): string {
   const label = dir.split(/[\\/]/).filter(Boolean).pop() ?? dir
   const branch = readGitBranch(dir)
-  const branchPart = branch ? ` · 🌿 ${branch}` : ""
-  return `✅ 工作目录已切换到: ${dir}\n📂 ${label}${branchPart} · 会话上下文已切换`
+  return [
+    `✅ 工作目录已切换到: ${dir}`,
+    branch ? `🌿 分支: ${branch}` : undefined,
+    `📂 ${label} · 会话上下文已切换`,
+  ].filter(Boolean).join("\n")
 }
 
 async function notifyMainUsersWorkspaceSwitched(dir: string): Promise<void> {
