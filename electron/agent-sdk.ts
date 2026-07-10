@@ -24,6 +24,10 @@ interface SdkSessionAgent {
   keepSession: boolean
   /** 通道开关：是否长连接（无限 poll 保活）；false = 回答完即收回合，按需唤醒 */
   persistentPoll: boolean
+  /** 实际使用的模型 id（空/"auto" 时已解析为默认 composer-2） */
+  model: string
+  /** 模型参数 JSON（与启动时一致，供 UI 展示 slug） */
+  modelParams?: string
   /** 流式日志聚合缓冲：连续同类型(thinking/text)增量合并成一条打印 */
   logAgg: { kind: "thinking" | "text" | null; buf: string }
   /** 最近一次终态状态事件（ERROR/EXPIRED/CANCELLED），用于结束时还原真实错误原因 */
@@ -125,23 +129,9 @@ function buildWakePrompt(session: SdkSessionAgent, rulesUpdated = false): string
 
 let sdkIdleHandler: ((sessionKey: string) => void) | null = null
 
-/** run 收口释放后回调（调度器借此立即消费运行期间积压的消息） */
+/** run 收口释放后回调（调度器借此立即消费运行期间积压的消息，含异常结束） */
 export function setSdkIdleHandler(fn: (sessionKey: string) => void): void {
   sdkIdleHandler = fn
-}
-
-let sdkRunErrorHandler: ((sessionKey: string, chatType: ChatType, errorDetail: string, senderOpenId?: string) => void) | null = null
-
-/** run 以 error 终态结束时回调（调度器借此自动重试拉起 / 通知用户），在 idle 回调之前触发 */
-export function setSdkRunErrorHandler(fn: (sessionKey: string, chatType: ChatType, errorDetail: string, senderOpenId?: string) => void): void {
-  sdkRunErrorHandler = fn
-}
-
-let sdkRunSuccessHandler: ((sessionKey: string) => void) | null = null
-
-/** run 正常结束时回调（用于重置连续错误重试计数） */
-export function setSdkRunSuccessHandler(fn: (sessionKey: string) => void): void {
-  sdkRunSuccessHandler = fn
 }
 
 function closeAndRemoveSession(session: SdkSessionAgent): void {
@@ -193,6 +183,8 @@ function broadcastSdkSessionStatus(): void {
     chatType: s.chatType as string,
     chatName: resolveSessionChatName(s.sessionKey, s.chatName, s.senderOpenId),
     workspaceDir: s.workspaceDir,
+    model: s.model,
+    modelParams: s.modelParams,
   }))
   broadcastSessionStatus(list, "sdk")
 }
@@ -361,6 +353,8 @@ export function getSdkSessionList() {
     workspaceDir: s.workspaceDir,
     senderOpenId: s.senderOpenId,
     chatName: s.chatName,
+    model: s.model,
+    modelParams: s.modelParams,
   }))
 }
 
@@ -424,13 +418,7 @@ function startRunLifecycle(session: SdkSessionAgent, run: Run): void {
     session.run = null
     closeAndRemoveSession(session)
     broadcastSdkSessionStatus()
-    // 异常终态先交错误处理器（自动重试拉起/通知用户），再走 idle 调度消费积压消息
-    if (run.status === "error") {
-      sdkRunErrorHandler?.(sessionKey, session.chatType, errorDetail ?? "unknown", session.senderOpenId)
-    } else {
-      sdkRunSuccessHandler?.(sessionKey)
-    }
-    // 运行期间可能已有积压消息，立即触发一次调度
+    // 无论成功/异常：释放后立即调度——队列有未处理消息（含 .claimed）时自动拉起
     sdkIdleHandler?.(sessionKey)
   })
 }
@@ -484,7 +472,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     let agent: SDKAgent | undefined
     if (resumable && resumable.workspaceDir === workspaceDir) {
       try {
-        pushUiLog("SDK", "INFO", `[${sessionKey}] Resume 恢复会话 (agentId=${resumable.agentId}, 新连接/上下文保留)`)
+        pushUiLog("SDK", "INFO", `[${sessionKey}] Resume 恢复会话 (agentId=${resumable.agentId}, model=${JSON.stringify(modelSelection)}, 新连接/上下文保留)`)
         agent = await Agent.resume(resumable.agentId, { apiKey, model: modelSelection, local: localOptions })
       } catch (e: unknown) {
         pushUiLog("SDK", "WARN", `[${sessionKey}] Resume 失败，回退全新会话: ${e instanceof Error ? e.message : String(e)}`)
@@ -512,11 +500,13 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       abortController,
       keepSession,
       persistentPoll,
+      model: modelId,
+      modelParams: opts.modelParams,
       logAgg: { kind: null, buf: "" },
     }
 
     sdkSessions.set(sessionKey, session)
-    broadcastLog(`[SDK] 会话 ${sessionKey} 已${resumed ? "恢复" : "创建"}, agentId=${agent.agentId}`)
+    broadcastLog(`[SDK] 会话 ${sessionKey} 已${resumed ? "恢复" : "创建"}, agentId=${agent.agentId}, model=${JSON.stringify(modelSelection)}`)
     broadcastSdkSessionStatus()
 
     // Resume 会话的规则是创建时快照：规则文件变过则在唤醒 prompt 里硬指令重读

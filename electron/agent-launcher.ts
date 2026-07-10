@@ -27,6 +27,7 @@ interface SessionAgent {
   workspaceDir?: string
   senderOpenId?: string
   chatName?: string
+  model?: string
 }
 
 const sessionAgents = new Map<string, SessionAgent>()
@@ -78,6 +79,7 @@ function broadcastSessionStatus(): void {
     lastActivityAt: s.lastActivityAt, chatType: s.chatType as string,
     chatName: resolveSessionChatName(s.sessionKey, s.chatName, s.senderOpenId),
     workspaceDir: s.workspaceDir,
+    model: s.model,
   }))
   broadcastSessionStatusToUi(list, "cli")
 }
@@ -107,7 +109,7 @@ export function getSessionAgentList() {
     sessionKey: s.sessionKey, pid: s.pid, startedAt: s.startedAt,
     chatType: s.chatType, lastActivityAt: s.lastActivityAt,
     workspaceDir: s.workspaceDir, senderOpenId: s.senderOpenId,
-    chatName: s.chatName,
+    chatName: s.chatName, model: s.model,
   }))
 }
 
@@ -289,12 +291,14 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
 
   try {
     const ws = workDir.trim() || undefined
+    pushUiLog("CLI", "INFO", `[${sessionKey}] 启动 CLI Agent (model=${opts.model?.trim() || "auto"}, cwd=${workDir})`)
     const child = spawnAgentWithLogs(args, spawnEnv, `session-${sessionKey}`, ws)
 
     const now = Date.now()
     const sa: SessionAgent = {
       sessionKey, child, pid: child.pid!, startedAt: now, lastActivityAt: now, lastOutputAt: now,
       chatType, workspaceDir: workDir, senderOpenId, chatName,
+      model: opts.model?.trim() && opts.model.trim() !== "auto" ? opts.model.trim() : undefined,
     }
     sessionAgents.set(sessionKey, sa)
 

@@ -218,7 +218,6 @@ brew info --cask cursor-claw
 | `send_image` | `image_path`, `message_id?`, `session_key?` | 发送本地图片到飞书 / 微信 |
 | `send_file` | `file_path`, `message_id?`, `session_key?` | 发送本地文件到飞书 / 微信 |
 | `send_question` | `text`, `options`, `message_id?`, `session_key` | 提问并附选项按钮（飞书卡片 / 微信文本降级） |
-| `mark_done` | `session_key`, `message_id?` | 标记事项处理完成，给对应用户消息打 DONE 表情 |
 
 ### 自管理工具
 

@@ -30,6 +30,12 @@ function getSessionDir(sessionKey?: string): string {
   return sub;
 }
 
+/** 会话是否有过队列目录（探测不创建）：send 校验用——收过消息的会话必有目录 */
+export function hasSessionQueueDir(sessionKey: string): boolean {
+  if (!queueDir || !sessionKey) return false;
+  return fs.existsSync(path.join(queueDir, sanitizeSessionDir(sessionKey)));
+}
+
 function listSessionDirs(): string[] {
   if (!queueDir) return [];
   try {
@@ -166,7 +172,7 @@ export function claimNextMessage(filterSessionKey?: string): QueueMessage | null
 }
 
 /** 会话目录下是否存在待投递的新消息（仅 .qmsg；.claimed 是处理中不算新，
- * 否则回复后未 mark_done 就挂 poll 会立即返回同一批消息造成空转） */
+ * 阻塞 poll 进入时已被隐式确认删除，不参与挂起判断） */
 function hasNewMessages(dir: string): boolean {
   try {
     return fs.readdirSync(dir).some((f) => f.endsWith(".qmsg"));
@@ -177,11 +183,11 @@ function hasNewMessages(dir: string): boolean {
 
 /**
  * 领取该会话所有未确认消息（不删除）：
- * 1. 把所有 .qmsg 改名为 .claimed（标记"已投递、待回复确认"）；
+ * 1. 把所有 .qmsg 改名为 .claimed（标记"已投递、待完成确认"）；
  * 2. 返回该会话全部 .claimed（含本次新投递的 + 历史未确认的），按 timestamp 升序。
  *
- * 消息只有在 Agent 通过 send-xxx 回复（ackMessages）后才删除；未确认则下次 poll 重新投递，
- * 因此幽灵连接领走也不会丢——这是"至少一次"投递的核心。
+ * 消息在 Agent 下一次挂阻塞 poll 时隐式确认删除（Agent 干完手头活才会挂 poll）；
+ * 未确认则下次领取重新投递，因此幽灵连接领走也不会丢——这是"至少一次"投递的核心。
  */
 export function claimSessionMessages(filterSessionKey?: string): QueueMessage[] {
   if (!queueDir) return [];
@@ -219,7 +225,8 @@ export function claimSessionMessages(filterSessionKey?: string): QueueMessage[] 
 }
 
 /**
- * 阻塞领取：有未确认消息（.qmsg 或 .claimed）立即返回；全空则挂起等待新消息。
+ * 阻塞领取：有待投递新消息（.qmsg）立即返回；否则挂起等待新消息。
+ * 调用方（poll handler）应在进入前先 confirmClaimedMessages 清掉处理中消息。
  * timeoutMs: 0=不等待立即返回；<0=无限阻塞；>0=超时毫秒。
  */
 export function waitForSessionMessages(
@@ -245,12 +252,12 @@ export function waitForSessionMessages(
 }
 
 /**
- * 标记完成（mark_done）：删除会话中已投递的 .claimed 并返回其 messageId（用于打 DONE 表情）。
- * 回复（send-xxx）不再删除消息——消息保持「处理中」直到 Agent 显式 mark_done。
+ * 确认已投递消息完成：删除会话中的 .claimed 并返回其 messageId（用于打 DONE 表情）。
+ * 主路径：Agent 挂阻塞 poll = 声明手头活全部干完，进入时自动确认全部 .claimed。
  * messageId 指定时删除「时间戳 ≤ 目标消息」的 .claimed；缺省删除该会话全部 .claimed。
  * 未投递的 .qmsg 永不删除（防时钟乱序误删新消息）。session_key 缺省时全局兜底。
  */
-export function markDoneMessages(messageId?: string, filterSessionKey?: string): string[] {
+export function confirmClaimedMessages(messageId?: string, filterSessionKey?: string): string[] {
   if (!queueDir) return [];
   const safeId = messageId ? messageId.replace(/[^a-zA-Z0-9_-]/g, "_") : "";
   // 指定会话目录优先（快路径）；未命中时全局兜底——messageId 全局唯一，
@@ -447,7 +454,7 @@ export function getDistinctSessions(): QueueSessionInfo[] {
 
 const STALE_CLAIMED_MS = 72 * 60 * 60 * 1000;
 
-/** 清理写入中断遗留的 .tmp 孤儿 + 超过 72h 未 mark_done 的 .claimed（死会话兜底，防无限堆积） */
+/** 清理写入中断遗留的 .tmp 孤儿 + 超过 72h 未确认的 .claimed（死会话兜底，防无限堆积） */
 export function cleanupStaleMessages(): void {
   if (!queueDir) return;
   const now = Date.now();

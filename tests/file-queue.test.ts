@@ -8,7 +8,7 @@ import {
   claimNextMessage,
   claimSessionMessages,
   waitForSessionMessages,
-  markDoneMessages,
+  confirmClaimedMessages,
   getQueueLength,
   getEarliestMessageTime,
   getQueueMessages,
@@ -89,7 +89,7 @@ describe("claimSessionMessages", () => {
     pushToFileQueue("消息", "m1", "test", SESSION_A)
     claimSessionMessages(SESSION_A)
     expect(getQueueLength(SESSION_A)).toBe(1)
-    markDoneMessages("m1", SESSION_A)
+    confirmClaimedMessages("m1", SESSION_A)
     expect(getQueueLength(SESSION_A)).toBe(0)
   })
 
@@ -97,19 +97,19 @@ describe("claimSessionMessages", () => {
     pushToFileQueue("消息", "m1", "test", SESSION_A, false, { chatType: "p2p" })
     claimSessionMessages(SESSION_A)
     expect(getDistinctSessions().map((s) => s.sessionKey)).toContain(SESSION_A)
-    markDoneMessages("m1", SESSION_A)
+    confirmClaimedMessages("m1", SESSION_A)
     expect(getDistinctSessions()).toHaveLength(0)
   })
 })
 
-describe("markDoneMessages", () => {
+describe("confirmClaimedMessages", () => {
   it("确认目标及更早的 claimed 消息", async () => {
     pushToFileQueue("一", "m1", "test", SESSION_A)
     await new Promise((r) => setTimeout(r, 5))
     pushToFileQueue("二", "m2", "test", SESSION_A)
     claimSessionMessages(SESSION_A)
 
-    const acked = markDoneMessages("m2", SESSION_A)
+    const acked = confirmClaimedMessages("m2", SESSION_A)
     expect(acked.sort()).toEqual(["m1", "m2"])
     expect(claimSessionMessages(SESSION_A)).toHaveLength(0)
   })
@@ -120,7 +120,7 @@ describe("markDoneMessages", () => {
     pushToFileQueue("二", "m2", "test", SESSION_A)
     claimSessionMessages(SESSION_A)
 
-    expect(markDoneMessages("m1", SESSION_A)).toEqual(["m1"])
+    expect(confirmClaimedMessages("m1", SESSION_A)).toEqual(["m1"])
     const remain = claimSessionMessages(SESSION_A)
     expect(remain).toHaveLength(1)
     expect(remain[0].messageId).toBe("m2")
@@ -132,20 +132,43 @@ describe("markDoneMessages", () => {
     await new Promise((r) => setTimeout(r, 5))
     pushToFileQueue("新（未领取）", "m3", "test", SESSION_A)
 
-    markDoneMessages("m1", SESSION_A)
+    confirmClaimedMessages("m1", SESSION_A)
     expect(getQueueLength(SESSION_A)).toBe(1)
   })
 
   it("目标不存在返回空数组", () => {
     pushToFileQueue("消息", "m1", "test", SESSION_A)
     claimSessionMessages(SESSION_A)
-    expect(markDoneMessages("nope", SESSION_A)).toEqual([])
+    expect(confirmClaimedMessages("nope", SESSION_A)).toEqual([])
   })
 
   it("省略 sessionKey 时遍历所有会话兜底", () => {
     pushToFileQueue("消息", "m1", "test", SESSION_A)
     claimSessionMessages(SESSION_A)
-    expect(markDoneMessages("m1")).toEqual(["m1"])
+    expect(confirmClaimedMessages("m1")).toEqual(["m1"])
+  })
+
+  it("省略 messageId 时确认会话全部 claimed（阻塞 poll 隐式确认），未投递的 qmsg 保留", () => {
+    pushToFileQueue("一", "m1", "test", SESSION_A)
+    pushToFileQueue("二", "m2", "test", SESSION_A)
+    claimSessionMessages(SESSION_A)
+    pushToFileQueue("新（未领取）", "m3", "test", SESSION_A)
+
+    expect(confirmClaimedMessages(undefined, SESSION_A).sort()).toEqual(["m1", "m2"])
+    expect(getQueueLength(SESSION_A)).toBe(1)
+    const remain = claimSessionMessages(SESSION_A)
+    expect(remain).toHaveLength(1)
+    expect(remain[0].messageId).toBe("m3")
+  })
+
+  it("省略 messageId 只清指定会话，不误删其他会话的 claimed", () => {
+    pushToFileQueue("给A", "ma", "test", SESSION_A)
+    pushToFileQueue("给B", "mb", "test", SESSION_B)
+    claimSessionMessages(SESSION_A)
+    claimSessionMessages(SESSION_B)
+
+    expect(confirmClaimedMessages(undefined, SESSION_A)).toEqual(["ma"])
+    expect(getQueueLength(SESSION_B)).toBe(1)
   })
 })
 

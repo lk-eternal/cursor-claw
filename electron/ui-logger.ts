@@ -98,7 +98,7 @@ export function flushAgentStreamChunk(
 
 export type SessionSource = "cli" | "sdk"
 
-type SessionEntry = { sessionKey: string; pid: number; startedAt: number; lastActivityAt: number; chatType: string; chatName?: string; workspaceDir?: string; source?: SessionSource }
+type SessionEntry = { sessionKey: string; pid: number; startedAt: number; lastActivityAt: number; chatType: string; chatName?: string; workspaceDir?: string; source?: SessionSource; model?: string; modelParams?: string }
 
 const sessionPartitions = new Map<SessionSource, SessionEntry[]>()
 

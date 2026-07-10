@@ -199,19 +199,33 @@ export class LarkSender {
     return card;
   }
 
-  /** 发送带回传按钮的交互卡片（优先回复，退避 chat 直发），返回 message_id */
-  async sendCardWithButtons(text: string, buttons: CardButton[], replyMessageId?: string, chatId?: string, title?: string, input?: CardInput): Promise<string | undefined> {
+  /**
+   * 发送带回传按钮的交互卡片。
+   * @returns message_id；回复成功但飞书未回 message_id 时返回 null（调用方不得再 create）；失败返回 undefined
+   */
+  async sendCardWithButtons(text: string, buttons: CardButton[], replyMessageId?: string, chatId?: string, title?: string, input?: CardInput): Promise<string | null | undefined> {
     const card = LarkSender.buildCard(`${this.messagePrefix}${text}`, title, buttons, input);
     const content = JSON.stringify(card);
+    // 有 replyMessageId 时只走回复，成功即返回——禁止再 create 到 chatId（否则群消息 reply + 主用户 chat 直发 = 窜台）
     if (replyMessageId && !replyMessageId.startsWith("internal_")) {
       try {
         const res = await this.client.im.message.reply({
           path: { message_id: replyMessageId },
           data: { content, msg_type: "interactive" },
         });
-        const mid = (res as any)?.data?.message_id;
-        if (mid) { this.log("INFO", `飞书按钮卡片已回复(${buttons.length}个按钮)`); return mid; }
-      } catch (e: any) { this.log("WARN", `按钮卡片回复退避 (${replyMessageId}): ${e?.message ?? e}`); }
+        const code = (res as any)?.code;
+        const mid = ((res as any)?.data?.message_id ?? (res as any)?.message_id) as string | undefined;
+        if (code !== undefined && code !== 0) {
+          this.log("WARN", `按钮卡片回复失败 code=${code} (${replyMessageId})`);
+          return undefined;
+        }
+        // 未抛错且 code 正常：视为回复成功，绝不再二次直发（防群聊+主用户窜台）
+        this.log("INFO", `飞书按钮卡片已回复(${buttons.length}个按钮)${mid ? "" : "（响应未带 message_id）"}`);
+        return mid ?? null; // null = 已回复成功但无 id，调用方禁止再 create
+      } catch (e: any) {
+        this.log("WARN", `按钮卡片回复失败 (${replyMessageId}): ${e?.message ?? e}`);
+        return undefined;
+      }
     }
     const targetChatId = chatId ?? this.chatId;
     if (!targetChatId) { this.log("WARN", "无发送目标"); return undefined; }
