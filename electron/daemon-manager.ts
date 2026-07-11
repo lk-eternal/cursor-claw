@@ -9,7 +9,7 @@ import {
   getConfig, saveConfig, type AppConfig,
   getChannels, getEnabledChannels, getChannel,
   updateChannel, migrateLegacyConfig, effectiveWorkspaceDir,
-  resolveChannelForSession,
+  resolveChannelForSession, getAgentResource, resolveChannelModel,
   mainChatScopeKey, setMainChatIdForScope, type MessageChannel,
 } from "./config-store"
 import { parseChatKey, channelIdFromSessionKey, type DaemonChannelConfig, type ChannelStatusInfo } from "../src/shared/channel-types"
@@ -40,14 +40,21 @@ import {
   McpServerEntry,
 } from "./mcp-manager"
 import { FileCommand, reportCommandResult, handleFeishuModelCommand, handleFeishuMcpCommand, handleFeishuTaskCommand, handleFeishuWorkflowCommand, parseListModelsStdout, type TaskRunFn } from "./command-handler"
-import { handleFeishuProjectCommand, handleProjectSyncSignal, fillProjectNewFromText } from "./project-commands"
-import { initProjectStore } from "../src/shared/project-store.js"
+import { handleFeishuProjectCommand, handleProjectSyncSignal, fillProjectNewFromText, handleProjectNewSubmit } from "./project-commands"
+import { initProjectStore, getProject } from "../src/shared/project-store.js"
+import { projectIdFromSessionKey } from "../src/shared/project-types.js"
+import {
+  readGitBranch,
+  formatSessionLabel,
+  resolveWorkspaceFromSessionKey,
+  dirBaseName,
+} from "../src/shared/session-label.js"
 import { readLockFile, getLockFilePath, httpGet, httpPost, syncActiveSession, getCurrentActiveSession, enqueueToMainSession } from "./daemon-client"
 import {
   isSessionAgentRunning, stopSessionAgent, stopAllSessionAgents,
   dispatchSessionAgents, launchSessionAgent, launchIndependentAgent,
   launchWorkflowAgent, notifyWorkflowChat,
-  getSessionAgentList, handleChatCommand, clearMessageQueue, getQueueMessages,
+  getSessionAgentList, handleChatCommand, clearMessageQueue, getQueueMessages, formatSessionStatusBlock,
   pullMergedMessagesFromQueue, isMainUser, extractChatId, chatNameCache,
   fetchChatNames, fetchUserNames, initSessionDispatcher, previousActiveSessionMap,
 } from "./session-dispatcher"
@@ -618,8 +625,18 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
         }
         if (line.startsWith("__PROJECT_NOTIFY__:")) {
           try {
-            const { chatId, text } = JSON.parse(line.slice("__PROJECT_NOTIFY__:".length))
-            if (chatId && text) void notifyWorkflowChat(chatId, text)
+            const { chatId, text, buttons, footer } = JSON.parse(line.slice("__PROJECT_NOTIFY__:".length)) as {
+              chatId: string; text: string; buttons?: { label: string; cmd: string }[]; footer?: string
+            }
+            if (chatId && text) {
+              const port = cachedPort ?? readLockFile()?.port
+              const body = footer ? `${text}\n\n---\n${footer}` : text
+              if (port) {
+                void reportCommandResult(port, "", true, body, chatId, buttons)
+              } else {
+                void notifyWorkflowChat(chatId, body)
+              }
+            }
           } catch { /* ignore */ }
           continue
         }
@@ -638,6 +655,21 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
             const port = cachedPort ?? readLockFile()?.port
             if (port && payload.chatId && payload.messageId) {
               void fillProjectNewFromText(port, payload.messageId, payload.chatId, payload.text || "")
+            }
+          } catch { /* ignore */ }
+          continue
+        }
+        if (line.startsWith("__PROJECT_NEW_SUBMIT__:")) {
+          try {
+            const payload = JSON.parse(line.slice("__PROJECT_NEW_SUBMIT__:".length)) as {
+              chatId: string; messageId: string
+              name: string; goal: string; repoPath: string; worktreeRoot: string
+              baseBranch: string; featureBranch?: string
+              storyUrl?: string; productDocUrl?: string; techDocUrl?: string
+            }
+            const port = cachedPort ?? readLockFile()?.port
+            if (port && payload.chatId && payload.messageId) {
+              void handleProjectNewSubmit(port, payload.messageId, payload.chatId, payload)
             }
           } catch { /* ignore */ }
           continue
@@ -912,8 +944,13 @@ function stopStatusPolling(): void {
   stopDaemonPowerSaveBlock()
 }
 
-function resolveCommandSessionKey(chatId?: string, chatType?: string): string | undefined {
+async function resolveCommandSessionKey(chatId?: string, chatType?: string): Promise<string | undefined> {
   if (!chatId) return undefined
+  const lock = readLockFile()
+  if (lock?.port) {
+    const active = await getCurrentActiveSession(lock.port, chatId)
+    if (active) return active
+  }
   if (chatType === "p2p" && isMainUser(chatId, chatType)) {
     const channel = getChannel(parseChatKey(chatId).channelId)
     const wsDir = effectiveWorkspaceDir(channel)
@@ -956,7 +993,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
     const cmdTokens = rawCmd.split(/\s+/).filter((t) => t.length > 0)
     const head = (cmdTokens[0] ?? "").toLowerCase()
     const isAdmin = isMainUser(claimed.chatId, claimed.chatType)
-    const reply = (ok: boolean, msg: string, buttons?: { label: string; cmd: string }[]) => reportCommandResult(lock.port, claimed!.messageId, ok, msg, claimed!.chatId, buttons)
+    const reply = (ok: boolean, msg: string, buttons?: { label: string; cmd: string; section?: string }[]) => reportCommandResult(lock.port, claimed!.messageId, ok, msg, claimed!.chatId, buttons)
     const denyNonAdmin = () => reply(false, "🔒 该指令仅管理员可用")
 
     broadcastLog(`[指令] 执行 ${rawCmd} (msgId=${claimed.messageId} admin=${isAdmin})`)
@@ -979,7 +1016,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
 
         case "/s":
         case "/status": {
-          const sessionKey = resolveCommandSessionKey(claimed.chatId, claimed.chatType)
+          const sessionKey = await resolveCommandSessionKey(claimed.chatId, claimed.chatType)
           const sessions = getSessionAgentList()
           const matched = (sessionKey
             ? sessions.find((s) => s.sessionKey === sessionKey)
@@ -988,66 +1025,86 @@ async function checkAndExecutePendingCommands(): Promise<void> {
               ? sessions.find((s) => s.sessionKey === claimed.chatId || s.sessionKey.startsWith(`${claimed.chatId}::`))
               : undefined)
           const status = await getDaemonStatus()
-          // 队列按当前会话统计（与 /ls 过滤规则一致）
           const qMsgs = await getQueueMessages()
-          const qMine = claimed.chatId
-            ? qMsgs.filter((m) => m.sessionKey === claimed.chatId || m.sessionKey?.startsWith(`${claimed.chatId}::`))
-            : qMsgs
-          const qProcessing = qMine.filter((m) => m.status === "processing").length
-          const qPending = qMine.length - qProcessing
-          const queueLine = `📭 队列: 排队 ${qPending} · 处理中 ${qProcessing}`
+
+          const pid = sessionKey ? projectIdFromSessionKey(sessionKey) : undefined
+          const project = pid ? getProject(pid) : undefined
+          const wsDir = project?.worktreePath
+            || resolveWorkspaceFromSessionKey(sessionKey)
+            || (claimed.chatId
+              ? effectiveWorkspaceDir(getChannel(parseChatKey(claimed.chatId).channelId) ?? undefined)
+              : undefined)
+            || getConfig().workspaceDir
+            || undefined
+
+          const channel = claimed.chatId
+            ? (getChannel(parseChatKey(claimed.chatId).channelId) ?? resolveChannelForSession(sessionKey ?? claimed.chatId))
+            : undefined
+          const channelModel = channel
+            ? resolveChannelModel(channel, isAdmin ? "primary" : "others")
+            : { model: "", modelParams: "" }
+          const effModel = matched?.model || channelModel.model
+          const effParams = matched?.modelParams ?? channelModel.modelParams
+          if (channel) {
+            const resource = getAgentResource(channel.agentResourceId)
+            if (resource.type === "sdk") {
+              await listSdkModels(resource.apiKey ?? "", effModel, effParams).catch(() => undefined)
+            }
+          }
+
+          const sessionBlock = formatSessionStatusBlock({
+            sessionKey: sessionKey || claimed.chatId || "unknown",
+            chatType: claimed.chatType || matched?.chatType,
+            workspaceDir: matched?.workspaceDir || wsDir,
+            chatName: matched?.chatName,
+            pid: matched?.pid,
+            model: effModel,
+            modelParams: effParams,
+            startedAt: matched?.startedAt,
+          }, {
+            current: true,
+            queueMessages: sessionKey
+              ? qMsgs.filter((m) => m.sessionKey === sessionKey)
+              : qMsgs,
+            agentRunning: !!matched,
+            showType: false,
+            hideWorkspace: !isAdmin,
+          })
 
           if (!isAdmin) {
-            // 非主用户：只看本会话 Agent + 队列
-            let agentLine: string
-            if (matched) {
-              const detail = matched.pid
-                ? `PID ${matched.pid}`
-                : `SDK${matched.model ? ` · ${matched.model}` : ""}`
-              agentLine = `🤖 当前会话: ✅ 运行中（${detail}）`
-            } else {
-              agentLine = "🤖 当前会话: ❌ 未运行"
-            }
-            await reply(true, `${agentLine}\n${queueLine}`)
+            await reply(true, sessionBlock)
             break
           }
 
           const schedTasks = readTasksFromFile()
           const schedTotal = schedTasks.length
           const schedEnabled = schedTasks.filter((t) => t.enabled).length
-          const channel = claimed.chatId
-            ? (getChannel(parseChatKey(claimed.chatId).channelId) ?? resolveChannelForSession(sessionKey ?? claimed.chatId))
-            : undefined
           if (!channel && claimed.chatId) {
             await reply(false, "❌ 未找到当前会话所属的消息通道")
             break
           }
-          const wsDir = (channel ? effectiveWorkspaceDir(channel) : undefined) || getConfig().workspaceDir || undefined
-          const branch = wsDir ? readGitBranch(wsDir) : undefined
-          const ov = sessionKey ? getSessionOverride(sessionKey) : undefined
-          const model = ov?.model?.trim() || channel?.model?.trim() || "auto"
-          let agentLine: string
-          if (matched) {
-            agentLine = matched.pid
-              ? `🤖 Agent: ✅ 运行中 (PID: ${matched.pid})`
-              : `🤖 Agent: ✅ 运行中（SDK${matched.model ? ` · ${matched.model}` : ""}）`
-          } else if (isAgentRunning()) {
-            agentLine = `🤖 Agent: ✅ 其他会话运行中 (${getRunningSessionCount()} 个)`
-          } else {
-            agentLine = "🤖 Agent: ❌ 未运行"
-          }
-          const lines = [
+
+          const appBlock = [
+            "🏗 应用",
             `🛡️ Daemon: ${status.running ? "✅ 运行中" : "❌ 未运行"}`,
             status.version ? `🔄 版本: ${status.version}` : "",
             status.uptime !== undefined ? `⌛️ 运行时间: ${Math.floor(status.uptime / 60)}分钟` : "",
-            agentLine,
-            wsDir ? `📁 工作目录: ${wsDir}` : "",
-            branch ? `🌿 分支: ${branch}` : (wsDir ? "🌿 分支: （非 git 或无法读取）" : ""),
-            `🧠 模型: ${model}${ov ? "（本会话）" : "（通道默认）"}`,
-            queueLine,
             `⏰ 定时任务: 开启 ${schedEnabled} / 共 ${schedTotal} 条`,
-          ].filter(Boolean)
-          await reply(true, lines.join("\n"))
+          ].filter(Boolean).join("\n")
+
+          const body = [
+            appBlock,
+            "",
+            sessionBlock,
+            "",
+            "💡 直发消息走「当前会话」；引用某条 AI 回复可路由到对应会话/项目",
+          ].join("\n")
+
+          await reply(true, body, [
+            { label: "🔁 重启", cmd: "/restart", section: "应用" },
+            { label: "🔄 刷新", cmd: "/s", section: "当前会话" },
+            { label: "♻ 重置", cmd: "/r", section: "当前会话" },
+          ])
           break
         }
 
@@ -1129,7 +1186,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
 
         case "/r":
         case "/reset": {
-          const sessionKey = resolveCommandSessionKey(claimed.chatId, claimed.chatType)
+          const sessionKey = await resolveCommandSessionKey(claimed.chatId, claimed.chatType)
           if (sessionKey && isSessionAgentRunning(sessionKey)) {
             stopSessionAgent(sessionKey)
           }
@@ -1159,8 +1216,12 @@ async function checkAndExecutePendingCommands(): Promise<void> {
               const name = parts.pop() ?? dir
               const dup = favDirs.some((o) => o !== dir && lastSeg(o) === name)
               const parent = parts.pop()
-              const short = dup && parent ? `${name}·${parent}` : name
-              return { label: `📂 /w set ${short}`.slice(0, 40), cmd: `/w set ${dir}` }
+              const branch = readGitBranch(dir)
+              // 有分支优先显示分支；同名目录才用父级消歧
+              const short = branch
+                ? `${name} · ${branch}`
+                : (dup && parent ? `${name}·${parent}` : name)
+              return { label: `📂 ${short}`.slice(0, 40), cmd: `/w set ${dir}` }
             })
             const body = wsBtns.length
               ? `${info}\n\n💡 /w set <路径> — 切换；下方为常用目录快捷按钮`
@@ -1259,8 +1320,12 @@ export interface ConfigSaveResult {
  * 切换工作目录：可选地停止旧会话，然后热更新到新目录。
  */
 export async function applyWorkspaceSwitch(workspaceDir: string, stopOldSessions: boolean, skipDaemonSync = false, notifyMain = false): Promise<{ ok: boolean; error?: string }> {
-  const w = workspaceDir.trim()
+  // path.normalize 压平 D:\\foo（Windows existsSync 对双重反斜杠仍为 true，写入 config/sessionKey 会分裂队列）
+  const w = path.normalize(workspaceDir.trim()).replace(/[\\/]+$/, "")
   if (!w) return { ok: false, error: "工作目录为空" }
+  if (!/[\\/]/.test(w) || !fs.existsSync(w) || !fs.statSync(w).isDirectory()) {
+    return { ok: false, error: `目录不存在或不是有效路径: ${w}` }
+  }
 
   if (stopOldSessions) {
     stopAllSessionAgents()
@@ -1290,33 +1355,12 @@ export async function applyWorkspaceSwitch(workspaceDir: string, stopOldSessions
   return { ok: true }
 }
 
-function readGitBranch(dir: string): string | undefined {
-  try {
-    const r = spawnSync("git", ["-C", dir, "rev-parse", "--abbrev-ref", "HEAD"], {
-      encoding: "utf8",
-      timeout: 3000,
-      windowsHide: true,
-    })
-    const b = (r.stdout || "").trim()
-    if (r.status === 0 && b && b !== "HEAD") return b
-    if (r.status === 0 && b === "HEAD") {
-      const sh = spawnSync("git", ["-C", dir, "rev-parse", "--short", "HEAD"], {
-        encoding: "utf8",
-        timeout: 3000,
-        windowsHide: true,
-      })
-      const sha = (sh.stdout || "").trim()
-      return sha ? `HEAD(${sha})` : "HEAD"
-    }
-  } catch { /* not a git repo */ }
-  return undefined
-}
-
 function formatWorkspaceSwitchText(dir: string): string {
-  const label = dir.split(/[\\/]/).filter(Boolean).pop() ?? dir
+  const label = dirBaseName(dir)
   const branch = readGitBranch(dir)
   return [
-    `✅ 工作目录已切换到: ${dir}`,
+    `✅ 工作目录已切换`,
+    `📁 \`${dir}\``,
     branch ? `🌿 分支: ${branch}` : undefined,
     `📂 ${label} · 会话上下文已切换`,
   ].filter(Boolean).join("\n")

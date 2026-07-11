@@ -8,7 +8,7 @@ import {
   stopDaemonScheduledTasks,
   setDaemonSchedulerLogger,
 } from "./daemon-scheduled-tasks.js";
-import { stripProxyEnv, localTimestamp, createLarkClient, LarkSender, LarkMessageEvent, LarkCardActionEvent, CardButton, CardInput, cleanupMediaCache } from "./shared/lark-core.js";
+import { stripProxyEnv, localTimestamp, createLarkClient, LarkSender, LarkMessageEvent, LarkCardActionEvent, CardButton, CardInput, CardTitle, cleanupMediaCache } from "./shared/lark-core.js";
 import { WeChatManager } from "./wechat-manager.js";
 import {
   initFileQueue,
@@ -35,6 +35,7 @@ import {
   parseChatKey,
   chatIdFromSessionKey,
   channelIdFromSessionKey,
+  normalizeSessionKey,
   type DaemonChannelConfig,
   type ChannelStatusInfo,
 } from "./shared/channel-types.js";
@@ -46,7 +47,9 @@ import { z } from "zod";
 import { registerAdminTools } from "./server-admin.js";
 import { registerWorkflowAgentTools, registerWorkflowAdminTools } from "./server-workflow.js";
 import { registerProjectAgentTools } from "./server-project.js";
-import { initProjectStore, hasProjectNewDraft } from "./shared/project-store.js";
+import { initProjectStore, hasProjectNewDraft, getProject } from "./shared/project-store.js";
+import { projectIdFromSessionKey } from "./shared/project-types.js";
+import { buildSessionCardTitle, isSpecialSessionSuffix, resolveWorkspaceFromSessionKey, sessionHeaderTemplate } from "./shared/session-label.js";
 
 const _require = createRequire(import.meta.url);
 const PKG_VERSION: string = (_require("../package.json") as { version: string }).version;
@@ -55,7 +58,10 @@ const PKG_VERSION: string = (_require("../package.json") as { version: string })
 
 const ENCRYPT_KEY = process.env.LARK_ENCRYPT_KEY ?? "";
 const CONFIGURED_PORT = process.env.LARK_DAEMON_PORT ? Number(process.env.LARK_DAEMON_PORT) : 0;
-let WORKSPACE_DIR = process.env.LARK_WORKSPACE_DIR ?? process.cwd();
+let WORKSPACE_DIR = (() => {
+  const raw = process.env.LARK_WORKSPACE_DIR ?? process.cwd();
+  return /^[A-Za-z]:/.test(raw) ? raw.replace(/\\+/g, "\\") : raw;
+})();
 const MESSAGE_PREFIX = process.env.LARK_MESSAGE_PREFIX ?? "";
 const APP_DATA_DIR = process.env.APP_DATA_DIR || "";
 
@@ -344,6 +350,35 @@ const sessionLastReplyAt = new Map<string, number>();
 const ROUTING_FILE = path.join(APP_DATA_DIR, "session-routing.json");
 let routingSaveTimer: NodeJS.Timeout | null = null;
 
+
+/** 清掉误写入的展示标签后缀（无路径分隔符且非 wf_/project_），回写为真实 WORKSPACE_DIR；并压平双重反斜杠 */
+function scrubInvalidActiveSessions(): void {
+  if (!WORKSPACE_DIR || !/[\\/]/.test(WORKSPACE_DIR)) return;
+  let n = 0;
+  for (const [chatId, sk] of [...activeSessionMap.entries()]) {
+    const idx = sk.indexOf("::");
+    if (idx < 0) continue;
+    const suffix = sk.slice(idx + 2);
+    const normalized = normalizeSessionKey(sk);
+    if (normalized !== sk) {
+      activeSessionMap.set(chatId, normalized);
+      sessionToChatMap.delete(sk);
+      sessionToChatMap.set(normalized, chatId);
+      n++;
+      log("INFO", `[Routing] 纠正双重转义会话: ${sk} → ${normalized}`);
+      continue;
+    }
+    if (!suffix || isSpecialSessionSuffix(suffix) || /[\\/]/.test(suffix)) continue;
+    const next = `${chatId}::${WORKSPACE_DIR}`;
+    activeSessionMap.set(chatId, next);
+    sessionToChatMap.delete(sk);
+    sessionToChatMap.set(next, chatId);
+    n++;
+    log("INFO", `[Routing] 纠正非法会话后缀: ${sk} → ${next}`);
+  }
+  if (n > 0) scheduleRoutingSave();
+}
+
 function loadRoutingMaps(): void {
   try {
     if (!APP_DATA_DIR || !fs.existsSync(ROUTING_FILE)) return;
@@ -353,6 +388,7 @@ function loadRoutingMaps(): void {
     for (const [k, v] of Object.entries(raw.messageSession ?? {})) messageSessionMap.set(k, v);
     for (const [k, v] of Object.entries(raw.activeSession ?? {})) activeSessionMap.set(k, v);
     for (const [k, v] of Object.entries(raw.sessionToChat ?? {})) sessionToChatMap.set(k, v);
+    scrubInvalidActiveSessions();
     log("INFO", `[Routing] 路由映射已恢复: msg=${messageSessionMap.size}, active=${activeSessionMap.size}, chat=${sessionToChatMap.size}`);
   } catch (e: any) { log("WARN", `[Routing] 路由映射恢复失败: ${e?.message ?? e}`); }
 }
@@ -418,10 +454,11 @@ function terminateSessionsByChat(chatId: string): void {
 }
 
 function setActiveSession(chatId: string, sessionKey: string): void {
-  activeSessionMap.set(chatId, sessionKey);
-  sessionToChatMap.set(sessionKey, chatId);
+  const normalized = normalizeSessionKey(sessionKey) || sessionKey;
+  activeSessionMap.set(chatId, normalized);
+  sessionToChatMap.set(normalized, chatId);
   scheduleRoutingSave();
-  log("INFO", `会话路由更新: ${chatId} → ${sessionKey}`);
+  log("INFO", `会话路由更新: ${chatId} → ${normalized}`);
 }
 
 function resolveRawChatId(sessionKey?: string): string | undefined {
@@ -487,17 +524,35 @@ function chatActiveSessionCount(chatKey: string): number {
   return dirs.size;
 }
 
-/** 仅主用户私聊显示工作目录标题（只有主用户可能在多个工作目录间切换），群聊/其他人不显示 */
-function resolveReplyTitle(ch: ResolvedChannel, sessionKey?: string): string | undefined {
+/** 仅主用户私聊显示会话标题（目录/项目 + 分支）；群聊/非主用户/缺 chatId 一律不露 */
+function resolveReplyTitle(ch: ResolvedChannel, sessionKey?: string): CardTitle | undefined {
   if (ch.type !== "feishu") return undefined;
   const { mainUserEnabled, mainUserChatId } = ch.rt.cfg;
-  if (!mainUserEnabled || !mainUserChatId) return undefined;
-  // chatId 为空时走 sender 默认目标（绑定主用户后即主用户私聊）
-  if (ch.chatId && ch.chatId !== mainUserChatId) return undefined;
-  // 单会话时引用回复已足够定位，标题反而头重；仅同一聊天多个目录会话并行时才需要目录标题区分
-  const chatKey = makeChatKey(ch.rt.cfg.id, ch.chatId ?? mainUserChatId);
-  if (chatActiveSessionCount(chatKey) < 2) return undefined;
-  return extractWorkspaceTitle(sessionKey, listChatWorkspaceDirs(chatKey));
+  if (!mainUserEnabled || !mainUserChatId?.trim()) return undefined;
+  // 必须精确匹配主用户私聊 chatId（群聊 id ≠ 主用户；chatId 缺失也不推断）
+  if (!ch.chatId || ch.chatId !== mainUserChatId.trim()) return undefined;
+
+  const chatKey = makeChatKey(ch.rt.cfg.id, ch.chatId);
+  const sk = sessionKey
+    || activeSessionMap.get(chatKey)
+    || activeSessionMap.get(ch.chatId);
+
+  const pid = sk ? projectIdFromSessionKey(sk) : undefined;
+  if (pid) {
+    const p = getProject(pid);
+    return buildSessionCardTitle({ sessionKey: sk, project: p });
+  }
+
+  const fromSk = resolveWorkspaceFromSessionKey(sk);
+  const wsDir = (fromSk && fs.existsSync(fromSk) ? fromSk : undefined)
+    || (WORKSPACE_DIR && /[\\/]/.test(WORKSPACE_DIR) && fs.existsSync(WORKSPACE_DIR) ? WORKSPACE_DIR : undefined);
+  if (!wsDir) return undefined;
+  const peers = listChatWorkspaceDirs(chatKey);
+  return buildSessionCardTitle({
+    sessionKey: sk,
+    workspaceDir: wsDir,
+    peers: peers.length ? peers : [wsDir],
+  });
 }
 
 type ResolvedChannel =
@@ -719,18 +774,20 @@ function pushMessage(content: string, messageId?: string, chatId?: string, chatT
   const resolved = resolveRoutingKey(chatId, replyMessageId);
   let routedId = resolved.sessionKey;
   // 非回复消息的 p2p 路由规则:一律投递到当前主工作目录会话(引用回复才跟随原会话)。
-  // 仅当 active 指向显式特殊会话(temp/task/wf 等非路径 key)时尊重指针,避免残留的旧目录映射错投。
+  // 仅当 active 指向显式特殊会话(裸 temp_/task_，或 ::wf_ / ::project_)时尊重指针。
+  // 注意：展示标签误写入的非路径后缀(如 cp-scheduling·workspace)必须纠正，不能当特殊会话。
   if (!resolved.viaReply && chatId && chatType === "p2p") {
     const idx = routedId ? routedId.indexOf("::") : -1;
-    const suffix = routedId && idx >= 0 ? routedId.slice(idx + 2) : undefined;
-    const isExplicitSession = !!routedId && routedId !== chatId
-        && (suffix === undefined || !/[\\/]/.test(suffix));
+    const suffix = routedId && idx >= 0 ? routedId.slice(idx + 2) : "";
+    const isExplicitSession = !!routedId && routedId !== chatId && (
+      idx < 0 || isSpecialSessionSuffix(suffix)
+    );
     if (!isExplicitSession) {
       const { channelId } = parseChatKey(chatId);
       const rt = channelId ? channels.get(channelId) : undefined;
       const wsDir = rt ? channelWorkspaceDir(rt) : WORKSPACE_DIR;
-      if (wsDir) {
-        const mainSessionKey = `${chatId}::${wsDir}`;
+      if (wsDir && /[\\/]/.test(wsDir)) {
+        const mainSessionKey = normalizeSessionKey(`${chatId}::${wsDir}`) || `${chatId}::${wsDir}`;
         if (routedId !== mainSessionKey) {
           setActiveSession(chatId, mainSessionKey);
           routedId = mainSessionKey;
@@ -747,7 +804,7 @@ function pushMessage(content: string, messageId?: string, chatId?: string, chatT
     if (messageId && routedId) trackMessageSession(messageId, routedId);
     // 用户直接发消息（非卡片点击）时关闭同聊天未决问题卡片
     if (chatId && messageId && !messageId.startsWith("internal_")) {
-      expireOpenCardQuestions(chatId, "已通过新消息处理（卡片已关闭）");
+      expireOpenCardQuestions(chatId, "问题已关闭");
     }
     const preview = content.length > 200 ? `${content.slice(0, 200)} …(+${content.length - 200} chars)` : content;
     log("INFO", `消息已写入共享队列: ${JSON.stringify(preview)} (id=${messageId ?? "none"}, chat=${chatId ?? "none"}${routedId !== chatId ? ` → routed=${routedId}` : ""}${replyMessageId ? `, reply=${replyMessageId}` : ""})`);
@@ -982,7 +1039,7 @@ function isCommand(text: string): boolean {
 
 // ── 卡片按钮回调 ─────────────────────────────────────────
 
-interface CardQuestionEntry { text: string; options: string[]; sessionKey?: string; chatKey?: string; createdAt: number; title?: string }
+interface CardQuestionEntry { text: string; options: string[]; sessionKey?: string; chatKey?: string; createdAt: number; title?: CardTitle; template?: string }
 const cardQuestionMap = new Map<string, CardQuestionEntry>();
 const CARD_QUESTION_MAX = 500;
 const CARD_QUESTION_FILE = path.join(APP_DATA_DIR, "card-questions.json");
@@ -1051,7 +1108,7 @@ function expireOpenCardQuestions(chatKey: string, note: string): void {
   const sender = ch.rt.sender;
   let closed = 0;
   for (const { messageId, entry } of targets) {
-    sender.patchCard(messageId, entry.text, entry.title, entry.title ? "grey" : undefined, `⏹ ${note}`)
+    sender.patchCard(messageId, entry.text, entry.title, entry.template, `⏹ ${note}`)
       .then((ok) => {
         if (ok) {
           cardQuestionMap.delete(messageId);
@@ -1128,11 +1185,12 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
       scheduleCardQuestionSave();
     }
     const questionText = entry?.text ?? "问题";
-    // 只保留发送时记下的 title：无 title 的卡点选后不得再补工作区名（否则会「突然出现标题」）
+    // 只保留发送时记下的 title/template：点选后不变色
     const title = entry?.title;
+    const template = entry?.template;
     return {
       toast: { type: "success", content: `已选择: ${opt.slice(0, 30)}` },
-      card: { type: "raw", data: LarkSender.buildCard(questionText, title, undefined, undefined, title ? "green" : undefined, `✅ 已选择: **${opt}**`) },
+      card: { type: "raw", data: LarkSender.buildCard(questionText, title, undefined, undefined, template, `✅ 已选择: **${opt}**`) },
     };
   }
 
@@ -1146,10 +1204,37 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
     return { toast: { type: "info", content: `已执行 ${cmd}` } };
   }
 
+  if (value?.kind === "project_new_form") {
+    const f = evt.formValue || {};
+    const name = (f.name || "").trim();
+    const goal = (f.goal || "").trim();
+    const repoPath = (f.repoPathCustom || f.repoPath || "").trim();
+    const worktreeRoot = (f.worktreeRoot || String((value as { worktreeRoot?: string } | undefined)?.worktreeRoot || "")).trim();
+    const baseBranch = (f.baseBranch || "main").trim() || "main";
+    const featureBranch = (f.featureBranch || "").trim();
+    const storyUrl = (f.storyUrl || "").trim();
+    const productDocUrl = (f.productDocUrl || "").trim();
+    const techDocUrl = (f.techDocUrl || "").trim();
+    if (!name) return { toast: { type: "error", content: "请填写项目名称" } };
+    if (!goal) return { toast: { type: "error", content: "请填写目标描述" } };
+    if (!repoPath) return { toast: { type: "error", content: "请选择或填写主仓" } };
+    if (!worktreeRoot) return { toast: { type: "error", content: "请填写 worktree 根目录" } };
+    process.stdout.write(`__PROJECT_NEW_SUBMIT__:${JSON.stringify({
+      chatId: chatKey,
+      messageId: evt.messageId,
+      name, goal, repoPath, worktreeRoot, baseBranch, featureBranch,
+      storyUrl, productDocUrl, techDocUrl,
+    })}\n`);
+    return {
+      toast: { type: "info", content: "正在创建项目…" },
+      card: { type: "raw", data: LarkSender.buildCard(`📦 正在创建项目 **${name}**…`, "创建项目", undefined, undefined, "orange") },
+    };
+  }
+
   return {};
 }
 
-async function replyToMessage(messageId: string, text: string, chatId?: string, buttons?: { label: string; cmd: string; section?: string }[]): Promise<void> {
+async function replyToMessage(messageId: string, text: string, chatId?: string, buttons?: { label: string; cmd: string; section?: string }[], template?: string): Promise<void> {
   // 优先显式 chatId；缺省时从消息路由表找回，禁止 allowDefault 兜底到别的通道（防微信指令回飞书）
   const routeKey = chatId
     || (messageId ? messageSessionMap.get(messageId) : undefined)
@@ -1179,18 +1264,26 @@ async function replyToMessage(messageId: string, text: string, chatId?: string, 
     return;
   }
   const sender = ch.rt.sender!;
+  // 标题可跟消息原会话；配色必须跟「当前活跃会话」（指令色 = 当前会话色）
+  const titleSessionKey = (messageId ? messageSessionMap.get(messageId) : undefined)
+    || (chatId ? activeSessionMap.get(chatId) : undefined)
+    || routeKey;
+  const colorSessionKey = (chatId ? activeSessionMap.get(chatId) : undefined)
+    || titleSessionKey;
+  const title = resolveReplyTitle(ch, titleSessionKey);
+  const headerTemplate = template || sessionHeaderTemplate(colorSessionKey) || (title ? "turquoise" : undefined);
   if (buttons && buttons.length > 0) {
     // 上限 20：/help 全量指令 + 常用目录快捷按钮
     const btns: CardButton[] = buttons.slice(0, 20).map((b) => ({
       label: b.label, value: { kind: "cmd", cmd: b.cmd }, type: "default" as const, section: b.section,
     }));
-    await sender.sendCardWithButtons(text, btns, ch.chatId ? undefined : messageId, ch.chatId);
+    await sender.sendCardWithButtons(text, btns, ch.chatId ? undefined : messageId, ch.chatId, title, undefined, headerTemplate);
     return;
   }
   if (ch.chatId) {
-    await sender.sendMessage(text, undefined, ch.chatId);
+    await sender.sendMessage(text, undefined, ch.chatId, title, headerTemplate);
   } else {
-    await sender.replyMessage(messageId, text);
+    await sender.replyMessage(messageId, text, title, headerTemplate);
   }
 }
 
@@ -1896,19 +1989,22 @@ async function handleWorkspaceAdmin(method: string, req: http.IncomingMessage, r
     const body = JSON.parse(await readBody(req));
     const { dir } = body as { dir?: string };
     if (!dir?.trim()) { json(res, { ok: false, error: "dir is required" }, 400); return true; }
-    const newDir = dir.trim();
-    if (!fs.existsSync(newDir)) { json(res, { ok: false, error: "directory does not exist" }, 400); return true; }
+    // path.normalize 压平 D:\\foo（Windows existsSync 对双重反斜杠仍返回 true，但 sessionKey 哈希会分裂）
+    const newDir = path.normalize(dir.trim()).replace(/[\\/]+$/, "");
+    if (!/[\\/]/.test(newDir) || !fs.existsSync(newDir) || !fs.statSync(newDir).isDirectory()) {
+      json(res, { ok: false, error: "directory does not exist" }, 400);
+      return true;
+    }
     const oldDir = WORKSPACE_DIR;
     WORKSPACE_DIR = newDir;
     if (oldDir !== newDir) {
-      // 迁移所有"路径型"会话指针(含历史残留的其他目录映射),仅放过 wf_/task 等非路径会话;
-      // 只按旧全局目录匹配会漏掉残留映射,导致切换后消息仍投旧会话(重启也无效,映射已持久化)
+      // 迁移会话指针到新主目录；仅保留 ::wf_ / ::project_；顺带清掉误写入的展示标签后缀
       for (const [chatId, oldSessionKey] of activeSessionMap) {
         const idx = oldSessionKey.indexOf("::");
         const suffix = idx >= 0 ? oldSessionKey.slice(idx + 2) : "";
-        const isPathSession = idx < 0 || /[\\/]/.test(suffix);
-        if (!isPathSession || suffix === newDir) continue;
-        const newSessionKey = `${chatId}::${newDir}`;
+        if (idx >= 0 && isSpecialSessionSuffix(suffix)) continue;
+        if (suffix === newDir) continue;
+        const newSessionKey = normalizeSessionKey(`${chatId}::${newDir}`) || `${chatId}::${newDir}`;
         activeSessionMap.set(chatId, newSessionKey);
         if (idx >= 0) sessionToChatMap.delete(oldSessionKey);
         sessionToChatMap.set(newSessionKey, chatId);
@@ -2011,23 +2107,62 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       json(res, { ok: await ch.rt.wechat!.sendText(ch.chatId, text) });
     } else {
       const sender = ch.rt.sender!;
-      const title = resolveReplyTitle(ch, session_key);
+      const colorKey = session_key
+        || (message_id ? messageSessionMap.get(message_id) : undefined)
+        || (ch.chatId ? activeSessionMap.get(makeChatKey(ch.rt.cfg.id, ch.chatId)) : undefined);
+      const title = resolveReplyTitle(ch, colorKey || session_key);
+      const headerTemplate = sessionHeaderTemplate(colorKey || session_key) || (title ? "turquoise" : undefined);
       let sentMsgId: string | undefined;
       // internal_（卡片点击）不可 reply：必须按 chatId 直发，禁止落到 sender 默认主用户私聊
       if (message_id && !message_id.startsWith("internal_")) {
-        sentMsgId = await sender.sendMessage(text, message_id, undefined, title);
+        sentMsgId = await sender.sendMessage(text, message_id, undefined, title, headerTemplate);
         if (!sentMsgId) {
           log("INFO", `回复退避: message_id=${message_id} → ${ch.chatId ? `chat_id=${ch.chatId}` : "无目标"}`);
-          if (ch.chatId) sentMsgId = await sender.sendMessage(text, undefined, ch.chatId, title);
+          if (ch.chatId) sentMsgId = await sender.sendMessage(text, undefined, ch.chatId, title, headerTemplate);
         }
       } else {
         if (!ch.chatId) { json(res, { ok: false, error: "无法解析发送目标 chatId" }, 400); return true; }
-        sentMsgId = await sender.sendMessage(text, undefined, ch.chatId, title);
+        sentMsgId = await sender.sendMessage(text, undefined, ch.chatId, title, headerTemplate);
       }
       if (sentMsgId && session_key) trackMessageSession(sentMsgId, session_key);
       json(res, { ok: !!sentMsgId, message_id: sentMsgId });
     }
     if (session_key) sessionLastReplyAt.set(session_key, Date.now());
+    return true;
+  }
+
+  if (method === "POST" && pathname === "/api/project-new-form") {
+    const body = JSON.parse(await readBody(req));
+    const { message_id, session_key, repo_roots, worktree_root } = body as {
+      message_id?: string; session_key?: string; repo_roots?: string[]; worktree_root?: string
+    };
+    if (rejectUnroutedSend(res, "project-new-form", session_key, message_id)) return true;
+    const ch = resolveChannel(routeTargetKey(session_key, message_id), { allowDefault: false });
+    if (ch.type === "error") { json(res, { ok: false, error: ch.message }, 400); return true; }
+    if (ch.type === "wechat") {
+      const roots = (repo_roots || []).map((r, i) => `#${i + 1} ${r}`).join("\n") || "(无预置主仓，请在路径里手填)";
+      const tip = [
+        "微信暂不支持表单卡片，请用一行命令：",
+        "/p new <名> <主仓序号或路径> <基线分支> <feature分支> <目标…>",
+        "",
+        `worktree 根: ${worktree_root || "(未设)"}`,
+        `主仓:\n${roots}`,
+      ].join("\n");
+      json(res, { ok: await ch.rt.wechat!.sendText(ch.chatId, tip), degraded: true });
+      return true;
+    }
+    const sender = ch.rt.sender!;
+    const card = LarkSender.buildProjectNewFormCard({
+      repoRoots: repo_roots || [],
+      worktreeRoot: worktree_root,
+    });
+    let sent = message_id && !message_id.startsWith("internal_")
+      ? await sender.sendInteractiveCard(card, message_id, undefined)
+      : undefined;
+    if (sent === undefined && ch.chatId) {
+      sent = await sender.sendInteractiveCard(card, undefined, ch.chatId);
+    }
+    json(res, { ok: sent !== undefined, message_id: typeof sent === "string" ? sent : undefined });
     return true;
   }
 
@@ -2047,11 +2182,14 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       json(res, { ok: await ch.rt.wechat!.sendText(ch.chatId, fallback), degraded: true });
     } else {
       const sender = ch.rt.sender!;
-      const title = resolveReplyTitle(ch, session_key);
-      // 正文 | hr | ❓状态 | 选项 | 输入；有工作区标题才用色板
+      const colorKey = session_key
+        || (message_id ? messageSessionMap.get(message_id) : undefined)
+        || (ch.chatId ? activeSessionMap.get(makeChatKey(ch.rt.cfg.id, ch.chatId)) : undefined);
+      const title = resolveReplyTitle(ch, colorKey || session_key);
+      // 问题卡与普通回复同色：用会话稳定色，关闭/点选时不变色
       const pendingText = text;
       const pendingFooter = "❓ 请选择下方选项或直接输入";
-      const pendingTemplate = title ? "orange" : undefined;
+      const pendingTemplate = sessionHeaderTemplate(colorKey || session_key) || (title ? "turquoise" : undefined);
       // session_key 打进按钮 value：即使 reply 未返回 message_id 导致 cardQuestionMap 未登记，点击仍能路由回原会话
       const buttons: CardButton[] = opts.map((o, i) => ({ label: `${i + 1}. ${o}`, value: { kind: "question", opt: o, sk: session_key } }));
       const input: CardInput = { placeholder: "其他答复：输入后点发送", value: { kind: "question", sk: session_key } };
@@ -2068,7 +2206,11 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       }
       const ok = sentMsgId !== undefined; // null 也算成功（已回复到原聊天）
       if (typeof sentMsgId === "string" && sentMsgId) {
-        rememberCardQuestion(sentMsgId, { text, options: opts, sessionKey: session_key, chatKey: session_key ? chatIdFromSessionKey(session_key) : (ch.chatId ? makeChatKey(ch.rt.cfg.id, ch.chatId) : undefined), createdAt: Date.now(), title });
+        rememberCardQuestion(sentMsgId, {
+          text, options: opts, sessionKey: session_key,
+          chatKey: session_key ? chatIdFromSessionKey(session_key) : (ch.chatId ? makeChatKey(ch.rt.cfg.id, ch.chatId) : undefined),
+          createdAt: Date.now(), title, template: pendingTemplate,
+        });
         if (session_key) trackMessageSession(sentMsgId, session_key);
       }
       json(res, { ok, message_id: typeof sentMsgId === "string" ? sentMsgId : undefined });
@@ -2156,7 +2298,8 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
 
   if (method === "GET" && pathname === "/api/poll-message") {
     const qs = new URL(req.url ?? "", "http://localhost").searchParams;
-    const sessionKeyFilter = qs.get("sessionKey") || qs.get("chatId") || undefined;
+    const rawSessionKey = qs.get("sessionKey") || qs.get("chatId") || undefined;
+    const sessionKeyFilter = rawSessionKey ? (normalizeSessionKey(rawSessionKey) || rawSessionKey) : undefined;
     const waitParam = qs.get("wait");
     const blocking = waitParam !== "false" && waitParam !== "0";
 

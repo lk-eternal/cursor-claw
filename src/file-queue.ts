@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
+import { normalizeSessionKey } from "./shared/channel-types.js";
 
 const POLL_INTERVAL_MS = 400;
 const STALE_TMP_MS = 5 * 60 * 1000;
@@ -12,6 +13,7 @@ export function initFileQueue(): string {
   if (!appDataDir) throw new Error("APP_DATA_DIR 环境变量未设置");
   queueDir = path.join(appDataDir, "file-queue");
   if (!fs.existsSync(queueDir)) fs.mkdirSync(queueDir, { recursive: true });
+  migrateDoubledPathSessions();
   return queueDir;
 }
 
@@ -25,15 +27,63 @@ function sanitizeSessionDir(sessionKey: string): string {
 
 function getSessionDir(sessionKey?: string): string {
   if (!sessionKey) return queueDir;
-  const sub = path.join(queueDir, sanitizeSessionDir(sessionKey));
+  const normalized = normalizeSessionKey(sessionKey) || sessionKey;
+  const sub = path.join(queueDir, sanitizeSessionDir(normalized));
   if (!fs.existsSync(sub)) fs.mkdirSync(sub, { recursive: true });
   return sub;
+}
+
+/** 把盘符路径被双重转义的会话目录合并到规范 key 目录，避免消息永久 pending */
+function migrateDoubledPathSessions(): void {
+  if (!queueDir) return;
+  let dirs: string[];
+  try {
+    dirs = fs.readdirSync(queueDir).filter((d) => fs.statSync(path.join(queueDir, d)).isDirectory());
+  } catch {
+    return;
+  }
+  for (const d of dirs) {
+    const dir = path.join(queueDir, d);
+    let files: string[];
+    try {
+      files = fs.readdirSync(dir).filter((f) => f.endsWith(".qmsg") || f.endsWith(".claimed"));
+    } catch {
+      continue;
+    }
+    for (const f of files) {
+      const fp = path.join(dir, f);
+      let parsed: { sessionKey?: string; [k: string]: unknown };
+      try {
+        parsed = JSON.parse(fs.readFileSync(fp, "utf-8"));
+      } catch {
+        continue;
+      }
+      const sk = typeof parsed.sessionKey === "string" ? parsed.sessionKey : "";
+      if (!sk) continue;
+      const norm = normalizeSessionKey(sk);
+      if (norm === sk) continue;
+      parsed.sessionKey = norm;
+      const destDir = getSessionDir(norm);
+      const dest = path.join(destDir, f);
+      try {
+        fs.writeFileSync(fp, JSON.stringify(parsed), "utf-8");
+        if (path.resolve(destDir) !== path.resolve(dir)) {
+          if (fs.existsSync(dest)) fs.unlinkSync(fp);
+          else fs.renameSync(fp, dest);
+        }
+      } catch { /* ignore */ }
+    }
+    try {
+      if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
+    } catch { /* ignore */ }
+  }
 }
 
 /** 会话是否有过队列目录（探测不创建）：send 校验用——收过消息的会话必有目录 */
 export function hasSessionQueueDir(sessionKey: string): boolean {
   if (!queueDir || !sessionKey) return false;
-  return fs.existsSync(path.join(queueDir, sanitizeSessionDir(sessionKey)));
+  const normalized = normalizeSessionKey(sessionKey) || sessionKey;
+  return fs.existsSync(path.join(queueDir, sanitizeSessionDir(normalized)));
 }
 
 function listSessionDirs(): string[] {
@@ -54,7 +104,8 @@ let lastPushTs = 0;
 export function pushToFileQueue(text: string, messageId?: string, source?: string, sessionKey?: string, skipDedup?: boolean, meta?: QueueMessageMeta): boolean {
   if (!queueDir || !text?.trim()) return false;
 
-  const dir = getSessionDir(sessionKey);
+  const normalizedKey = sessionKey ? (normalizeSessionKey(sessionKey) || sessionKey) : sessionKey;
+  const dir = getSessionDir(normalizedKey);
   const ts = Math.max(Date.now(), lastPushTs + 1);
   lastPushTs = ts;
   const fileToken = messageId || `${ts}-${Math.random().toString(36).slice(2, 8)}`;
@@ -74,7 +125,7 @@ export function pushToFileQueue(text: string, messageId?: string, source?: strin
     const data = JSON.stringify({
       text, messageId: messageId || "", timestamp: ts,
       source: source || `pid-${process.pid}`,
-      sessionKey: sessionKey || "",
+      sessionKey: normalizedKey || "",
       ...(meta && Object.keys(meta).length > 0 ? { meta } : {}),
     });
     const tmpPath = path.join(dir, filename + ".tmp");

@@ -85,6 +85,9 @@ export interface CardButton {
   section?: string;
 }
 
+/** 卡片标题：字符串，或主标题 + 副标题（分支等小字） */
+export type CardTitle = string | { title: string; subtitle?: string };
+
 export interface CardInput {
   placeholder: string;
   /** 回传交互数据，用户提交输入时随 input_value 一起返回 */
@@ -137,12 +140,12 @@ export class LarkSender {
     return /<at\s+user_id=/.test(text);
   }
 
-  private formatForSend(text: string, title?: string): { content: string; msgType: string } {
+  private formatForSend(text: string, title?: CardTitle, template?: string): { content: string; msgType: string } {
     const fullText = `${this.messagePrefix}${text}`;
     if (LarkSender.containsAtTag(fullText)) {
       return { content: JSON.stringify({ text: fullText }), msgType: "text" };
     }
-    return { content: JSON.stringify(LarkSender.buildCard(fullText, title)), msgType: "interactive" };
+    return { content: JSON.stringify(LarkSender.buildCard(fullText, title, undefined, undefined, template)), msgType: "interactive" };
   }
 
   /** 按显示宽度计数（CJK/emoji 算 2，半角算 1）；.length 会低估中文导致窄屏按钮文字被截为 "..." */
@@ -152,8 +155,14 @@ export class LarkSender {
     return w;
   }
 
+  private static normalizeCardTitle(title?: CardTitle): { title?: string; subtitle?: string } {
+    if (!title) return {};
+    if (typeof title === "string") return { title };
+    return { title: title.title, subtitle: title.subtitle };
+  }
+
   /** 构造 schema 2.0 markdown 卡片；buttons 为回传交互按钮；input 为末尾自由输入；footer 在正文后、选项前（经 hr 分隔），用于已选/关闭状态 */
-  static buildCard(text: string, title?: string, buttons?: CardButton[], input?: CardInput, template?: string, footer?: string): any {
+  static buildCard(text: string, title?: CardTitle, buttons?: CardButton[], input?: CardInput, template?: string, footer?: string): any {
     const elements: any[] = [];
     const body = text.replace(/\\/g, "\\\\").replace(/\s+$/u, "");
     elements.push({ tag: "markdown", content: body });
@@ -214,17 +223,146 @@ export class LarkSender {
       config: { wide_screen_mode: true, update_multi: true },
       body: { horizontal_align: "left", elements },
     };
-    if (title) {
-      card.header = { title: { tag: "plain_text", content: title }, template: template || "turquoise" };
+    const { title: titleText, subtitle } = LarkSender.normalizeCardTitle(title);
+    if (titleText) {
+      card.header = {
+        title: { tag: "plain_text", content: titleText.slice(0, 100) },
+        template: template || "turquoise",
+      };
+      if (subtitle) {
+        card.header.subtitle = { tag: "plain_text", content: subtitle.slice(0, 100) };
+      }
     }
     return card;
+  }
+
+  /** 项目创建大表单（一次提交；可选字段可空） */
+  static buildProjectNewFormCard(opts: {
+    title?: string
+    repoRoots: string[]
+    worktreeRoot?: string
+    prefix?: string
+  }): any {
+    const roots = opts.repoRoots || []
+    const elements: any[] = []
+    const tip = [
+      `${opts.prefix || ""}一次填完提交；带 * 为必填。`,
+      "不合规会 toast 提示，改完再提交即可。",
+    ].join("\n")
+    elements.push({ tag: "markdown", content: tip.replace(/\\/g, "\\\\") })
+
+    const field = (name: string, label: string, placeholder: string, required?: boolean, defaultValue?: string) => {
+      const el: any = {
+        tag: "input",
+        name,
+        required: !!required,
+        placeholder: { tag: "plain_text", content: placeholder.slice(0, 100) },
+        label: { tag: "plain_text", content: label },
+        label_position: "top",
+        width: "fill",
+      }
+      if (defaultValue) el.default_value = defaultValue
+      return el
+    }
+
+    const formElements: any[] = [
+      field("name", "* 项目名称", "例如 login", true),
+      field("goal", "* 目标描述", "要做什么", true),
+    ]
+
+    if (roots.length > 0) {
+      formElements.push({
+        tag: "select_static",
+        name: "repoPath",
+        required: false,
+        placeholder: { tag: "plain_text", content: "下拉选择主仓" },
+        label: { tag: "plain_text", content: "* 主仓（下拉或下方手填）" },
+        label_position: "top",
+        options: roots.slice(0, 20).map((r) => ({
+          text: { tag: "plain_text", content: r.length > 40 ? `…${r.slice(-39)}` : r },
+          value: r,
+        })),
+      })
+      formElements.push(field("repoPathCustom", "主仓手填（优先于下拉）", "D:\\repos\\foo"))
+    } else {
+      formElements.push(field("repoPath", "* 主仓绝对路径", "D:\\repos\\foo", true))
+    }
+
+    formElements.push(
+      field("worktreeRoot", roots.length && opts.worktreeRoot ? "worktree 根目录" : "* worktree 根目录", "D:\\claw-projects", !(opts.worktreeRoot?.trim()), opts.worktreeRoot || undefined),
+      field("baseBranch", "* 基线分支", "main", true, "main"),
+      field("featureBranch", "feature 分支（可空，默认 feature/<名>）", "feature/login"),
+      field("storyUrl", "飞书项目链接（可空）", "https://project.feishu.cn/..."),
+      field("productDocUrl", "产品文档（可空）", "https://..."),
+      field("techDocUrl", "技术文档（可空）", "https://..."),
+      {
+        tag: "button",
+        name: "submit",
+        text: { tag: "plain_text", content: "创建项目" },
+        type: "primary",
+        action_type: "form_submit",
+        behaviors: [{
+          type: "callback",
+          value: {
+            kind: "project_new_form",
+            worktreeRoot: opts.worktreeRoot || "",
+          },
+        }],
+      },
+    )
+
+    elements.push({ tag: "form", name: "project_new", elements: formElements })
+
+    return {
+      schema: "2.0",
+      config: { wide_screen_mode: true, update_multi: true },
+      header: {
+        title: { tag: "plain_text", content: opts.title || "创建项目" },
+        template: "orange",
+      },
+      body: { horizontal_align: "left", elements },
+    }
+  }
+
+  async sendInteractiveCard(card: any, replyMessageId?: string, chatId?: string): Promise<string | null | undefined> {
+    const content = JSON.stringify(card)
+    if (replyMessageId && !replyMessageId.startsWith("internal_")) {
+      try {
+        const res = await this.client.im.message.reply({
+          path: { message_id: replyMessageId },
+          data: { content, msg_type: "interactive" },
+        })
+        const code = (res as any)?.code
+        const mid = ((res as any)?.data?.message_id ?? (res as any)?.message_id) as string | undefined
+        if (code !== undefined && code !== 0) {
+          this.log("WARN", `交互卡片回复失败 code=${code}`)
+          return undefined
+        }
+        return mid ?? null
+      } catch (e: any) {
+        this.log("WARN", `交互卡片回复失败: ${e?.message ?? e}`)
+        return undefined
+      }
+    }
+    const target = chatId || this.chatId
+    if (!target) return undefined
+    try {
+      const res = await this.client.im.message.create({
+        params: { receive_id_type: "chat_id" },
+        data: { receive_id: target, content, msg_type: "interactive" },
+      })
+      return ((res as any)?.data?.message_id ?? (res as any)?.message_id) as string | undefined
+    } catch (e: any) {
+      this.log("WARN", `交互卡片发送失败: ${e?.message ?? e}`)
+      return undefined
+    }
   }
 
   /**
    * 发送带回传按钮的交互卡片。
    * @returns message_id；回复成功但飞书未回 message_id 时返回 null（调用方不得再 create）；失败返回 undefined
    */
-  async sendCardWithButtons(text: string, buttons: CardButton[], replyMessageId?: string, chatId?: string, title?: string, input?: CardInput, template?: string, footer?: string): Promise<string | null | undefined> {
+  async sendCardWithButtons(text: string, buttons: CardButton[], replyMessageId?: string, chatId?: string, title?: CardTitle, input?: CardInput, template?: string, footer?: string): Promise<string | null | undefined> {
     const card = LarkSender.buildCard(`${this.messagePrefix}${text}`, title, buttons, input, template, footer);
     const content = JSON.stringify(card);
     // 有 replyMessageId 时只走回复，成功即返回——禁止再 create 到 chatId（否则群消息 reply + 主用户 chat 直发 = 窜台）
@@ -261,7 +399,7 @@ export class LarkSender {
   }
 
   /** 主动更新已发送的交互卡片（需 config.update_multi=true） */
-  async patchCard(messageId: string, text: string, title?: string, template?: string, footer?: string): Promise<boolean> {
+  async patchCard(messageId: string, text: string, title?: CardTitle, template?: string, footer?: string): Promise<boolean> {
     if (!messageId || messageId.startsWith("internal_")) return false;
     try {
       const card = LarkSender.buildCard(`${this.messagePrefix}${text}`, title, undefined, undefined, template, footer);
@@ -282,9 +420,9 @@ export class LarkSender {
     }
   }
 
-  async replyMessage(messageId: string, text: string, title?: string): Promise<string | undefined> {
+  async replyMessage(messageId: string, text: string, title?: CardTitle, template?: string): Promise<string | undefined> {
     try {
-      const { content, msgType } = this.formatForSend(text, title);
+      const { content, msgType } = this.formatForSend(text, title, template);
       const res = await this.client.im.message.reply({
         path: { message_id: messageId },
         data: { content, msg_type: msgType },
@@ -295,8 +433,8 @@ export class LarkSender {
     } catch (e: any) { this.log("WARN", `飞书回复异常: ${e?.message ?? e}`); return undefined; }
   }
 
-  async sendMessage(text: string, replyMessageId?: string, chatId?: string, title?: string): Promise<string | undefined> {
-    if (replyMessageId && !replyMessageId.startsWith("internal_")) { return this.replyMessage(replyMessageId, text, title); }
+  async sendMessage(text: string, replyMessageId?: string, chatId?: string, title?: CardTitle, template?: string): Promise<string | undefined> {
+    if (replyMessageId && !replyMessageId.startsWith("internal_")) { return this.replyMessage(replyMessageId, text, title, template); }
     // internal_ 不可 reply：必须显式 chatId，禁止回落到 this.chatId（主用户）造成窜台
     if (replyMessageId?.startsWith("internal_") && !chatId) {
       this.log("WARN", `internal 消息回复缺少 chatId，已拒绝默认私聊兜底 (${replyMessageId})`);
@@ -305,7 +443,7 @@ export class LarkSender {
     const targetChatId = chatId ?? this.chatId;
     if (!targetChatId) { this.log("WARN", "无发送目标"); return undefined; }
     try {
-      const { content, msgType } = this.formatForSend(text, title);
+      const { content, msgType } = this.formatForSend(text, title, template);
       const res = await this.client.im.message.create({
         params: { receive_id_type: "chat_id" as any },
         data: { receive_id: targetChatId, content, msg_type: msgType },
@@ -648,12 +786,17 @@ export class LarkSender {
       },
       "card.action.trigger": async (data: any) => {
         try {
+          const rawForm = data?.action?.form_value;
+          const formValue = rawForm && typeof rawForm === "object" && !Array.isArray(rawForm)
+            ? Object.fromEntries(Object.entries(rawForm).map(([k, v]) => [k, String(v ?? "").trim()]))
+            : undefined;
           const evt: LarkCardActionEvent = {
             messageId: data?.context?.open_message_id ?? data?.open_message_id ?? "",
             chatId: data?.context?.open_chat_id ?? data?.open_chat_id ?? "",
             operatorOpenId: data?.operator?.open_id,
             value: data?.action?.value,
             inputValue: typeof data?.action?.input_value === "string" ? data.action.input_value : undefined,
+            formValue,
           };
           this.log("INFO", `卡片按钮点击: msg=${evt.messageId} value=${JSON.stringify(evt.value)?.slice(0, 200)}`);
           if (!onCardAction) return {};
@@ -732,6 +875,8 @@ export interface LarkCardActionEvent {
   value: unknown;
   /** 输入框组件提交的文本（tag=input 时返回） */
   inputValue?: string;
+  /** 表单提交时各字段 name → value */
+  formValue?: Record<string, string>;
 }
 
 export interface LarkMessageEvent {

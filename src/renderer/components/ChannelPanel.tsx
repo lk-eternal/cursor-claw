@@ -263,6 +263,10 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
 
   const resource = resources.find((r) => r.id === draft.agentResourceId) ?? resources[0]
 
+  const modelOptLabel = (id?: string, params?: string) =>
+    modelOptions.find((o) => o.id === id && o.params === (params ?? ""))?.label
+    || modelSlug(id, params)
+
   const fetchModels = useCallback(async (silent = false) => {
     setLoadingModels(true)
     try {
@@ -567,9 +571,9 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
                       onChange={(key) => { const { id, params } = parseModelKey(key); set({ model: id, modelParams: params }) }}
                       options={modelOptions.map((o) => ({ id: modelKey(o.id, o.params), label: o.label }))}
                       placeholder="选择模型..."
-                      fallbackLabel={modelSlug(draft.model, draft.modelParams)}
+                      fallbackLabel={modelOptLabel(draft.model, draft.modelParams)}
                     />
-                  : <input type="text" value={modelSlug(draft.model, draft.modelParams)} onChange={(e) => set({ model: e.target.value, modelParams: "" })} placeholder="auto" className={inputCls} />}
+                  : <input type="text" value={modelOptLabel(draft.model, draft.modelParams)} onChange={(e) => set({ model: e.target.value, modelParams: "" })} placeholder="auto" className={inputCls} />}
             </div>
             <div>
               <label className="mb-1 block text-xs text-gray-500">其他人模型 <span className="text-gray-600">— 其他用户私聊 & 群聊</span></label>
@@ -581,9 +585,9 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
                       onChange={(key) => { if (!key) { set({ othersModel: "", othersModelParams: "" }); return } const { id, params } = parseModelKey(key); set({ othersModel: id, othersModelParams: params }) }}
                       options={[{ id: "", label: "跟随主模型" }, ...modelOptions.map((o) => ({ id: modelKey(o.id, o.params), label: o.label }))]}
                       placeholder="跟随主模型"
-                      fallbackLabel={modelSlug(draft.othersModel, draft.othersModelParams)}
+                      fallbackLabel={modelOptLabel(draft.othersModel, draft.othersModelParams)}
                     />
-                  : <input type="text" value={modelSlug(draft.othersModel, draft.othersModelParams)} onChange={(e) => set({ othersModel: e.target.value, othersModelParams: "" })} placeholder="留空则跟随主模型" className={inputCls} />}
+                  : <input type="text" value={modelOptLabel(draft.othersModel, draft.othersModelParams)} onChange={(e) => set({ othersModel: e.target.value, othersModelParams: "" })} placeholder="留空则跟随主模型" className={inputCls} />}
             </div>
           </div>
 

@@ -22,8 +22,14 @@ import {
 import {
   launchSdkAgent, stopSdkSession, stopAllSdkSessions,
   isSdkSessionRunning, getSdkSessionList, setSdkIdleHandler, hasResumableSdkSession,
+  listSdkModels,
 } from "./agent-sdk"
 import { injectWorkspaceToDir } from "./workspace-injector"
+import { buildSessionCardTitle, formatSessionLabel, readGitBranch, dirBaseName } from "../src/shared/session-label.js"
+import { getProject } from "../src/shared/project-store.js"
+import { projectIdFromSessionKey } from "../src/shared/project-types.js"
+import { getSessionOverride } from "../src/shared/session-model-store.js"
+import { resolveModelLabel } from "../src/shared/model-utils.js"
 
 // ── readLockFile 短 TTL 缓存 ─────────────────────────────
 let _lockCache: { value: ReturnType<typeof readLockFile>; ts: number } | null = null
@@ -266,6 +272,83 @@ export async function getQueueMessages(): Promise<QueueMessageItem[]> {
   }
 }
 
+/** /s 与 /c 共用的单会话状态块 */
+export function formatSessionStatusBlock(
+  s: {
+    sessionKey: string
+    chatType?: string
+    workspaceDir?: string
+    chatName?: string
+    pid?: number
+    model?: string
+    modelParams?: string
+    startedAt?: number
+  },
+  opts?: {
+    index?: number
+    current?: boolean
+    queueMessages?: QueueMessageItem[]
+    now?: number
+    showType?: boolean
+    /** 缺省 true；Agent 未匹配到运行实例时传 false */
+    agentRunning?: boolean
+    /** 群聊/非主用户：不暴露目录名、分支、路径 */
+    hideWorkspace?: boolean
+  },
+): string {
+  const now = opts?.now ?? Date.now()
+  const hideWs = !!opts?.hideWorkspace
+  const projId = projectIdFromSessionKey(s.sessionKey)
+  const project = !hideWs && projId ? getProject(projId) : undefined
+  const ws = hideWs ? undefined : (project?.worktreePath || s.workspaceDir)
+  const card = hideWs ? undefined : buildSessionCardTitle({
+    sessionKey: s.sessionKey,
+    project,
+    workspaceDir: ws,
+  })
+  const name = hideWs ? undefined : (card?.title || (ws ? `📂 ${dirBaseName(ws)}` : s.chatName || undefined))
+  const branch = hideWs ? undefined : (
+    card?.subtitle
+    || (project?.featureBranch ? `🌿 ${project.featureBranch}` : undefined)
+    || (ws ? (() => { const b = readGitBranch(ws); return b ? `🌿 ${b}` : undefined })() : undefined)
+  )
+  const engine = s.pid ? "CLI" : "SDK"
+  const agentRunning = opts?.agentRunning !== false
+  const agentLine = agentRunning
+    ? `🤖 Agent: ✅ 运行中（${engine}${s.pid ? ` · PID ${s.pid}` : ""}）`
+    : "🤖 Agent: ❌ 未运行"
+  const ov = getSessionOverride(s.sessionKey)
+  const modelId = (s.model || ov?.model || "").trim() || "auto"
+  const modelParams = (s.modelParams ?? ov?.modelParams ?? "").trim()
+  const favLabel = (getConfig().favoriteModels ?? []).find(
+    (f) => f.model === modelId && (f.modelParams ?? "") === modelParams,
+  )?.label
+  const model = resolveModelLabel(modelId, modelParams, favLabel) || modelId
+  const qList = (opts?.queueMessages ?? []).filter((m) => m.sessionKey === s.sessionKey)
+  const qProcessing = qList.filter((m) => m.status === "processing").length
+  const qPending = qList.length - qProcessing
+  const started = s.startedAt ? new Date(s.startedAt).toLocaleTimeString("zh-CN", { hour12: false }) : undefined
+  const dur = s.startedAt ? formatDuration(now - s.startedAt) : undefined
+  const timeLine = started && dur ? `⏱ 启动 ${started} · 时长 ${dur}` : undefined
+  const type = s.chatType === "p2p" ? "私聊" : s.chatType === "group" ? "群聊" : s.chatType === "task" ? "定时" : s.chatType === "temp" ? "临时" : s.chatType === "workflow" ? "工作流" : s.chatType === "project" ? "项目" : (s.chatType || "")
+  let head: string
+  if (opts?.index != null) {
+    head = `#${opts.index}${opts.current ? " ★" : ""}${opts.showType !== false && type ? ` [${type}]` : ""}`
+  } else {
+    head = opts?.current === false ? "📍 当前会话" : "📍 当前会话 ★"
+  }
+  return [
+    head,
+    name,
+    branch,
+    ws ? `📁 \`${ws}\`` : undefined,
+    agentLine,
+    `🧠 模型: ${model}`,
+    `📭 队列: 排队 ${qPending} · 处理中 ${qProcessing}`,
+    timeLine,
+  ].filter(Boolean).join("\n")
+}
+
 export async function deleteQueueMessage(fileId: string): Promise<boolean> {
   const lock = cachedLock()
   if (!lock?.port) return false
@@ -443,10 +526,17 @@ export async function notifyWorkflowChat(chatId: string, text: string): Promise<
 
 export function getSessionAgentList() {
   const rawList = [
-    ...getRawCliSessionList(),
-    ...getSdkSessionList().map((s) => ({ ...s, pid: 0 })),
+    ...getRawCliSessionList().map((s) => ({ ...s, modelParams: undefined as string | undefined, source: "cli" as const })),
+    ...getSdkSessionList().map((s) => ({ ...s, pid: 0, source: "sdk" as const })),
   ]
-  return rawList.map((s) => ({ ...s, chatName: resolveSessionChatName(s.sessionKey, s.chatName, s.senderOpenId) }))
+  // 同 sessionKey 只保留一条（SDK 优先，避免 CLI+SDK 双计）
+  const byKey = new Map<string, (typeof rawList)[number]>()
+  for (const s of rawList) {
+    const prev = byKey.get(s.sessionKey)
+    if (!prev || s.source === "sdk") byKey.set(s.sessionKey, s)
+  }
+  return [...byKey.values()]
+    .map((s) => ({ ...s, chatName: resolveSessionChatName(s.sessionKey, s.chatName, s.senderOpenId) }))
 }
 
 // ── /chat 命令处理 ────────────────────────────────────────
@@ -459,24 +549,28 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
 
   if (!sub || sub === "ls" || sub === "list") {
     if (sessions.length === 0) { await reply(true, "📭 当前没有活跃会话"); return }
+    const channel = chatId ? resolveChannelForSession(chatId) : undefined
+    if (channel) {
+      const resource = getAgentResource(channel.agentResourceId)
+      if (resource.type === "sdk") {
+        await listSdkModels(resource.apiKey ?? "", channel.model, channel.modelParams).catch(() => undefined)
+      }
+    }
+    const active = chatId ? await getCurrentActiveSession(port, chatId) : undefined
+    const qAll = await getQueueMessages()
     const now = Date.now()
-    const lines = sessions.map((s, i) => {
-      const idx = `#${i + 1}`
-      const type = s.chatType === "p2p" ? "私聊" : s.chatType === "group" ? "群聊" : s.chatType === "task" ? "定时" : s.chatType === "temp" ? "临时" : s.chatType === "workflow" ? "工作流" : s.chatType
-      const name = s.chatName || "-"
-      const dir = s.workspaceDir ? path.basename(s.workspaceDir) : "-"
-      const pid = s.pid || "-"
-      const started = s.startedAt ? new Date(s.startedAt).toLocaleTimeString("zh-CN", { hour12: false }) : "-"
-      const dur = s.startedAt ? formatDuration(now - s.startedAt) : "-"
-      return `${idx} [${type}] ${name} | 启动:${started} | 时长:${dur} | dir:${dir} | pid:${pid}`
-    })
-    const chatBtns = sessions.slice(0, 8).map((s, i) => {
-      const cmd = `/c ${i + 1}`
-      const name = s.chatName || path.basename(s.workspaceDir ?? "") || s.chatType
-      return { label: `${cmd} ${name}`.slice(0, 40), cmd }
-    })
-    const usage = "💡 /c <序号> 切换 | /c stop <序号> 停止 | /c new <描述> 新临时会话"
-    await reply(true, `📋 活跃会话 (${sessions.length}):\n${lines.join("\n")}\n\n${usage}`, chatBtns)
+    const blocks = sessions.map((s, i) => formatSessionStatusBlock(s, {
+      index: i + 1,
+      current: !!(active && s.sessionKey === active),
+      queueMessages: qAll,
+      now,
+    }))
+    const chatBtns = sessions.slice(0, 10).map((_, i) => ({
+      label: `#${i + 1}`,
+      cmd: `/c ${i + 1}`,
+    }))
+    const usage = "💡 点序号切换 · /c stop <序号> 停止 · /c new <描述> 新临时会话"
+    await reply(true, `📋 活跃会话 (${sessions.length})　★=当前\n\n${blocks.join("\n\n")}\n\n${usage}`, chatBtns)
     return
   }
 
@@ -528,17 +622,22 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
     }
     const s = sessions[idx - 1]
     const now = Date.now()
-    const type = s.chatType === "p2p" ? "私聊" : s.chatType === "group" ? "群聊" : s.chatType === "task" ? "定时任务" : s.chatType === "temp" ? "临时任务" : s.chatType === "workflow" ? "工作流" : s.chatType
+    const type = s.chatType === "p2p" ? "私聊" : s.chatType === "group" ? "群聊" : s.chatType === "task" ? "定时任务" : s.chatType === "temp" ? "临时任务" : s.chatType === "workflow" ? "工作流" : s.chatType === "project" ? "项目" : s.chatType
 
     if (chatId) {
       await syncActiveSession(port, chatId, s.sessionKey)
     }
 
+    const pid = projectIdFromSessionKey(s.sessionKey)
+    const project = pid ? getProject(pid) : undefined
+    const label = formatSessionLabel({
+      sessionKey: s.sessionKey,
+      project,
+      workspaceDir: project?.worktreePath || s.workspaceDir,
+    })
     const lines = [
-      `🔀 已切换到会话 #${idx}:`,
+      `🔀 已切换到会话 #${idx}: ${label}`,
       `  类型: ${type}`,
-      `  名称: ${s.chatName || "-"}`,
-      `  SessionKey: ${s.sessionKey}`,
       `  工作目录: ${s.workspaceDir || "-"}`,
       `  PID: ${s.pid || "-"}`,
       `  启动时间: ${s.startedAt ? new Date(s.startedAt).toLocaleString("zh-CN", { hour12: false }) : "-"}`,

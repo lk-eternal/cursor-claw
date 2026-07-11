@@ -112,7 +112,8 @@ export default function Dashboard({ onSettings, active }: Props) {
     // 打开过的目录自动收入常用列表，切换工作目录后标签不丢失
     const current = cfg.workspaceDir ?? ""
     let favorites = cfg.favoriteWorkspaces ?? []
-    if (current.trim() && !favorites.includes(current)) {
+    const same = (a: string, b: string) => a.replace(/[\\/]+$/g, "").toLowerCase() === b.replace(/[\\/]+$/g, "").toLowerCase()
+    if (current.trim() && !favorites.some((f) => same(f, current))) {
       favorites = [...favorites, current]
       void window.electronAPI.saveConfig({ favoriteWorkspaces: favorites })
     }
@@ -133,9 +134,10 @@ export default function Dashboard({ onSettings, active }: Props) {
       if (r.ok) {
         // 新旧目录都留在常用里，切换不丢标签
         setWsTabs((t) => {
+          const same = (a: string, b: string) => a.replace(/[\\/]+$/g, "").toLowerCase() === b.replace(/[\\/]+$/g, "").toLowerCase()
           const favorites = [...t.favorites]
           for (const d of [t.current, dir]) {
-            if (d && !favorites.includes(d)) favorites.push(d)
+            if (d && !favorites.some((f) => same(f, d))) favorites.push(d)
           }
           if (favorites.length !== t.favorites.length) {
             void window.electronAPI.saveConfig({ favoriteWorkspaces: favorites })
@@ -153,7 +155,8 @@ export default function Dashboard({ onSettings, active }: Props) {
   const addFavoriteWorkspace = async () => {
     const dir = await window.electronAPI.selectDirectory()
     if (!dir) return
-    const favorites = wsTabs.favorites.includes(dir) ? wsTabs.favorites : [...wsTabs.favorites, dir]
+    const same = (a: string, b: string) => a.replace(/[\\/]+$/g, "").toLowerCase() === b.replace(/[\\/]+$/g, "").toLowerCase()
+    const favorites = wsTabs.favorites.some((f) => same(f, dir)) ? wsTabs.favorites : [...wsTabs.favorites, dir]
     setWsTabs((t) => ({ ...t, favorites }))
     await window.electronAPI.saveConfig({ favoriteWorkspaces: favorites })
   }
@@ -1008,7 +1011,10 @@ export default function Dashboard({ onSettings, active }: Props) {
                               setModelMenuSession(s.sessionKey)
                             }}
                           >
-                            {modelSlug(s.model, s.modelParams)} ▾
+                            {(() => {
+                              const hit = modelTabs.find((m) => m.model === s.model && (m.modelParams ?? "") === (s.modelParams ?? ""))
+                              return hit?.label || modelSlug(s.model, s.modelParams)
+                            })()} ▾
                           </button>
                           {modelMenuSession === s.sessionKey && (
                             <div className="absolute left-0 top-full z-20 mt-1 max-h-48 w-48 overflow-auto rounded border border-gray-700 bg-gray-900 py-1 shadow-lg">

@@ -8,6 +8,7 @@ import { broadcastLog } from "./ui-logger"
 import { applyProxyEnv, execAgentSync } from "./agent-cli"
 import { listSdkModels, switchSdkSessionModel, getSdkSessionList, hasResumableSdkSession, isSdkSessionRunning } from "./agent-sdk"
 import { listQuickModels, getSessionOverride, type ModelEntry } from "../src/shared/session-model-store.js"
+import { resolveModelLabel, rememberModelLabel } from "../src/shared/model-utils.js"
 import { McpServerEntry, getMcpServerList, getMcpEnabledMap, toggleMcpServer, deleteMcpServer, saveMcpServer } from "./mcp-manager"
 import { httpPost } from "./daemon-client"
 import { deleteDefinition, getDefinition, listDefinitions, listInstances } from "./workflow-file"
@@ -103,15 +104,16 @@ async function applySessionModelPick(
     await reportCommandResult(port, messageId, false, `❌ 切换失败: ${r.error}`, chatId)
     return
   }
+  const display = resolveModelLabel(picked.id, picked.params, picked.label) || picked.id
+  if (picked.label) rememberModelLabel(picked.id, picked.params, picked.label)
   const lines = [
     r.deferred
       ? `✅ 已记下本会话模型（会话未拉起，下次唤醒生效）`
       : `✅ 本会话已切换模型（Resume 保留上下文）`,
     idxLabel ? ` # · ${idxLabel}` : undefined,
-    ` id · ${picked.id}`,
-    `说明 · ${picked.label}`,
+    `🧠 ${display}`,
     `session · ${sessionKey}`,
-    `通道默认仍为 · ${channel.model?.trim() || "auto"}（未改）`,
+    `通道默认仍为 · ${resolveModelLabel(channel.model, channel.modelParams) || channel.model?.trim() || "auto"}（未改）`,
   ].filter(Boolean) as string[]
   await reportCommandResult(port, messageId, true, lines.join("\n"), chatId)
 }
@@ -133,9 +135,9 @@ export async function handleFeishuModelCommand(port: number, messageId: string, 
       { label: "/m ls", cmd: "/m ls" },
       { label: "/m info", cmd: "/m info" },
     ]
-    const favBtns = quick.map((m) => {
-      const cmd = `/m use ${m.model}`
-      return { label: `⚡ ${cmd}`.slice(0, 40), cmd }
+    const favBtns = quick.map((m, i) => {
+      const slug = resolveModelLabel(m.model, m.modelParams, m.label) || m.model
+      return { label: `⚡ ${slug}`.slice(0, 40), cmd: `/m use q${i + 1}` }
     })
     await reportCommandResult(port, messageId, true, MODEL_SUBCMD_HELP, chatId, [...subBtns, ...favBtns])
     return
@@ -149,12 +151,13 @@ export async function handleFeishuModelCommand(port: number, messageId: string, 
 
   if (sub === "info") {
     const sessionKey = resolveModelSessionKey(chatId, channel)
-    const cfgModel = channel.model?.trim() || "auto"
+    const cfgDisplay = resolveModelLabel(channel.model, channel.modelParams) || channel.model?.trim() || "auto"
     const ov = sessionKey ? getSessionOverride(sessionKey) : undefined
+    const ovDisplay = ov ? resolveModelLabel(ov.model, ov.modelParams) : undefined
     const lines: string[] = [
-      `📝 通道「${channel.name}」默认主模型: ${cfgModel}`,
+      `📝 通道「${channel.name}」默认主模型: ${cfgDisplay}`,
       sessionKey ? `会话: ${sessionKey}` : "会话: （未知）",
-      ov ? `本会话 override: ${ov.model}` : "本会话 override: （无）",
+      ovDisplay ? `本会话 override: ${ovDisplay}` : "本会话 override: （无）",
       sessionKey && (isSdkSessionRunning(sessionKey) || hasResumableSdkSession(sessionKey))
         ? "状态: 可 Resume / 运行中"
         : "状态: 未拉起（切换将记为下次唤醒生效）",
@@ -172,28 +175,49 @@ export async function handleFeishuModelCommand(port: number, messageId: string, 
     const blocks = lr.models.map((m, i) => {
       const n = i + 1
       const tag = m.current ? "  ⭐current" : ""
-      return [`#${n}`, `\t id · ${m.id}`, `\t说明 · ${m.label}${tag}`].join("\n")
+      const display = resolveModelLabel(m.id, m.params, m.label) || m.label || m.id
+      return `#${n}  ${display}${tag}`
     })
     const body = [`🧠 模型列表（共 ${lr.models.length} 个）`, "", ...blocks, "", "💡 仅本会话：/m set <序号>"].join("\n")
     const btns = lr.models.slice(0, 6).map((m, i) => {
       const cmd = `/m set ${i + 1}`
-      return { label: `${cmd} ${m.id}`.slice(0, 40), cmd }
+      const display = resolveModelLabel(m.id, m.params, m.label) || m.label || m.id
+      return { label: `#${i + 1} ${display}`.slice(0, 40), cmd }
     })
     await reportCommandResult(port, messageId, true, body, chatId, btns)
     return
   }
 
   if (sub === "set" || sub === "use") {
+    if (parts.length < 3) {
+      await reportCommandResult(port, messageId, false, `💡 用法：/m ${sub} <序号|id|qN>`, chatId)
+      return
+    }
+    const token = parts[2]
+    const qMatch = /^q(\d+)$/i.exec(token)
+    if (qMatch) {
+      const favs = (getConfig().favoriteModels ?? []) as ModelEntry[]
+      const quick = listQuickModels(favs, 20)
+      const qi = parseInt(qMatch[1], 10)
+      if (qi < 1 || qi > quick.length) {
+        await reportCommandResult(port, messageId, false, `😅 常用模型序号须为 1～${quick.length}（先 /m）`, chatId)
+        return
+      }
+      const fromQuick = quick[qi - 1]
+      const picked: ListedModel = {
+        id: fromQuick.model,
+        label: resolveModelLabel(fromQuick.model, fromQuick.modelParams, fromQuick.label) || fromQuick.model,
+        current: false,
+        params: fromQuick.modelParams,
+      }
+      await applySessionModelPick(port, messageId, channel, chatId, picked, `q${qi}`)
+      return
+    }
     const lr = await listCursorModelsForCommands(channel)
     if (!lr.ok) {
       await reportCommandResult(port, messageId, false, `❌ ${lr.error}`, chatId)
       return
     }
-    if (parts.length < 3) {
-      await reportCommandResult(port, messageId, false, `💡 用法：/m ${sub} <序号|id>`, chatId)
-      return
-    }
-    const token = parts[2]
     const idx = parseInt(token, 10)
     let picked: ListedModel | undefined
     let idxLabel: string | undefined
@@ -205,13 +229,23 @@ export async function handleFeishuModelCommand(port: number, messageId: string, 
       picked = lr.models[idx - 1]
       idxLabel = String(idx)
     } else {
-      picked = lr.models.find((m) => m.id === token || m.id.startsWith(token))
+      picked = lr.models.find((m) => {
+        const slug = resolveModelLabel(m.id, m.params, m.label)
+        return m.id === token || m.id.startsWith(token) || slug === token || m.label === token
+      })
       if (!picked) {
-        // 收藏/最近里的 id 可能不在本次 ls 列表：仍允许切换
         const favs = (getConfig().favoriteModels ?? []) as ModelEntry[]
-        const fromQuick = listQuickModels(favs, 20).find((m) => m.model === token)
+        const fromQuick = listQuickModels(favs, 20).find((m) => {
+          const slug = resolveModelLabel(m.model, m.modelParams, m.label) || m.model
+          return m.model === token || slug === token
+        })
         if (fromQuick) {
-          picked = { id: fromQuick.model, label: fromQuick.label || fromQuick.model, current: false, params: fromQuick.modelParams }
+          picked = {
+            id: fromQuick.model,
+            label: resolveModelLabel(fromQuick.model, fromQuick.modelParams, fromQuick.label) || fromQuick.model,
+            current: false,
+            params: fromQuick.modelParams,
+          }
         }
       }
       if (!picked) {

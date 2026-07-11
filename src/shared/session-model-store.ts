@@ -1,5 +1,6 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
+import { modelSlug } from "./model-utils.js"
 
 export interface ModelRef {
   model: string
@@ -170,7 +171,11 @@ export function listQuickModels(favorites: ModelEntry[], limit = 6): ModelEntry[
     const k = modelEntryKey(e)
     if (seen.has(k)) return
     seen.add(k)
-    out.push({ model: e.model, modelParams: e.modelParams ?? "", label: e.label })
+    out.push({
+      model: e.model,
+      modelParams: e.modelParams ?? "",
+      label: e.label || modelSlug(e.model, e.modelParams) || e.model,
+    })
   }
   for (const f of favorites) add(f)
   for (const r of getRecentModels()) add(r)

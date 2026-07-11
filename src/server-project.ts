@@ -12,9 +12,14 @@ function txt(text: string) {
   return { content: [{ type: "text" as const, text }] }
 }
 
-function emitProjectNotify(chatId: string | undefined, text: string): void {
+function emitProjectNotify(
+  chatId: string | undefined,
+  text: string,
+  buttons?: { label: string; cmd: string }[],
+  footer?: string,
+): void {
   if (!chatId) return
-  process.stdout.write(`__PROJECT_NOTIFY__:${JSON.stringify({ chatId, text })}\n`)
+  process.stdout.write(`__PROJECT_NOTIFY__:${JSON.stringify({ chatId, text, buttons, footer })}\n`)
 }
 
 function emitProjectSync(payload: { projectId: string; actionId: string; artifactPath?: string }): void {
@@ -46,17 +51,34 @@ export function registerProjectAgentTools(mcpServer: McpServer): void {
       })
       if (!r.ok) return txt(`❌ ${r.error}`)
       const p = r.project
+      const typeLabel: Record<string, string> = {
+        plan: "规划", build: "实现", review: "审查", ship: "交付",
+      }
+      const typeName = typeLabel[r.action.type] || r.action.type
+      const advanceBtns = [
+        { label: "规划 /p plan", cmd: "/p plan" },
+        { label: "实现 /p build", cmd: "/p build" },
+        { label: "审查 /p review", cmd: "/p review" },
+        { label: "交付 /p ship", cmd: "/p ship" },
+        { label: "退出项目 /p leave", cmd: "/p leave" },
+      ]
+      const footer = "也可直接发消息，在项目会话里继续聊"
       if (args.status === "awaiting_ack") {
-        emitProjectNotify(p.notifyChatId, `⏳ 项目「${p.name}」${r.action.type} 待确认\n产物: ${args.artifact_path || "(无)"}`)
+        emitProjectNotify(
+          p.notifyChatId,
+          `⏳ 项目「${p.name}」${typeName} 待确认\n产物: ${args.artifact_path || "(无)"}\n摘要: ${args.summary || "(无)"}`,
+          advanceBtns,
+          footer,
+        )
       } else if (args.status === "accepted") {
-        emitProjectNotify(p.notifyChatId, `✅ 项目「${p.name}」${r.action.type} 已通过`)
+        emitProjectNotify(p.notifyChatId, `✅ 项目「${p.name}」${typeName} 已通过`, advanceBtns, footer)
         if (args.artifact_path) {
           emitProjectSync({ projectId: p.id, actionId: r.action.id, artifactPath: args.artifact_path })
         }
       } else if (args.status === "rejected") {
-        emitProjectNotify(p.notifyChatId, `⏹ 项目「${p.name}」${r.action.type} 已驳回`)
+        emitProjectNotify(p.notifyChatId, `⏹ 项目「${p.name}」${typeName} 已驳回`, advanceBtns, footer)
       } else {
-        emitProjectNotify(p.notifyChatId, `❌ 项目「${p.name}」${r.action.type} 失败: ${args.error || ""}`)
+        emitProjectNotify(p.notifyChatId, `❌ 项目「${p.name}」${typeName} 失败: ${args.error || ""}`, advanceBtns, footer)
       }
       return txt(`✅ 已更新 action ${args.action_id} → ${args.status}`)
     },

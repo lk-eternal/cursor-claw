@@ -112,3 +112,27 @@ export function workspaceDirFromSessionKey(sessionKey: string): string | undefin
   const dir = sessionKey.slice(idx + 2);
   return dir && /[\\/]/.test(dir) ? dir : undefined;
 }
+
+/**
+ * 规范化会话 key：盘符路径上的重复反斜杠压成单个（防 JSON/环境变量双重转义导致队列目录分裂）。
+ * 特殊后缀（wf_/project_/裸 temp_ 等）不动。
+ */
+export function normalizeSessionKey(sessionKey: string | undefined | null): string {
+  if (!sessionKey) return "";
+  const idx = sessionKey.indexOf("::");
+  if (idx < 0) return sessionKey;
+  const prefix = sessionKey.slice(0, idx + 2);
+  let suffix = sessionKey.slice(idx + 2);
+  if (!suffix) return sessionKey;
+  if (suffix.startsWith("wf_") || suffix.startsWith("project_")) return sessionKey;
+  if (!/[\\/]/.test(suffix) && !/^[A-Za-z]:/.test(suffix)) return sessionKey;
+  // Windows 盘符路径：D:\\foo → D:\foo；保留开头的 UNC \\server 为两个反斜杠
+  if (/^[A-Za-z]:/.test(suffix)) {
+    suffix = suffix.replace(/\\+/g, "\\");
+  } else if (suffix.startsWith("\\\\")) {
+    suffix = "\\\\" + suffix.slice(2).replace(/\\+/g, "\\");
+  } else {
+    suffix = suffix.replace(/\\+/g, "\\");
+  }
+  return prefix + suffix;
+}

@@ -13,6 +13,7 @@ import {
   setSessionOverride,
   pushRecentModel,
 } from "../src/shared/session-model-store.js"
+import { modelSlugFromParams, rememberModelLabel } from "../src/shared/model-utils.js"
 
 interface SdkSessionAgent {
   sessionKey: string
@@ -680,12 +681,9 @@ export interface SdkModelOption {
   current: boolean
 }
 
-/** 变体参数合成 CLI 风格 slug：claude-4.6-opus + {thinking:true, context:max} → claude-4.6-opus-thinking-max */
+/** 与设置页同一套：modelSlug（含 params 里的 1m/300k） */
 function modelSlug(id: string, params: { id: string; value: string }[]): string {
-  return id + params
-    .filter((p) => p.value !== "false")
-    .map((p) => (p.value === "true" ? `-${p.id}` : `-${p.value}`))
-    .join("")
+  return modelSlugFromParams(id, params)
 }
 
 export async function listSdkModels(apiKey: string, currentModelId?: string, currentModelParams?: string): Promise<{ ok: boolean; models: SdkModelOption[]; error?: string }> {
@@ -706,22 +704,27 @@ export async function listSdkModels(apiKey: string, currentModelId?: string, cur
           const s = modelSlug(m.id, v.params)
           slugCount.set(s, (slugCount.get(s) || 0) + 1)
         }
-
         for (const v of m.variants) {
           const ps = JSON.stringify(v.params)
           const slug = modelSlug(m.id, v.params)
           const hasDup = (slugCount.get(slug) || 0) > 1
+          const label = hasDup
+            ? `${slug} (${v.params.map((p) => `${p.id}=${p.value}`).join(", ")})`
+            : slug
+          rememberModelLabel(m.id, ps, label)
           models.push({
             id: m.id,
-            label: hasDup ? `${slug} (${v.params.map((p) => `${p.id}=${p.value}`).join(", ")})` : slug,
+            label,
             params: ps,
             current: m.id === currentModel && ps === currentParams,
           })
         }
       } else {
+        const label = m.id
+        rememberModelLabel(m.id, "", label)
         models.push({
           id: m.id,
-          label: m.id,
+          label,
           params: "",
           current: m.id === currentModel && !currentParams,
         })

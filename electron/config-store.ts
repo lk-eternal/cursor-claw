@@ -1,5 +1,6 @@
 import Store from "electron-store"
 import { randomBytes } from "node:crypto"
+import * as path from "node:path"
 import type { AgentResource, MessageChannel } from "../src/shared/channel-types"
 import { channelIdFromSessionKey } from "../src/shared/channel-types"
 import type { ScheduledTask } from "../src/shared/scheduled-task"
@@ -119,17 +120,55 @@ function getStore(): Store<AppConfig> {
 }
 
 export function getConfig(): AppConfig {
-  return { ...defaults, ...getStore().store }
+  const cfg = { ...defaults, ...getStore().store }
+  const fav = dedupeFavoriteWorkspaces(cfg.favoriteWorkspaces)
+  if (fav.length !== (cfg.favoriteWorkspaces?.length ?? 0)) {
+    getStore().set({ favoriteWorkspaces: fav } as unknown as AppConfig)
+    cfg.favoriteWorkspaces = fav
+  } else {
+    cfg.favoriteWorkspaces = fav
+  }
+  return cfg
 }
 
 export function saveConfig(partial: Partial<AppConfig>): void {
   const cleaned = Object.fromEntries(
     Object.entries(partial).filter(([, v]) => v !== undefined),
-  )
+  ) as Partial<AppConfig>
+  if (cleaned.favoriteWorkspaces) {
+    cleaned.favoriteWorkspaces = dedupeFavoriteWorkspaces(cleaned.favoriteWorkspaces)
+  }
   if (Object.keys(cleaned).length > 0) {
     // electron-store 的 set(object) 重载要求完整 AppConfig，实际支持部分键合并
     getStore().set(cleaned as unknown as AppConfig)
   }
+}
+
+/** 工作目录路径比较键：解析 + 去尾部分隔符 + 小写 */
+export function workspacePathKey(p: string): string {
+  try {
+    return path.resolve(p.trim()).replace(/[\\/]+$/, "").toLowerCase()
+  } catch {
+    return p.trim().replace(/[\\/]+$/, "").toLowerCase()
+  }
+}
+
+/** 常用目录去重（同路径不同写法只留一条） */
+export function dedupeFavoriteWorkspaces(dirs: string[] | undefined): string[] {
+  const map = new Map<string, string>()
+  for (const raw of dirs ?? []) {
+    const d = raw?.trim()
+    if (!d) continue
+    const key = workspacePathKey(d)
+    if (!map.has(key)) {
+      try { map.set(key, path.resolve(d)) } catch { map.set(key, d) }
+    }
+  }
+  return [...map.values()]
+}
+
+export function isSameWorkspacePath(a: string, b: string): boolean {
+  return workspacePathKey(a) === workspacePathKey(b)
 }
 
 // ── 通道 / 资源 工具 ──────────────────────────────────────

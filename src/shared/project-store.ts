@@ -99,6 +99,8 @@ export function createProject(input: Omit<Project, "id" | "actions" | "status" |
     name: input.name,
     goal: input.goal,
     storyUrl: input.storyUrl,
+    productDocUrl: input.productDocUrl,
+    techDocUrl: input.techDocUrl,
     repoPath: input.repoPath,
     baseBranch: input.baseBranch,
     featureBranch: input.featureBranch,
