@@ -166,17 +166,28 @@ export function resolveProjectRef(token: string | undefined, projects?: Project[
 }
 
 /** /p new 交互向导草稿（按 chatKey） */
-export type ProjectNewStep = "name" | "repo" | "base" | "branch" | "goal"
+export type ProjectNewStep =
+  | "setup_worktree"
+  | "setup_repo"
+  | "name"
+  | "repo"
+  | "base"
+  | "branch"
+  | "goal"
 
 export interface ProjectNewDraft {
   chatKey: string
   step: ProjectNewStep
+  /** 配置补齐后要继续的项目名（来自 /p new 名字） */
+  pendingName?: string
   name?: string
   repoPath?: string
   baseBranch?: string
   featureBranch?: string
   goal?: string
   storyUrl?: string
+  /** 仅 /p setup，完成后不进入创建 */
+  setupOnly?: boolean
   updatedAt: number
 }
 

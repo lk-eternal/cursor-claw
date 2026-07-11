@@ -1,7 +1,7 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { app } from "electron"
-import { getConfig } from "./config-store"
+import { getConfig, saveConfig } from "./config-store"
 import { reportCommandResult, type CommandButton } from "./command-handler"
 import {
   createProject,
@@ -34,8 +34,9 @@ import { launchProjectAgent } from "./session-dispatcher"
 const PROJECT_HELP = [
   "💡 /p 子命令（全称 /project）",
   "🔹 /p — 当前项目状态卡",
-  "🔹 /p new [名字] — 交互创建（逐步选主仓/分支/目标）",
-  "🔹 /p new --cancel — 取消创建向导",
+  "🔹 /p new [名字] — 交互创建（缺配置时先飞书交互设置）",
+  "🔹 /p setup — 交互配置 worktree 根目录 / 主仓",
+  "🔹 /p new --cancel — 取消向导",
   "🔹 /p ls — 列表",
   "🔹 /p use <序号|id> — 切换当前项目",
   "🔹 /p plan|build|review|ship — 触发 action",
@@ -184,6 +185,17 @@ async function finalizeNewProject(
   }
 }
 
+function continueAfterSetup(draft: ProjectNewDraft): ProjectNewDraft {
+  if (draft.pendingName) {
+    draft.name = draft.pendingName
+    draft.pendingName = undefined
+    draft.step = "repo"
+  } else {
+    draft.step = "name"
+  }
+  return draft
+}
+
 async function promptNewStep(
   port: number,
   messageId: string,
@@ -192,6 +204,50 @@ async function promptNewStep(
 ): Promise<void> {
   const cfg = getConfig()
   saveProjectNewDraft(draft)
+
+  if (draft.step === "setup_worktree") {
+    await reportCommandResult(
+      port,
+      messageId,
+      true,
+      [
+        "⚙️ 项目工作区尚未配置，先走飞书交互设置",
+        "",
+        "① 请直接回复 **worktree 根目录** 的绝对路径",
+        "例：`D:\\claw-projects`",
+        "",
+        "取消：/p new --cancel",
+      ].join("\n"),
+      chatId,
+      [{ label: "取消", cmd: "/p new --cancel" }],
+    )
+    return
+  }
+
+  if (draft.step === "setup_repo") {
+    const roots = cfg.repoRoots || []
+    const list = roots.length ? roots.map((r, i) => `#${i + 1}\t${r}`).join("\n") : "（暂无）"
+    const btns: CommandButton[] = []
+    if (roots.length > 0) {
+      btns.push({ label: "完成，继续", cmd: "/p new --setup-done" })
+    }
+    btns.push({ label: "取消", cmd: "/p new --cancel" })
+    await reportCommandResult(
+      port,
+      messageId,
+      true,
+      [
+        "⚙️ ② 请直接回复 **主仓本地路径**（须为 git 根目录）",
+        "例：`D:\\repos\\foo`",
+        "",
+        `已登记主仓：\n${list}`,
+        roots.length ? "\n可继续回复路径追加；或点「完成，继续」" : "",
+      ].filter(Boolean).join("\n"),
+      chatId,
+      btns,
+    )
+    return
+  }
 
   if (draft.step === "name") {
     await reportCommandResult(
@@ -208,8 +264,8 @@ async function promptNewStep(
   if (draft.step === "repo") {
     const roots = cfg.repoRoots || []
     if (roots.length === 0) {
-      clearProjectNewDraft(draft.chatKey)
-      await reportCommandResult(port, messageId, false, "❌ 请先在 设置 → 项目工作区 登记主仓路径", chatId)
+      draft.step = "setup_repo"
+      await promptNewStep(port, messageId, chatId, draft)
       return
     }
     const lines = roots.map((r, i) => `#${i + 1}\t${r}`).join("\n")
@@ -284,8 +340,56 @@ export async function fillProjectNewFromText(
   ensureStore()
   const draft = getProjectNewDraft(chatId)
   if (!draft) return false
-  const value = text.trim()
+  const value = text.trim().replace(/^["']|["']$/g, "")
   if (!value) return true
+
+  if (draft.step === "setup_worktree") {
+    if (!path.isAbsolute(value)) {
+      await reportCommandResult(port, messageId, false, "❌ 请回复绝对路径，例如 D:\\claw-projects", chatId)
+      return true
+    }
+    try {
+      if (!fs.existsSync(value)) fs.mkdirSync(value, { recursive: true })
+    } catch (e: any) {
+      await reportCommandResult(port, messageId, false, `❌ 无法创建目录: ${e?.message || e}`, chatId)
+      return true
+    }
+    saveConfig({ worktreeRoot: value })
+    draft.step = "setup_repo"
+    await promptNewStep(port, messageId, chatId, draft)
+    return true
+  }
+
+  if (draft.step === "setup_repo") {
+    if (!path.isAbsolute(value)) {
+      await reportCommandResult(port, messageId, false, "❌ 请回复主仓绝对路径", chatId)
+      return true
+    }
+    if (!isGitRepoRoot(value)) {
+      await reportCommandResult(port, messageId, false, `❌ 不是有效 git 根目录: ${value}`, chatId)
+      return true
+    }
+    const cfg = getConfig()
+    const roots = [...(cfg.repoRoots || [])]
+    const resolved = path.resolve(value)
+    if (!roots.some((r) => path.resolve(r) === resolved)) {
+      roots.push(resolved)
+      saveConfig({ repoRoots: roots })
+    }
+    await reportCommandResult(
+      port,
+      messageId,
+      true,
+      `✅ 已登记主仓：${resolved}\n可继续回复路径追加，或点「完成，继续」`,
+      chatId,
+      [
+        { label: "完成，继续", cmd: "/p new --setup-done" },
+        { label: "取消", cmd: "/p new --cancel" },
+      ],
+    )
+    saveProjectNewDraft(draft)
+    return true
+  }
 
   if (draft.step === "name") {
     draft.name = value
@@ -353,7 +457,40 @@ async function handleNewCommand(
 
   if (flag === "--cancel") {
     if (chatKey) clearProjectNewDraft(chatKey)
-    await reportCommandResult(port, messageId, true, "已取消创建项目", chatId)
+    await reportCommandResult(port, messageId, true, "已取消向导", chatId)
+    return
+  }
+
+  if (flag === "--setup-done") {
+    const draft = chatKey ? getProjectNewDraft(chatKey) : undefined
+    if (!draft) {
+      await reportCommandResult(port, messageId, false, "❌ 没有进行中的向导", chatId)
+      return
+    }
+    const roots = getConfig().repoRoots || []
+    if (!roots.length) {
+      await reportCommandResult(port, messageId, false, "❌ 至少登记一个主仓", chatId)
+      return
+    }
+    if (!getConfig().worktreeRoot?.trim()) {
+      draft.step = "setup_worktree"
+      await promptNewStep(port, messageId, chatId, draft)
+      return
+    }
+    if (draft.setupOnly) {
+      clearProjectNewDraft(chatKey)
+      const cfg = getConfig()
+      await reportCommandResult(
+        port,
+        messageId,
+        true,
+        `✅ 项目工作区已配置\nworktree：${cfg.worktreeRoot}\n主仓：\n${(cfg.repoRoots || []).map((r, i) => `#${i + 1}\t${r}`).join("\n")}\n\n可以 /p new 了`,
+        chatId,
+        [{ label: "创建项目 /p new", cmd: "/p new" }],
+      )
+      return
+    }
+    await promptNewStep(port, messageId, chatId, continueAfterSetup(draft))
     return
   }
 
@@ -414,18 +551,22 @@ async function handleNewCommand(
     await reportCommandResult(port, messageId, false, "❌ 无法解析会话", chatId)
     return
   }
-  if (!cfg.worktreeRoot?.trim() || !(cfg.repoRoots || []).length) {
-    await reportCommandResult(
-      port,
-      messageId,
-      false,
-      "❌ 请先在 设置 → 项目工作区 配置：主仓列表 + worktree 根目录",
-      chatId,
-    )
+
+  const nameArg = parts[2] && !parts[2].startsWith("--") ? parts.slice(2).join(" ").trim() : ""
+  const needWorktree = !cfg.worktreeRoot?.trim()
+  const needRepos = !(cfg.repoRoots || []).length
+
+  if (needWorktree || needRepos) {
+    const draft: ProjectNewDraft = {
+      chatKey,
+      step: needWorktree ? "setup_worktree" : "setup_repo",
+      pendingName: nameArg || undefined,
+      updatedAt: Date.now(),
+    }
+    await promptNewStep(port, messageId, chatId, draft)
     return
   }
 
-  const nameArg = parts[2] && !parts[2].startsWith("--") ? parts.slice(2).join(" ").trim() : ""
   const draft: ProjectNewDraft = {
     chatKey,
     step: nameArg ? "repo" : "name",
@@ -572,6 +713,22 @@ export async function handleFeishuProjectCommand(
 
   if (sub === "new") {
     await handleNewCommand(port, messageId, chatId, parts)
+    return
+  }
+
+  if (sub === "setup") {
+    if (!chatId) {
+      await reportCommandResult(port, messageId, false, "❌ 无法解析会话", chatId)
+      return
+    }
+    const cfgNow = getConfig()
+    const draft: ProjectNewDraft = {
+      chatKey: chatId,
+      step: !cfgNow.worktreeRoot?.trim() ? "setup_worktree" : "setup_repo",
+      setupOnly: true,
+      updatedAt: Date.now(),
+    }
+    await promptNewStep(port, messageId, chatId, draft)
     return
   }
 
