@@ -786,7 +786,7 @@ export default function Dashboard({ onSettings, active }: Props) {
       <div className="mx-6 mb-3 flex flex-wrap items-center gap-1.5">
         <MessageSquare size={13} className="shrink-0 text-gray-500" />
         {sessionTabs.map((t) => {
-          const short = t.label.slice(0, 28)
+          const short = t.label
           const Icon = t.kind === "project" ? Package : FolderOpen
           return (
             <span key={t.sessionKey} title={t.sessionKey}
@@ -821,7 +821,7 @@ export default function Dashboard({ onSettings, active }: Props) {
         <Cpu size={13} className="shrink-0 text-gray-500" />
         {modelTabs.map((m) => {
           const key = `${m.model}\0${m.modelParams ?? ""}`
-          const label = (m.label || modelSlug(m.model, m.modelParams)).slice(0, 28)
+          const label = m.label || modelSlug(m.model, m.modelParams)
           const isCurrent = !!activeSessionModel
             && activeSessionModel.model === m.model
             && (activeSessionModel.modelParams ?? "") === (m.modelParams ?? "")
