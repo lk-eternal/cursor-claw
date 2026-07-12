@@ -25,13 +25,21 @@ function runGit(cwd: string, args: string[]): { ok: boolean; stdout: string; std
   }
 }
 
+function resolveReal(p: string): string {
+  try {
+    return fs.realpathSync.native(path.resolve(p))
+  } catch {
+    return path.resolve(p)
+  }
+}
+
 export function isGitRepoRoot(repoPath: string): boolean {
   if (!repoPath || !fs.existsSync(repoPath)) return false
   const r = runGit(repoPath, ["rev-parse", "--is-inside-work-tree"])
   if (!r.ok || r.stdout !== "true") return false
   const top = runGit(repoPath, ["rev-parse", "--show-toplevel"])
   if (!top.ok) return false
-  return path.resolve(top.stdout) === path.resolve(repoPath)
+  return resolveReal(top.stdout) === resolveReal(repoPath)
 }
 
 export function addProjectWorktree(input: WorktreeAddInput): WorktreeResult {
