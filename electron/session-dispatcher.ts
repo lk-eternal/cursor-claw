@@ -608,10 +608,6 @@ function tabLabelForSession(
   return running?.chatName || sessionKey.slice(0, 28)
 }
 
-function stripTabEmoji(label: string): string {
-  return label.replace(/^[📦📂]\s*/, "").replace(/\s*·\s*🌿\s*/g, " · ").trim()
-}
-
 function sessionTabKind(sessionKey: string): SessionTabItem["kind"] {
   if (projectIdFromSessionKey(sessionKey)) return "project"
   if (sessionKey.startsWith("temp_")) return "temp"
@@ -673,10 +669,9 @@ export async function listMainSessionTabs(): Promise<{
     })
   }
   if (activeKey && !seen.has(activeKey)) {
-    const sw = switchable.find((x) => x.sessionKey === activeKey)
     tabs.unshift({
       sessionKey: activeKey,
-      label: stripTabEmoji(sw?.label || tabLabelForSession(activeKey)),
+      label: tabLabelForSession(activeKey),
       kind: sessionTabKind(activeKey),
       running: false,
       current: true,
@@ -688,7 +683,7 @@ export async function listMainSessionTabs(): Promise<{
     if (seen.has(sw.sessionKey)) continue
     tabs.push({
       sessionKey: sw.sessionKey,
-      label: stripTabEmoji(sw.label),
+      label: tabLabelForSession(sw.sessionKey),
       kind: sessionTabKind(sw.sessionKey),
       running: false,
       current: !!activeKey && sw.sessionKey === activeKey,
