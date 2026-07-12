@@ -1,7 +1,7 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { randomUUID } from "node:crypto"
-import type { Project, ProjectAction, ProjectActionStatus, ProjectActionType } from "./project-types.js"
+import { DEFAULT_PROJECT_NODES, type Project, type ProjectAction, type ProjectActionStatus, type ProjectActionType, type ProjectNodeDef } from "./project-types.js"
 
 let baseDir = ""
 
@@ -12,6 +12,36 @@ export function initProjectStore(userDataDir: string): void {
 
 export function getProjectStoreDir(): string {
   return baseDir
+}
+
+// ── 流程节点表（electron 设置页写，daemon MCP 读，共用一份文件） ──
+
+function nodesPath(): string {
+  return path.join(baseDir, "project-nodes.json")
+}
+
+export function getProjectNodes(): ProjectNodeDef[] {
+  const saved = baseDir ? readJsonSafe<ProjectNodeDef[] | null>(nodesPath(), null) : null
+  const list = (saved ?? []).filter((n) => n?.id?.trim() && n?.label?.trim())
+  if (!list.length) return DEFAULT_PROJECT_NODES.map((n) => ({ ...n }))
+  // 内置节点始终存在（用户可改 label/prompt，不可删）
+  for (const b of DEFAULT_PROJECT_NODES) {
+    if (!list.some((n) => n.id === b.id)) list.push({ ...b })
+  }
+  return list
+}
+
+export function saveProjectNodes(nodes: ProjectNodeDef[]): void {
+  if (!baseDir) throw new Error("project store not initialized")
+  writeJson(nodesPath(), nodes)
+}
+
+export function getProjectNode(id: string): ProjectNodeDef | undefined {
+  return getProjectNodes().find((n) => n.id === id)
+}
+
+export function projectNodeLabel(id: string): string {
+  return getProjectNode(id)?.label || id
 }
 
 function ensureDir(dir: string): void {
@@ -105,6 +135,7 @@ export function createProject(input: Omit<Project, "id" | "actions" | "status" |
     baseBranch: input.baseBranch,
     featureBranch: input.featureBranch,
     worktreePath: input.worktreePath,
+    repos: input.repos,
     status: input.status ?? "active",
     actions: input.actions ?? [],
     sessionKey: input.sessionKey,
@@ -118,15 +149,28 @@ export function createProject(input: Omit<Project, "id" | "actions" | "status" |
 }
 
 export function findBusyAction(project: Project): ProjectAction | undefined {
-  return project.actions.find((a) => a.status === "running" || a.status === "awaiting_ack")
+  // 只有正在跑的 agent 才算忙；产出后（含旧数据的 awaiting_ack）即可推进下一节点
+  return project.actions.find((a) => a.status === "running")
 }
+
+const STALE_RUNNING_MS = 12 * 60 * 60 * 1000
 
 export function startAction(projectId: string, type: ProjectActionType): { ok: true; project: Project; action: ProjectAction } | { ok: false; error: string } {
   const project = getProject(projectId)
   if (!project) return { ok: false, error: "项目不存在" }
   if (project.status === "done") return { ok: false, error: "项目已结束" }
   const busy = findBusyAction(project)
-  if (busy) return { ok: false, error: `已有进行中的 action: ${busy.type} (${busy.status})` }
+  if (busy) {
+    // agent 崩溃等原因遗留的陈旧 running：超时自动失效放行，避免项目被永久卡死
+    if (Date.now() - (busy.startedAt ?? 0) > STALE_RUNNING_MS) {
+      busy.status = "failed"
+      busy.error = "长时间未完成，已自动失效"
+      busy.completedAt = Date.now()
+      saveProject(project)
+    } else {
+      return { ok: false, error: `已有进行中的 action: ${busy.type} (${busy.status})` }
+    }
+  }
   const action: ProjectAction = {
     id: randomUUID().replace(/-/g, "").slice(0, 10),
     type,
@@ -170,26 +214,28 @@ export function resolveProjectRef(token: string | undefined, projects?: Project[
 /** /p new 交互向导草稿（按 chatKey） */
 export type ProjectNewStep =
   | "setup_worktree"
-  | "setup_repo"
-  | "name"
-  | "repo"
-  | "base"
-  | "branch"
-  | "goal"
+  | "setup_add_path"
+  | "setup_add_base"
+  | "setup_add_test"
+  | "setup_add_dev"
+  | "setup_gitlab_token"
+  | "setup_gitlab_host"
 
 export interface ProjectNewDraft {
   chatKey: string
   step: ProjectNewStep
-  /** 配置补齐后要继续的项目名（来自 /p new 名字） */
-  pendingName?: string
   name?: string
   repoPath?: string
   baseBranch?: string
+  testBranch?: string
+  developBranch?: string
   featureBranch?: string
   goal?: string
   storyUrl?: string
   /** 仅 /p setup，完成后不进入创建 */
   setupOnly?: boolean
+  /** setup 子流程结束后回到 setup 总览 */
+  returnToSetup?: boolean
   updatedAt: number
 }
 

@@ -14,7 +14,7 @@ import {
 
 // ── 会话 Agent ──────────────────────────────────────────
 
-export type ChatType = "p2p" | "group" | "task" | "temp" | "workflow" | "project"
+export type ChatType = "p2p" | "group" | "task" | "temp" | "project"
 
 interface SessionAgent {
   sessionKey: string
@@ -146,7 +146,8 @@ export interface LaunchMeta { messageIds?: string[]; chatId?: string; chatType?:
 
 export function buildPrompt(meta?: LaunchMeta, taskMessage?: string, sessionKey?: string, useMainWorkspace?: boolean, keepAlive = true): string {
   const prompts: string[] = []
-  if (useMainWorkspace || meta?.chatType === "workflow") {
+  // 数字身份（拟人人设）只用于聊天类会话；工作流/项目等干活会话不注入
+  if (useMainWorkspace || meta?.chatType === "project") {
     prompts.push("请绝对严格遵守工作流规则cursor-claw开始工作")
   } else {
     prompts.push("请按照digital-identity数字身份定义并绝对严格遵守工作流规则cursor-claw开始工作")

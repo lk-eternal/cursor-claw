@@ -54,11 +54,15 @@ describe("project-store", () => {
     const r2 = startAction(p.id, "build")
     expect(r2.ok).toBe(false)
     if (r1.ok) {
+      // 产出即完成：awaiting_ack（旧数据）不再算忙，可直接推进下一节点
       updateAction(p.id, r1.action.id, { status: "awaiting_ack" })
-      expect(findBusyAction(getProject(p.id)!)?.status).toBe("awaiting_ack")
-      expect(startAction(p.id, "build").ok).toBe(false)
-      updateAction(p.id, r1.action.id, { status: "accepted", artifactPath: "x.md" })
-      expect(startAction(p.id, "build").ok).toBe(true)
+      expect(findBusyAction(getProject(p.id)!)).toBeUndefined()
+      const r3 = startAction(p.id, "build")
+      expect(r3.ok).toBe(true)
+      if (r3.ok) {
+        updateAction(p.id, r3.action.id, { status: "accepted", artifactPath: "x.md" })
+        expect(startAction(p.id, "review").ok).toBe(true)
+      }
     }
   })
 

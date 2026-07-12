@@ -38,6 +38,8 @@ export interface AppConfig {
   gitlabHost: string
   /** 已 clone 的主仓本地路径列表 */
   repoRoots: string[]
+  /** 主仓+固定基线（/p new 多选记忆） */
+  repoProfiles: { path: string; baseBranch: string; testBranch?: string; developBranch?: string }[]
   /** 新建 worktree 的父目录 */
   worktreeRoot: string
 
@@ -83,6 +85,7 @@ const defaults: AppConfig = {
   gitlabToken: "",
   gitlabHost: "",
   repoRoots: [],
+  repoProfiles: [],
   worktreeRoot: "",
 
   allowOthers: false,
@@ -137,6 +140,14 @@ export function saveConfig(partial: Partial<AppConfig>): void {
   ) as Partial<AppConfig>
   if (cleaned.favoriteWorkspaces) {
     cleaned.favoriteWorkspaces = dedupeFavoriteWorkspaces(cleaned.favoriteWorkspaces)
+  }
+  // 压平 D:\\foo 双反斜杠脏输入
+  if (cleaned.worktreeRoot?.trim()) cleaned.worktreeRoot = path.normalize(cleaned.worktreeRoot.trim())
+  if (cleaned.repoRoots) cleaned.repoRoots = cleaned.repoRoots.map((r) => path.normalize(r.trim())).filter(Boolean)
+  if (cleaned.repoProfiles) {
+    cleaned.repoProfiles = cleaned.repoProfiles
+      .filter((p) => p?.path?.trim())
+      .map((p) => ({ ...p, path: path.normalize(p.path.trim()) }))
   }
   if (Object.keys(cleaned).length > 0) {
     // electron-store 的 set(object) 重载要求完整 AppConfig，实际支持部分键合并
@@ -407,4 +418,55 @@ export function setMainChatIdForScope(scope: string, chatId: string): void {
   const ids = { ...(config.mainChatIds ?? {}), [scope]: chatId }
   if (!chatId) delete ids[scope]
   saveConfig({ mainChatIds: ids })
+}
+
+export type RepoProfileCfg = {
+  path: string
+  baseBranch: string
+  testBranch?: string
+  developBranch?: string
+}
+
+export function getRepoProfiles(cfg: AppConfig = getConfig()): RepoProfileCfg[] {
+  const profiles = cfg.repoProfiles || []
+  if (profiles.length) {
+    return profiles.map((p) => ({
+      path: path.resolve(p.path),
+      baseBranch: (p.baseBranch || "main").trim() || "main",
+      testBranch: p.testBranch?.trim() || undefined,
+      developBranch: p.developBranch?.trim() || undefined,
+    }))
+  }
+  return (cfg.repoRoots || []).map((r) => ({
+    path: path.resolve(r),
+    baseBranch: "main",
+  }))
+}
+
+export function upsertRepoProfiles(pairs: RepoProfileCfg[]): void {
+  const byPath = new Map<string, RepoProfileCfg>()
+  for (const p of [...getRepoProfiles(), ...pairs]) {
+    if (!p?.path?.trim()) continue
+    const resolved = path.resolve(p.path.trim())
+    byPath.set(resolved.toLowerCase(), {
+      path: resolved,
+      baseBranch: (p.baseBranch || "main").trim() || "main",
+      testBranch: p.testBranch?.trim() || undefined,
+      developBranch: p.developBranch?.trim() || undefined,
+    })
+  }
+  const next = [...byPath.values()]
+  saveConfig({ repoProfiles: next, repoRoots: next.map((p) => p.path) })
+}
+
+export function removeRepoProfile(index1Based: number): RepoProfileCfg | null {
+  const list = getRepoProfiles()
+  const idx = index1Based - 1
+  if (idx < 0 || idx >= list.length) return null
+  const [removed] = list.splice(idx, 1)
+  saveConfig({
+    repoProfiles: list,
+    repoRoots: list.map((p) => p.path),
+  })
+  return removed
 }

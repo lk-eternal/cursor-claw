@@ -72,11 +72,18 @@ export class WeChatManager extends EventEmitter {
     this.client.on("message", (msg: WeixinMessage) => this.handleMessage(msg));
     this.client.on("error", (err: Error) => {
       this.opts.log("ERROR", `[WeChat] 错误: ${err.message}`);
-      this.setStatus("error");
+      if (this.status !== "error") this.setStatus("error");
     });
     this.client.on("sessionExpired", () => {
       this.opts.log("WARN", "[WeChat] 会话已过期，需要重新登录");
       this.setStatus("disconnected");
+    });
+    // 轮询循环断网时不退出（内部退避重试）；一旦拉取成功即视为网络恢复，状态拉回 connected
+    this.client.on("poll", () => {
+      if (this.status === "error") {
+        this.opts.log("INFO", "[WeChat] 网络恢复，重连成功");
+        this.setStatus("connected");
+      }
     });
 
     const loadSyncBuf = async (): Promise<string | undefined> => {

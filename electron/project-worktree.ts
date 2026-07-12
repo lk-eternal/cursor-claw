@@ -55,7 +55,18 @@ export function addProjectWorktree(input: WorktreeAddInput): WorktreeResult {
     }
   }
 
-  const startPoint = resolveStartPoint(repoPath, baseBranch)
+  const existing = resolveExistingBranch(repoPath, featureBranch)
+  if (existing.ok && existing.ref) {
+    const add = runGit(repoPath, ["worktree", "add", worktreePath, existing.ref])
+    if (!add.ok) {
+      removeProjectWorktree(repoPath, worktreePath)
+      return { ok: false, error: `挂接已有分支失败: ${add.stderr || add.stdout}` }
+    }
+    unsetUpstream(worktreePath)
+    return { ok: true }
+  }
+
+  const startPoint = ensureLocalBase(repoPath, baseBranch)
   if (!startPoint.ok) return startPoint
 
   const add = runGit(repoPath, ["worktree", "add", "-b", featureBranch, worktreePath, startPoint.ref!])
@@ -63,15 +74,43 @@ export function addProjectWorktree(input: WorktreeAddInput): WorktreeResult {
     removeProjectWorktree(repoPath, worktreePath)
     return { ok: false, error: `worktree add 失败: ${add.stderr || add.stdout}` }
   }
+  unsetUpstream(worktreePath)
   return { ok: true }
 }
 
-function resolveStartPoint(repoPath: string, baseBranch: string): WorktreeResult & { ref?: string } {
-  const remote = runGit(repoPath, ["rev-parse", "--verify", `origin/${baseBranch}`])
-  if (remote.ok) return { ok: true, ref: `origin/${baseBranch}` }
-  const local = runGit(repoPath, ["rev-parse", "--verify", baseBranch])
-  if (local.ok) return { ok: true, ref: baseBranch }
-  return { ok: false, error: `找不到基线分支: ${baseBranch}（本地与 origin 均无）` }
+function unsetUpstream(worktreePath: string): void {
+  // 禁止 feature 跟踪生产基线；后续 push 默认走同名远程分支
+  runGit(worktreePath, ["branch", "--unset-upstream"])
+}
+
+function ensureLocalBase(repoPath: string, baseBranch: string): WorktreeResult & { ref?: string } {
+  const name = baseBranch.trim()
+  if (!name) return { ok: false, error: "基线分支为空" }
+  const local = runGit(repoPath, ["rev-parse", "--verify", name])
+  if (local.ok) return { ok: true, ref: name }
+  const remote = runGit(repoPath, ["rev-parse", "--verify", `origin/${name}`])
+  if (!remote.ok) {
+    return { ok: false, error: `找不到基线分支: ${name}（本地与 origin 均无）` }
+  }
+  // 建本地同名分支指向 origin/base，不设置 upstream（避免绑生产远程）
+  const created = runGit(repoPath, ["branch", "--no-track", name, `origin/${name}`])
+  if (!created.ok) {
+    // 可能已存在竞争；再读一次
+    const again = runGit(repoPath, ["rev-parse", "--verify", name])
+    if (again.ok) return { ok: true, ref: name }
+    return { ok: false, error: `无法创建本地基线 ${name}: ${created.stderr || created.stdout}` }
+  }
+  return { ok: true, ref: name }
+}
+
+function resolveExistingBranch(repoPath: string, branch: string): WorktreeResult & { ref?: string } {
+  const name = branch.trim()
+  if (!name) return { ok: false, error: "分支名为空" }
+  const local = runGit(repoPath, ["rev-parse", "--verify", name])
+  if (local.ok) return { ok: true, ref: name }
+  const remote = runGit(repoPath, ["rev-parse", "--verify", `origin/${name}`])
+  if (remote.ok) return { ok: true, ref: `origin/${name}` }
+  return { ok: false, error: "分支不存在" }
 }
 
 export function removeProjectWorktree(repoPath: string, worktreePath: string): void {

@@ -58,6 +58,18 @@ try {
 
   Write-Log "4/4 start $exe"
   Start-Process -FilePath $exe -WorkingDirectory $dst
+
+  # 写通知标记：应用启动后主用户私聊会收到「新版已启动」
+  $notify = Join-Path $env:APPDATA "cursor-claw\pack-notify.json"
+  $ver = "unknown"
+  try {
+    $pkg = Get-Content (Join-Path $Root "package.json") -Raw | ConvertFrom-Json
+    if ($pkg.version) { $ver = [string]$pkg.version }
+  } catch {}
+  @{ version = $ver; packedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); log = $LogFile } |
+    ConvertTo-Json -Compress | Set-Content -Path $notify -Encoding UTF8
+  Write-Log "  pack-notify written: $notify ver=$ver"
+
   Write-Log "=== pack-local done ==="
   exit 0
 } catch {

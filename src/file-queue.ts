@@ -474,12 +474,14 @@ export interface QueueSessionInfo {
   sessionKey: string;
   chatType: string;
   senderOpenId?: string;
+  /** 有未领取的新消息（区别于崩溃重投的已领取消息）：调度器无视失败冷却立即拉起 */
+  hasPending?: boolean;
 }
 
 /** 有未处理完消息的会话（含 .claimed 未确认：Agent 掉线后调度器据此重新拉起并重投） */
 export function getDistinctSessions(): QueueSessionInfo[] {
   if (!queueDir) return [];
-  const map = new Map<string, { chatType: string; senderOpenId?: string }>();
+  const map = new Map<string, { chatType: string; senderOpenId?: string; hasPending?: boolean }>();
   const dirs = [queueDir, ...listSessionDirs()];
   for (const dir of dirs) {
     try {
@@ -489,9 +491,10 @@ export function getDistinctSessions(): QueueSessionInfo[] {
           const raw = fs.readFileSync(path.join(dir, f), "utf-8");
           const parsed = JSON.parse(raw);
           const key = parsed.sessionKey || parsed.chatId || "";
-          if (key && !map.has(key)) {
-            map.set(key, { chatType: parsed.meta?.chatType || parsed.chatType || "p2p", senderOpenId: parsed.meta?.senderOpenId || parsed.senderOpenId || undefined });
-          }
+          if (!key) continue;
+          const entry = map.get(key) ?? { chatType: parsed.meta?.chatType || parsed.chatType || "p2p", senderOpenId: parsed.meta?.senderOpenId || parsed.senderOpenId || undefined, hasPending: false };
+          if (f.endsWith(".qmsg")) entry.hasPending = true;
+          map.set(key, entry);
         } catch { /* ignore */ }
       }
     } catch { /* ignore */ }

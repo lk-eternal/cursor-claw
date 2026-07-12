@@ -35,10 +35,8 @@ import {
   Info,
   Github,
   MessageSquare,
-  Waypoints,
 } from "lucide-react"
 import SearchableSelect from "../components/SearchableSelect"
-import WorkflowPanel from "../components/WorkflowPanel"
 import ToolboxPanel from "../components/ToolboxPanel"
 import AgentPanel from "../components/AgentPanel"
 import ChannelPanel from "../components/ChannelPanel"
@@ -49,7 +47,7 @@ import { modelSlug } from "../model-utils"
 
 interface Props { onBack: () => void; initialTab?: string; onTabConsumed?: () => void; onReenterWizard?: () => void }
 
-type Tab = "general" | "channel" | "proxy" | "agent" | "mcp" | "rules" | "tasks" | "skills" | "workflows" | "projects" | "toolbox" | "setup" | "about"
+type Tab = "general" | "channel" | "proxy" | "agent" | "mcp" | "rules" | "tasks" | "skills" | "projects" | "toolbox" | "setup" | "about"
 type CloseWindowAction = "ask" | "minimize" | "quit"
 
 interface McpEditForm {
@@ -76,7 +74,6 @@ const TABS: { id: Tab; label: string; icon: typeof SettingsIcon }[] = [
   { id: "rules", label: "Rules", icon: FileCode2 },
   { id: "skills", label: "Skills", icon: Sparkles },
   { id: "tasks", label: "定时任务", icon: Timer },
-  { id: "workflows", label: "工作流", icon: Waypoints },
   { id: "projects", label: "项目工作区", icon: FolderOpen },
   { id: "toolbox", label: "工具箱", icon: Wrench },
   { id: "setup", label: "帮助引导", icon: BookOpen },
@@ -107,7 +104,10 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
   const [appVersion, setAppVersion] = useState("")
   const [gitlabToken, setGitlabToken] = useState("")
   const [gitlabHost, setGitlabHost] = useState("")
-  const [repoRootsText, setRepoRootsText] = useState("")
+  const [repoProfiles, setRepoProfiles] = useState<{ path: string; baseBranch: string; testBranch?: string; developBranch?: string }[]>([])
+  type ProjectNodeItem = { id: string; label: string; prompt?: string; builtin?: boolean; defaultPrompt?: string }
+  const [projectNodes, setProjectNodes] = useState<ProjectNodeItem[]>([])
+  const [nodeEditing, setNodeEditing] = useState<(ProjectNodeItem & { index: number }) | null>(null)
   const [worktreeRoot, setWorktreeRoot] = useState("")
   const [updateBusy, setUpdateBusy] = useState(false)
   const [updateCheck, setUpdateCheck] = useState<Awaited<ReturnType<typeof window.electronAPI.checkAppUpdate>> | null>(null)
@@ -302,9 +302,13 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
       window.electronAPI.getConfig().then((config) => {
         setGitlabToken(config.gitlabToken ?? "")
         setGitlabHost(config.gitlabHost ?? "")
-        setRepoRootsText((config.repoRoots ?? []).join("\n"))
+        const profiles = (config.repoProfiles?.length)
+          ? config.repoProfiles
+          : (config.repoRoots ?? []).map((p) => ({ path: p, baseBranch: "main" }))
+        setRepoProfiles(profiles)
         setWorktreeRoot(config.worktreeRoot ?? "")
       })
+      window.electronAPI.getProjectNodes().then(setProjectNodes).catch(() => {})
     }
   }, [tab, refreshMcpServers, refreshRules, refreshSkills, refreshTasks])
 
@@ -976,9 +980,6 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
               </section>
             </>)}
 
-            {/* ═══ Workflows ═══ */}
-            {tab === "workflows" && <WorkflowPanel />}
-
             {/* ═══ Projects ═══ */}
             {tab === "projects" && (<>
               <section className="space-y-4">
@@ -993,13 +994,39 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                   <input type="text" value={gitlabHost} onChange={(e) => setGitlabHost(e.target.value)} placeholder="https://gitlab.com" className={inputCls} />
                 </div>
                 <div>
-                  <label className="mb-1 block text-xs text-gray-500">主仓本地路径（每行一个，须为 git 根目录）</label>
-                  <textarea value={repoRootsText} onChange={(e) => setRepoRootsText(e.target.value)} rows={4} placeholder={"D:\\repos\\foo\nD:\\repos\\bar"} className={inputCls} />
+                  <label className="mb-1 block text-xs text-gray-500">主仓（路径须为 git 根目录；基线=生产分支，只作切 feature 起点；测试/开发可空）</label>
+                  <div className="space-y-2">
+                    {repoProfiles.map((p, i) => (
+                      <div key={i} className="flex items-center gap-2">
+                        <input type="text" value={p.path} placeholder="D:\repos\foo"
+                          onChange={(e) => setRepoProfiles((list) => list.map((x, j) => j === i ? { ...x, path: e.target.value } : x))}
+                          className={`${inputCls} flex-[3]`} />
+                        <input type="text" value={p.baseBranch} placeholder="基线 main"
+                          onChange={(e) => setRepoProfiles((list) => list.map((x, j) => j === i ? { ...x, baseBranch: e.target.value } : x))}
+                          className={`${inputCls} flex-1`} />
+                        <input type="text" value={p.testBranch ?? ""} placeholder="测试"
+                          onChange={(e) => setRepoProfiles((list) => list.map((x, j) => j === i ? { ...x, testBranch: e.target.value || undefined } : x))}
+                          className={`${inputCls} flex-1`} />
+                        <input type="text" value={p.developBranch ?? ""} placeholder="开发"
+                          onChange={(e) => setRepoProfiles((list) => list.map((x, j) => j === i ? { ...x, developBranch: e.target.value || undefined } : x))}
+                          className={`${inputCls} flex-1`} />
+                        <button type="button" title="删除"
+                          onClick={() => setRepoProfiles((list) => list.filter((_, j) => j !== i))}
+                          className="shrink-0 rounded-md border border-gray-700 px-2 py-1.5 text-xs text-gray-400 hover:bg-gray-800 hover:text-red-400"
+                        >✕</button>
+                      </div>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => setRepoProfiles((list) => [...list, { path: "", baseBranch: "main" }])}
+                      className="rounded-md border border-dashed border-gray-700 px-3 py-1.5 text-xs text-gray-400 hover:bg-gray-800"
+                    >+ 添加主仓</button>
+                  </div>
                 </div>
                 <div>
                   <label className="mb-1 block text-xs text-gray-500">worktree 根目录</label>
                   <div className="flex gap-2">
-                    <input type="text" value={worktreeRoot} onChange={(e) => setWorktreeRoot(e.target.value)} placeholder="D:\\claw-projects" className={inputCls} />
+                    <input type="text" value={worktreeRoot} onChange={(e) => setWorktreeRoot(e.target.value)} placeholder="D:\claw-projects" className={inputCls} />
                     <button
                       type="button"
                       onClick={async () => {
@@ -1013,18 +1040,48 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                 <button
                   type="button"
                   onClick={async () => {
-                    const repoRoots = repoRootsText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+                    const profiles = repoProfiles
+                      .map((p) => ({
+                        path: p.path.trim(),
+                        baseBranch: p.baseBranch.trim() || "main",
+                        testBranch: p.testBranch?.trim() || undefined,
+                        developBranch: p.developBranch?.trim() || undefined,
+                      }))
+                      .filter((p) => p.path)
                     await window.electronAPI.saveConfig({
                       gitlabToken: gitlabToken.trim(),
                       gitlabHost: gitlabHost.trim(),
-                      repoRoots,
+                      repoProfiles: profiles,
+                      repoRoots: profiles.map((p) => p.path),
                       worktreeRoot: worktreeRoot.trim(),
                     })
+                    setRepoProfiles(profiles)
                     setSaved(true)
                     setTimeout(() => setSaved(false), 1500)
                   }}
                   className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500"
                 >保存项目设置</button>
+              </section>
+
+              <section className="space-y-4 border-t border-gray-800 pt-4">
+                <h3 className="text-sm font-medium text-gray-300">流程节点</h3>
+                <p className="text-xs text-gray-500">推进按钮与节点提示词的唯一来源，点击节点编辑。内置节点可改名称与提示词；自定义节点会一并出现在推进按钮里。</p>
+                <div className="space-y-1.5">
+                  {projectNodes.map((n, i) => (
+                    <button key={n.id || i} type="button"
+                      onClick={() => setNodeEditing({ ...n, index: i })}
+                      className="flex w-full items-center gap-3 rounded-lg border border-gray-800 px-3 py-2 text-left transition hover:border-gray-600 hover:bg-gray-900">
+                      <span className="text-sm text-gray-200">{n.label}</span>
+                      <span className="font-mono text-xs text-gray-500">/p {n.id}</span>
+                      <span className="ml-auto shrink-0 text-[10px] text-gray-500">{n.builtin ? "内置" : "自定义"}{n.prompt?.trim() ? " · 已自定义提示词" : ""}</span>
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => setNodeEditing({ id: "", label: "", index: -1 })}
+                    className="w-full rounded-md border border-dashed border-gray-700 px-3 py-2 text-xs text-gray-400 hover:bg-gray-800"
+                  >+ 添加节点</button>
+                </div>
               </section>
             </>)}
 
@@ -1253,6 +1310,93 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
             <div className="flex justify-end gap-2 border-t border-gray-800 px-6 py-4">
               <button onClick={() => setMcpEditing(null)} className="rounded-md px-4 py-1.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white">取消</button>
               <button onClick={handleMcpSave} className="rounded-md bg-blue-600 px-4 py-1.5 text-xs font-medium text-white transition hover:bg-blue-500 disabled:opacity-40">保存</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═══ Project Node Edit Modal ═══ */}
+      {nodeEditing && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="flex w-full max-w-lg flex-col rounded-xl border border-gray-700 bg-gray-900 shadow-2xl" style={{ maxHeight: "80vh" }}>
+            <div className="flex items-center justify-between border-b border-gray-800 px-6 py-4">
+              <h3 className="text-sm font-semibold text-gray-200">{nodeEditing.index < 0 ? "添加节点" : `编辑节点 · ${nodeEditing.label || nodeEditing.id}`}</h3>
+              <button onClick={() => setNodeEditing(null)} className="text-gray-500 hover:text-white"><X size={16} /></button>
+            </div>
+            <div className="flex-1 space-y-3 overflow-y-auto px-6 py-4">
+              <div className="flex gap-3">
+                <div className="flex-1"><label className="mb-1 block text-xs text-gray-500">节点 id（/p 命令）</label>
+                  <input type="text" value={nodeEditing.id} disabled={!!nodeEditing.builtin}
+                    onChange={(e) => setNodeEditing({ ...nodeEditing, id: e.target.value.trim() })}
+                    className={`${inputCls} ${nodeEditing.builtin ? "opacity-60" : ""}`} placeholder="如 test-report" /></div>
+                <div className="flex-1"><label className="mb-1 block text-xs text-gray-500">按钮名称</label>
+                  <input type="text" value={nodeEditing.label}
+                    onChange={(e) => setNodeEditing({ ...nodeEditing, label: e.target.value })}
+                    className={inputCls} placeholder="如 测试报告" /></div>
+              </div>
+              <div>
+                <div className="mb-1 flex items-center justify-between">
+                  <label className="block text-xs text-gray-500">节点提示词（告诉 AI 该节点做什么、产出标准）</label>
+                  {nodeEditing.builtin && (nodeEditing.prompt ?? "").trim() !== "" && (
+                    <button type="button" className="text-xs text-blue-400 hover:text-blue-300"
+                      onClick={() => setNodeEditing({ ...nodeEditing, prompt: undefined })}
+                    >恢复默认模板</button>
+                  )}
+                </div>
+                <textarea rows={12}
+                  value={nodeEditing.prompt ?? nodeEditing.defaultPrompt ?? ""}
+                  onChange={(e) => setNodeEditing({ ...nodeEditing, prompt: e.target.value })}
+                  className={inputCls + " font-mono text-xs leading-relaxed"}
+                  placeholder="每行一条要求，会原样进入节点任务提示词" />
+                {nodeEditing.builtin && (nodeEditing.prompt ?? "").trim() === "" && (
+                  <p className="mt-1 text-[10px] text-gray-500">当前使用内置默认模板（上方内容即模板全文，编辑即覆盖）</p>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center justify-between border-t border-gray-800 px-6 py-4">
+              <div>
+                {!nodeEditing.builtin && nodeEditing.index >= 0 && (
+                  <button
+                    onClick={async () => {
+                      const next = projectNodes.filter((_, j) => j !== nodeEditing.index)
+                      await window.electronAPI.saveProjectNodes(next.map(({ defaultPrompt: _d, ...n }) => n))
+                      setProjectNodes(next)
+                      setNodeEditing(null)
+                    }}
+                    className="rounded-md px-4 py-1.5 text-xs text-red-400 transition hover:bg-gray-800"
+                  >删除节点</button>
+                )}
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => setNodeEditing(null)} className="rounded-md px-4 py-1.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white">取消</button>
+                <button
+                  disabled={!nodeEditing.id.trim() || !nodeEditing.label.trim()}
+                  onClick={async () => {
+                    const reserved = ["help", "menu", "ls", "list", "use", "leave", "status", "new", "del", "delete", "rm", "setup", "sync"]
+                    const id = nodeEditing.id.trim()
+                    if (!nodeEditing.builtin && (reserved.includes(id) || !/^[a-z][a-z0-9-]*$/.test(id))) {
+                      void showAlert("节点 id 不可用", `「${id}」需小写字母开头（可含数字/-），且不能与保留命令冲突`)
+                      return
+                    }
+                    if (projectNodes.some((n, j) => n.id === id && j !== nodeEditing.index)) {
+                      void showAlert("无法保存", "节点 id 与已有节点重复")
+                      return
+                    }
+                    // 与默认模板一致的内容不落库（保持跟随模板升级）
+                    const raw = (nodeEditing.prompt ?? "").trim()
+                    const promptVal = raw && raw !== (nodeEditing.defaultPrompt ?? "").trim() ? raw : undefined
+                    const item: ProjectNodeItem = { id, label: nodeEditing.label.trim(), prompt: promptVal, builtin: nodeEditing.builtin, defaultPrompt: nodeEditing.defaultPrompt }
+                    const next: ProjectNodeItem[] = nodeEditing.index < 0
+                      ? [...projectNodes, item]
+                      : projectNodes.map((n, j) => j === nodeEditing.index ? { ...n, ...item } : n)
+                    await window.electronAPI.saveProjectNodes(next.map(({ defaultPrompt: _d, ...n }) => n))
+                    const fresh = await window.electronAPI.getProjectNodes()
+                    setProjectNodes(fresh)
+                    setNodeEditing(null)
+                  }}
+                  className="rounded-md bg-blue-600 px-4 py-1.5 text-xs font-medium text-white transition hover:bg-blue-500 disabled:opacity-40"
+                >保存</button>
+              </div>
             </div>
           </div>
         </div>

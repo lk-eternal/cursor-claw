@@ -11,9 +11,6 @@ import { listQuickModels, getSessionOverride, type ModelEntry } from "../src/sha
 import { resolveModelLabel, rememberModelLabel } from "../src/shared/model-utils.js"
 import { McpServerEntry, getMcpServerList, getMcpEnabledMap, toggleMcpServer, deleteMcpServer, saveMcpServer } from "./mcp-manager"
 import { httpPost } from "./daemon-client"
-import { deleteDefinition, getDefinition, listDefinitions, listInstances } from "./workflow-file"
-import { runWorkflowDefinition } from "./workflow-runner"
-import type { WorkflowDefinition } from "../src/shared/workflow-types"
 
 // ── 共享类型与工具 ─────────────────────────────────────────
 
@@ -21,9 +18,31 @@ export interface FileCommand { id: string; command: string; messageId: string; c
 
 export interface CommandButton { label: string; cmd: string; /** 分组标题（飞书插在按钮前，微信列表分段） */ section?: string }
 
-export async function reportCommandResult(port: number, messageId: string, ok: boolean, message: string, chatId?: string, buttons?: CommandButton[]): Promise<void> {
+export type CommandCardSection = { text: string; buttons?: CommandButton[] }
+
+export type CommandResultExtra = {
+  cardTitle?: { title: string; subtitle?: string }
+  sections?: CommandCardSection[]
+  /** 出站消息登记到此会话：用户引用该消息回复可路由回原会话 */
+  sessionKey?: string
+}
+
+export async function reportCommandResult(
+  port: number,
+  messageId: string,
+  ok: boolean,
+  message: string,
+  chatId?: string,
+  buttons?: CommandButton[],
+  extra?: CommandResultExtra,
+): Promise<void> {
   try {
-    await httpPost(`http://127.0.0.1:${port}/cmd/result`, { messageId, ok, message, chatId, buttons })
+    await httpPost(`http://127.0.0.1:${port}/cmd/result`, {
+      messageId, ok, message, chatId, buttons,
+      cardTitle: extra?.cardTitle,
+      sections: extra?.sections,
+      sessionKey: extra?.sessionKey,
+    })
   } catch (e: unknown) {
     broadcastLog(`指令结果回报失败: ${e instanceof Error ? e.message : e}`, "WARN")
   }
@@ -52,7 +71,7 @@ async function listCursorModelsForCommands(channel?: MessageChannel): Promise<{ 
   const resource = getAgentResource(channel?.agentResourceId)
   if (resource.type === "sdk") {
     const r = await listSdkModels(resource.apiKey ?? "", channel?.model, channel?.modelParams)
-    if (!r.ok) return { ok: false, error: r.error || "SDK 获取模型列表失败" }
+    if (!r.ok) return { ok: false, error: r.error || "获取模型列表失败" }
     return { ok: true, models: r.models }
   }
   const config = getConfig()
@@ -71,11 +90,11 @@ async function listCursorModelsForCommands(channel?: MessageChannel): Promise<{ 
 }
 
 const MODEL_SUBCMD_HELP = [
-  "💡 /m 子命令（切换仅影响本会话，不改通道默认；全称 /model）",
-  "🔹 /m ls — 列出可用模型与序号",
-  "🔹 /m info — 查看本会话有效模型 / 通道默认",
-  "🔹 /m set <序号> — 按 /m ls 的 # 切换本会话模型",
-  "🔹 /m use <序号|id> — 同 set（快捷按钮用）",
+  "💡 /m 模型指令",
+  "🔹 /m ls — 查看可选模型",
+  "🔹 /m info — 查看当前对话在用的模型",
+  "🔹 /m set <序号> — 切换当前对话的模型",
+  "🔹 /m use <序号|id> — 同 set",
 ].join("\n")
 
 function resolveModelSessionKey(chatId?: string, channel?: MessageChannel): string | undefined {
@@ -108,12 +127,11 @@ async function applySessionModelPick(
   if (picked.label) rememberModelLabel(picked.id, picked.params, picked.label)
   const lines = [
     r.deferred
-      ? `✅ 已记下本会话模型（会话未拉起，下次唤醒生效）`
-      : `✅ 本会话已切换模型（Resume 保留上下文）`,
+      ? `✅ 已记下模型，下次对话时生效`
+      : `✅ 已切换模型（当前对话上下文保留）`,
     idxLabel ? ` # · ${idxLabel}` : undefined,
     `🧠 ${display}`,
-    `session · ${sessionKey}`,
-    `通道默认仍为 · ${resolveModelLabel(channel.model, channel.modelParams) || channel.model?.trim() || "auto"}（未改）`,
+    `应用默认模型未改：${resolveModelLabel(channel.model, channel.modelParams) || channel.model?.trim() || "auto"}`,
   ].filter(Boolean) as string[]
   await reportCommandResult(port, messageId, true, lines.join("\n"), chatId)
 }
@@ -155,12 +173,11 @@ export async function handleFeishuModelCommand(port: number, messageId: string, 
     const ov = sessionKey ? getSessionOverride(sessionKey) : undefined
     const ovDisplay = ov ? resolveModelLabel(ov.model, ov.modelParams) : undefined
     const lines: string[] = [
-      `📝 通道「${channel.name}」默认主模型: ${cfgDisplay}`,
-      sessionKey ? `会话: ${sessionKey}` : "会话: （未知）",
-      ovDisplay ? `本会话 override: ${ovDisplay}` : "本会话 override: （无）",
+      `📝 「${channel.name}」默认模型: ${cfgDisplay}`,
+      ovDisplay ? `当前对话模型: ${ovDisplay}` : "当前对话模型: （同默认）",
       sessionKey && (isSdkSessionRunning(sessionKey) || hasResumableSdkSession(sessionKey))
-        ? "状态: 可 Resume / 运行中"
-        : "状态: 未拉起（切换将记为下次唤醒生效）",
+        ? "状态: 进行中"
+        : "状态: 空闲（切换模型将在下次对话生效）",
     ]
     await reportCommandResult(port, messageId, true, lines.join("\n"), chatId)
     return
@@ -265,21 +282,21 @@ export async function handleFeishuModelCommand(port: number, messageId: string, 
     return
   }
 
-  await reportCommandResult(port, messageId, false, `😅 未知子命令: ${parts[1]}\n\n${MODEL_SUBCMD_HELP}`, chatId)
+  await reportCommandResult(port, messageId, false, `😅 未知指令: ${parts[1]}\n\n${MODEL_SUBCMD_HELP}`, chatId)
 }
 
 // ── Task 命令 ──────────────────────────────────────────────
 
 const TASK_SUBCMD_HELP = [
-  "💡 /t 子命令（全称 /task）",
-  "🔹 /t ls — 列出所有任务",
-  "🔹 /t info <序号> — 查看详情",
-  "🔹 /t run <序号> — 立即触发一次",
-  "🔹 /t stop <序号> — 停止任务",
-  "🔹 /t start <序号> — 启动任务",
+  "💡 /t 定时任务",
+  "🔹 /t ls — 列出任务",
+  "🔹 /t info <序号> — 查看任务详情",
+  "🔹 /t run <序号> — 立即执行一次",
+  "🔹 /t stop <序号> — 暂停任务",
+  "🔹 /t start <序号> — 启用任务",
   "🔹 /t delete <序号> — 删除任务",
-  "🔹 /t create <名称> <cron> <内容> — 创建任务",
-  "🔹 /t update <序号> [-name 值] [-cron 值] [-content 值] — 更新任务",
+  "🔹 /t create <名称> <cron> <内容> — 新建任务",
+  "🔹 /t update <序号> … — 修改任务",
 ].join("\n")
 
 function parseTaskOneBasedIndex(s: string | undefined): number | null {
@@ -531,19 +548,19 @@ export async function handleFeishuTaskCommand(
     return
   }
 
-  await reportCommandResult(port, messageId, false, `😅 未知子命令: ${parts[1]}\n\n${TASK_SUBCMD_HELP}`, chatId)
+  await reportCommandResult(port, messageId, false, `😅 未知指令: ${parts[1]}\n\n${TASK_SUBCMD_HELP}`, chatId)
 }
 
 // ── MCP 命令 ──────────────────────────────────────────────
 
 const MCP_SUBCMD_HELP = [
-  "💡 /mc 子命令（全称 /mcp）",
-  "🔹 /mc ls — 列出所有 MCP 服务器",
+  "💡 /mc MCP 工具",
+  "🔹 /mc ls — 列出 MCP 服务器",
   "🔹 /mc info <序号|名称> — 查看详情",
   "🔹 /mc enable <序号|名称> — 启用",
   "🔹 /mc disable <序号|名称> — 禁用",
   "🔹 /mc delete <序号|名称> — 删除",
-  '🔹 /mc add <json> — 添加（如 /mc add {"name":"test","command":"npx","args":["-y","xxx"]}）',
+  "🔹 /mc add <配置> — 添加 MCP（JSON 配置）",
 ].join("\n")
 
 function resolveMcpTarget(list: McpServerEntry[], token: string): McpServerEntry | null {
@@ -570,7 +587,7 @@ export async function handleFeishuMcpCommand(port: number, messageId: string, ra
       const detail = s.type === "url" ? s.url : s.command
       return `  ${i + 1}. ${flag} ${src} ${s.name}  (${detail})`
     })
-    await reportCommandResult(port, messageId, true, `📦 MCP 服务器列表：\n${lines.join("\n")}\n\n💡 用法：/mc info|enable|disable|delete <序号|名称> · /mc add {JSON}`, chatId)
+    await reportCommandResult(port, messageId, true, `📦 MCP 服务器：\n${lines.join("\n")}\n\n💡 /mc info|enable|disable|delete <序号或名称> · /mc add {JSON}`, chatId)
     return
   }
 
@@ -639,157 +656,5 @@ export async function handleFeishuMcpCommand(port: number, messageId: string, ra
     return
   }
 
-  await reportCommandResult(port, messageId, false, `😅 未知子命令: ${sub}\n\n${MCP_SUBCMD_HELP}`, chatId)
-}
-
-// ── Workflow 命令 ────────────────────────────────────────────
-
-const WORKFLOW_SUBCMD_HELP = [
-  "💡 /wf 子命令（全称 /workflow）",
-  "🔹 /wf ls — 列出工作流定义",
-  "🔹 /wf info <序号|ID> — 查看定义详情",
-  "🔹 /wf run <序号|ID> [初始输入] — 启动工作流",
-  "🔹 /wf status [实例ID] — 查看实例状态",
-  "🔹 /wf delete <序号|ID> — 删除工作流定义",
-].join("\n")
-
-function resolveWorkflowDef(defs: WorkflowDefinition[], token: string | undefined): WorkflowDefinition | null {
-  if (!token) return null
-  const idx = parseTaskOneBasedIndex(token)
-  if (idx !== null && idx >= 1 && idx <= defs.length) return defs[idx - 1]
-  return defs.find((d) => d.id === token) ?? null
-}
-
-export async function handleFeishuWorkflowCommand(
-  port: number,
-  messageId: string,
-  raw: string,
-  chatId?: string,
-): Promise<void> {
-  const parts = raw.trim().split(/\s+/).filter((p) => p.length > 0)
-  const low = (s: string) => s.toLowerCase()
-
-  if (parts.length <= 1) {
-    await reportCommandResult(port, messageId, true, WORKFLOW_SUBCMD_HELP, chatId, [
-      { label: "/wf ls", cmd: "/wf ls" },
-      { label: "/wf status", cmd: "/wf status" },
-    ])
-    return
-  }
-
-  const sub = low(parts[1])
-  if (sub === "help" || sub === "-h" || sub === "--help") {
-    await reportCommandResult(port, messageId, true, WORKFLOW_SUBCMD_HELP, chatId, [
-      { label: "/wf ls", cmd: "/wf ls" },
-      { label: "/wf status", cmd: "/wf status" },
-    ])
-    return
-  }
-
-  const defs = listDefinitions()
-
-  if (sub === "ls" || sub === "list") {
-    if (defs.length === 0) {
-      await reportCommandResult(port, messageId, true, "📭 当前还没有工作流定义～", chatId)
-      return
-    }
-    const lines = defs.map((d, i) => `#${i + 1}\t📋 ${d.name} · ${d.nodes.length} 节点 · ID: ${d.id}`)
-    await reportCommandResult(port, messageId, true, `🔀 工作流一览（共 ${defs.length} 条）\n\n${lines.join("\n")}\n\n✨ 详情：/wf info <序号>`, chatId)
-    return
-  }
-
-  if (sub === "info" || sub === "get") {
-    const target = resolveWorkflowDef(defs, parts[2])
-    if (!target) {
-      await reportCommandResult(port, messageId, false, "💡 用法：/wf info <序号|ID>", chatId)
-      return
-    }
-    const idx = defs.findIndex((d) => d.id === target.id) + 1
-    const nodeLines = target.nodes.map((n, i) => `   ${i + 1}. ${n.name} (${n.id})`).join("\n")
-    const body = [
-      `📋 工作流详情 #${idx}`,
-      `📝 名称 · ${target.name}`,
-      target.description ? `📄 描述 · ${target.description}` : "",
-      `📁 目录 · ${target.workingDirectory || "(默认工作目录)"}`,
-      `🔗 ID · ${target.id}`,
-      `🧩 节点 (${target.nodes.length})`,
-      nodeLines,
-    ].filter(Boolean).join("\n")
-    await reportCommandResult(port, messageId, true, body, chatId)
-    return
-  }
-
-  if (sub === "run") {
-    const target = resolveWorkflowDef(defs, parts[2])
-    if (!target) {
-      await reportCommandResult(port, messageId, false, "💡 用法：/wf run <序号|ID> [初始输入]", chatId)
-      return
-    }
-    const input = parts.slice(3).join(" ").trim() || undefined
-    const result = await runWorkflowDefinition(target.id, { input, notifyChatId: chatId })
-    if (!result.ok) {
-      await reportCommandResult(port, messageId, false, `❌ 启动失败: ${result.error}`, chatId)
-      return
-    }
-    await reportCommandResult(
-      port,
-      messageId,
-      true,
-      `🚀 工作流「${target.name}」已启动\n实例 ID: ${result.instanceId}${input ? `\n初始输入: ${input}` : ""}`,
-      chatId,
-    )
-    return
-  }
-
-  if (sub === "status") {
-    const instances = listInstances().sort((a, b) => b.updatedAt - a.updatedAt)
-    const token = parts[2]
-    if (token) {
-      const idx = parseTaskOneBasedIndex(token)
-      const inst = instances.find((i) => i.id === token)
-        ?? (idx !== null && idx >= 1 && idx <= instances.length ? instances[idx - 1] : undefined)
-      if (!inst) {
-        await reportCommandResult(port, messageId, false, "❌ 找不到该实例", chatId)
-        return
-      }
-      const def = getDefinition(inst.workflowId)
-      const body = [
-        `📊 实例状态`,
-        `📋 工作流 · ${def?.name || inst.workflowId}`,
-        `💠 状态 · ${inst.status}`,
-        `🔗 ID · ${inst.id}`,
-        `📍 当前节点 · ${inst.currentNodeId || "(无)"}`,
-        `📈 步数 · ${inst.stepCount}/${inst.maxSteps}`,
-        inst.input ? `✉️ 输入 · ${inst.input}` : "",
-      ].filter(Boolean).join("\n")
-      await reportCommandResult(port, messageId, true, body, chatId)
-      return
-    }
-    if (instances.length === 0) {
-      await reportCommandResult(port, messageId, true, "📭 暂无工作流实例", chatId)
-      return
-    }
-    const lines = instances.slice(0, 10).map((inst, i) => {
-      const def = getDefinition(inst.workflowId)
-      return `#${i + 1}\t${def?.name || inst.workflowId} · ${inst.status} · ${inst.id.slice(0, 8)}…`
-    })
-    await reportCommandResult(port, messageId, true, `📊 工作流实例（最近 ${lines.length} 条）\n\n${lines.join("\n")}\n\n✨ 详情：/wf status <实例ID>`, chatId)
-    return
-  }
-
-  if (sub === "delete" || sub === "del") {
-    const target = resolveWorkflowDef(defs, parts[2])
-    if (!target) {
-      await reportCommandResult(port, messageId, false, "💡 用法：/wf delete <序号|ID>", chatId)
-      return
-    }
-    if (!deleteDefinition(target.id)) {
-      await reportCommandResult(port, messageId, false, "❌ 删除失败", chatId)
-      return
-    }
-    await reportCommandResult(port, messageId, true, `✅ 工作流「${target.name}」已删除`, chatId)
-    return
-  }
-
-  await reportCommandResult(port, messageId, false, `😅 未知子命令: ${sub}\n\n${WORKFLOW_SUBCMD_HELP}`, chatId)
+  await reportCommandResult(port, messageId, false, `😅 未知指令: ${sub}\n\n${MCP_SUBCMD_HELP}`, chatId)
 }

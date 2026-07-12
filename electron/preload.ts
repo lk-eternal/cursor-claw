@@ -1,5 +1,4 @@
 import { contextBridge, ipcRenderer } from "electron"
-import type { WorkflowDefinition, WorkflowInstance } from "../src/shared/workflow-types"
 import type { AgentResource, MessageChannel, ChannelStatusInfo } from "../src/shared/channel-types"
 import type { ScheduledTask } from "../src/shared/scheduled-task"
 
@@ -186,6 +185,10 @@ const api = {
   stopSessionAgent: (sessionKey: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("agent:stop-session", sessionKey),
   setSessionModel: (sessionKey: string, model: string, modelParams?: string): Promise<{ ok: boolean; deferred?: boolean; error?: string }> =>
     ipcRenderer.invoke("session:set-model", sessionKey, model, modelParams),
+  listSessionTabs: (): Promise<{ ok: boolean; chatId?: string; activeKey?: string; tabs: { sessionKey: string; label: string; kind: "main" | "project" | "dir" | "temp" | "other"; running: boolean; current: boolean; removable?: boolean }[]; error?: string }> =>
+    ipcRenderer.invoke("session:list-tabs"),
+  switchSession: (sessionKey: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("session:switch", sessionKey),
   listQuickModels: (): Promise<{ ok: boolean; models: { model: string; modelParams?: string; label?: string }[] }> =>
     ipcRenderer.invoke("session:list-quick-models"),
   stopAllSessionAgents: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("agent:stop-all-sessions"),
@@ -216,6 +219,12 @@ const api = {
     ipcRenderer.invoke("scheduled-tasks:trigger", taskId),
   getScheduledTaskStatus: (): Promise<Record<string, { running: boolean; pid?: number; startedAt?: number }>> =>
     ipcRenderer.invoke("scheduled-tasks:get-status"),
+
+  // ── 项目流程节点 ──────────────────────────────────────
+  getProjectNodes: (): Promise<{ id: string; label: string; prompt?: string; builtin?: boolean }[]> =>
+    ipcRenderer.invoke("project-nodes:get"),
+  saveProjectNodes: (nodes: { id: string; label: string; prompt?: string; builtin?: boolean }[]): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke("project-nodes:save", nodes),
   onScheduledTaskStatus: (cb: (statuses: Record<string, { running: boolean; pid?: number; startedAt?: number }>) => void) => {
     const handler = (_: unknown, statuses: Record<string, { running: boolean; pid?: number; startedAt?: number }>) => cb(statuses)
     ipcRenderer.on("scheduled-tasks:status", handler)
@@ -334,21 +343,6 @@ const api = {
     return () => ipcRenderer.removeListener("window:maximized-change", handler)
   },
 
-  // ── Workflow ──────────────────────────────────────────
-  getWorkflowDefinitions: (): Promise<WorkflowDefinition[]> => ipcRenderer.invoke("workflow:list-definitions"),
-  saveWorkflowDefinition: (def: WorkflowDefinition): Promise<{ ok: boolean }> => ipcRenderer.invoke("workflow:save-definition", def),
-  deleteWorkflowDefinition: (id: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("workflow:delete-definition", id),
-  getWorkflowInstances: (): Promise<WorkflowInstance[]> => ipcRenderer.invoke("workflow:list-instances"),
-  getWorkflowInstance: (id: string): Promise<WorkflowInstance | undefined> => ipcRenderer.invoke("workflow:get-instance", id),
-  saveWorkflowInstance: (inst: WorkflowInstance): Promise<{ ok: boolean }> => ipcRenderer.invoke("workflow:save-instance", inst),
-  deleteWorkflowInstance: (id: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("workflow:delete-instance", id),
-  runWorkflow: (workflowId: string, input?: string): Promise<{ ok: boolean; error?: string; instanceId?: string }> =>
-    ipcRenderer.invoke("workflow:run", workflowId, input),
-  onWorkflowInstanceUpdate: (cb: (inst: WorkflowInstance) => void): (() => void) => {
-    const handler = (_: unknown, inst: WorkflowInstance) => cb(inst)
-    ipcRenderer.on("workflow:instance-updated", handler)
-    return () => ipcRenderer.removeListener("workflow:instance-updated", handler)
-  },
 }
 
 contextBridge.exposeInMainWorld("electronAPI", api)

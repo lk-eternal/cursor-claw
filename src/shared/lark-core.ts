@@ -1,3 +1,4 @@
+import { encodeRepoPair } from "./project-types.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -161,49 +162,90 @@ export class LarkSender {
     return { title: title.title, subtitle: title.subtitle };
   }
 
-  /** 构造 schema 2.0 markdown 卡片；buttons 为回传交互按钮；input 为末尾自由输入；footer 在正文后、选项前（经 hr 分隔），用于已选/关闭状态 */
-  static buildCard(text: string, title?: CardTitle, buttons?: CardButton[], input?: CardInput, template?: string, footer?: string): any {
-    const elements: any[] = [];
-    const body = text.replace(/\\/g, "\\\\").replace(/\s+$/u, "");
-    elements.push({ tag: "markdown", content: body });
-    const btns = buttons ?? [];
-    const foot = footer?.replace(/\\/g, "\\\\").replace(/^\s+|\s+$/gu, "");
-    // 正文与状态/选项之间统一一条分隔线（待选 / 已选 / 关闭同结构）
-    if (foot || (input && btns.length > 0)) elements.push({ tag: "hr" });
-    if (foot) elements.push({ tag: "markdown", content: foot });
-    if (btns.length > 0) {
-      // 一律 default 宽度 + 左对齐；fill 会把文字居中
-      // 无 input 时仍按文案宽度分列，但列宽 auto、整行左对齐；按 section 分段
-      const groups: { section?: string; items: CardButton[] }[] = [];
-      for (const b of btns) {
-        const last = groups[groups.length - 1];
-        if (!last || last.section !== b.section) groups.push({ section: b.section, items: [b] });
-        else last.items.push(b);
+  /** 正文色条底色（RGB）；与会话色板枚举一一对应。飞书 header 渲染有客户端 bug（同一卡片时有时无背景色），改为正文自绘规避 */
+  private static readonly BANNER_RGB: Record<string, string> = {
+    turquoise: "16,166,166",
+    blue: "51,109,244",
+    wathet: "58,142,230",
+    indigo: "97,81,244",
+    violet: "180,74,224",
+    purple: "124,88,246",
+    carmine: "235,54,146",
+    orange: "255,136,0",
+    red: "245,74,82",
+    yellow: "255,197,26",
+    green: "52,199,36",
+    grey: "142,142,147",
+    default: "142,142,147",
+  };
+
+  /** 正文分段：每段 markdown 后紧跟该段按钮（用于 /s 等「标题+信息+按钮」同区） */
+  static appendButtonRows(elements: any[], buttons: CardButton[], opts?: { showSection?: boolean; singleCol?: boolean }): void {
+    if (!buttons.length) return;
+    const groups: { section?: string; items: CardButton[] }[] = [];
+    for (const b of buttons) {
+      const last = groups[groups.length - 1];
+      if (!last || last.section !== b.section) groups.push({ section: b.section, items: [b] });
+      else last.items.push(b);
+    }
+    const toButton = (b: CardButton) => ({
+      tag: "button",
+      text: { tag: "plain_text", content: b.label.slice(0, 100) },
+      type: b.type ?? "primary",
+      width: "default",
+      behaviors: [{ type: "callback", value: b.value }],
+    });
+    const leftRow = (row: CardButton[]) => ({
+      tag: "column_set",
+      horizontal_align: "left",
+      horizontal_spacing: "8px",
+      columns: row.map((b) => ({
+        tag: "column", width: "auto", elements: [toButton(b)],
+      })),
+    });
+    for (const g of groups) {
+      if (opts?.showSection !== false && g.section) {
+        elements.push({ tag: "markdown", content: `**${g.section}**` });
       }
-      const toButton = (b: CardButton) => ({
-        tag: "button",
-        text: { tag: "plain_text", content: b.label.slice(0, 100) },
-        type: b.type ?? "primary",
-        width: "default",
-        behaviors: [{ type: "callback", value: b.value }],
-      });
-      const leftRow = (row: CardButton[]) => ({
-        tag: "column_set",
-        horizontal_align: "left",
-        horizontal_spacing: "8px",
-        columns: row.map((b) => ({
-          tag: "column", width: "auto", elements: [toButton(b)],
-        })),
-      });
-      for (const g of groups) {
-        if (g.section) elements.push({ tag: "markdown", content: `**${g.section.replace(/\\/g, "\\\\")}**` });
-        const maxLen = Math.max(...g.items.map((b) => LarkSender.displayWidth(b.label)));
-        const perRow = input ? 1 : maxLen <= 6 ? 3 : maxLen <= 12 ? 2 : 1;
-        for (let i = 0; i < g.items.length; i += perRow) {
-          elements.push(leftRow(g.items.slice(i, i + perRow)));
-        }
+      const maxLen = Math.max(...g.items.map((b) => LarkSender.displayWidth(b.label)));
+      const perRow = opts?.singleCol ? 1 : maxLen <= 6 ? 3 : maxLen <= 12 ? 2 : 1;
+      for (let i = 0; i < g.items.length; i += perRow) {
+        elements.push(leftRow(g.items.slice(i, i + perRow)));
       }
     }
+  }
+
+  /**
+   * 构造 schema 2.0 markdown 卡片。
+   * sections 优先：每段正文后紧跟该段按钮（不再把所有按钮堆到卡片底部）。
+   */
+  static buildCard(
+    text: string,
+    title?: CardTitle,
+    buttons?: CardButton[],
+    input?: CardInput,
+    template?: string,
+    footer?: string,
+    sections?: { text: string; buttons?: CardButton[] }[],
+  ): any {
+    const elements: any[] = [];
+    if (sections && sections.length > 0) {
+      for (let i = 0; i < sections.length; i++) {
+        const sec = sections[i];
+        const md = sec.text.replace(/\s+$/u, "");
+        if (md) elements.push({ tag: "markdown", content: md });
+        if (sec.buttons?.length) LarkSender.appendButtonRows(elements, sec.buttons, { showSection: false });
+        if (i < sections.length - 1) elements.push({ tag: "hr" });
+      }
+    } else {
+      const body = text.replace(/\s+$/u, "");
+      elements.push({ tag: "markdown", content: body });
+    }
+    const btns = sections?.length ? [] : (buttons ?? []);
+    const foot = footer?.replace(/^\s+|\s+$/gu, "");
+    if (foot || (input && (btns.length > 0 || sections?.some((s) => s.buttons?.length)))) elements.push({ tag: "hr" });
+    if (foot) elements.push({ tag: "markdown", content: foot });
+    if (btns.length > 0) LarkSender.appendButtonRows(elements, btns, { singleCol: !!input });
     if (input) {
       elements.push({
         tag: "input",
@@ -220,18 +262,33 @@ export class LarkSender {
     }
     const card: any = {
       schema: "2.0",
-      config: { wide_screen_mode: true, update_multi: true },
+      config: { update_multi: true, width_mode: "fill" },
       body: { horizontal_align: "left", elements },
     };
     const { title: titleText, subtitle } = LarkSender.normalizeCardTitle(title);
     if (titleText) {
-      card.header = {
-        title: { tag: "plain_text", content: titleText.slice(0, 100) },
-        template: template || "turquoise",
+      const esc = (s: string) => s.slice(0, 100);
+      const t = esc(titleText);
+      const sub = subtitle ? esc(subtitle) : undefined;
+      const oneLine = sub && LarkSender.displayWidth(t) + LarkSender.displayWidth(sub) + 3 <= 36;
+      const content = sub ? (oneLine ? `**${t}** · ${sub}` : `**${t}**\n${sub}`) : `**${t}**`;
+      const rgb = LarkSender.BANNER_RGB[template || ""] ?? LarkSender.BANNER_RGB.turquoise;
+      card.config.style = {
+        color: { "cus-hdr": { light_mode: `rgba(${rgb},0.14)`, dark_mode: `rgba(${rgb},0.26)` } },
       };
-      if (subtitle) {
-        card.header.subtitle = { tag: "plain_text", content: subtitle.slice(0, 100) };
-      }
+      elements.unshift({
+        tag: "column_set",
+        margin: "0px 0px 8px 0px",
+        columns: [{
+          tag: "column",
+          width: "weighted",
+          weight: 1,
+          background_style: "cus-hdr",
+          padding: "6px 10px 6px 10px",
+          vertical_align: "center",
+          elements: [{ tag: "markdown", content, text_size: "notation" }],
+        }],
+      });
     }
     return card;
   }
@@ -239,68 +296,82 @@ export class LarkSender {
   /** 项目创建大表单（一次提交；可选字段可空） */
   static buildProjectNewFormCard(opts: {
     title?: string
-    repoRoots: string[]
+    repoProfiles?: { path: string; baseBranch: string; testBranch?: string; developBranch?: string }[]
+    /** @deprecated 兼容旧调用 */
+    repoRoots?: string[]
     worktreeRoot?: string
     prefix?: string
   }): any {
-    const roots = opts.repoRoots || []
+    type Profile = { path: string; baseBranch: string; testBranch?: string; developBranch?: string }
+    const profiles: Profile[] = (opts.repoProfiles && opts.repoProfiles.length)
+      ? opts.repoProfiles
+      : (opts.repoRoots || []).map((p) => ({ path: p, baseBranch: "main" }))
     const elements: any[] = []
     const tip = [
-      `${opts.prefix || ""}一次填完提交；带 * 为必填。`,
-      "不合规会 toast 提示，改完再提交即可。",
+      `${opts.prefix || ""}一次填完提交；红 * 为必填（飞书自动标记；目标可空）。`,
+      "主仓可多选历史项，或下方追加手填（测试/开发可空）。生产基线只作切分支起点，默认不作 ship 目标。",
     ].join("\n")
-    elements.push({ tag: "markdown", content: tip.replace(/\\/g, "\\\\") })
+    elements.push({ tag: "markdown", content: tip })
 
-    const field = (name: string, label: string, placeholder: string, required?: boolean, defaultValue?: string) => {
+    const field = (name: string, label: string | null, placeholder: string, required?: boolean, defaultValue?: string) => {
       const el: any = {
         tag: "input",
         name,
         required: !!required,
-        placeholder: { tag: "plain_text", content: placeholder.slice(0, 100) },
-        label: { tag: "plain_text", content: label },
+        placeholder: { tag: "plain_text", content: placeholder.replace(/\\/g, "/").slice(0, 100) },
         label_position: "top",
         width: "fill",
       }
-      if (defaultValue) el.default_value = defaultValue
+      if (label) {
+        el.label = { tag: "plain_text", content: label }
+      }
+      if (defaultValue) el.default_value = defaultValue.replace(/\\/g, "/")
       return el
     }
 
     const formElements: any[] = [
-      field("name", "* 项目名称", "例如 login", true),
-      field("goal", "* 目标描述", "要做什么", true),
+      field("name", "项目名称", "例如 login", true),
     ]
 
-    if (roots.length > 0) {
-      formElements.push({
-        tag: "select_static",
-        name: "repoPath",
-        required: false,
-        placeholder: { tag: "plain_text", content: "下拉选择主仓" },
-        label: { tag: "plain_text", content: "* 主仓（下拉或下方手填）" },
-        label_position: "top",
-        options: roots.slice(0, 20).map((r) => ({
-          text: { tag: "plain_text", content: r.length > 40 ? `…${r.slice(-39)}` : r },
-          value: r,
-        })),
-      })
-      formElements.push(field("repoPathCustom", "主仓手填（优先于下拉）", "D:\\repos\\foo"))
-    } else {
-      formElements.push(field("repoPath", "* 主仓绝对路径", "D:\\repos\\foo", true))
+    const encode = encodeRepoPair
+    const labelOf = (rp: string, b: string, t?: string, d?: string) => {
+      const norm = rp.replace(/\\/g, "/").replace(/\/+$/, "")
+      const name = norm.split("/").pop() || norm
+      return [name, b || "main", t || "", d || ""].filter((x) => !!x).join(" · ").slice(0, 50)
     }
 
+    if (profiles.length > 0) {
+      formElements.push({ tag: "markdown", content: "主仓·分支（可多选历史项；也可下方追加）" })
+      formElements.push({
+        tag: "multi_select_static",
+        name: "repoPairs",
+        required: false,
+        placeholder: { tag: "plain_text", content: "点此选择主仓·分支（可多选）" },
+        options: profiles.slice(0, 50).map((pr) => ({
+          text: { tag: "plain_text", content: labelOf(pr.path, pr.baseBranch, pr.testBranch, pr.developBranch) },
+          value: encode(pr.path, pr.baseBranch, pr.testBranch, pr.developBranch),
+        })),
+      })
+    }
+
+    formElements.push({ tag: "markdown", content: profiles.length ? "追加主仓·分支" : "主仓·分支" })
     formElements.push(
-      field("worktreeRoot", roots.length && opts.worktreeRoot ? "worktree 根目录" : "* worktree 根目录", "D:\\claw-projects", !(opts.worktreeRoot?.trim()), opts.worktreeRoot || undefined),
-      field("baseBranch", "* 基线分支", "main", true, "main"),
-      field("featureBranch", "feature 分支（可空，默认 feature/<名>）", "feature/login"),
-      field("storyUrl", "飞书项目链接（可空）", "https://project.feishu.cn/..."),
-      field("productDocUrl", "产品文档（可空）", "https://..."),
-      field("techDocUrl", "技术文档（可空）", "https://..."),
+      field("repoPathCustom", null, "主仓绝对路径，例如 D:/repos/foo", !profiles.length),
+      field("baseBranchCustom", null, "生产基线分支，例如 main", !profiles.length),
+      field("testBranchCustom", null, "测试分支，可空，例如 test"),
+      field("developBranchCustom", null, "开发分支，可空，例如 develop"),
+      field("worktreeRoot", "worktree 根目录", "将在此下切出各主仓 feature；有历史会预填", true, opts.worktreeRoot || undefined),
+      field("featureBranch", "feature 分支", "可空，默认 feature/yyMMdd-名；已存在则复用"),
+      field("storyUrl", "飞书项目链接", "可空"),
+      field("productDocUrl", "产品文档", "可空"),
+      field("techDocUrl", "技术文档", "可空"),
+      field("goal", "目标描述", "可空，可后续再定"),
       {
         tag: "button",
         name: "submit",
         text: { tag: "plain_text", content: "创建项目" },
         type: "primary",
-        action_type: "form_submit",
+        form_action_type: "submit",
         behaviors: [{
           type: "callback",
           value: {
@@ -315,9 +386,51 @@ export class LarkSender {
 
     return {
       schema: "2.0",
-      config: { wide_screen_mode: true, update_multi: true },
+      config: { update_multi: true, width_mode: "fill" },
       header: {
         title: { tag: "plain_text", content: opts.title || "创建项目" },
+        template: "orange",
+      },
+      body: { horizontal_align: "left", elements },
+    }
+  }
+
+  /** /p setup 添加主仓表单：路径+基线+测试+开发一次填完提交 */
+  static buildRepoSetupFormCard(opts?: { title?: string; prefix?: string }): any {
+    const field = (name: string, placeholder: string, required?: boolean) => ({
+      tag: "input",
+      name,
+      required: !!required,
+      placeholder: { tag: "plain_text", content: placeholder.slice(0, 100) },
+      label_position: "top",
+      width: "fill",
+    })
+    const elements: any[] = [
+      { tag: "markdown", content: `${opts?.prefix || ""}一次填完提交；红 * 为必填。生产基线只作切分支起点，不会成为交付目标。` },
+      {
+        tag: "form",
+        name: "repo_setup",
+        elements: [
+          field("repoPath", "主仓绝对路径，例如 D:/repos/foo", true),
+          field("baseBranch", "生产基线分支，例如 main", true),
+          field("testBranch", "测试分支，可空"),
+          field("developBranch", "开发分支，可空"),
+          {
+            tag: "button",
+            name: "submit",
+            text: { tag: "plain_text", content: "保存主仓" },
+            type: "primary",
+            form_action_type: "submit",
+            behaviors: [{ type: "callback", value: { kind: "repo_setup_form" } }],
+          },
+        ],
+      },
+    ]
+    return {
+      schema: "2.0",
+      config: { update_multi: true, width_mode: "fill" },
+      header: {
+        title: { tag: "plain_text", content: opts?.title || "添加主仓" },
         template: "orange",
       },
       body: { horizontal_align: "left", elements },
@@ -340,7 +453,7 @@ export class LarkSender {
         }
         return mid ?? null
       } catch (e: any) {
-        this.log("WARN", `交互卡片回复失败: ${e?.message ?? e}`)
+        this.log("WARN", `交互卡片回复失败: ${e?.message ?? e}${e?.response?.data ? " " + JSON.stringify(e.response.data).slice(0, 500) : ""}`)
         return undefined
       }
     }
@@ -353,7 +466,7 @@ export class LarkSender {
       })
       return ((res as any)?.data?.message_id ?? (res as any)?.message_id) as string | undefined
     } catch (e: any) {
-      this.log("WARN", `交互卡片发送失败: ${e?.message ?? e}`)
+      this.log("WARN", `交互卡片发送失败: ${e?.message ?? e}${e?.response?.data ? " " + JSON.stringify(e.response.data).slice(0, 500) : ""}`)
       return undefined
     }
   }
@@ -362,8 +475,18 @@ export class LarkSender {
    * 发送带回传按钮的交互卡片。
    * @returns message_id；回复成功但飞书未回 message_id 时返回 null（调用方不得再 create）；失败返回 undefined
    */
-  async sendCardWithButtons(text: string, buttons: CardButton[], replyMessageId?: string, chatId?: string, title?: CardTitle, input?: CardInput, template?: string, footer?: string): Promise<string | null | undefined> {
-    const card = LarkSender.buildCard(`${this.messagePrefix}${text}`, title, buttons, input, template, footer);
+  async sendCardWithButtons(
+    text: string,
+    buttons: CardButton[],
+    replyMessageId?: string,
+    chatId?: string,
+    title?: CardTitle,
+    input?: CardInput,
+    template?: string,
+    footer?: string,
+    sections?: { text: string; buttons?: CardButton[] }[],
+  ): Promise<string | null | undefined> {
+    const card = LarkSender.buildCard(`${this.messagePrefix}${text}`, title, buttons, input, template, footer, sections);
     const content = JSON.stringify(card);
     // 有 replyMessageId 时只走回复，成功即返回——禁止再 create 到 chatId（否则群消息 reply + 主用户 chat 直发 = 窜台）
     if (replyMessageId && !replyMessageId.startsWith("internal_")) {
@@ -470,61 +593,65 @@ export class LarkSender {
     }
   }
 
-  async sendImage(imagePath: string, replyMessageId?: string, chatId?: string): Promise<void> {
+  async sendImage(imagePath: string, replyMessageId?: string, chatId?: string): Promise<string | undefined> {
     const absPath = path.resolve(imagePath);
-    if (!fs.existsSync(absPath)) { this.log("ERROR", `图片不存在: ${absPath}`); return; }
+    if (!fs.existsSync(absPath)) { this.log("ERROR", `图片不存在: ${absPath}`); return undefined; }
     try {
       const uploadRes: any = await this.client.im.image.create({ data: { image_type: "message", image: fs.createReadStream(absPath) } });
       const imageKey = uploadRes?.data?.image_key ?? uploadRes?.image_key;
-      if (!imageKey) { this.log("ERROR", `图片上传失败`); return; }
+      if (!imageKey) { this.log("ERROR", `图片上传失败`); return undefined; }
       const content = JSON.stringify({ image_key: imageKey });
-      let sent = false;
+      let sentId: string | undefined;
       if (replyMessageId && !replyMessageId.startsWith("internal_")) {
         try {
-          await this.client.im.message.reply({ path: { message_id: replyMessageId }, data: { content, msg_type: "image" } });
-          sent = true;
+          const r: any = await this.client.im.message.reply({ path: { message_id: replyMessageId }, data: { content, msg_type: "image" } });
+          sentId = r?.data?.message_id ?? r?.message_id;
         } catch (e: any) { this.log("WARN", `图片回复退避 (${replyMessageId}): ${e?.message}`); }
       }
-      if (!sent) {
+      if (!sentId) {
         if (replyMessageId?.startsWith("internal_") && !chatId) {
           this.log("WARN", `internal 图片回复缺少 chatId，已拒绝默认私聊兜底 (${replyMessageId})`);
-          return;
+          return undefined;
         }
         const targetChatId = chatId ?? this.chatId;
-        if (!targetChatId) { this.log("WARN", "无发送目标"); return; }
-        await this.client.im.message.create({ params: { receive_id_type: "chat_id" as any }, data: { receive_id: targetChatId, content, msg_type: "image" } });
+        if (!targetChatId) { this.log("WARN", "无发送目标"); return undefined; }
+        const r: any = await this.client.im.message.create({ params: { receive_id_type: "chat_id" as any }, data: { receive_id: targetChatId, content, msg_type: "image" } });
+        sentId = r?.data?.message_id ?? r?.message_id;
       }
       this.log("INFO", "图片已发送");
-    } catch (e: any) { this.log("ERROR", `发送图片异常: ${e?.message ?? e}`); }
+      return sentId;
+    } catch (e: any) { this.log("ERROR", `发送图片异常: ${e?.message ?? e}`); return undefined; }
   }
 
-  async sendFile(filePath: string, replyMessageId?: string, chatId?: string): Promise<void> {
+  async sendFile(filePath: string, replyMessageId?: string, chatId?: string): Promise<string | undefined> {
     const absPath = path.resolve(filePath);
-    if (!fs.existsSync(absPath)) { this.log("ERROR", `文件不存在: ${absPath}`); return; }
+    if (!fs.existsSync(absPath)) { this.log("ERROR", `文件不存在: ${absPath}`); return undefined; }
     try {
       const fileName = path.basename(absPath);
       const uploadRes: any = await this.client.im.file.create({ data: { file_type: "stream", file_name: fileName, file: fs.createReadStream(absPath) } });
       const fileKey = uploadRes?.data?.file_key ?? uploadRes?.file_key;
-      if (!fileKey) { this.log("ERROR", `文件上传失败`); return; }
+      if (!fileKey) { this.log("ERROR", `文件上传失败`); return undefined; }
       const content = JSON.stringify({ file_key: fileKey, file_name: fileName });
-      let sent = false;
+      let sentId: string | undefined;
       if (replyMessageId && !replyMessageId.startsWith("internal_")) {
         try {
-          await this.client.im.message.reply({ path: { message_id: replyMessageId }, data: { content, msg_type: "file" } });
-          sent = true;
+          const r: any = await this.client.im.message.reply({ path: { message_id: replyMessageId }, data: { content, msg_type: "file" } });
+          sentId = r?.data?.message_id ?? r?.message_id;
         } catch (e: any) { this.log("WARN", `文件回复退避 (${replyMessageId}): ${e?.message}`); }
       }
-      if (!sent) {
+      if (!sentId) {
         if (replyMessageId?.startsWith("internal_") && !chatId) {
           this.log("WARN", `internal 文件回复缺少 chatId，已拒绝默认私聊兜底 (${replyMessageId})`);
-          return;
+          return undefined;
         }
         const targetChatId = chatId ?? this.chatId;
-        if (!targetChatId) { this.log("WARN", "无发送目标"); return; }
-        await this.client.im.message.create({ params: { receive_id_type: "chat_id" as any }, data: { receive_id: targetChatId, content, msg_type: "file" } });
+        if (!targetChatId) { this.log("WARN", "无发送目标"); return undefined; }
+        const r: any = await this.client.im.message.create({ params: { receive_id_type: "chat_id" as any }, data: { receive_id: targetChatId, content, msg_type: "file" } });
+        sentId = r?.data?.message_id ?? r?.message_id;
       }
       this.log("INFO", `文件已发送: ${fileName}`);
-    } catch (e: any) { this.log("ERROR", `发送文件异常: ${e?.message ?? e}`); }
+      return sentId;
+    } catch (e: any) { this.log("ERROR", `发送文件异常: ${e?.message ?? e}`); return undefined; }
   }
 
   // ── 图片下载 ───────────────────────────────────────────

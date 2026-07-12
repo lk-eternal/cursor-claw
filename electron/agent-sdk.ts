@@ -14,6 +14,7 @@ import {
   pushRecentModel,
 } from "../src/shared/session-model-store.js"
 import { modelSlugFromParams, rememberModelLabel } from "../src/shared/model-utils.js"
+import { projectIdFromSessionKey } from "../src/shared/project-types.js"
 
 interface SdkSessionAgent {
   sessionKey: string
@@ -103,7 +104,8 @@ function saveResumableMap(): void {
 }
 
 function isResumeEligible(session: SdkSessionAgent): boolean {
-  return session.keepSession && (session.chatType === "p2p" || session.chatType === "group")
+  return session.keepSession
+    && (session.chatType === "p2p" || session.chatType === "group" || session.chatType === "project")
 }
 
 function rememberResumable(session: SdkSessionAgent): void {
@@ -120,12 +122,22 @@ function forgetResumable(sessionKey: string): void {
   if (getResumableMap().delete(sessionKey)) saveResumableMap()
 }
 
-function buildWakePrompt(session: SdkSessionAgent, rulesUpdated = false): string {
-  const lines = [
-    "[SESSION_RESUME / 系统指令] 会话已由后台唤醒（历史上下文完整保留），有新消息待处理。",
-    "立即执行：非阻塞检查 poll-message（wait=false），按 cursor-claw 协议处理所有消息并逐条回复，然后按 keep_alive 模式收尾。",
-    "禁止向用户发送问候、唤醒说明等任何多余消息。",
-  ]
+function buildWakePrompt(session: SdkSessionAgent, rulesUpdated = false, taskMessage?: string): string {
+  const lines = taskMessage
+    ? [
+      "[SESSION_RESUME / 系统指令] 会话已由后台唤醒（历史上下文完整保留），有新任务待执行。",
+      "---",
+      "任务内容:",
+      taskMessage,
+      "---",
+      "直接开始执行上述任务；执行中按 cursor-claw 协议同步进度，完成后按 keep_alive 模式收尾。",
+      "禁止向用户发送问候、唤醒说明等任何多余消息。",
+    ]
+    : [
+      "[SESSION_RESUME / 系统指令] 会话已由后台唤醒（历史上下文完整保留），有新消息待处理。",
+      "立即执行：非阻塞检查 poll-message（wait=false），按 cursor-claw 协议处理所有消息并逐条回复，然后按 keep_alive 模式收尾。",
+      "禁止向用户发送问候、唤醒说明等任何多余消息。",
+    ]
   if (rulesUpdated) {
     lines.push("⚠️ 工作区规则已更新（你上下文中的规则是旧版快照）：处理消息前必须先重读 .cursor/rules/ 目录下全部 .mdc 规则文件，并严格按最新规则执行。")
   }
@@ -140,10 +152,43 @@ function buildWakePrompt(session: SdkSessionAgent, rulesUpdated = false): string
 }
 
 let sdkIdleHandler: ((sessionKey: string) => void) | null = null
+/** sessionKey → 连续失败次数与最近失败时间（冷却判定在调度器层，对所有叫醒源生效） */
+const sdkFailStreak = new Map<string, { count: number; lastFailAt: number }>()
 
 /** run 收口释放后回调（调度器借此立即消费运行期间积压的消息，含异常结束） */
 export function setSdkIdleHandler(fn: (sessionKey: string) => void): void {
   sdkIdleHandler = fn
+}
+
+export function clearSdkFailStreak(sessionKey: string): void {
+  sdkFailStreak.delete(sessionKey)
+}
+
+/** 失败冷却剩余毫秒：2s→60s 指数递增，超 8 次降频为 10 分钟一次（自愈不放弃） */
+export function sdkFailCooldownRemaining(sessionKey: string): number {
+  const st = sdkFailStreak.get(sessionKey)
+  if (!st) return 0
+  const cool = st.count > 8 ? 10 * 60_000 : Math.min(60_000, 2_000 * Math.pow(2, Math.min(st.count - 1, 5)))
+  return Math.max(0, st.lastFailAt + cool - Date.now())
+}
+
+function scheduleSdkIdle(sessionKey: string, errored: boolean): void {
+  if (errored) {
+    const st = sdkFailStreak.get(sessionKey) ?? { count: 0, lastFailAt: 0 }
+    st.count += 1
+    st.lastFailAt = Date.now()
+    sdkFailStreak.set(sessionKey, st)
+    pushUiLog("SDK", st.count > 8 ? "ERROR" : "WARN",
+      `[${sessionKey}] 异常结束（连续第 ${st.count} 次），冷却后由调度器重试；新消息随时放行`)
+  } else {
+    const prev = sdkFailStreak.get(sessionKey)
+    clearSdkFailStreak(sessionKey)
+    if (prev && prev.count >= 2) {
+      pushUiLog("SDK", "INFO", `[${sessionKey}] 已恢复（曾连续失败 ${prev.count} 次）`)
+    }
+  }
+  // 成功失败都立即叫醒调度器：是否真正拉起由调度器按队列与冷却决定
+  sdkIdleHandler?.(sessionKey)
 }
 
 function closeAndRemoveSession(session: SdkSessionAgent): void {
@@ -407,11 +452,22 @@ function startRunLifecycle(session: SdkSessionAgent, run: Run): void {
     if (run.status === "error") {
       // wait() 返回 RunResult 对象（出错时也不抛），真实原因藏在 RunResult.result / 终态状态事件里
       const wr = await run.wait().catch((e: unknown) => e)
-      const detail = wr instanceof Error ? `${wr.constructor.name}: ${wr.message}` : JSON.stringify(wr)
+      let detail: string
+      if (wr instanceof Error) {
+        detail = `${wr.constructor.name}: ${wr.message}${(wr as Error & { cause?: unknown }).cause ? ` cause=${String((wr as Error & { cause?: unknown }).cause)}` : ""}`
+      } else if (wr && typeof wr === "object") {
+        const o = wr as Record<string, unknown>
+        detail = JSON.stringify({
+          status: o.status, result: o.result, error: o.error, message: o.message,
+          durationMs: o.durationMs, id: o.id, model: o.model,
+        })
+      } else {
+        detail = String(wr)
+      }
       const last = session.lastStatus
       const lastStr = last ? `lastStatus=${last.status}${last.message ? ` msg=${last.message}` : ""} ` : ""
-      errorDetail = `${lastStr}${detail}`.slice(0, 500)
-      pushUiLog("SDK", "ERROR", `[${sessionKey}] 运行错误详情: ${lastStr}waitResult=${detail}`)
+      errorDetail = `${lastStr}${detail}`.slice(0, 800)
+      pushUiLog("SDK", "ERROR", `[${sessionKey}] 运行错误详情: ${errorDetail}`)
     }
 
     lastRunResults.set(sessionKey, {
@@ -428,10 +484,11 @@ function startRunLifecycle(session: SdkSessionAgent, run: Run): void {
     pushUiLog("SDK", level, `[${sessionKey}] Agent 运行结束 (status=${run.status}${summary ? `, ${summary}` : ""})`)
 
     session.run = null
+    const errored = run.status === "error"
     closeAndRemoveSession(session)
     broadcastSdkSessionStatus()
-    // 无论成功/异常：释放后立即调度——队列有未处理消息（含 .claimed）时自动拉起
-    sdkIdleHandler?.(sessionKey)
+    // 成功立即调度；失败指数退避，避免 4s 一轮硬重试风暴
+    scheduleSdkIdle(sessionKey, errored)
   })
 }
 
@@ -483,9 +540,12 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       sandboxOptions: { enabled: false },
     }
 
-    // 有可恢复的 agentId 时优先 Resume：全新连接，历史上下文完整保留；
-    // 关闭保留会话 / 主用户每次新会话 / 任务类会话直接新建
-    const wantResume = keepSession && !opts.newSession && !taskMessage
+    // Resume 语义：
+    // - project 永远 Resume（带 taskMessage 时任务附在唤醒 prompt 里）
+    // - task/temp 带 taskMessage 为任务首启不 Resume；无 taskMessage 为续聊，Resume 保上下文
+    // - p2p/group 正常 Resume
+    const wantResume = keepSession && !opts.newSession
+      && (chatType === "project" || !taskMessage)
     if (!wantResume) forgetResumable(sessionKey)
     const resumable = wantResume ? getResumableMap().get(sessionKey) : undefined
     let agent: SDKAgent | undefined
@@ -534,7 +594,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       && resumable.rulesHash !== computeRulesHash(workspaceDir)
     if (rulesUpdated) pushUiLog("SDK", "INFO", `[${sessionKey}] 检测到规则更新，唤醒时要求重读规则`)
     const prompt = resumed
-      ? buildWakePrompt(session, rulesUpdated)
+      ? buildWakePrompt(session, rulesUpdated, taskMessage)
       : buildPrompt(meta, taskMessage, sessionKey, opts.useMainWorkspace, persistentPoll)
     pushUiLog("SDK", "INFO", `[${sessionKey}] ${resumed ? "恢复" : "启动"} Prompt:\n${prompt}`)
     let run: Run
@@ -549,6 +609,8 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       run = await agent.send(prompt, { local: { force: true } })
     }
     startRunLifecycle(session, run)
+    // 成功拉起即清零失败计数：封顶停手的会话由新消息重新给满重试额度
+    clearSdkFailStreak(sessionKey)
     // 持久化最新 agentId：run 结束释放进程后靠它 Resume，应用重启后依然有效
     rememberResumable(session)
 
@@ -628,9 +690,11 @@ export async function switchSdkSessionModel(
     broadcastSdkSessionStatus()
   }
 
+  const chatType: ChatType = live?.chatType
+    ?? (projectIdFromSessionKey(sessionKey) ? "project" : "p2p")
   const r = await launchSdkAgent({
     sessionKey,
-    chatType: live?.chatType ?? "p2p",
+    chatType,
     workspaceDir,
     apiKey: resource.apiKey,
     model: mid,
@@ -641,6 +705,18 @@ export async function switchSdkSessionModel(
     chatName: live?.chatName,
   })
   if (!r.ok) return { ok: false, error: r.error || "Resume 换模失败" }
+  // 等新 run 真正 RUNNING（最多 15s），避免「已切换」报喜后实际还在 error 重试
+  const deadline = Date.now() + 15_000
+  while (Date.now() < deadline) {
+    const s = sdkSessions.get(sessionKey)
+    if (s?.run && (s.lastStatus?.status === "RUNNING" || s.lastStatus?.status === "running")) {
+      clearSdkFailStreak(sessionKey)
+      return { ok: true }
+    }
+    // launch 成功但已又 error 退出：继续等退避重试拉起
+    await new Promise((r) => setTimeout(r, 400))
+  }
+  // 超时仍返回 ok（override 已写入），但提示调用方可能仍在重试
   return { ok: true }
 }
 

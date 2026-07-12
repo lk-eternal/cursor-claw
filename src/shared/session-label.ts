@@ -8,7 +8,7 @@ export type SessionCardTitle = { title: string; subtitle?: string }
 /** 同一 sessionKey 稳定映射到飞书 header 色板（同会话同色、不同会话尽量区分） */
 const SESSION_HEADER_TEMPLATES = [
   "turquoise", "blue", "wathet", "indigo", "violet", "purple",
-  "carmine", "orange", "yellow", "green",
+  "carmine", "orange", "red", "green",
 ] as const
 
 /** 配色用规范 key：忽略路径转义/大小写差异；项目按 projectId；普通会话按 chat+工作目录 */

@@ -10,12 +10,10 @@ import {
   getChannels, getEnabledChannels, getChannel,
   updateChannel, migrateLegacyConfig, effectiveWorkspaceDir,
   resolveChannelForSession, getAgentResource, resolveChannelModel,
-  mainChatScopeKey, setMainChatIdForScope, type MessageChannel,
+  mainChatScopeKey, setMainChatIdForScope, upsertRepoProfiles, type MessageChannel,
 } from "./config-store"
 import { parseChatKey, channelIdFromSessionKey, type DaemonChannelConfig, type ChannelStatusInfo } from "../src/shared/channel-types"
 import { validateCron, readTasksFromFile, writeTasksToFile, previewCronNextRuns, getNextCronFireLabel } from "./cron-scheduler"
-import { seedBuiltins, listDefinitions, saveDefinition, deleteDefinition, listInstances, getInstance, saveInstance, deleteInstance } from "./workflow-file"
-import { runWorkflowDefinition } from "./workflow-runner"
 import { pushLog, pushUiLog, broadcastLog, getLogBuffer, clearLogBuffer, escapeLogContentSingleLine } from "./ui-logger"
 import { applyProxyEnv } from "./agent-cli"
 import {
@@ -39,9 +37,11 @@ import {
   saveMcpServer,
   McpServerEntry,
 } from "./mcp-manager"
-import { FileCommand, reportCommandResult, handleFeishuModelCommand, handleFeishuMcpCommand, handleFeishuTaskCommand, handleFeishuWorkflowCommand, parseListModelsStdout, type TaskRunFn } from "./command-handler"
-import { handleFeishuProjectCommand, handleProjectSyncSignal, fillProjectNewFromText, handleProjectNewSubmit } from "./project-commands"
-import { initProjectStore, getProject } from "../src/shared/project-store.js"
+import { FileCommand, reportCommandResult, handleFeishuModelCommand, handleFeishuMcpCommand, handleFeishuTaskCommand, parseListModelsStdout, type TaskRunFn } from "./command-handler"
+import { handleFeishuProjectCommand, handleProjectSyncSignal, fillProjectNewFromText, handleProjectNewSubmit, replySetupHub, executeProjectDelete } from "./project-commands"
+import { isGitRepoRoot } from "./project-worktree"
+import { getDefaultNodeGuide } from "./project-prompts"
+import { initProjectStore, getProject, getProjectNodes, saveProjectNodes } from "../src/shared/project-store.js"
 import { projectIdFromSessionKey } from "../src/shared/project-types.js"
 import {
   readGitBranch,
@@ -49,12 +49,13 @@ import {
   resolveWorkspaceFromSessionKey,
   dirBaseName,
 } from "../src/shared/session-label.js"
-import { readLockFile, getLockFilePath, httpGet, httpPost, syncActiveSession, getCurrentActiveSession, enqueueToMainSession } from "./daemon-client"
+import { readLockFile, getLockFilePath, httpGet, httpPost, syncActiveSession, getCurrentActiveSession, enqueueToMainSession, resolveMainChatId } from "./daemon-client"
 import {
   isSessionAgentRunning, stopSessionAgent, stopAllSessionAgents,
   dispatchSessionAgents, launchSessionAgent, launchIndependentAgent,
-  launchWorkflowAgent, notifyWorkflowChat,
+  notifyChatFallback,
   getSessionAgentList, handleChatCommand, clearMessageQueue, getQueueMessages, formatSessionStatusBlock,
+  listMainSessionTabs, switchMainSession,
   pullMergedMessagesFromQueue, isMainUser, extractChatId, chatNameCache,
   fetchChatNames, fetchUserNames, initSessionDispatcher, previousActiveSessionMap,
 } from "./session-dispatcher"
@@ -600,41 +601,26 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
           } catch { /* ignore malformed */ }
           continue
         }
-        if (line.startsWith("__WF_LAUNCH__:")) {
+                                if (line.startsWith("__PROJECT_NOTIFY__:")) {
           try {
-            const p = JSON.parse(line.slice("__WF_LAUNCH__:".length))
-            void launchWorkflowAgent(p).then((r) => {
-              if (!r.ok) broadcastLog(`[WF] Agent 启动失败: ${r.error}`, "WARN")
-            })
-          } catch { /* ignore */ }
-          continue
-        }
-        if (line.startsWith("__WF_INSTANCE__:")) {
-          try {
-            const inst = JSON.parse(line.slice("__WF_INSTANCE__:".length))
-            BrowserWindow.getAllWindows().forEach((w) => w.webContents.send("workflow:instance-updated", inst))
-          } catch { /* ignore */ }
-          continue
-        }
-        if (line.startsWith("__WF_NOTIFY__:")) {
-          try {
-            const { chatId, text } = JSON.parse(line.slice("__WF_NOTIFY__:".length))
-            if (chatId && text) void notifyWorkflowChat(chatId, text)
-          } catch { /* ignore */ }
-          continue
-        }
-        if (line.startsWith("__PROJECT_NOTIFY__:")) {
-          try {
-            const { chatId, text, buttons, footer } = JSON.parse(line.slice("__PROJECT_NOTIFY__:".length)) as {
-              chatId: string; text: string; buttons?: { label: string; cmd: string }[]; footer?: string
+            const { chatId, text, buttons, footer, filePath, sessionKey } = JSON.parse(line.slice("__PROJECT_NOTIFY__:".length)) as {
+              chatId: string; text: string; buttons?: { label: string; cmd: string }[]; footer?: string; filePath?: string; sessionKey?: string
             }
             if (chatId && text) {
               const port = cachedPort ?? readLockFile()?.port
               const body = footer ? `${text}\n\n---\n${footer}` : text
               if (port) {
-                void reportCommandResult(port, "", true, body, chatId, buttons)
+                void (async () => {
+                  // 先发产物文件再发结论卡；出站均登记项目会话——用户引用文件/卡片回复时路由回项目会话
+                  if (filePath && fs.existsSync(filePath)) {
+                    await httpPost(`http://127.0.0.1:${port}/api/send-file`, {
+                      file_path: filePath, session_key: sessionKey || chatId,
+                    }, 15000).catch(() => {})
+                  }
+                  await reportCommandResult(port, "", true, body, chatId, buttons, sessionKey ? { sessionKey } : undefined)
+                })()
               } else {
-                void notifyWorkflowChat(chatId, body)
+                void notifyChatFallback(chatId, body)
               }
             }
           } catch { /* ignore */ }
@@ -659,6 +645,37 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
           } catch { /* ignore */ }
           continue
         }
+        if (line.startsWith("__PROJECT_DELETE__:")) {
+          try {
+            const { projectId } = JSON.parse(line.slice("__PROJECT_DELETE__:".length)) as { projectId: string }
+            if (projectId) executeProjectDelete(projectId)
+          } catch { /* ignore */ }
+          continue
+        }
+        if (line.startsWith("__PROJECT_PROFILE_UPSERT__:")) {
+          try {
+            const payload = JSON.parse(line.slice("__PROJECT_PROFILE_UPSERT__:".length)) as {
+              path: string; baseBranch: string; testBranch?: string; developBranch?: string
+              chatId?: string; messageId?: string
+            }
+            const port = cachedPort ?? readLockFile()?.port
+            // setup 表单提交（带 chatId）：路径必须是 git 根目录，否则拒绝并回错误
+            if (payload.chatId && !isGitRepoRoot(payload.path)) {
+              if (port) {
+                void reportCommandResult(port, payload.messageId || "", false,
+                  `❌ 不是有效 git 根目录，未保存：${payload.path}`, payload.chatId,
+                  [{ label: "重新添加", cmd: "/p setup add" }, { label: "返回 setup", cmd: "/p setup" }])
+              }
+              continue
+            }
+            upsertRepoProfiles([payload])
+            // setup 表单提交：保存后回一张最新的工作区总览
+            if (port && payload.chatId) {
+              void replySetupHub(port, payload.messageId || "", payload.chatId)
+            }
+          } catch { /* ignore */ }
+          continue
+        }
         if (line.startsWith("__PROJECT_NEW_SUBMIT__:")) {
           try {
             const payload = JSON.parse(line.slice("__PROJECT_NEW_SUBMIT__:".length)) as {
@@ -666,6 +683,7 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
               name: string; goal: string; repoPath: string; worktreeRoot: string
               baseBranch: string; featureBranch?: string
               storyUrl?: string; productDocUrl?: string; techDocUrl?: string
+              repos?: { repoPath: string; baseBranch: string; testBranch?: string; developBranch?: string }[]
             }
             const port = cachedPort ?? readLockFile()?.port
             if (port && payload.chatId && payload.messageId) {
@@ -867,6 +885,8 @@ function connectSseQueueEvents(): void {
           if (ev.type === "queue-update") {
             if (sseDispatchDebounce) clearTimeout(sseDispatchDebounce)
             sseDispatchDebounce = setTimeout(() => dispatchSessionAgents().catch(() => {}), 300)
+          } else if (ev.type === "command-update") {
+            void checkAndExecutePendingCommands().catch(() => {})
           }
         } catch { /* ignore */ }
       }
@@ -889,10 +909,44 @@ function disconnectSseQueueEvents(): void {
   if (sseReq) { try { sseReq.destroy() } catch { /* */ }; sseReq = null }
 }
 
+
+async function consumePackNotify(): Promise<void> {
+  try {
+    const notifyPath = path.join(app.getPath("userData"), "pack-notify.json")
+    if (!fs.existsSync(notifyPath)) return
+    const raw = JSON.parse(fs.readFileSync(notifyPath, "utf8")) as { version?: string; packedAt?: number }
+    fs.unlinkSync(notifyPath)
+    const lock = readLockFile()
+    if (!lock?.port) return
+    // 等 daemon HTTP 就绪
+    for (let i = 0; i < 20; i++) {
+      try {
+        await httpGet(`http://127.0.0.1:${lock.port}/health`, 1000)
+        break
+      } catch {
+        await new Promise((r) => setTimeout(r, 500))
+      }
+    }
+    const chatId = await resolveMainChatId(lock.port)
+    if (!chatId) {
+      broadcastLog("[Pack] 新版已启动，但未找到主用户会话，跳过通知", "WARN")
+      return
+    }
+    const ver = raw.version || "unknown"
+    const text = `✅ 新版已启动（v${ver}）。可发 /s 或随便聊一句验证。`
+    // enqueue 走主会话路由，避免裸 chatId 被 send-text 白名单拒绝
+    await enqueueToMainSession(lock.port, text, chatId)
+    broadcastLog(`[Pack] 已通知主用户: v${ver}`, "INFO")
+  } catch (e: unknown) {
+    broadcastLog(`[Pack] 启动通知失败: ${e instanceof Error ? e.message : e}`, "WARN")
+  }
+}
+
 function startStatusPolling(): void {
   stopStatusPolling()
   startDaemonPowerSaveBlock()
   connectSseQueueEvents()
+  void consumePackNotify()
   statusInterval = setInterval(async () => {
     try {
       const status = await getDaemonStatus()
@@ -1004,12 +1058,12 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           if (isAdmin) {
             const wasRunning = isAgentRunning()
             await stopAgent()
-            await reply(true, wasRunning ? "✅ Agent 已停止" : "❌ Agent 当前未运行")
+            await reply(true, wasRunning ? "✅ 已停止" : "❌ 当前没有进行中的对话")
           } else if (claimed.chatId && isSessionAgentRunning(claimed.chatId)) {
             stopSessionAgent(claimed.chatId)
-            await reply(true, "✅ 当前会话 Agent 已停止")
+            await reply(true, "✅ 已停止当前对话")
           } else {
-            await reply(false, "❌ 当前会话无运行中的 Agent")
+            await reply(false, "❌ 当前没有进行中的对话")
           }
           break
         }
@@ -1080,31 +1134,39 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           const schedTotal = schedTasks.length
           const schedEnabled = schedTasks.filter((t) => t.enabled).length
           if (!channel && claimed.chatId) {
-            await reply(false, "❌ 未找到当前会话所属的消息通道")
+            await reply(false, "❌ 未找到当前对话所属通道")
             break
           }
 
           const appBlock = [
-            "🏗 应用",
-            `🛡️ Daemon: ${status.running ? "✅ 运行中" : "❌ 未运行"}`,
+            "**🏗 应用**",
+            `🛡️ 后台服务: ${status.running ? "✅ 运行中" : "❌ 未运行"}`,
             status.version ? `🔄 版本: ${status.version}` : "",
             status.uptime !== undefined ? `⌛️ 运行时间: ${Math.floor(status.uptime / 60)}分钟` : "",
             `⏰ 定时任务: 开启 ${schedEnabled} / 共 ${schedTotal} 条`,
           ].filter(Boolean).join("\n")
 
-          const body = [
-            appBlock,
-            "",
-            sessionBlock,
-            "",
-            "💡 直发消息走「当前会话」；引用某条 AI 回复可路由到对应会话/项目",
-          ].join("\n")
+          // 会话块首行加粗（formatSessionStatusBlock 返回的首行是 📍 当前会话 ★）
+          const sessionLines = sessionBlock.split("\n")
+          if (sessionLines[0]) sessionLines[0] = `**${sessionLines[0]}**`
+          const sessionMd = sessionLines.join("\n")
 
-          await reply(true, body, [
-            { label: "🔁 重启", cmd: "/restart", section: "应用" },
-            { label: "🔄 刷新", cmd: "/s", section: "当前会话" },
-            { label: "♻ 重置", cmd: "/r", section: "当前会话" },
-          ])
+          await reportCommandResult(lock.port, claimed!.messageId, true, "状态", claimed!.chatId, undefined, {
+            cardTitle: { title: "状态", subtitle: "当前对话" },
+            sections: [
+              {
+                text: appBlock,
+                buttons: [{ label: "🔁 重启", cmd: "/restart" }],
+              },
+              {
+                text: `${sessionMd}\n\n💡 直接发消息继续当前对话；引用某条回复可切到对应项目`,
+                buttons: [
+                  { label: "🔄 刷新", cmd: "/s" },
+                  { label: "♻ 重置", cmd: "/r" },
+                ],
+              },
+            ],
+          })
           break
         }
 
@@ -1114,10 +1176,10 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           const filtered = isAdmin ? msgs : msgs.filter((m) =>
             m.sessionKey === claimed!.chatId || m.sessionKey?.startsWith(claimed!.chatId + "::"))
           if (filtered.length === 0) {
-            await reply(true, "📭 消息队列为空")
+            await reply(true, "📭 暂无排队消息")
           } else {
             const lines = filtered.map((m) => `  [${m.index}] ${m.preview}`)
-            await reply(true, `📬 队列中有 ${filtered.length} 条消息：\n${lines.join("\n")}`)
+            await reply(true, `📬 排队中 ${filtered.length} 条：\n${lines.join("\n")}`)
           }
           break
         }
@@ -1148,13 +1210,6 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           break
         }
 
-        case "/workflow":
-        case "/wf": {
-          if (!isAdmin) { await denyNonAdmin(); break }
-          await handleFeishuWorkflowCommand(lock.port, claimed.messageId, rawCmd, claimed.chatId)
-          break
-        }
-
         case "/project":
         case "/p": {
           if (!isAdmin) { await denyNonAdmin(); break }
@@ -1167,7 +1222,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           if (!isAdmin) { await denyNonAdmin(); break }
           await stopAgent()
           const cleared = await clearMessageQueue()
-          await reply(true, `✅ Agent 已停止，已清空 ${cleared} 条队列消息，正在重启 Daemon...`)
+          await reply(true, `✅ 已停止当前对话，清空 ${cleared} 条排队，正在重启…`)
           await stopDaemon()
           await new Promise((r) => setTimeout(r, 1500))
           const result = await startDaemon()
@@ -1180,7 +1235,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           if (!isAdmin) { await denyNonAdmin(); break }
           const cleared = await clearMessageQueue()
           broadcastLog(`[指令 /clean] 已清空队列 ${cleared} 条`, "INFO")
-          await reply(true, `✅ 已清空消息队列，共移除 ${cleared} 条`)
+          await reply(true, `✅ 已清空排队，共移除 ${cleared} 条`)
           break
         }
 
@@ -1224,26 +1279,34 @@ async function checkAndExecutePendingCommands(): Promise<void> {
               return { label: `📂 ${short}`.slice(0, 40), cmd: `/w set ${dir}` }
             })
             const body = wsBtns.length
-              ? `${info}\n\n💡 /w set <路径> — 切换；下方为常用目录快捷按钮`
+              ? `${info}\n\n💡 /w set <路径> 可切换目录；也可点下方常用目录`
               : `${info}\n\n💡 /w — 查看当前 · /w set <路径> — 切换`
             await reply(true, body, wsBtns.length ? wsBtns : undefined)
           } else if (wsArgs[0] === "set" && wsArgs.length >= 2) {
             const newDir = wsArgs.slice(1).join(" ").trim()
             const cfg = getConfig()
-            if (newDir === cfg.workspaceDir) {
+            // 项目会话中切目录 = 退出项目、切到目标目录的普通会话（项目 worktree 不受影响）
+            const curSk = await resolveCommandSessionKey(claimed!.chatId, claimed!.chatType)
+            const inProject = !!(curSk && projectIdFromSessionKey(curSk))
+            if (newDir === cfg.workspaceDir && !inProject) {
               await reply(true, `📂 工作目录未变化: ${newDir}`)
             } else {
-              const wsResult = await applyWorkspaceSwitch(newDir, false)
+              const wsResult = newDir === cfg.workspaceDir
+                ? { ok: true as const }
+                : await applyWorkspaceSwitch(newDir, false)
               if (wsResult.ok) {
-                broadcastLog(`[指令 /workspace] 已切换到 ${newDir}`, "INFO")
-                await reply(true, formatWorkspaceSwitchText(newDir))
+                if (inProject && claimed!.chatId) {
+                  await syncActiveSession(lock.port, claimed!.chatId, `${claimed!.chatId}::${newDir}`)
+                }
+                broadcastLog(`[指令 /workspace] 已切换到 ${newDir}${inProject ? "（已退出项目会话）" : ""}`, "INFO")
+                await reply(true, formatWorkspaceSwitchText(newDir) + (inProject ? "\n\n已退出项目会话，回到该目录的普通会话" : ""))
               } else {
-                broadcastLog(`[指令 /workspace] 切换失败: ${wsResult.error}`, "ERROR")
-                await reply(false, `❌ 切换失败: ${wsResult.error}`)
+                broadcastLog(`[指令 /workspace] 切换失败: ${(wsResult as { error?: string }).error}`, "ERROR")
+                await reply(false, `❌ 切换失败: ${(wsResult as { error?: string }).error}`)
               }
             }
           } else {
-            await reply(false, "💡 /w 子命令（全称 /workspace）\n🔹 /w — 查看当前目录\n🔹 /w set <路径> — 切换工作目录")
+            await reply(false, "💡 /w 工作目录（全称 /workspace）\n🔹 /w — 查看当前目录\n🔹 /w set <路径> — 切换工作目录")
           }
           break
         }
@@ -1257,33 +1320,32 @@ async function checkAndExecutePendingCommands(): Promise<void> {
 
         case "/h":
         case "/help": {
-          // 按作用域分组（方案 C）：当前上下文 / 队列 / 编排 / 基础设施
+          // 帮助分组：当前对话 / 排队 / 协作 / 系统
           const ctx = [
-            { label: "📊 状态 /s", cmd: "/s", section: "▶ 当前上下文" },
-            { label: "⏹ 停止 /x", cmd: "/x", section: "▶ 当前上下文" },
-            { label: "🔄 重置 /r", cmd: "/r", section: "▶ 当前上下文" },
-            { label: "🧠 模型 /m", cmd: "/m", section: "▶ 当前上下文" },
-            { label: "📁 目录 /w", cmd: "/w", section: "▶ 当前上下文" },
+            { label: "📊 状态 /s", cmd: "/s", section: "▶ 当前对话" },
+            { label: "⏹ 停止 /x", cmd: "/x", section: "▶ 当前对话" },
+            { label: "🔄 清空上下文 /r", cmd: "/r", section: "▶ 当前对话" },
+            { label: "🧠 切换模型 /m", cmd: "/m", section: "▶ 当前对话" },
+            { label: "📁 工作目录 /w", cmd: "/w", section: "▶ 当前对话" },
           ]
           const queue = [
-            { label: "📋 队列 /ls", cmd: "/ls", section: "▶ 队列" },
-            { label: "🧹 清队列 /cl", cmd: "/cl", section: "▶ 队列" },
+            { label: "📋 查看排队 /ls", cmd: "/ls", section: "▶ 排队中" },
+            { label: "🧹 清空排队 /cl", cmd: "/cl", section: "▶ 排队中" },
           ]
           const orch = [
-            { label: "💬 会话 /c", cmd: "/c", section: "▶ 编排" },
-            { label: "⏰ 任务 /t", cmd: "/t", section: "▶ 编排" },
-            { label: "🔀 工作流 /wf", cmd: "/wf", section: "▶ 编排" },
-            { label: "📦 项目 /p", cmd: "/p", section: "▶ 编排" },
+            { label: "💬 会话 /c", cmd: "/c", section: "▶ 协作" },
+            { label: "⏰ 任务 /t", cmd: "/t", section: "▶ 协作" },
+            { label: "📦 项目 /p", cmd: "/p", section: "▶ 协作" },
           ]
           const infra = [
-            { label: "📦 MCP /mc", cmd: "/mc", section: "▶ 基础设施" },
-            { label: "♻️ 重启 /rr", cmd: "/rr", section: "▶ 基础设施" },
+            { label: "🧩 MCP /mc", cmd: "/mc", section: "▶ 系统" },
+            { label: "♻️ 重启应用 /rr", cmd: "/rr", section: "▶ 系统" },
           ]
           const helpBtns = isAdmin
             ? [...ctx, ...queue, ...orch, ...infra]
             : ctx.filter((b) => ["/s", "/x", "/r"].includes(b.cmd))
-          const body = "💡 发送短指令；有子命令的先进二级说明"
-          await reply(true, body, helpBtns)
+          const body = "💡 点下面按钮或直接发送指令；有下级选项的会先说明用法"
+          await reportCommandResult(lock.port, claimed!.messageId, true, body, claimed!.chatId, helpBtns, { cardTitle: { title: "帮助", subtitle: "指令" } })
           break
         }
 
@@ -1539,7 +1601,6 @@ export function initDaemonManager(): void {
   initSessionModelStore(app.getPath("userData"))
   initProjectStore(app.getPath("userData"))
   runLegacyConfigMigration()
-  seedBuiltins()
   initSessionDispatcher()
   ipcMain.handle("config:apply-workspace-switch", (_, workspaceDir: string, stopOldSessions: boolean, notifyMain?: boolean) => applyWorkspaceSwitch(workspaceDir, stopOldSessions, false, !!notifyMain))
   ipcMain.handle("daemon:get-log-buffer", () => getLogBuffer())
@@ -1686,6 +1747,8 @@ export function initDaemonManager(): void {
   ipcMain.handle("session:set-model", async (_e, sessionKey: string, model: string, modelParams?: string) => {
     return switchSdkSessionModel(sessionKey, model, modelParams)
   })
+  ipcMain.handle("session:list-tabs", () => listMainSessionTabs())
+  ipcMain.handle("session:switch", (_e, sessionKey: string) => switchMainSession(sessionKey))
   ipcMain.handle("session:list-quick-models", () => {
     initSessionModelStore(app.getPath("userData"))
   initProjectStore(app.getPath("userData"))
@@ -1827,18 +1890,15 @@ export function initDaemonManager(): void {
 
   ipcMain.handle("scheduled-tasks:get-status", () => getIndependentTaskStatuses())
 
-  // ── Workflow CRUD ─────────────────────────────────────
-  ipcMain.handle("workflow:list-definitions", () => listDefinitions())
-  ipcMain.handle("workflow:save-definition", (_, def) => { saveDefinition(def); return { ok: true } })
-  ipcMain.handle("workflow:delete-definition", (_, id: string) => ({ ok: deleteDefinition(id) }))
-  ipcMain.handle("workflow:list-instances", () => listInstances())
-  ipcMain.handle("workflow:get-instance", (_, id: string) => getInstance(id))
-  ipcMain.handle("workflow:save-instance", (_, inst) => { saveInstance(inst); return { ok: true } })
-  ipcMain.handle("workflow:delete-instance", (_, id: string) => ({ ok: deleteInstance(id) }))
-
-  ipcMain.handle("workflow:run", async (_, workflowId: string, input?: string) => {
-    if (!workflowId?.trim()) return { ok: false, error: "工作流 ID 不能为空" }
-    return runWorkflowDefinition(workflowId.trim(), { input: input?.trim() || undefined })
+  // ── 项目流程节点 ──────────────────────────────────────
+  ipcMain.handle("project-nodes:get", () => {
+    initProjectStore(app.getPath("userData"))
+    return getProjectNodes().map((n) => ({ ...n, defaultPrompt: getDefaultNodeGuide(n.id) }))
+  })
+  ipcMain.handle("project-nodes:save", (_e, nodes: { id: string; label: string; prompt?: string; builtin?: boolean }[]) => {
+    initProjectStore(app.getPath("userData"))
+    saveProjectNodes(nodes)
+    return { ok: true }
   })
 
   void autoStartDaemonOnLaunch()

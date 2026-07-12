@@ -19,6 +19,7 @@ import {
   ChevronRight,
   ChevronDown,
   FolderOpen,
+  Package,
   Rocket,
   Search,
   X,
@@ -64,7 +65,9 @@ export default function Dashboard({ onSettings, active }: Props) {
   const [onboard, setOnboard] = useState<OnboardState | null>(null)
   const [onboardDismissed, setOnboardDismissed] = useState(false)
   const [wsTabs, setWsTabs] = useState<{ current: string; favorites: string[] }>({ current: "", favorites: [] })
-  const [wsSwitching, setWsSwitching] = useState("")
+  const [sessionTabs, setSessionTabs] = useState<{ sessionKey: string; label: string; kind: "main" | "project" | "dir" | "temp" | "other"; running: boolean; current: boolean; removable?: boolean }[]>([])
+  const [activeSessionKey, setActiveSessionKey] = useState("")
+  const [sessionSwitching, setSessionSwitching] = useState("")
   const [modelTabs, setModelTabs] = useState<{ model: string; modelParams?: string; label?: string }[]>([])
   const [modelSwitching, setModelSwitching] = useState("")
   const [activeSessionModel, setActiveSessionModel] = useState<{ model: string; modelParams?: string } | null>(null)
@@ -97,6 +100,17 @@ export default function Dashboard({ onSettings, active }: Props) {
     if (r.ok) setModelTabs(r.models)
   }, [])
 
+  const refreshSessionTabs = useCallback(async () => {
+    const r = await window.electronAPI.listSessionTabs()
+    if (!r.ok) {
+      setSessionTabs([])
+      setActiveSessionKey("")
+      return
+    }
+    setSessionTabs(r.tabs)
+    setActiveSessionKey(r.activeKey ?? r.tabs.find((t) => t.current)?.sessionKey ?? "")
+  }, [])
+
   const refreshOnboard = useCallback(async () => {
     const cfg = await window.electronAPI.getConfig()
     const channels = cfg.channels ?? []
@@ -109,7 +123,7 @@ export default function Dashboard({ onSettings, active }: Props) {
       agentReady: hasSdkKey || (prev?.agentReady ?? false),
       channelReady,
     }))
-    // 打开过的目录自动收入常用列表，切换工作目录后标签不丢失
+    // 打开过的目录自动收入常用列表，供「可切换会话」与 /c 共用
     const current = cfg.workspaceDir ?? ""
     let favorites = cfg.favoriteWorkspaces ?? []
     const same = (a: string, b: string) => a.replace(/[\\/]+$/g, "").toLowerCase() === b.replace(/[\\/]+$/g, "").toLowerCase()
@@ -118,37 +132,27 @@ export default function Dashboard({ onSettings, active }: Props) {
       void window.electronAPI.saveConfig({ favoriteWorkspaces: favorites })
     }
     setWsTabs({ current, favorites })
-    await refreshModelTabs()
-  }, [refreshModelTabs])
+    await Promise.all([refreshModelTabs(), refreshSessionTabs()])
+  }, [refreshModelTabs, refreshSessionTabs])
 
   // 从设置页返回时立即刷新清单状态
   useEffect(() => {
     if (active) void refreshOnboard()
   }, [active, refreshOnboard])
 
-  const switchWorkspace = async (dir: string) => {
-    if (dir === wsTabs.current || wsSwitching) return
-    setWsSwitching(dir)
+  const switchSessionTab = async (sessionKey: string) => {
+    if (!sessionKey || sessionKey === activeSessionKey || sessionSwitching) return
+    setSessionSwitching(sessionKey)
     try {
-      const r = await window.electronAPI.applyWorkspaceSwitch(dir, false, true)
-      if (r.ok) {
-        // 新旧目录都留在常用里，切换不丢标签
-        setWsTabs((t) => {
-          const same = (a: string, b: string) => a.replace(/[\\/]+$/g, "").toLowerCase() === b.replace(/[\\/]+$/g, "").toLowerCase()
-          const favorites = [...t.favorites]
-          for (const d of [t.current, dir]) {
-            if (d && !favorites.some((f) => same(f, d))) favorites.push(d)
-          }
-          if (favorites.length !== t.favorites.length) {
-            void window.electronAPI.saveConfig({ favoriteWorkspaces: favorites })
-          }
-          return { current: dir, favorites }
-        })
-      } else {
-        setActionError(r.error ?? "切换工作目录失败")
+      const r = await window.electronAPI.switchSession(sessionKey)
+      if (!r.ok) {
+        setActionError(r.error ?? "切换会话失败")
+        return
       }
+      setActionError("")
+      await refreshSessionTabs()
     } finally {
-      setWsSwitching("")
+      setSessionSwitching("")
     }
   }
 
@@ -159,28 +163,39 @@ export default function Dashboard({ onSettings, active }: Props) {
     const favorites = wsTabs.favorites.some((f) => same(f, dir)) ? wsTabs.favorites : [...wsTabs.favorites, dir]
     setWsTabs((t) => ({ ...t, favorites }))
     await window.electronAPI.saveConfig({ favoriteWorkspaces: favorites })
+    await refreshSessionTabs()
   }
 
-  const removeFavoriteWorkspace = async (dir: string) => {
-    const favorites = wsTabs.favorites.filter((d) => d !== dir)
+  const removeFavoriteSessionTab = async (sessionKey: string) => {
+    const marker = "::"
+    const idx = sessionKey.indexOf(marker)
+    if (idx < 0) return
+    const dir = sessionKey.slice(idx + marker.length)
+    if (!dir || dir.startsWith("project_")) return
+    const same = (a: string, b: string) => a.replace(/[\\/]+$/g, "").toLowerCase() === b.replace(/[\\/]+$/g, "").toLowerCase()
+    const favorites = wsTabs.favorites.filter((d) => !same(d, dir))
     setWsTabs((t) => ({ ...t, favorites }))
     await window.electronAPI.saveConfig({ favoriteWorkspaces: favorites })
+    await refreshSessionTabs()
   }
 
   const [sessionList, setSessionList] = useState<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string; workspaceDir?: string; source?: "cli" | "sdk"; model?: string; modelParams?: string }[]>([])
   const [sessionDiag, setSessionDiag] = useState<Record<string, { running: boolean; resumeAgentId?: string; resumeUpdatedAt?: number; lastRun?: { status: string; endedAt: number; durationMs?: number; error?: string }; lastReplyAt: number | null }>>({})
 
-  /** 首页切模型目标：仅当前工作目录下的会话；无则写 pending key，禁止落到其他目录会话 */
+  /** 首页切模型：当前 active 会话；无则最近活跃；再无则按工作目录写 pending */
   const resolveModelTargetSession = useCallback(async (): Promise<string | null> => {
+    if (activeSessionKey) return activeSessionKey
+    if (sessionList.length > 0) {
+      const sorted = [...sessionList].sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0))
+      return sorted[0].sessionKey
+    }
     const ws = wsTabs.current
     if (!ws?.trim()) return null
-    const hit = sessionList.find((s) => s.workspaceDir && s.workspaceDir === ws)
-    if (hit) return hit.sessionKey
     const cfg = await window.electronAPI.getConfig()
     const ch = (cfg.channels ?? []).find((c) => c.enabled && c.mainUserEnabled && c.mainUserChatId?.trim())
     if (!ch) return null
     return `${ch.id}|${ch.mainUserChatId}::${ws}`
-  }, [sessionList, wsTabs.current])
+  }, [activeSessionKey, sessionList, wsTabs.current])
 
   const switchSessionModel = async (m: { model: string; modelParams?: string; label?: string }) => {
     const key = `${m.model}\0${m.modelParams ?? ""}`
@@ -294,11 +309,14 @@ export default function Dashboard({ onSettings, active }: Props) {
   }
 
   useEffect(() => {
-    const ws = wsTabs.current
-    const hit = sessionList.find((s) => s.workspaceDir && ws && s.workspaceDir === ws && s.model)
-      || sessionList.find((s) => s.model)
+    const hit = (activeSessionKey && sessionList.find((s) => s.sessionKey === activeSessionKey && s.model))
+      || [...sessionList.filter((s) => s.model)].sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0))[0]
     if (hit?.model) setActiveSessionModel({ model: hit.model, modelParams: hit.modelParams })
-  }, [sessionList, wsTabs.current])
+  }, [sessionList, activeSessionKey])
+
+  useEffect(() => {
+    void refreshSessionTabs()
+  }, [sessionList, refreshSessionTabs])
 
   const [exportingDiag, setExportingDiag] = useState(false)
   const [logFilter, setLogFilter] = useState("")
@@ -592,9 +610,6 @@ export default function Dashboard({ onSettings, active }: Props) {
 
   const isStarting = starting || !!status.starting
 
-  const wsTabDirs = [...new Set([wsTabs.current, ...wsTabs.favorites])].filter(Boolean)
-  /** 末段目录名重名时附加父目录区分（如 cp-scheduling·bugfix） */
-  const wsTabLabel = (dir: string) => disambiguatePathLabel(dir, wsTabDirs)
   const sessionWsDirs = sessionList.map((s) => s.workspaceDir).filter((d): d is string => !!d)
 
   return (
@@ -767,25 +782,27 @@ export default function Dashboard({ onSettings, active }: Props) {
         </div>
       </div>
 
-      {/* Workspace quick-switch tabs */}
+      {/* Session quick-switch tabs（对齐 /c） */}
       <div className="mx-6 mb-3 flex flex-wrap items-center gap-1.5">
-        <FolderOpen size={13} className="shrink-0 text-gray-500" />
-        {wsTabDirs.map((dir) => {
-          const name = wsTabLabel(dir)
-          const isCurrent = dir === wsTabs.current
-          const isFav = wsTabs.favorites.includes(dir)
+        <MessageSquare size={13} className="shrink-0 text-gray-500" />
+        {sessionTabs.map((t) => {
+          const short = t.label.slice(0, 28)
+          const Icon = t.kind === "project" ? Package : FolderOpen
           return (
-            <span key={dir} title={dir}
-              onClick={() => void switchWorkspace(dir)}
+            <span key={t.sessionKey} title={t.sessionKey}
+              onClick={() => void switchSessionTab(t.sessionKey)}
               className={`group inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs transition ${
-                isCurrent ? "border-blue-500/70 bg-blue-950/40 text-blue-200"
+                t.current ? "border-blue-500/70 bg-blue-950/40 text-blue-200"
                 : "cursor-pointer border-gray-700 text-gray-400 hover:border-blue-500 hover:text-blue-300"}`}
             >
-              {wsSwitching === dir && <Loader2 size={11} className="animate-spin" />}
-              {name}
-              {isFav && !isCurrent && (
-                <button onClick={(e) => { e.stopPropagation(); void removeFavoriteWorkspace(dir) }}
-                  className="hidden text-gray-600 hover:text-red-400 group-hover:inline-flex" title="移除常用">
+              {sessionSwitching === t.sessionKey
+                ? <Loader2 size={11} className="animate-spin" />
+                : <Icon size={11} className={t.current ? "text-blue-300" : "text-gray-500"} />}
+              {t.running && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400" title="运行中" />}
+              {short}
+              {t.removable && !t.current && (
+                <button onClick={(e) => { e.stopPropagation(); void removeFavoriteSessionTab(t.sessionKey) }}
+                  className="hidden text-gray-600 hover:text-red-400 group-hover:inline-flex" title="移除常用目录会话">
                   <X size={11} />
                 </button>
               )}
@@ -794,7 +811,7 @@ export default function Dashboard({ onSettings, active }: Props) {
         })}
         <button onClick={() => void addFavoriteWorkspace()}
           className="inline-flex items-center gap-0.5 rounded-md border border-dashed border-gray-700 px-2 py-1 text-xs text-gray-500 transition hover:border-blue-500 hover:text-blue-300"
-          title="添加常用目录（点击标签快速切换工作目录）">
+          title="添加目录型会话到可切换列表（与 /c 常用目录同源）">
           <Plus size={11} />常用
         </button>
       </div>

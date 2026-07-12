@@ -45,10 +45,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { registerAdminTools } from "./server-admin.js";
-import { registerWorkflowAgentTools, registerWorkflowAdminTools } from "./server-workflow.js";
 import { registerProjectAgentTools } from "./server-project.js";
 import { initProjectStore, hasProjectNewDraft, getProject } from "./shared/project-store.js";
-import { projectIdFromSessionKey } from "./shared/project-types.js";
+import { projectIdFromSessionKey, decodeRepoPair } from "./shared/project-types.js";
 import { buildSessionCardTitle, isSpecialSessionSuffix, resolveWorkspaceFromSessionKey, sessionHeaderTemplate } from "./shared/session-label.js";
 
 const _require = createRequire(import.meta.url);
@@ -306,6 +305,7 @@ function initWeChatChannel(rt: ChannelRuntime): WeChatManager {
         log("INFO", `[WeChat:${rt.cfg.name}] 首条消息已收到，context_token 已绑定（chatId=${msg.chatId}），不入队`);
         return;
       }
+      rememberChatType(chatKey, msg.chatType);
       if (isCommand(msg.text)) {
         handleCommand(msg.text, msg.messageId, chatKey, msg.chatType).catch((e: any) =>
           log("ERROR", `[WeChat:${rt.cfg.name}] 指令处理失败: ${e?.message ?? e}`),
@@ -338,6 +338,14 @@ function broadcastQueueEvent(chatId?: string): void {
   }
 }
 
+/** 指令入队即时通知 electron，避免等 5s 状态轮询 */
+function broadcastCommandEvent(): void {
+  const data = JSON.stringify({ type: "command-update", ts: Date.now() });
+  for (const res of sseClients) {
+    try { res.write(`data: ${data}\n\n`); } catch { sseClients.delete(res); }
+  }
+}
+
 // ── 会话路由映射 ─────────────────────────────────────────
 
 const activeSessionMap = new Map<string, string>();
@@ -345,6 +353,33 @@ const messageSessionMap = new Map<string, string>();
 const sessionToChatMap = new Map<string, string>();
 const MSG_SESSION_MAP_MAX = 5000;
 const sessionLastReplyAt = new Map<string, number>();
+/** chatKey / 裸 chatId → p2p|group，供发送时决定是否 reply */
+const chatTypeByChatKey = new Map<string, string>();
+
+function rememberChatType(chatRef?: string, chatType?: string): void {
+  if (!chatRef || !chatType) return;
+  if (chatType !== "p2p" && chatType !== "group") return;
+  const prev = chatTypeByChatKey.get(chatRef);
+  chatTypeByChatKey.set(chatRef, chatType);
+  const { chatId: raw } = parseChatKey(chatRef);
+  if (raw && raw !== chatRef) chatTypeByChatKey.set(raw, chatType);
+  if (prev !== chatType) scheduleRoutingSave();
+}
+
+/**
+ * 群聊保留 reply（引用对齐多话题）；p2p 直发砍掉引用条（header 仍保留）。
+ * internal_ 不可 reply；无 chatId 只能 reply。
+ */
+function shouldReplyToMessage(ch: { type: "feishu"; rt: ChannelRuntime; chatId?: string }, messageId?: string): boolean {
+  if (!messageId || messageId.startsWith("internal_")) return false;
+  if (!ch.chatId) return true;
+  const chatKey = makeChatKey(ch.rt.cfg.id, ch.chatId);
+  const ct = chatTypeByChatKey.get(chatKey) || chatTypeByChatKey.get(ch.chatId);
+  if (ct === "p2p") return false;
+  if (ct === "group") return true;
+  if (ch.rt.cfg.mainUserEnabled && ch.rt.cfg.mainUserChatId?.trim() === ch.chatId) return false;
+  return true;
+}
 
 // ── 路由映射持久化：daemon 重启后回复历史消息仍能路由到原会话 ──
 const ROUTING_FILE = path.join(APP_DATA_DIR, "session-routing.json");
@@ -383,13 +418,16 @@ function loadRoutingMaps(): void {
   try {
     if (!APP_DATA_DIR || !fs.existsSync(ROUTING_FILE)) return;
     const raw = JSON.parse(fs.readFileSync(ROUTING_FILE, "utf-8")) as {
-      messageSession?: Record<string, string>; activeSession?: Record<string, string>; sessionToChat?: Record<string, string>;
+      messageSession?: Record<string, string>; activeSession?: Record<string, string>; sessionToChat?: Record<string, string>; chatType?: Record<string, string>;
     };
     for (const [k, v] of Object.entries(raw.messageSession ?? {})) messageSessionMap.set(k, v);
     for (const [k, v] of Object.entries(raw.activeSession ?? {})) activeSessionMap.set(k, v);
     for (const [k, v] of Object.entries(raw.sessionToChat ?? {})) sessionToChatMap.set(k, v);
+    for (const [k, v] of Object.entries(raw.chatType ?? {})) {
+      if (v === "p2p" || v === "group") chatTypeByChatKey.set(k, v);
+    }
     scrubInvalidActiveSessions();
-    log("INFO", `[Routing] 路由映射已恢复: msg=${messageSessionMap.size}, active=${activeSessionMap.size}, chat=${sessionToChatMap.size}`);
+    log("INFO", `[Routing] 路由映射已恢复: msg=${messageSessionMap.size}, active=${activeSessionMap.size}, chat=${sessionToChatMap.size}, chatType=${chatTypeByChatKey.size}`);
   } catch (e: any) { log("WARN", `[Routing] 路由映射恢复失败: ${e?.message ?? e}`); }
 }
 
@@ -402,6 +440,7 @@ function scheduleRoutingSave(): void {
         messageSession: Object.fromEntries(messageSessionMap),
         activeSession: Object.fromEntries(activeSessionMap),
         sessionToChat: Object.fromEntries(sessionToChatMap),
+        chatType: Object.fromEntries(chatTypeByChatKey),
       };
       fs.writeFileSync(ROUTING_FILE + ".tmp", JSON.stringify(data));
       fs.renameSync(ROUTING_FILE + ".tmp", ROUTING_FILE);
@@ -524,35 +563,72 @@ function chatActiveSessionCount(chatKey: string): number {
   return dirs.size;
 }
 
-/** 仅主用户私聊显示会话标题（目录/项目 + 分支）；群聊/非主用户/缺 chatId 一律不露 */
+
+/** 按 chatKey / 裸 chatId 查当前活跃会话（带工作区的完整 sessionKey） */
+function lookupActiveSessionKey(chatRef?: string): string | undefined {
+  if (!chatRef) return undefined;
+  const direct = activeSessionMap.get(chatRef);
+  if (direct) return direct;
+  const { chatId: raw } = parseChatKey(chatRef);
+  if (raw && raw !== chatRef) {
+    const byRaw = activeSessionMap.get(raw);
+    if (byRaw) return byRaw;
+  }
+  for (const [k, v] of activeSessionMap) {
+    if (k === chatRef || k.endsWith("|" + chatRef)) return v;
+    if (raw && (k === raw || k.endsWith("|" + raw))) return v;
+  }
+  return undefined;
+}
+
+/** 优先带 ::工作区 的 key，保证 title/配色稳定同一会话 */
+function preferWorkspaceSessionKey(...keys: (string | undefined)[]): string | undefined {
+  const hit = keys.find((k) => {
+    if (!k) return false;
+    const idx = k.indexOf("::");
+    if (idx < 0) return false;
+    const suffix = k.slice(idx + 2);
+    if (!suffix) return false;
+    // 项目/工作流会话身份同样明确，不能被"当前活跃会话"抢走标题与配色
+    return isSpecialSessionSuffix(suffix) || /[\\/]/.test(suffix);
+  });
+  return hit || keys.find((k) => !!k);
+}
+
+/** 仅主用户私聊显示会话标题（目录/项目 + 分支）；群聊/非主用户/缺 chatId 一律不露。
+ * 主用户私聊只要认定身份，就尽量给出标题——否则飞书卡片无 header，看起来就像「没颜色」。 */
 function resolveReplyTitle(ch: ResolvedChannel, sessionKey?: string): CardTitle | undefined {
   if (ch.type !== "feishu") return undefined;
   const { mainUserEnabled, mainUserChatId } = ch.rt.cfg;
   if (!mainUserEnabled || !mainUserChatId?.trim()) return undefined;
-  // 必须精确匹配主用户私聊 chatId（群聊 id ≠ 主用户；chatId 缺失也不推断）
   if (!ch.chatId || ch.chatId !== mainUserChatId.trim()) return undefined;
 
   const chatKey = makeChatKey(ch.rt.cfg.id, ch.chatId);
   const sk = sessionKey
     || activeSessionMap.get(chatKey)
-    || activeSessionMap.get(ch.chatId);
+    || activeSessionMap.get(ch.chatId)
+    || undefined;
 
   const pid = sk ? projectIdFromSessionKey(sk) : undefined;
   if (pid) {
     const p = getProject(pid);
-    return buildSessionCardTitle({ sessionKey: sk, project: p });
+    const card = buildSessionCardTitle({ sessionKey: sk, project: p });
+    if (card) return card;
   }
 
   const fromSk = resolveWorkspaceFromSessionKey(sk);
   const wsDir = (fromSk && fs.existsSync(fromSk) ? fromSk : undefined)
     || (WORKSPACE_DIR && /[\\/]/.test(WORKSPACE_DIR) && fs.existsSync(WORKSPACE_DIR) ? WORKSPACE_DIR : undefined);
-  if (!wsDir) return undefined;
-  const peers = listChatWorkspaceDirs(chatKey);
-  return buildSessionCardTitle({
-    sessionKey: sk,
-    workspaceDir: wsDir,
-    peers: peers.length ? peers : [wsDir],
-  });
+  if (wsDir) {
+    const peers = listChatWorkspaceDirs(chatKey);
+    return buildSessionCardTitle({
+      sessionKey: sk,
+      workspaceDir: wsDir,
+      peers: peers.length ? peers : [wsDir],
+    }) || { title: `📂 ${wsDir.split(/[\\/]/).filter(Boolean).pop() || wsDir}` };
+  }
+  // 工作目录暂不可解析时仍给最小标题，保证 header 配色条出现
+  return { title: "💬 会话" };
 }
 
 type ResolvedChannel =
@@ -795,6 +871,7 @@ function pushMessage(content: string, messageId?: string, chatId?: string, chatT
       }
     }
   }
+  if (chatId && chatType) rememberChatType(chatId, chatType);
   const fullMeta: QueueMessageMeta = { ...(meta || {}) };
   if (chatType) fullMeta.chatType = chatType;
   if (senderOpenId) fullMeta.senderOpenId = senderOpenId;
@@ -946,6 +1023,7 @@ async function startFeishuChannel(rt: ChannelRuntime): Promise<void> {
 
     const cleanText = chatType === "group" ? resolveMentionTags(text, ev.mentions, rt.botOpenId) : text;
     log("INFO", `[${rt.cfg.name}] 收到消息 [${chatType}] chat=${chatId} sender=${senderOpenId ?? "?"}${ev.senderType === "app" ? "(bot)" : ""}${parentId ? ` reply=${parentId}` : ""}: ${cleanText.slice(0, 100)}`);
+    rememberChatType(chatKey, chatType);
 
     if (messageType === "text" && isCommand(cleanText)) {
       handleCommand(cleanText, messageId, chatKey, chatType).catch((e: any) =>
@@ -1010,8 +1088,6 @@ const COMMANDS: Record<string, string> = {
   "/ls": "同 /list",
   "/task": "定时任务（/task 查看子命令说明；如 /task ls）",
   "/t": "同 /task",
-  "/workflow": "工作流管理（/workflow ls | info | run | status | delete）",
-  "/wf": "同 /workflow",
   "/project": "项目工作区（/project 查看；/p new|ls|use|plan|build|review|ship|sync）",
   "/p": "同 /project",
   "/model": "Cursor CLI 模型（/model ls | info | set <序号>）",
@@ -1208,22 +1284,66 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
     const f = evt.formValue || {};
     const name = (f.name || "").trim();
     const goal = (f.goal || "").trim();
-    const repoPath = (f.repoPathCustom || f.repoPath || "").trim();
-    const worktreeRoot = (f.worktreeRoot || String((value as { worktreeRoot?: string } | undefined)?.worktreeRoot || "")).trim();
-    const baseBranch = (f.baseBranch || "main").trim() || "main";
+    const worktreeRaw = (f.worktreeRoot || String((value as { worktreeRoot?: string } | undefined)?.worktreeRoot || "")).trim();
+    const worktreeRoot = worktreeRaw ? path.normalize(worktreeRaw) : "";
     const featureBranch = (f.featureBranch || "").trim();
     const storyUrl = (f.storyUrl || "").trim();
     const productDocUrl = (f.productDocUrl || "").trim();
     const techDocUrl = (f.techDocUrl || "").trim();
+
+    const decodePair = (raw: string) => {
+      const r = decodeRepoPair(String(raw || ""));
+      return { ...r, path: path.normalize(r.path || "") };
+    };
+    const selectedRaw = f.repoPairs;
+    const selectedList: string[] = Array.isArray(selectedRaw)
+      ? selectedRaw.map(String)
+      : (selectedRaw ? [String(selectedRaw)] : []);
+    type RepoIn = { repoPath: string; baseBranch: string; testBranch?: string; developBranch?: string };
+    const repos: RepoIn[] = [];
+    const seen = new Set<string>();
+    for (const item of selectedList) {
+      const { path: rp, baseBranch, testBranch, developBranch } = decodePair(item);
+      if (!rp) continue;
+      const key = rp.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      repos.push({ repoPath: rp, baseBranch, testBranch, developBranch });
+    }
+    const customPath = (f.repoPathCustom || "").trim();
+    const customBase = (f.baseBranchCustom || "").trim();
+    const customTest = (f.testBranchCustom || "").trim() || undefined;
+    const customDev = (f.developBranchCustom || "").trim() || undefined;
+    if (customPath) {
+      if (!customBase) return { toast: { type: "error", content: "手填主仓时请填写生产基线分支" } };
+      const rp = path.normalize(customPath);
+      const key = rp.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        repos.push({ repoPath: rp, baseBranch: customBase, testBranch: customTest, developBranch: customDev });
+      } else {
+        const hit = repos.find((r) => r.repoPath.toLowerCase() === key);
+        if (hit) {
+          hit.baseBranch = customBase;
+          if (customTest) hit.testBranch = customTest;
+          if (customDev) hit.developBranch = customDev;
+        }
+      }
+    }
+
     if (!name) return { toast: { type: "error", content: "请填写项目名称" } };
-    if (!goal) return { toast: { type: "error", content: "请填写目标描述" } };
-    if (!repoPath) return { toast: { type: "error", content: "请选择或填写主仓" } };
+    if (!repos.length) return { toast: { type: "error", content: "请多选或手填至少一个主仓·分支" } };
     if (!worktreeRoot) return { toast: { type: "error", content: "请填写 worktree 根目录" } };
+
+    const primary = repos[0];
     process.stdout.write(`__PROJECT_NEW_SUBMIT__:${JSON.stringify({
       chatId: chatKey,
       messageId: evt.messageId,
-      name, goal, repoPath, worktreeRoot, baseBranch, featureBranch,
+      name, goal, worktreeRoot, featureBranch,
       storyUrl, productDocUrl, techDocUrl,
+      repos,
+      repoPath: primary.repoPath,
+      baseBranch: primary.baseBranch,
     })}\n`);
     return {
       toast: { type: "info", content: "正在创建项目…" },
@@ -1231,10 +1351,47 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
     };
   }
 
+  if (value?.kind === "repo_setup_form") {
+    const f = evt.formValue || {};
+    const repoPathRaw = (f.repoPath || "").trim();
+    const baseBranch = (f.baseBranch || "").trim();
+    const testBranch = (f.testBranch || "").trim() || undefined;
+    const developBranch = (f.developBranch || "").trim() || undefined;
+    if (!repoPathRaw) return { toast: { type: "error", content: "请填写主仓绝对路径" } };
+    if (!baseBranch) return { toast: { type: "error", content: "请填写生产基线分支" } };
+    const repoPath = path.normalize(repoPathRaw);
+    // 卡片保持可改：路径无效只 toast，不落库不更新卡片
+    if (!fs.existsSync(repoPath) || !fs.existsSync(path.join(repoPath, ".git"))) {
+      return { toast: { type: "error", content: `不是有效 git 根目录: ${repoPath}` } };
+    }
+    process.stdout.write(`__PROJECT_PROFILE_UPSERT__:${JSON.stringify({
+      path: repoPath, baseBranch, testBranch, developBranch,
+      chatId: chatKey, messageId: evt.messageId,
+    })}\n`);
+    const summary = [repoPath, `base=${baseBranch}`, testBranch ? `test=${testBranch}` : "", developBranch ? `dev=${developBranch}` : ""]
+      .filter(Boolean).join(" · ");
+    return {
+      toast: { type: "success", content: "已保存" },
+      card: { type: "raw", data: LarkSender.buildCard(`✅ 已保存主仓\n${summary}`, "添加主仓", undefined, undefined, "green") },
+    };
+  }
+
   return {};
 }
 
-async function replyToMessage(messageId: string, text: string, chatId?: string, buttons?: { label: string; cmd: string; section?: string }[], template?: string): Promise<void> {
+async function replyToMessage(
+  messageId: string,
+  text: string,
+  chatId?: string,
+  buttons?: { label: string; cmd: string; section?: string }[],
+  template?: string,
+  opts?: {
+    cardTitle?: { title: string; subtitle?: string };
+    sections?: { text: string; buttons?: { label: string; cmd: string; section?: string }[] }[];
+    /** 出站消息登记到此会话：用户引用该卡片回复可路由回原会话（如项目通知） */
+    sessionKey?: string;
+  },
+): Promise<void> {
   // 优先显式 chatId；缺省时从消息路由表找回，禁止 allowDefault 兜底到别的通道（防微信指令回飞书）
   const routeKey = chatId
     || (messageId ? messageSessionMap.get(messageId) : undefined)
@@ -1247,7 +1404,21 @@ async function replyToMessage(messageId: string, text: string, chatId?: string, 
   if (ch.type === "wechat") {
     // 微信无交互卡片：把按钮降级为可直接发送的指令列表（按 section 分段）
     let body = text;
-    if (buttons && buttons.length > 0) {
+    const secs = opts?.sections;
+    if (secs?.length) {
+      const chunks: string[] = [];
+      for (const sec of secs) {
+        let part = sec.text;
+        if (sec.buttons?.length) {
+          const lines: string[] = [];
+          let n = 1;
+          for (const b of sec.buttons.slice(0, 20)) lines.push(`${n++}. ${b.label || b.cmd}`);
+          part = `${part}\n${lines.join("\n")}`;
+        }
+        chunks.push(part);
+      }
+      body = chunks.join("\n\n");
+    } else if (buttons && buttons.length > 0) {
       const lines: string[] = [];
       let n = 1;
       let lastSec: string | undefined;
@@ -1264,27 +1435,39 @@ async function replyToMessage(messageId: string, text: string, chatId?: string, 
     return;
   }
   const sender = ch.rt.sender!;
-  // 标题可跟消息原会话；配色必须跟「当前活跃会话」（指令色 = 当前会话色）
-  const titleSessionKey = (messageId ? messageSessionMap.get(messageId) : undefined)
-    || (chatId ? activeSessionMap.get(chatId) : undefined)
-    || routeKey;
-  const colorSessionKey = (chatId ? activeSessionMap.get(chatId) : undefined)
-    || titleSessionKey;
-  const title = resolveReplyTitle(ch, titleSessionKey);
-  const headerTemplate = template || sessionHeaderTemplate(colorSessionKey) || (title ? "turquoise" : undefined);
-  if (buttons && buttons.length > 0) {
-    // 上限 20：/help 全量指令 + 常用目录快捷按钮
-    const btns: CardButton[] = buttons.slice(0, 20).map((b) => ({
+  // 优先当前活跃会话（含工作区），避免 messageSession 只记了裸 chatKey 导致配色/标题抖动
+  const mappedSk = messageId ? messageSessionMap.get(messageId) : undefined;
+  const activeSk = lookupActiveSessionKey(chatId) || lookupActiveSessionKey(routeKey);
+  const titleSessionKey = preferWorkspaceSessionKey(activeSk, mappedSk, routeKey);
+  const colorSessionKey = preferWorkspaceSessionKey(activeSk, titleSessionKey, mappedSk);
+  const title = opts?.cardTitle || resolveReplyTitle(ch, titleSessionKey);
+  const headerTemplate = template || sessionHeaderTemplate(colorSessionKey) || sessionHeaderTemplate(titleSessionKey) || (title ? "turquoise" : undefined);
+  // 群聊指令卡保留 reply（多人并发指令要对得上号）；p2p 直发去引用条
+  const replyId = shouldReplyToMessage(ch, messageId) ? messageId : undefined;
+  const mapBtns = (list?: { label: string; cmd: string; section?: string }[]): CardButton[] =>
+    (list ?? []).slice(0, 20).map((b) => ({
       label: b.label, value: { kind: "cmd", cmd: b.cmd }, type: "default" as const, section: b.section,
     }));
-    await sender.sendCardWithButtons(text, btns, ch.chatId ? undefined : messageId, ch.chatId, title, undefined, headerTemplate);
+  const cardSections = opts?.sections?.map((s) => ({ text: s.text, buttons: mapBtns(s.buttons) }));
+  if ((buttons && buttons.length > 0) || (cardSections && cardSections.length > 0)) {
+    const btns = mapBtns(buttons);
+    let sent = await sender.sendCardWithButtons(text, btns, replyId, ch.chatId, title, undefined, headerTemplate, undefined, cardSections);
+    if (sent === undefined && replyId && ch.chatId) {
+      sent = await sender.sendCardWithButtons(text, btns, undefined, ch.chatId, title, undefined, headerTemplate, undefined, cardSections);
+    }
+    if (typeof sent === "string" && opts?.sessionKey) trackMessageSession(sent, opts.sessionKey);
     return;
   }
-  if (ch.chatId) {
-    await sender.sendMessage(text, undefined, ch.chatId, title, headerTemplate);
-  } else {
-    await sender.replyMessage(messageId, text, title, headerTemplate);
+  let sentTextId: string | undefined | null;
+  if (replyId) {
+    sentTextId = await sender.replyMessage(replyId, text, title, headerTemplate);
+    if (!sentTextId && ch.chatId) sentTextId = await sender.sendMessage(text, undefined, ch.chatId, title, headerTemplate);
+  } else if (ch.chatId) {
+    sentTextId = await sender.sendMessage(text, undefined, ch.chatId, title, headerTemplate);
+  } else if (messageId && !messageId.startsWith("internal_")) {
+    sentTextId = await sender.replyMessage(messageId, text, title, headerTemplate);
   }
+  if (typeof sentTextId === "string" && opts?.sessionKey) trackMessageSession(sentTextId, opts.sessionKey);
 }
 
 // ── 共享指令文件队列（.fcmd）──────────────────────────────
@@ -1307,8 +1490,9 @@ function pushCommandToQueue(command: string, messageId: string, source: string, 
     const finalPath = path.join(queueDir, filename);
     fs.writeFileSync(tmpPath, data, "utf-8");
     fs.renameSync(tmpPath, finalPath);
-    if (messageId && chatId) trackMessageSession(messageId, chatId);
+    if (messageId && chatId) trackMessageSession(messageId, lookupActiveSessionKey(chatId) || chatId);
     log("INFO", `指令已入队: ${command} (msgId=${messageId}, source=${source})`);
+    broadcastCommandEvent();
     return true;
   } catch { return false; }
 }
@@ -1513,8 +1697,6 @@ function createMcpServer(): McpServer {
       }
     },
   );
-
-  registerWorkflowAgentTools(s);
   registerProjectAgentTools(s);
   return s;
 }
@@ -1522,7 +1704,6 @@ function createMcpServer(): McpServer {
 function createAdminMcpServer(): McpServer {
   const s = new McpServer({ name: "cursor-claw-admin", version: PKG_VERSION, description: "cursor-claw 管理工具" });
   registerAdminTools(s);
-  registerWorkflowAdminTools(s);
   return s;
 }
 
@@ -1647,8 +1828,16 @@ function startHttpServer(): Promise<number> {
           if (!content) { json(res, { error: "content is required" }, 400); return; }
           const chatId = typeof body.chatId === "string" ? body.chatId.trim() : "";
           const chatType = typeof body.chatType === "string" ? body.chatType : "p2p";
+          const sessionKey = typeof body.sessionKey === "string" ? body.sessionKey.trim() : "";
           const internalMsgId = `internal_enqueue_${Date.now()}`;
-          if (chatId) {
+          if (sessionKey) {
+            // 直投指定会话（项目节点任务等）：绕过 p2p 主目录强制路由，队列保障崩溃重投
+            const normalized = normalizeSessionKey(sessionKey) || sessionKey;
+            pushToFileQueue(content, internalMsgId, `daemon-${process.pid}`, normalized, false, { chatType });
+            trackMessageSession(internalMsgId, normalized);
+            broadcastQueueEvent(chatIdFromSessionKey(normalized));
+            log("INFO", `任务已直投会话队列: session=${normalized} len=${content.length}`);
+          } else if (chatId) {
             pushMessage(content, internalMsgId, chatId, chatType);
           } else {
             pushMessage(content, internalMsgId);
@@ -1699,9 +1888,21 @@ function startHttpServer(): Promise<number> {
         }
 
         if (method === "POST" && pathname === "/cmd/result") {
-          const body = JSON.parse(await readBody(req)) as { messageId: string; ok: boolean; message: string; chatId?: string; buttons?: { label: string; cmd: string; section?: string }[] };
+          const body = JSON.parse(await readBody(req)) as {
+            messageId: string; ok: boolean; message: string; chatId?: string;
+            buttons?: { label: string; cmd: string; section?: string }[];
+            cardTitle?: { title: string; subtitle?: string };
+            sections?: { text: string; buttons?: { label: string; cmd: string; section?: string }[] }[];
+            sessionKey?: string;
+          };
           log("INFO", `指令执行完成: ok=${body.ok}, msgId=${body.messageId}, chatId=${body.chatId ?? "N/A"}`);
-          if (body.messageId) await replyToMessage(body.messageId, body.message, body.chatId, body.buttons);
+          if (body.messageId) {
+            await replyToMessage(body.messageId, body.message, body.chatId, body.buttons, undefined, {
+              cardTitle: body.cardTitle,
+              sections: body.sections,
+              sessionKey: body.sessionKey,
+            });
+          }
           json(res, { ok: true });
           return;
         }
@@ -2107,14 +2308,16 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       json(res, { ok: await ch.rt.wechat!.sendText(ch.chatId, text) });
     } else {
       const sender = ch.rt.sender!;
-      const colorKey = session_key
-        || (message_id ? messageSessionMap.get(message_id) : undefined)
-        || (ch.chatId ? activeSessionMap.get(makeChatKey(ch.rt.cfg.id, ch.chatId)) : undefined);
+      const colorKey = preferWorkspaceSessionKey(
+        session_key,
+        message_id ? messageSessionMap.get(message_id) : undefined,
+        ch.chatId ? lookupActiveSessionKey(makeChatKey(ch.rt.cfg.id, ch.chatId)) : undefined,
+      );
       const title = resolveReplyTitle(ch, colorKey || session_key);
       const headerTemplate = sessionHeaderTemplate(colorKey || session_key) || (title ? "turquoise" : undefined);
       let sentMsgId: string | undefined;
-      // internal_（卡片点击）不可 reply：必须按 chatId 直发，禁止落到 sender 默认主用户私聊
-      if (message_id && !message_id.startsWith("internal_")) {
+      // p2p 直发砍引用条；群聊保留 reply；internal_ 不可 reply
+      if (shouldReplyToMessage(ch, message_id)) {
         sentMsgId = await sender.sendMessage(text, message_id, undefined, title, headerTemplate);
         if (!sentMsgId) {
           log("INFO", `回复退避: message_id=${message_id} → ${ch.chatId ? `chat_id=${ch.chatId}` : "无目标"}`);
@@ -2133,8 +2336,9 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
 
   if (method === "POST" && pathname === "/api/project-new-form") {
     const body = JSON.parse(await readBody(req));
-    const { message_id, session_key, repo_roots, worktree_root } = body as {
-      message_id?: string; session_key?: string; repo_roots?: string[]; worktree_root?: string
+    const { message_id, session_key, repo_roots, repo_profiles, worktree_root } = body as {
+      message_id?: string; session_key?: string; repo_roots?: string[];
+      repo_profiles?: { path: string; baseBranch: string }[]; worktree_root?: string
     };
     if (rejectUnroutedSend(res, "project-new-form", session_key, message_id)) return true;
     const ch = resolveChannel(routeTargetKey(session_key, message_id), { allowDefault: false });
@@ -2153,9 +2357,47 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     }
     const sender = ch.rt.sender!;
     const card = LarkSender.buildProjectNewFormCard({
+      repoProfiles: repo_profiles || [],
       repoRoots: repo_roots || [],
       worktreeRoot: worktree_root,
     });
+    let sent = message_id && !message_id.startsWith("internal_")
+      ? await sender.sendInteractiveCard(card, message_id, undefined)
+      : undefined;
+    if (sent === undefined && ch.chatId) {
+      sent = await sender.sendInteractiveCard(card, undefined, ch.chatId);
+    }
+    if (sent === undefined) {
+      const roots = (repo_roots || []).map((r, i) => `#${i + 1} ${r}`).join("\n") || "(无预置主仓)";
+      const tip = [
+        "❌ 创建项目表单卡片被飞书拒绝（请检查路径/卡片格式）。临时可用一行命令：",
+        "/p new <名> <主仓序号或路径> <基线分支> <feature分支> <目标…>",
+        "",
+        `worktree 根: ${worktree_root || "(未设)"}`,
+        `主仓:\n${roots}`,
+      ].join("\n");
+      if (message_id && !message_id.startsWith("internal_")) await sender.sendMessage(tip, message_id, undefined);
+      else if (ch.chatId) await sender.sendMessage(tip, undefined, ch.chatId);
+      json(res, { ok: false, error: "feishu card rejected" });
+      return true;
+    }
+    json(res, { ok: true, message_id: typeof sent === "string" ? sent : undefined });
+    return true;
+  }
+
+  if (method === "POST" && pathname === "/api/project-setup-form") {
+    const body = JSON.parse(await readBody(req));
+    const { message_id, session_key } = body as { message_id?: string; session_key?: string };
+    if (rejectUnroutedSend(res, "project-setup-form", session_key, message_id)) return true;
+    const ch = resolveChannel(routeTargetKey(session_key, message_id), { allowDefault: false });
+    if (ch.type === "error") { json(res, { ok: false, error: ch.message }, 400); return true; }
+    if (ch.type === "wechat") {
+      // 微信无表单卡：调用方降级走分步问答
+      json(res, { ok: false, degraded: true, error: "wechat form unsupported" });
+      return true;
+    }
+    const sender = ch.rt.sender!;
+    const card = LarkSender.buildRepoSetupFormCard();
     let sent = message_id && !message_id.startsWith("internal_")
       ? await sender.sendInteractiveCard(card, message_id, undefined)
       : undefined;
@@ -2182,9 +2424,11 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       json(res, { ok: await ch.rt.wechat!.sendText(ch.chatId, fallback), degraded: true });
     } else {
       const sender = ch.rt.sender!;
-      const colorKey = session_key
-        || (message_id ? messageSessionMap.get(message_id) : undefined)
-        || (ch.chatId ? activeSessionMap.get(makeChatKey(ch.rt.cfg.id, ch.chatId)) : undefined);
+      const colorKey = preferWorkspaceSessionKey(
+        session_key,
+        message_id ? messageSessionMap.get(message_id) : undefined,
+        ch.chatId ? lookupActiveSessionKey(makeChatKey(ch.rt.cfg.id, ch.chatId)) : undefined,
+      );
       const title = resolveReplyTitle(ch, colorKey || session_key);
       // 问题卡与普通回复同色：用会话稳定色，关闭/点选时不变色
       const pendingText = text;
@@ -2193,15 +2437,16 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       // session_key 打进按钮 value：即使 reply 未返回 message_id 导致 cardQuestionMap 未登记，点击仍能路由回原会话
       const buttons: CardButton[] = opts.map((o, i) => ({ label: `${i + 1}. ${o}`, value: { kind: "question", opt: o, sk: session_key } }));
       const input: CardInput = { placeholder: "其他答复：输入后点发送", value: { kind: "question", sk: session_key } };
-      // 两段式：先按 message_id 回复（落在原聊天）；仅失败(undefined)才 chat 直发——null 表示已回复成功勿再发
+      // p2p 直发；群聊先 reply，失败再直发（null=已回复成功勿再发）
       let sentMsgId: string | null | undefined;
-      if (message_id && !message_id.startsWith("internal_")) {
+      if (shouldReplyToMessage(ch, message_id)) {
         sentMsgId = await sender.sendCardWithButtons(pendingText, buttons, message_id, undefined, title, input, pendingTemplate, pendingFooter);
         if (sentMsgId === undefined) {
           log("INFO", `问题卡片回复退避: message_id=${message_id} → ${ch.chatId ? `chat_id=${ch.chatId}` : "无目标"}`);
           if (ch.chatId) sentMsgId = await sender.sendCardWithButtons(pendingText, buttons, undefined, ch.chatId, title, input, pendingTemplate, pendingFooter);
         }
       } else {
+        if (!ch.chatId) { json(res, { ok: false, error: "无法解析发送目标 chatId" }, 400); return true; }
         sentMsgId = await sender.sendCardWithButtons(pendingText, buttons, undefined, ch.chatId, title, input, pendingTemplate, pendingFooter);
       }
       const ok = sentMsgId !== undefined; // null 也算成功（已回复到原聊天）
@@ -2229,9 +2474,11 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     if (ch.type === "wechat") {
       await ch.rt.wechat!.sendMedia(ch.chatId, image_path);
     } else {
-      const replyId = message_id?.startsWith("internal_") ? undefined : message_id;
+      const replyId = shouldReplyToMessage(ch, message_id) ? message_id : undefined;
       if (!replyId && !ch.chatId) { json(res, { ok: false, error: "无法解析发送目标 chatId" }, 400); return true; }
-      await ch.rt.sender!.sendImage(image_path, replyId, ch.chatId);
+      const sentId = await ch.rt.sender!.sendImage(image_path, replyId, ch.chatId);
+      // 登记出站消息路由：用户引用这张图片回复时能路由回原会话
+      if (sentId && session_key) trackMessageSession(sentId, session_key);
     }
     json(res, { ok: true });
     if (session_key) sessionLastReplyAt.set(session_key, Date.now());
@@ -2248,9 +2495,11 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     if (ch.type === "wechat") {
       await ch.rt.wechat!.sendMedia(ch.chatId, file_path);
     } else {
-      const replyId = message_id?.startsWith("internal_") ? undefined : message_id;
+      const replyId = shouldReplyToMessage(ch, message_id) ? message_id : undefined;
       if (!replyId && !ch.chatId) { json(res, { ok: false, error: "无法解析发送目标 chatId" }, 400); return true; }
-      await ch.rt.sender!.sendFile(file_path, replyId, ch.chatId);
+      const sentId = await ch.rt.sender!.sendFile(file_path, replyId, ch.chatId);
+      // 登记出站消息路由：用户引用这份文件回复时能路由回原会话
+      if (sentId && session_key) trackMessageSession(sentId, session_key);
     }
     json(res, { ok: true });
     if (session_key) sessionLastReplyAt.set(session_key, Date.now());

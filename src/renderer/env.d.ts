@@ -1,4 +1,3 @@
-import type { WorkflowDefinition as WorkflowDefinitionType, WorkflowInstance as WorkflowInstanceType } from "../shared/workflow-types"
 import type { AgentResource as AgentResourceType, MessageChannel, ChannelStatusInfo as ChannelStatusInfoType } from "../shared/channel-types"
 import type { ScheduledTask as ScheduledTaskType } from "../shared/scheduled-task"
 
@@ -6,8 +5,6 @@ declare global {
   type AgentResource = AgentResourceType
   type ChannelStatusInfo = ChannelStatusInfoType
   type ScheduledTask = ScheduledTaskType
-  type WorkflowDefinition = WorkflowDefinitionType
-  type WorkflowInstance = WorkflowInstanceType
   /** 注意：避免与 DOM 内置 MessageChannel 类型冲突，这里别名为 ChannelConfig */
   type ChannelConfig = MessageChannel
 
@@ -42,6 +39,7 @@ declare global {
     gitlabToken?: string
     gitlabHost?: string
     repoRoots?: string[]
+    repoProfiles?: { path: string; baseBranch: string; testBranch?: string; developBranch?: string }[]
     worktreeRoot?: string
   }
 
@@ -143,6 +141,8 @@ declare global {
     onUpdaterError(cb: (message: string) => void): () => void
     onUpdaterStatus(cb: (payload: { kind: "available" } | { kind: "downloaded"; version: string } | { kind: "downloading" }) => void): () => void
     getConfig(): Promise<AppConfig>
+    getProjectNodes(): Promise<{ id: string; label: string; prompt?: string; builtin?: boolean; defaultPrompt?: string }[]>
+    saveProjectNodes(nodes: { id: string; label: string; prompt?: string; builtin?: boolean }[]): Promise<{ ok: boolean }>
     saveConfig(config: Partial<AppConfig>): Promise<ConfigSaveResult>
     setAutoStart(enabled: boolean): Promise<{ ok: boolean }>
     applyWorkspaceSwitch(workspaceDir: string, stopOldSessions: boolean, notifyMain?: boolean): Promise<{ ok: boolean; error?: string }>
@@ -160,6 +160,8 @@ declare global {
     exportDiagnostics(): Promise<{ ok: boolean; path?: string; error?: string }>
     stopSessionAgent(sessionKey: string): Promise<{ ok: boolean }>
     setSessionModel(sessionKey: string, model: string, modelParams?: string): Promise<{ ok: boolean; deferred?: boolean; error?: string }>
+    listSessionTabs(): Promise<{ ok: boolean; chatId?: string; activeKey?: string; tabs: { sessionKey: string; label: string; kind: "main" | "project" | "dir" | "temp" | "other"; running: boolean; current: boolean; removable?: boolean }[]; error?: string }>
+    switchSession(sessionKey: string): Promise<{ ok: boolean; error?: string }>
     listQuickModels(): Promise<{ ok: boolean; models: { model: string; modelParams?: string; label?: string }[] }>
     stopAllSessionAgents(): Promise<{ ok: boolean }>
     onSessionAgents(cb: (list: { sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string; workspaceDir?: string; source?: "cli" | "sdk" }[]) => void): () => void
@@ -219,16 +221,6 @@ declare global {
     windowIsMaximized(): Promise<boolean>
     onWindowMaximizedChange(cb: (maximized: boolean) => void): () => void
 
-    // ── Workflow ──────────────────────────────────────────
-    getWorkflowDefinitions(): Promise<WorkflowDefinition[]>
-    saveWorkflowDefinition(def: WorkflowDefinition): Promise<{ ok: boolean }>
-    deleteWorkflowDefinition(id: string): Promise<{ ok: boolean }>
-    getWorkflowInstances(): Promise<WorkflowInstance[]>
-    getWorkflowInstance(id: string): Promise<WorkflowInstance | undefined>
-    saveWorkflowInstance(inst: WorkflowInstance): Promise<{ ok: boolean }>
-    deleteWorkflowInstance(id: string): Promise<{ ok: boolean }>
-    runWorkflow(workflowId: string, input?: string): Promise<{ ok: boolean; error?: string; instanceId?: string }>
-    onWorkflowInstanceUpdate(cb: (inst: WorkflowInstance) => void): () => void
 
     testBind(channelId?: string): Promise<{ ok: boolean; error?: string }>
     fetchFeishuAppInfo(appId: string, appSecret: string): Promise<{ ok: boolean; name?: string; openId?: string; error?: string }>

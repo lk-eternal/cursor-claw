@@ -1,10 +1,12 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { app } from "electron"
-import { getConfig, saveConfig } from "./config-store"
+import { getConfig, saveConfig, getRepoProfiles, upsertRepoProfiles, removeRepoProfile } from "./config-store"
 import { reportCommandResult, type CommandButton } from "./command-handler"
+import { buildSessionCardTitle } from "../src/shared/session-label.js"
 import {
   createProject,
+  deleteProject,
   getCurrentProject,
   getProject,
   initProjectStore,
@@ -17,35 +19,50 @@ import {
   getProjectNewDraft,
   saveProjectNewDraft,
   clearProjectNewDraft,
+  getProjectNodes,
+  projectNodeLabel,
   type ProjectNewDraft,
 } from "../src/shared/project-store.js"
-import {
-  artifactRelPath,
-  isProjectActionType,
+import { repoShortName,
   projectSessionKey,
+  PROJECT_RESERVED_SUBCOMMANDS,
   type Project,
   type ProjectActionType,
 } from "../src/shared/project-types.js"
 import { addProjectWorktree, ensureArtifactDir, isGitRepoRoot, removeProjectWorktree } from "./project-worktree"
+import { buildProjectSessionPrompt, buildActionPrompt } from "./project-prompts"
 import { pushAndCreateMergeRequest } from "./project-gitlab"
 import { syncArtifactToFeishu } from "./project-feishu-sync"
-import { httpPost, syncActiveSession, getCurrentActiveSession } from "./daemon-client"
+import { httpPost, syncActiveSession, enqueueToSession } from "./daemon-client"
 import { launchProjectAgent } from "./session-dispatcher"
 
-const PROJECT_HELP = [
-  "💡 /p 子命令（全称 /project）",
-  "🔹 /p — 当前项目状态卡",
-  "🔹 /p new — 飞书大表单创建（下拉+手填，一次提交）",
-  "🔹 /p ls — 项目列表并切换",
-  "🔹 /p use <序号|id> — 进入该项目会话",
-  "🔹 /p leave — 退出项目，回到普通会话",
-  "🔹 /p plan|build|review|ship — 推进阶段（注入项目会话队列）",
-  "🔹 /p sync — 同步最近 accepted artifact 到飞书",
-  "🔹 /p setup — 仅配置 worktree/主仓",
-].join("\n")
+function projectHelpText(): string {
+  const nodeIds = getProjectNodes().map((n) => n.id).join("|")
+  return [
+    "💡 /p 项目指令",
+    "🔹 /p — 打开项目菜单",
+    "🔹 /p status — 查看当前项目详情",
+    "🔹 /p new — 新建项目",
+    "🔹 /p ls — 列出全部项目",
+    "🔹 /p use <序号|id> — 进入指定项目",
+    "🔹 /p leave — 退出当前项目",
+    `🔹 /p ${nodeIds} — 推进项目节点`,
+    "🔹 /p sync — 把最近通过的产出同步到飞书文档",
+    "🔹 /p setup — 配置项目工作区与主仓",
+    "🔹 /p del <序号|id> — 删除项目（连带移除 worktree）",
+  ].join("\n")
+}
 
 function ensureStore(): void {
   initProjectStore(app.getPath("userData"))
+}
+
+function defaultFeatureBranch(name: string): string {
+  const d = new Date()
+  const yy = String(d.getFullYear()).slice(-2)
+  const mm = String(d.getMonth() + 1).padStart(2, "0")
+  const dd = String(d.getDate()).padStart(2, "0")
+  return `feature/${yy}${mm}${dd}-${slugify(name)}`
 }
 
 function slugify(name: string): string {
@@ -55,6 +72,27 @@ function slugify(name: string): string {
     .replace(/[^a-z0-9\u4e00-\u9fa5_-]+/gi, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 40) || `p${Date.now().toString(36)}`
+}
+
+/** 同名项目 worktree 目录去重：被现有项目占用则追加 -2/-3… */
+function uniqueProjectSlug(name: string): string {
+  const base = slugify(name)
+  const used = new Set<string>()
+  for (const p of listProjects()) {
+    const wts = p.repos?.length ? p.repos.map((r) => r.worktreePath) : [p.worktreePath]
+    for (const wt of wts) {
+      if (!wt) continue
+      // 新规则 root/<slug>/<repo> 取父层；旧规则 root/<slug> 取本层
+      used.add(path.basename(path.dirname(wt)).toLowerCase())
+      used.add(path.basename(wt).toLowerCase())
+    }
+  }
+  if (!used.has(base.toLowerCase())) return base
+  for (let i = 2; i < 100; i++) {
+    const cand = `${base}-${i}`
+    if (!used.has(cand.toLowerCase())) return cand
+  }
+  return `${base}-${Date.now().toString(36)}`
 }
 
 function formatProjectCard(p: Project, index?: number): string {
@@ -67,8 +105,13 @@ function formatProjectCard(p: Project, index?: number): string {
     p.storyUrl ? `🔗 飞书项目 · ${p.storyUrl}` : "",
     p.productDocUrl ? `📘 产品文档 · ${p.productDocUrl}` : "",
     p.techDocUrl ? `📗 技术文档 · ${p.techDocUrl}` : "",
-    `🌿 ${p.featureBranch} ← ${p.baseBranch}`,
-    `📁 ${p.worktreePath}`,
+    `🌿 feature: ${p.featureBranch}`,
+    ...(p.repos && p.repos.length
+      ? p.repos.map((r, i) => {
+          const tags = [`base=${r.baseBranch}`, r.testBranch ? `test=${r.testBranch}` : "", r.developBranch ? `dev=${r.developBranch}` : ""].filter(Boolean).join(" ")
+          return `📦#${i + 1} ${r.repoPath}\n   ${tags}\n   📁 ${r.worktreePath}`
+        })
+      : [`base=${p.baseBranch}`, `📁 ${p.worktreePath}`]),
     `💠 ${p.status}`,
     last ? `⏭ 最近 action · ${last.type} (${last.status})` : "⏭ 尚无 action",
     accepted?.artifactPath ? `📄 artifact · ${accepted.artifactPath}` : "",
@@ -78,57 +121,26 @@ function formatProjectCard(p: Project, index?: number): string {
   return lines.filter(Boolean).join("\n")
 }
 
-function projectButtons(_p?: Project): CommandButton[] {
+function projectButtons(): CommandButton[] {
+  const nodeBtns: CommandButton[] = getProjectNodes().map((n) => ({
+    label: `${n.label} /p ${n.id}`,
+    cmd: `/p ${n.id}`,
+  }))
   return [
-    { label: "规划 /p plan", cmd: "/p plan" },
-    { label: "实现 /p build", cmd: "/p build" },
-    { label: "审查 /p review", cmd: "/p review" },
-    { label: "交付 /p ship", cmd: "/p ship" },
+    ...nodeBtns,
     { label: "同步文档 /p sync", cmd: "/p sync" },
-    { label: "项目列表 /p ls", cmd: "/p ls" },
+    { label: "项目菜单 /p", cmd: "/p" },
     { label: "退出项目 /p leave", cmd: "/p leave" },
   ]
 }
 
-function withChatFooter(text: string, footer = "也可直接发消息，在项目会话里继续聊"): string {
-  return `${text}\n\n---\n${footer}`
+/** 项目卡色条用项目名/分支，避免仍显示普通会话目录 */
+function projectCardTitle(p: Project) {
+  return buildSessionCardTitle({ project: p })
 }
 
-function buildActionPrompt(p: Project, actionId: string, type: ProjectActionType): string {
-  const rel = artifactRelPath(actionId, type)
-  const abs = path.join(p.worktreePath, rel.replace(/\//g, path.sep))
-  const prev = lastAcceptedAction(p)
-  const lines = [
-    `[PROJECT_ACTION]`,
-    `你正在执行项目工作区 action，不是普通闲聊。`,
-    `项目 ID: ${p.id}`,
-    `Action ID: ${actionId}`,
-    `Action 类型: ${type}`,
-    `目标: ${p.goal}`,
-    p.storyUrl ? `Story: ${p.storyUrl}` : "",
-    `工作目录(cwd): ${p.worktreePath}`,
-    `Feature 分支: ${p.featureBranch}`,
-    `基线分支: ${p.baseBranch}`,
-    `Artifact 必须写入: ${abs}`,
-    prev?.artifactPath ? `上一份已通过产物: ${prev.artifactPath}` : "",
-    "",
-    `要求:`,
-    `1. 在 worktree 内完成 ${type} 工作，把完整产出写成上述 md 文件`,
-    `2. 调用 MCP project_action_done(project_id, action_id, status=awaiting_ack, artifact_path, summary)`,
-    `3. 再用 send_question 让用户选择：通过 / 再聊聊 / 驳回（session_key 用当前专属会话）`,
-    `4. 用户选择后再次 project_action_done → accepted 或 rejected`,
-    `5. 禁止调用 workflow_next；本任务走 project_* 工具`,
-  ]
-  if (type === "ship") {
-    lines.push(
-      "",
-      `ship 额外要求:`,
-      `- 确保改动已提交到 ${p.featureBranch}`,
-      `- 推送并开向 ${p.baseBranch} 的 GitLab MR（可用 git + 设置中的 token；若环境已由宿主执行也可在 summary 写 MR 链接）`,
-      `- project_action_done 时带上 mr_url`,
-    )
-  }
-  return lines.filter(Boolean).join("\n")
+function withChatFooter(text: string, footer = "也可直接发消息，在项目会话里继续聊"): string {
+  return `${text}\n\n---\n${footer}`
 }
 
 async function enterProjectSession(
@@ -142,69 +154,98 @@ async function enterProjectSession(
   project.notifyChatId = chatId
   const { saveProject } = await import("../src/shared/project-store.js")
   saveProject(project)
-  const prev = await getCurrentActiveSession(port, chatId)
-  if (prev && prev !== sessionKey) {
-    // remember previous in draft file? skip — leave goes to bare chatKey
-  }
   await syncActiveSession(port, chatId, sessionKey)
   await launchProjectAgent({
     projectId: project.id,
     projectName: project.name,
     workingDirectory: project.worktreePath,
     notifyChatId: chatId,
-    prompt: welcome || [
-      `[PROJECT_SESSION] 你已进入项目「${project.name}」专属会话。`,
-      `目标: ${project.goal}`,
-      project.storyUrl ? `飞书项目: ${project.storyUrl}` : "",
-      project.productDocUrl ? `产品文档: ${project.productDocUrl}` : "",
-      project.techDocUrl ? `技术文档: ${project.techDocUrl}` : "",
-      `工作目录: ${project.worktreePath}`,
-      `用户可直接发消息自由聊；推进阶段请等用户点击 规划/实现/审查/交付 或发送 /p plan|build|review|ship。`,
-      `不要调用 workflow_next。`,
-    ].filter(Boolean).join("\n"),
+    prompt: welcome || buildProjectSessionPrompt(project),
   })
+}
+
+interface NewProjectInput {
+  chatKey?: string
+  name?: string
+  goal?: string
+  repoPath?: string
+  baseBranch?: string
+  featureBranch?: string
+  storyUrl?: string
+  productDocUrl?: string
+  techDocUrl?: string
+  worktreeRootOverride?: string
+  repos?: { repoPath: string; baseBranch: string; testBranch?: string; developBranch?: string }[]
 }
 
 async function finalizeNewProject(
   port: number,
   messageId: string,
   chatId: string | undefined,
-  draft: ProjectNewDraft & { productDocUrl?: string; techDocUrl?: string; worktreeRootOverride?: string },
+  draft: NewProjectInput,
 ): Promise<void> {
   const cfg = getConfig()
   const worktreeRoot = (draft.worktreeRootOverride || cfg.worktreeRoot || "").trim()
-  if (!draft.name || !draft.repoPath || !draft.baseBranch || !draft.goal) {
-    await reportCommandResult(port, messageId, false, "❌ 创建信息不完整（名称/主仓/基线分支/目标必填）", chatId)
+  const repos = (draft.repos && draft.repos.length)
+    ? draft.repos
+    : (draft.repoPath && draft.baseBranch
+      ? [{ repoPath: draft.repoPath, baseBranch: draft.baseBranch }]
+      : [])
+  if (!draft.name || !repos.length) {
+    await reportCommandResult(port, messageId, false, "❌ 创建信息不完整（名称/主仓·基线必填）", chatId)
     return
   }
+  if (!draft.goal) draft.goal = ""
   if (!worktreeRoot) {
-    await reportCommandResult(port, messageId, false, "❌ 未配置 worktree 根目录", chatId)
+    await reportCommandResult(port, messageId, false, "❌ 未配置工作区目录（/p setup）", chatId)
     return
   }
-  if (!isGitRepoRoot(draft.repoPath)) {
-    await reportCommandResult(port, messageId, false, `❌ 主仓无效: ${draft.repoPath}`, chatId)
-    return
+  for (const r of repos) {
+    if (!isGitRepoRoot(r.repoPath)) {
+      await reportCommandResult(port, messageId, false, `❌ 主仓无效: ${r.repoPath}`, chatId)
+      return
+    }
   }
   if (worktreeRoot !== cfg.worktreeRoot) {
     saveConfig({ worktreeRoot })
   }
-  const roots = cfg.repoRoots || []
-  if (!roots.some((r) => path.resolve(r) === path.resolve(draft.repoPath!))) {
-    saveConfig({ repoRoots: [...roots, path.resolve(draft.repoPath)] })
+  upsertRepoProfiles(repos.map((r) => ({
+    path: r.repoPath,
+    baseBranch: r.baseBranch,
+    testBranch: r.testBranch,
+    developBranch: r.developBranch,
+  })))
+
+  const featureBranch = (draft.featureBranch || defaultFeatureBranch(draft.name)).trim()
+  const projectSlug = uniqueProjectSlug(draft.name)
+  const created: { repoPath: string; worktreePath: string }[] = []
+  const projectRepos: { repoPath: string; baseBranch: string; testBranch?: string; developBranch?: string; worktreePath: string }[] = []
+
+  for (const r of repos) {
+    const short = repoShortName(r.repoPath)
+    const worktreePath = path.join(worktreeRoot, projectSlug, short)
+    const wt = addProjectWorktree({
+      repoPath: r.repoPath,
+      worktreePath,
+      featureBranch,
+      baseBranch: r.baseBranch,
+    })
+    if (!wt.ok) {
+      for (const c of created) removeProjectWorktree(c.repoPath, c.worktreePath)
+      await reportCommandResult(port, messageId, false, `❌ ${wt.error}`, chatId)
+      return
+    }
+    created.push({ repoPath: r.repoPath, worktreePath })
+    projectRepos.push({
+      repoPath: r.repoPath,
+      baseBranch: r.baseBranch,
+      testBranch: r.testBranch,
+      developBranch: r.developBranch,
+      worktreePath,
+    })
   }
 
-  const featureBranch = (draft.featureBranch || `feature/${slugify(draft.name)}`).trim()
-  const worktreePath = path.join(worktreeRoot, slugify(draft.name))
-  const wt = addProjectWorktree({
-    repoPath: draft.repoPath,
-    worktreePath,
-    featureBranch,
-    baseBranch: draft.baseBranch,
-  })
-  if (!wt.ok) {
-    await reportCommandResult(port, messageId, false, `❌ ${wt.error}`, chatId)
-    return
-  }
+  const primary = projectRepos[0]
   try {
     const project = createProject({
       name: draft.name,
@@ -212,10 +253,11 @@ async function finalizeNewProject(
       storyUrl: draft.storyUrl,
       productDocUrl: draft.productDocUrl,
       techDocUrl: draft.techDocUrl,
-      repoPath: draft.repoPath,
-      baseBranch: draft.baseBranch,
+      repoPath: primary.repoPath,
+      baseBranch: primary.baseBranch,
       featureBranch,
-      worktreePath,
+      worktreePath: primary.worktreePath,
+      repos: projectRepos,
       notifyChatId: chatId,
     })
     if (chatId) {
@@ -223,7 +265,7 @@ async function finalizeNewProject(
       const { saveProject } = await import("../src/shared/project-store.js")
       saveProject(project)
     }
-    ensureArtifactDir(worktreePath)
+    for (const r of projectRepos) ensureArtifactDir(r.worktreePath)
     if (draft.chatKey) clearProjectNewDraft(draft.chatKey)
     await reportCommandResult(
       port,
@@ -231,26 +273,167 @@ async function finalizeNewProject(
       true,
       withChatFooter(`✅ 项目已创建并进入项目会话\n\n${formatProjectCard(project)}`),
       chatId,
-      projectButtons(project),
+      projectButtons(),
+      { cardTitle: projectCardTitle(project) },
     )
     if (chatId) {
       await enterProjectSession(port, chatId, project)
     }
   } catch (e: any) {
-    removeProjectWorktree(draft.repoPath, worktreePath)
+    for (const c of created) removeProjectWorktree(c.repoPath, c.worktreePath)
     await reportCommandResult(port, messageId, false, `❌ 创建失败已回滚: ${e?.message || e}`, chatId)
   }
 }
 
-function continueAfterSetup(draft: ProjectNewDraft): ProjectNewDraft {
-  if (draft.pendingName) {
-    draft.name = draft.pendingName
-    draft.pendingName = undefined
-    draft.step = "repo"
-  } else {
-    draft.step = "name"
+async function handleSetupCommand(
+  port: number,
+  messageId: string,
+  chatId: string | undefined,
+  args: string[],
+): Promise<void> {
+  ensureStore()
+  if (!chatId) {
+    await reportCommandResult(port, messageId, false, "❌ 无法解析会话", chatId)
+    return
   }
-  return draft
+  const mode = (args[0] || "").toLowerCase()
+  if (!mode) {
+    clearProjectNewDraft(chatId)
+    await replySetupHub(port, messageId, chatId)
+    return
+  }
+  if (mode === "worktree") {
+    const draft: ProjectNewDraft = {
+      chatKey: chatId,
+      step: "setup_worktree",
+      setupOnly: true,
+      returnToSetup: true,
+      updatedAt: Date.now(),
+    }
+    await promptNewStep(port, messageId, chatId, draft)
+    return
+  }
+  if (mode === "add") {
+    const flag = (args[1] || "").toLowerCase()
+    const cur = getProjectNewDraft(chatId)
+    if (flag === "--skip-test" && cur?.step === "setup_add_test") {
+      cur.testBranch = undefined
+      cur.step = "setup_add_dev"
+      await promptNewStep(port, messageId, chatId, cur)
+      return
+    }
+    if (flag === "--skip-dev" && cur?.step === "setup_add_dev") {
+      cur.developBranch = undefined
+      upsertRepoProfiles([{
+        path: cur.repoPath!,
+        baseBranch: cur.baseBranch || "main",
+        testBranch: cur.testBranch,
+        developBranch: undefined,
+      }])
+      clearProjectNewDraft(chatId)
+      await reportCommandResult(port, messageId, true, `✅ 已添加主仓 ${path.basename(cur.repoPath!)}`, chatId)
+      await replySetupHub(port, messageId, chatId)
+      return
+    }
+    // 优先发飞书表单（四项一次填完）；被拒/微信降级走分步问答
+    try {
+      const r = await httpPost(`http://127.0.0.1:${port}/api/project-setup-form`, {
+        message_id: messageId,
+        session_key: chatId,
+      }) as { ok?: boolean }
+      if (r?.ok) return
+    } catch { /* fall through to Q&A */ }
+    const draft: ProjectNewDraft = {
+      chatKey: chatId,
+      step: "setup_add_path",
+      setupOnly: true,
+      returnToSetup: true,
+      updatedAt: Date.now(),
+    }
+    await promptNewStep(port, messageId, chatId, draft)
+    return
+  }
+  if (mode === "del" || mode === "delete" || mode === "rm") {
+    const n = Number.parseInt(args[1] || "", 10)
+    if (!Number.isInteger(n) || n < 1) {
+      await reportCommandResult(port, messageId, false, "用法：/p setup del <序号>", chatId)
+      return
+    }
+    const removed = removeRepoProfile(n)
+    if (!removed) {
+      await reportCommandResult(port, messageId, false, `❌ 序号无效：${n}`, chatId)
+      return
+    }
+    await reportCommandResult(
+      port,
+      messageId,
+      true,
+      `✅ 已删除 #${n} ${path.basename(removed.path)}`,
+      chatId,
+      [{ label: "返回 setup", cmd: "/p setup" }],
+    )
+    return
+  }
+  if (mode === "gitlab") {
+    const draft: ProjectNewDraft = {
+      chatKey: chatId,
+      step: "setup_gitlab_token",
+      setupOnly: true,
+      returnToSetup: true,
+      updatedAt: Date.now(),
+    }
+    await promptNewStep(port, messageId, chatId, draft)
+    return
+  }
+  await reportCommandResult(port, messageId, false, "用法：/p setup（总览）· /p setup worktree（目录）· /p setup add（加主仓）· /p setup gitlab · /p setup del <序号>", chatId)
+}
+
+function maskToken(token: string): string {
+  const t = token.trim()
+  if (!t) return "（未设置）"
+  return t.length <= 8 ? `${t.slice(0, 2)}***` : `${t.slice(0, 6)}***${t.slice(-3)}`
+}
+
+export async function replySetupHub(port: number, messageId: string, chatId: string): Promise<void> {
+  const cfg = getConfig()
+  const profiles = getRepoProfiles(cfg)
+  const wt = cfg.worktreeRoot?.trim() ? path.normalize(cfg.worktreeRoot.trim()) : ""
+  const list = profiles.length
+    ? profiles.map((p, i) => {
+      const name = path.basename(p.path)
+      const branches = [p.baseBranch, p.testBranch, p.developBranch].filter(Boolean).join(" · ")
+      return `#${i + 1} ${name} · ${branches}\n   ${p.path}`
+    }).join("\n")
+    : "（暂无）"
+  const btns: CommandButton[] = [
+    { label: "设置工作区目录", cmd: "/p setup worktree" },
+    { label: "添加主仓", cmd: "/p setup add" },
+    { label: "设置 GitLab", cmd: "/p setup gitlab" },
+  ]
+  for (let i = 0; i < Math.min(profiles.length, 8); i++) {
+    btns.push({
+      label: `删除 #${i + 1} ${path.basename(profiles[i].path)}`,
+      cmd: `/p setup del ${i + 1}`,
+    })
+  }
+  await reportCommandResult(
+    port,
+    messageId,
+    true,
+    [
+      "⚙️ 项目工作区",
+      "",
+      `工作区目录：${wt || "（未设置）"}`,
+      "",
+      "主仓：",
+      list,
+      "",
+      `GitLab Token：${maskToken(cfg.gitlabToken || "")}`,
+      `GitLab Host：${cfg.gitlabHost?.trim() || "（默认从 origin 推断）"}`,
+    ].join("\n"),
+    chatId,
+    btns,
+  )
 }
 
 async function promptNewStep(
@@ -268,123 +451,84 @@ async function promptNewStep(
       messageId,
       true,
       [
-        "⚙️ 项目工作区尚未配置，先走飞书交互设置",
+        "⚙️ 设置工作区目录",
         "",
-        "① 请直接回复 **worktree 根目录** 的绝对路径",
+        "请直接回复绝对路径",
         "例：`D:\\claw-projects`",
-        "",
-        "取消：/p new --cancel",
       ].join("\n"),
       chatId,
-      [{ label: "取消", cmd: "/p new --cancel" }],
+      [{ label: "返回 setup", cmd: "/p setup" }, { label: "取消", cmd: "/p new --cancel" }],
     )
     return
   }
 
-  if (draft.step === "setup_repo") {
-    const roots = cfg.repoRoots || []
-    const list = roots.length ? roots.map((r, i) => `#${i + 1}\t${r}`).join("\n") : "（暂无）"
-    const btns: CommandButton[] = []
-    if (roots.length > 0) {
-      btns.push({ label: "完成，继续", cmd: "/p new --setup-done" })
-    }
-    btns.push({ label: "取消", cmd: "/p new --cancel" })
+  if (draft.step === "setup_add_path") {
     await reportCommandResult(
       port,
       messageId,
       true,
-      [
-        "⚙️ ② 请直接回复 **主仓本地路径**（须为 git 根目录）",
-        "例：`D:\\repos\\foo`",
-        "",
-        `已登记主仓：\n${list}`,
-        roots.length ? "\n可继续回复路径追加；或点「完成，继续」" : "",
-      ].filter(Boolean).join("\n"),
+      "➕ 添加主仓 · 请回复主仓绝对路径（git 根目录）",
       chatId,
-      btns,
+      [{ label: "返回 setup", cmd: "/p setup" }, { label: "取消", cmd: "/p new --cancel" }],
+    )
+    return
+  }
+  if (draft.step === "setup_add_base") {
+    await reportCommandResult(
+      port,
+      messageId,
+      true,
+      `➕ 主仓 ${draft.repoPath}\n请回复 **生产基线分支**（必填）`,
+      chatId,
+      [{ label: "返回 setup", cmd: "/p setup" }, { label: "取消", cmd: "/p new --cancel" }],
+    )
+    return
+  }
+  if (draft.step === "setup_add_test") {
+    await reportCommandResult(
+      port,
+      messageId,
+      true,
+      "➕ 请回复 **测试分支**（可空，回 `-` 跳过）",
+      chatId,
+      [{ label: "跳过", cmd: "/p setup add --skip-test" }, { label: "返回 setup", cmd: "/p setup" }],
+    )
+    return
+  }
+  if (draft.step === "setup_add_dev") {
+    await reportCommandResult(
+      port,
+      messageId,
+      true,
+      "➕ 请回复 **开发分支**（可空，回 `-` 跳过）",
+      chatId,
+      [{ label: "跳过并完成", cmd: "/p setup add --skip-dev" }, { label: "返回 setup", cmd: "/p setup" }],
+    )
+    return
+  }
+  if (draft.step === "setup_gitlab_token") {
+    await reportCommandResult(
+      port,
+      messageId,
+      true,
+      `🔑 请回复 **GitLab Token**（当前 ${maskToken(cfg.gitlabToken || "")}；回 \`-\` 保持不变）`,
+      chatId,
+      [{ label: "返回 setup", cmd: "/p setup" }],
+    )
+    return
+  }
+  if (draft.step === "setup_gitlab_host") {
+    await reportCommandResult(
+      port,
+      messageId,
+      true,
+      `🌐 请回复 **GitLab Host**（当前 ${cfg.gitlabHost?.trim() || "默认从 origin 推断"}；回 \`-\` 保持不变，回 \`clear\` 清空）`,
+      chatId,
+      [{ label: "返回 setup", cmd: "/p setup" }],
     )
     return
   }
 
-  if (draft.step === "name") {
-    await reportCommandResult(
-      port,
-      messageId,
-      true,
-      "📦 创建项目 · 请直接回复**项目名称**（下一条消息）\n取消：/p new --cancel",
-      chatId,
-      [{ label: "取消 /p new --cancel", cmd: "/p new --cancel" }],
-    )
-    return
-  }
-
-  if (draft.step === "repo") {
-    const roots = cfg.repoRoots || []
-    if (roots.length === 0) {
-      draft.step = "setup_repo"
-      await promptNewStep(port, messageId, chatId, draft)
-      return
-    }
-    const lines = roots.map((r, i) => `#${i + 1}\t${r}`).join("\n")
-    const btns: CommandButton[] = roots.slice(0, 10).map((r, i) => ({
-      label: `#${i + 1} ${path.basename(r)}`,
-      cmd: `/p new --repo ${i + 1}`,
-    }))
-    btns.push({ label: "取消", cmd: "/p new --cancel" })
-    await reportCommandResult(
-      port,
-      messageId,
-      true,
-      `📦 项目「${draft.name}」· 选择主仓\n\n${lines}`,
-      chatId,
-      btns,
-    )
-    return
-  }
-
-  if (draft.step === "base") {
-    const btns: CommandButton[] = ["main", "master", "develop", "release"].map((b) => ({
-      label: b,
-      cmd: `/p new --base ${b}`,
-    }))
-    btns.push({ label: "取消", cmd: "/p new --cancel" })
-    await reportCommandResult(
-      port,
-      messageId,
-      true,
-      `📦 项目「${draft.name}」· 选择基线分支\n也可直接回复分支名（下一条消息）`,
-      chatId,
-      btns,
-    )
-    return
-  }
-
-  if (draft.step === "branch") {
-    const suggested = `feature/${slugify(draft.name || "task")}`
-    await reportCommandResult(
-      port,
-      messageId,
-      true,
-      `📦 项目「${draft.name}」· feature 分支\n建议：\`${suggested}\`\n点按钮或直接回复自定义分支名`,
-      chatId,
-      [
-        { label: suggested, cmd: `/p new --branch ${suggested}` },
-        { label: "取消", cmd: "/p new --cancel" },
-      ],
-    )
-    return
-  }
-
-  if (draft.step === "goal") {
-    await reportCommandResult(
-      port,
-      messageId,
-      true,
-      `📦 项目「${draft.name}」· 请直接回复**目标描述**（下一条消息）\n取消：/p new --cancel`,
-      chatId,
-      [{ label: "取消", cmd: "/p new --cancel" }],
-    )
-  }
 }
 
 /** 向导进行中时，把用户下一条非指令文本填入当前步骤 */
@@ -405,72 +549,81 @@ export async function fillProjectNewFromText(
       await reportCommandResult(port, messageId, false, "❌ 请回复绝对路径，例如 D:\\claw-projects", chatId)
       return true
     }
+    // 压平 D:\\foo 这类双反斜杠输入，避免脏路径进 config
+    const dir = path.normalize(value)
     try {
-      if (!fs.existsSync(value)) fs.mkdirSync(value, { recursive: true })
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
     } catch (e: any) {
       await reportCommandResult(port, messageId, false, `❌ 无法创建目录: ${e?.message || e}`, chatId)
       return true
     }
-    saveConfig({ worktreeRoot: value })
-    draft.step = "setup_repo"
-    await promptNewStep(port, messageId, chatId, draft)
+    saveConfig({ worktreeRoot: dir })
+    clearProjectNewDraft(chatId)
+    await reportCommandResult(port, messageId, true, `✅ 工作区目录已设为：${dir}`, chatId)
+    await replySetupHub(port, messageId, chatId)
     return true
   }
 
-  if (draft.step === "setup_repo") {
+  if (draft.step === "setup_add_path") {
     if (!path.isAbsolute(value)) {
-      await reportCommandResult(port, messageId, false, "❌ 请回复主仓绝对路径", chatId)
+      await reportCommandResult(port, messageId, false, "❌ 请回复绝对路径", chatId)
       return true
     }
     if (!isGitRepoRoot(value)) {
       await reportCommandResult(port, messageId, false, `❌ 不是有效 git 根目录: ${value}`, chatId)
       return true
     }
-    const cfg = getConfig()
-    const roots = [...(cfg.repoRoots || [])]
-    const resolved = path.resolve(value)
-    if (!roots.some((r) => path.resolve(r) === resolved)) {
-      roots.push(resolved)
-      saveConfig({ repoRoots: roots })
-    }
+    draft.repoPath = path.resolve(value)
+    draft.step = "setup_add_base"
+    await promptNewStep(port, messageId, chatId, draft)
+    return true
+  }
+  if (draft.step === "setup_add_base") {
+    draft.baseBranch = value
+    draft.step = "setup_add_test"
+    await promptNewStep(port, messageId, chatId, draft)
+    return true
+  }
+  if (draft.step === "setup_add_test") {
+    draft.testBranch = value === "-" ? undefined : value
+    draft.step = "setup_add_dev"
+    await promptNewStep(port, messageId, chatId, draft)
+    return true
+  }
+  if (draft.step === "setup_gitlab_token") {
+    if (value !== "-") saveConfig({ gitlabToken: value })
+    draft.step = "setup_gitlab_host"
+    await promptNewStep(port, messageId, chatId, draft)
+    return true
+  }
+  if (draft.step === "setup_gitlab_host") {
+    if (value === "clear") saveConfig({ gitlabHost: "" })
+    else if (value !== "-") saveConfig({ gitlabHost: value })
+    clearProjectNewDraft(chatId)
+    await reportCommandResult(port, messageId, true, "✅ GitLab 配置已更新", chatId)
+    await replySetupHub(port, messageId, chatId)
+    return true
+  }
+  if (draft.step === "setup_add_dev") {
+    draft.developBranch = value === "-" ? undefined : value
+    upsertRepoProfiles([{
+      path: draft.repoPath!,
+      baseBranch: draft.baseBranch || "main",
+      testBranch: draft.testBranch,
+      developBranch: draft.developBranch,
+    }])
+    clearProjectNewDraft(chatId)
     await reportCommandResult(
       port,
       messageId,
       true,
-      `✅ 已登记主仓：${resolved}\n可继续回复路径追加，或点「完成，继续」`,
+      `✅ 已添加主仓 ${path.basename(draft.repoPath!)} · ${draft.baseBranch}`,
       chatId,
-      [
-        { label: "完成，继续", cmd: "/p new --setup-done" },
-        { label: "取消", cmd: "/p new --cancel" },
-      ],
     )
-    saveProjectNewDraft(draft)
+    await replySetupHub(port, messageId, chatId)
     return true
   }
 
-  if (draft.step === "name") {
-    draft.name = value
-    draft.step = "repo"
-    await promptNewStep(port, messageId, chatId, draft)
-    return true
-  }
-  if (draft.step === "base") {
-    draft.baseBranch = value
-    draft.step = "branch"
-    await promptNewStep(port, messageId, chatId, draft)
-    return true
-  }
-  if (draft.step === "branch") {
-    draft.featureBranch = value
-    draft.step = "goal"
-    await promptNewStep(port, messageId, chatId, draft)
-    return true
-  }
-  if (draft.step === "goal") {
-    draft.goal = value
-    await finalizeNewProject(port, messageId, chatId, draft)
-    return true
-  }
   return true
 }
 
@@ -496,17 +649,14 @@ async function handleNewCommand(
       await reportCommandResult(port, messageId, false, "❌ 一行创建参数无效；也可用 /p new 走交互", chatId)
       return
     }
-    const draft: ProjectNewDraft = {
+    await finalizeNewProject(port, messageId, chatId, {
       chatKey,
-      step: "goal",
       name,
       repoPath: roots[repoIdx - 1],
       baseBranch,
       featureBranch,
       goal,
-      updatedAt: Date.now(),
-    }
-    await finalizeNewProject(port, messageId, chatId, draft)
+    })
     return
   }
 
@@ -518,91 +668,6 @@ async function handleNewCommand(
     return
   }
 
-  if (flag === "--setup-done") {
-    const draft = chatKey ? getProjectNewDraft(chatKey) : undefined
-    if (!draft) {
-      await reportCommandResult(port, messageId, false, "❌ 没有进行中的向导", chatId)
-      return
-    }
-    const roots = getConfig().repoRoots || []
-    if (!roots.length) {
-      await reportCommandResult(port, messageId, false, "❌ 至少登记一个主仓", chatId)
-      return
-    }
-    if (!getConfig().worktreeRoot?.trim()) {
-      draft.step = "setup_worktree"
-      await promptNewStep(port, messageId, chatId, draft)
-      return
-    }
-    if (draft.setupOnly) {
-      clearProjectNewDraft(chatKey)
-      const cfg = getConfig()
-      await reportCommandResult(
-        port,
-        messageId,
-        true,
-        `✅ 项目工作区已配置\nworktree：${cfg.worktreeRoot}\n主仓：\n${(cfg.repoRoots || []).map((r, i) => `#${i + 1}\t${r}`).join("\n")}\n\n可以 /p new 了`,
-        chatId,
-        [{ label: "创建项目 /p new", cmd: "/p new" }],
-      )
-      return
-    }
-    await promptNewStep(port, messageId, chatId, continueAfterSetup(draft))
-    return
-  }
-
-  if (flag === "--repo") {
-    const draft = chatKey ? getProjectNewDraft(chatKey) : undefined
-    if (!draft?.name) {
-      await reportCommandResult(port, messageId, false, "❌ 没有进行中的创建，先 /p new", chatId)
-      return
-    }
-    const repoIdx = Number.parseInt(parts[3], 10)
-    const roots = cfg.repoRoots || []
-    if (!Number.isInteger(repoIdx) || repoIdx < 1 || repoIdx > roots.length) {
-      await reportCommandResult(port, messageId, false, "❌ 主仓序号无效", chatId)
-      return
-    }
-    draft.repoPath = roots[repoIdx - 1]
-    draft.step = "base"
-    await promptNewStep(port, messageId, chatId, draft)
-    return
-  }
-
-  if (flag === "--base") {
-    const draft = chatKey ? getProjectNewDraft(chatKey) : undefined
-    if (!draft?.name || !draft.repoPath) {
-      await reportCommandResult(port, messageId, false, "❌ 没有进行中的创建，先 /p new", chatId)
-      return
-    }
-    const base = parts[3]
-    if (!base) {
-      await reportCommandResult(port, messageId, false, "❌ 缺少基线分支", chatId)
-      return
-    }
-    draft.baseBranch = base
-    draft.step = "branch"
-    await promptNewStep(port, messageId, chatId, draft)
-    return
-  }
-
-  if (flag === "--branch") {
-    const draft = chatKey ? getProjectNewDraft(chatKey) : undefined
-    if (!draft?.name || !draft.repoPath || !draft.baseBranch) {
-      await reportCommandResult(port, messageId, false, "❌ 没有进行中的创建，先 /p new", chatId)
-      return
-    }
-    const branch = parts.slice(3).join(" ").trim()
-    if (!branch) {
-      await reportCommandResult(port, messageId, false, "❌ 缺少 feature 分支名", chatId)
-      return
-    }
-    draft.featureBranch = branch
-    draft.step = "goal"
-    await promptNewStep(port, messageId, chatId, draft)
-    return
-  }
-
   // /p new  或  /p new 名字 → 大表单（名字可作表单预填提示，仍发空表单由用户改）
   if (!chatKey) {
     await reportCommandResult(port, messageId, false, "❌ 无法解析会话", chatId)
@@ -611,12 +676,16 @@ async function handleNewCommand(
 
   // 若带齐一行参数仍走旧路径；否则发大表单
   try {
-    await httpPost(`http://127.0.0.1:${port}/api/project-new-form`, {
+    const r = await httpPost(`http://127.0.0.1:${port}/api/project-new-form`, {
       message_id: messageId,
       session_key: chatId,
+      repo_profiles: getRepoProfiles(cfg),
       repo_roots: cfg.repoRoots || [],
       worktree_root: cfg.worktreeRoot || "",
-    })
+    }) as { ok?: boolean; error?: string }
+    if (!r?.ok) {
+      await reportCommandResult(port, messageId, false, `❌ 创建表单发送失败（飞书卡片被拒）。可先 /p setup 检查主仓与 worktree，或用一行命令：\n/p new <名> <主仓路径> <基线> <feature> <目标…>`, chatId)
+    }
   } catch (e: any) {
     await reportCommandResult(port, messageId, false, `❌ 打不开创建表单: ${e?.message || e}`, chatId)
   }
@@ -637,12 +706,12 @@ export async function handleProjectNewSubmit(
     storyUrl?: string
     productDocUrl?: string
     techDocUrl?: string
+    repos?: { repoPath: string; baseBranch: string; testBranch?: string; developBranch?: string }[]
   },
 ): Promise<void> {
   ensureStore()
   await finalizeNewProject(port, messageId, chatId, {
     chatKey: chatId,
-    step: "goal",
     name: fields.name,
     goal: fields.goal,
     repoPath: fields.repoPath,
@@ -652,8 +721,201 @@ export async function handleProjectNewSubmit(
     productDocUrl: fields.productDocUrl || undefined,
     techDocUrl: fields.techDocUrl || undefined,
     worktreeRootOverride: fields.worktreeRoot,
-    updatedAt: Date.now(),
+    repos: fields.repos,
   })
+}
+
+
+async function handleShipCommand(
+  port: number,
+  messageId: string,
+  chatId: string | undefined,
+  args: string[],
+): Promise<void> {
+  ensureStore()
+  const p = getCurrentProject()
+  if (!p) {
+    await reportCommandResult(port, messageId, false, "❌ 没有当前项目，先 /p new 或 /p use", chatId)
+    return
+  }
+  const primary = p.repos?.[0]
+  const developBranch = primary?.developBranch?.trim()
+  const testBranch = primary?.testBranch?.trim()
+  const mode = (args[0] || "").toLowerCase()
+
+  if (!mode) {
+    const btns: { label: string; cmd: string }[] = []
+    if (developBranch) btns.push({ label: `部署到开发 (${developBranch})`, cmd: "/p ship --to develop" })
+    if (testBranch) btns.push({ label: `开 MR → 测试 (${testBranch})`, cmd: "/p ship --mr test" })
+    if (!btns.length) {
+      await reportCommandResult(
+        port,
+        messageId,
+        false,
+        [
+          "❌ 未配置开发/测试分支，不能 ship 到生产基线。",
+          "",
+          `生产基线(只读起点): ${primary?.baseBranch || p.baseBranch}`,
+          "请补齐：/p ship --set develop <名> 或 /p ship --set test <名>",
+          "也可在项目会话里让 AI 用 project_update 写入。",
+        ].join("\n"),
+        chatId,
+        [{ label: "查看项目 /p status", cmd: "/p status" }],
+      )
+      return
+    }
+    await reportCommandResult(
+      port,
+      messageId,
+      true,
+      [
+        "🚢 选择交付方式（禁止默认打生产基线）",
+        `feature: ${p.featureBranch}`,
+        `生产基线: ${primary?.baseBranch || p.baseBranch}（不可作默认目标）`,
+        developBranch ? `开发: ${developBranch}` : "开发: （未配置）",
+        testBranch ? `测试: ${testBranch}` : "测试: （未配置）",
+      ].join("\n"),
+      chatId,
+      btns,
+    )
+    return
+  }
+
+  if (mode === "--set" || mode === "set") {
+    const kind = (args[1] || "").toLowerCase()
+    const name = (args[2] || "").trim()
+    if (!name || (kind !== "develop" && kind !== "dev" && kind !== "test")) {
+      await reportCommandResult(port, messageId, false, "用法：/p ship --set develop <分支> 或 /p ship --set test <分支>", chatId)
+      return
+    }
+    const repos = [...(p.repos || [{
+      repoPath: p.repoPath,
+      baseBranch: p.baseBranch,
+      worktreePath: p.worktreePath,
+    }])]
+    if (kind === "test") repos[0].testBranch = name
+    else repos[0].developBranch = name
+    p.repos = repos
+    const { saveProject } = await import("../src/shared/project-store.js")
+    saveProject(p)
+    upsertRepoProfiles([{
+      path: repos[0].repoPath,
+      baseBranch: repos[0].baseBranch,
+      testBranch: repos[0].testBranch,
+      developBranch: repos[0].developBranch,
+    }])
+    await reportCommandResult(
+      port,
+      messageId,
+      true,
+      `✅ 已写入 ${kind === "test" ? "testBranch" : "developBranch"}=${name}\n可再 /p ship`,
+      chatId,
+      [{ label: "继续 ship /p ship", cmd: "/p ship" }],
+    )
+    return
+  }
+
+  if ((mode === "--to" || mode === "to") && (args[1] || "").toLowerCase() === "develop") {
+    if (!developBranch) {
+      await reportCommandResult(port, messageId, false, "❌ 未配置 developBranch，先 /p ship --set develop <名>", chatId)
+      return
+    }
+    await runShipDeployDevelop(port, messageId, chatId, p, developBranch)
+    return
+  }
+
+  if ((mode === "--mr" || mode === "mr") && (args[1] || "").toLowerCase() === "test") {
+    if (!testBranch) {
+      await reportCommandResult(port, messageId, false, "❌ 未配置 testBranch，先 /p ship --set test <名>", chatId)
+      return
+    }
+    await runShipMrTest(port, messageId, chatId, p, testBranch)
+    return
+  }
+
+  await reportCommandResult(port, messageId, false, "用法：/p ship | /p ship --to develop | /p ship --mr test | /p ship --set develop|test <名>", chatId)
+}
+
+async function runShipDeployDevelop(
+  port: number,
+  messageId: string,
+  chatId: string | undefined,
+  project: Project,
+  developBranch: string,
+): Promise<void> {
+  const started = startAction(project.id, "ship")
+  if (!started.ok) {
+    await reportCommandResult(port, messageId, false, `❌ ${started.error}`, chatId)
+    return
+  }
+  const { action } = started
+  const { spawnSync } = await import("node:child_process")
+  const pushFeat = spawnSync("git", ["push", "-u", "origin", `HEAD:${project.featureBranch}`], {
+    cwd: project.worktreePath, encoding: "utf-8", windowsHide: true,
+  })
+  if ((pushFeat.status ?? 1) !== 0) {
+    const err = (pushFeat.stderr || pushFeat.stdout || "push feature 失败").toString()
+    updateAction(project.id, action.id, { status: "failed", error: err })
+    await reportCommandResult(port, messageId, false, `❌ 推送 feature 失败: ${err}`, chatId)
+    return
+  }
+  const pushDev = spawnSync("git", ["push", "origin", `HEAD:${developBranch}`], {
+    cwd: project.worktreePath, encoding: "utf-8", windowsHide: true,
+  })
+  if ((pushDev.status ?? 1) !== 0) {
+    const err = (pushDev.stderr || pushDev.stdout || "push develop 失败").toString()
+    updateAction(project.id, action.id, { status: "failed", error: err })
+    await reportCommandResult(port, messageId, false, `❌ 部署到开发分支失败: ${err}`, chatId)
+    return
+  }
+  updateAction(project.id, action.id, { status: "accepted", summary: `已推送到开发分支 ${developBranch}` })
+  const latest = getProject(project.id)!
+  const prompt = buildActionPrompt(latest, action.id, "ship")
+  const notify = chatId || project.notifyChatId || ""
+  if (notify) {
+    await enqueueToSession(port, projectSessionKey(notify, project.id),
+      prompt + `\n\n宿主已将 HEAD 推送到开发分支 ${developBranch}。请写 artifact 摘要登记完成。`)
+  }
+  await reportCommandResult(port, messageId, true, `✅ 已部署到开发分支 ${developBranch}\n并启动 ship 会话做摘要确认`, chatId)
+}
+
+async function runShipMrTest(
+  port: number,
+  messageId: string,
+  chatId: string | undefined,
+  project: Project,
+  testBranch: string,
+): Promise<void> {
+  const started = startAction(project.id, "ship")
+  if (!started.ok) {
+    await reportCommandResult(port, messageId, false, `❌ ${started.error}`, chatId)
+    return
+  }
+  const { action } = started
+  const cfg = getConfig()
+  const mr = await pushAndCreateMergeRequest({
+    cwd: project.worktreePath,
+    token: cfg.gitlabToken || "",
+    host: cfg.gitlabHost || undefined,
+    title: `Draft: ${project.name}`,
+    sourceBranch: project.featureBranch,
+    targetBranch: testBranch,
+    description: project.goal,
+  })
+  if (!mr.ok) {
+    updateAction(project.id, action.id, { status: "failed", error: mr.error })
+    await reportCommandResult(port, messageId, false, `❌ ship MR→测试失败: ${mr.error}`, chatId)
+    return
+  }
+  updateAction(project.id, action.id, { mrUrl: mr.mrUrl, status: "accepted", summary: `MR → ${testBranch}` })
+  const latest = getProject(project.id)!
+  const prompt = buildActionPrompt(latest, action.id, "ship")
+  const notify = chatId || project.notifyChatId || ""
+  if (notify) {
+    await enqueueToSession(port, projectSessionKey(notify, project.id),
+      prompt + `\n\n宿主已创建指向测试分支 ${testBranch} 的 MR: ${mr.mrUrl}\n请写 artifact 摘要登记完成（project_action_done 带 mr_url）。`)
+  }
+  await reportCommandResult(port, messageId, true, `✅ 已开 MR → 测试分支 ${testBranch}\n${mr.mrUrl}\n并启动 ship 会话`, chatId)
 }
 
 async function runAction(
@@ -687,44 +949,162 @@ async function runAction(
 
   const prompt = buildActionPrompt(project, action.id, type)
 
-  if (type === "ship") {
-    // Host-assisted ship: push+MR first, then still launch agent for summary/HITL if needed.
-    const cfg = getConfig()
-    const mr = await pushAndCreateMergeRequest({
-      cwd: project.worktreePath,
-      token: cfg.gitlabToken || "",
-      host: cfg.gitlabHost || undefined,
-      title: `Draft: ${project.name}`,
-      sourceBranch: project.featureBranch,
-      targetBranch: project.baseBranch,
-      description: project.goal,
-    })
-    if (!mr.ok) {
-      updateAction(project.id, action.id, { status: "failed", error: mr.error })
-      await reportCommandResult(port, messageId, false, `❌ ship 失败: ${mr.error}`, chatId)
-      return
-    }
-    updateAction(project.id, action.id, { mrUrl: mr.mrUrl })
-  }
-
-  const launch = await launchProjectAgent({
-    projectId: project.id,
-    projectName: project.name,
-    prompt,
-    workingDirectory: project.worktreePath,
-    notifyChatId: chatId,
-  })
-  if (!launch.ok) {
-    updateAction(project.id, action.id, { status: "failed", error: launch.error })
-    await reportCommandResult(port, messageId, false, `❌ 拉起项目会话失败: ${launch.error}`, chatId)
+  // 任务入队而非直塞启动提示词：Agent 崩溃时消息自动重投，节点不丢
+  const enq = await enqueueToSession(port, sessionKey, prompt)
+  if (!enq.ok) {
+    updateAction(project.id, action.id, { status: "failed", error: enq.error })
+    await reportCommandResult(port, messageId, false, `❌ 节点任务入队失败: ${enq.error}`, chatId)
     return
   }
+  await syncActiveSession(port, chatId, sessionKey)
   await reportCommandResult(
     port,
     messageId,
     true,
-    `🚀 已启动 ${type}\n项目: ${project.name}\nAction: ${action.id}\n会话: ${sessionKey}${type === "ship" && getProject(project.id)?.actions.find((a) => a.id === action.id)?.mrUrl ? `\nMR: ${getProject(project.id)!.actions.find((a) => a.id === action.id)!.mrUrl}` : ""}`,
+    `🚀 已启动${projectNodeLabel(type)}\n项目：${project.name}${type === "ship" && getProject(project.id)?.actions.find((a) => a.id === action.id)?.mrUrl ? `\nMR：${getProject(project.id)!.actions.find((a) => a.id === action.id)!.mrUrl}` : ""}`,
     chatId,
+  )
+}
+
+async function handleDeleteProjectCommand(
+  port: number,
+  messageId: string,
+  chatId: string | undefined,
+  args: string[],
+): Promise<void> {
+  ensureStore()
+  const token = args.filter((a) => a !== "--yes")[0]
+  const confirmed = args.includes("--yes")
+
+  if (!token) {
+    const list = listProjects()
+    if (!list.length) {
+      await reportCommandResult(port, messageId, true, "📭 暂无项目", chatId)
+      return
+    }
+    const lines = list.map((p, i) => `#${i + 1} ${p.name} · ${p.featureBranch}`)
+    const btns: CommandButton[] = list.slice(0, 10).map((p, i) => ({
+      label: `删除 #${i + 1} ${p.name}`,
+      cmd: `/p del ${i + 1}`,
+    }))
+    btns.push({ label: "返回菜单 /p", cmd: "/p" })
+    await reportCommandResult(port, messageId, true, `选择要删除的项目：\n${lines.join("\n")}`, chatId, btns)
+    return
+  }
+
+  const target = resolveProjectRef(token)
+  if (!target) {
+    await reportCommandResult(port, messageId, false, `❌ 未找到项目：${token}`, chatId)
+    return
+  }
+  const repos = target.repos?.length
+    ? target.repos
+    : [{ repoPath: target.repoPath, baseBranch: target.baseBranch, worktreePath: target.worktreePath }]
+
+  if (!confirmed) {
+    await reportCommandResult(
+      port,
+      messageId,
+      true,
+      [
+        `⚠️ 确认删除项目「${target.name}」？`,
+        `feature：${target.featureBranch}`,
+        ...repos.map((r) => `📁 ${r.worktreePath}`),
+        "",
+        "将移除以上 worktree 目录（含未提交改动）；主仓与远程分支不受影响。",
+      ].join("\n"),
+      chatId,
+      [
+        { label: `确认删除 ${target.name}`, cmd: `/p del ${target.id} --yes` },
+        { label: "取消", cmd: "/p" },
+      ],
+    )
+    return
+  }
+
+  const wasCurrent = getCurrentProject()?.id === target.id
+  executeProjectDelete(target.id)
+  if (wasCurrent && chatId) await syncActiveSession(port, chatId, chatId)
+  await reportCommandResult(
+    port,
+    messageId,
+    true,
+    `🗑 已删除项目「${target.name}」并移除 worktree`,
+    chatId,
+    [{ label: "项目菜单 /p", cmd: "/p" }],
+  )
+}
+
+/** 删除项目：移除全部 worktree + 删记录（MCP project_delete 与 /p del 共用）。
+ * 历史同名项目可能共享同一 worktree 目录：被其他项目引用的目录只删记录不删目录。 */
+export function executeProjectDelete(projectId: string): { ok: boolean; name?: string } {
+  ensureStore()
+  const target = getProject(projectId)
+  if (!target) return { ok: false }
+  const othersWt = new Set<string>()
+  for (const p of listProjects()) {
+    if (p.id === target.id) continue
+    const wts = p.repos?.length ? p.repos.map((r) => r.worktreePath) : [p.worktreePath]
+    for (const wt of wts) { if (wt) othersWt.add(path.resolve(wt).toLowerCase()) }
+  }
+  const repos = target.repos?.length
+    ? target.repos
+    : [{ repoPath: target.repoPath, baseBranch: target.baseBranch, worktreePath: target.worktreePath }]
+  for (const r of repos) {
+    if (!r.worktreePath) continue
+    if (othersWt.has(path.resolve(r.worktreePath).toLowerCase())) continue
+    try { removeProjectWorktree(r.repoPath, r.worktreePath) } catch { /* 尽力清理 */ }
+  }
+  deleteProject(target.id)
+  return { ok: true, name: target.name }
+}
+
+/** 项目二级菜单：列表 + 快速进入，不自动进当前项目 */
+async function replyProjectMenu(port: number, messageId: string, chatId?: string): Promise<void> {
+  const list = listProjects()
+  const cur = getCurrentProject()
+  if (list.length === 0) {
+    await reportCommandResult(port, messageId, true, `${projectHelpText()}\n\n📭 暂无项目`, chatId, [
+      { label: "新建项目 /p new", cmd: "/p new" },
+      { label: "配置工作区 /p setup", cmd: "/p setup" },
+    ], { cardTitle: { title: "项目", subtitle: "菜单" } })
+    return
+  }
+  const statusLabel: Record<string, string> = { active: "进行中", paused: "已暂停", done: "已完成" }
+  const lines = list.map((p, i) => {
+    const mark = cur?.id === p.id ? "（当前）" : ""
+    const st = statusLabel[p.status] || p.status
+    return `#${i + 1}  ${p.name}${mark} · ${st} · ${p.featureBranch}`
+  })
+  const head = cur
+    ? [
+      "📦 项目菜单",
+      `当前选中：「${cur.name}」——尚未进入协作，点下方「进入」开始`,
+      "",
+      lines.join("\n"),
+    ].join("\n")
+    : ["📦 项目菜单", "", lines.join("\n")].join("\n")
+  const btns: CommandButton[] = list.slice(0, 10).map((p, i) => ({
+    label: `进入 ${p.name}`,
+    cmd: `/p use ${i + 1}`,
+    section: "进入项目",
+  }))
+  if (cur) {
+    btns.push({ label: "项目详情 /p status", cmd: "/p status", section: "其他" })
+    btns.push({ label: "退出项目 /p leave", cmd: "/p leave", section: "其他" })
+  }
+  btns.push({ label: "新建项目 /p new", cmd: "/p new", section: "其他" })
+  btns.push({ label: "删除项目 /p del", cmd: "/p del", section: "其他" })
+  btns.push({ label: "配置工作区 /p setup", cmd: "/p setup", section: "其他" })
+  btns.push({ label: "帮助 /p help", cmd: "/p help", section: "其他" })
+  await reportCommandResult(
+    port,
+    messageId,
+    true,
+    `${head}\n\n💡 点「进入」才会切换到该项目；直接发消息不会自动进入`,
+    chatId,
+    btns,
+    { cardTitle: { title: "项目", subtitle: "菜单" } },
   )
 }
 
@@ -739,41 +1119,23 @@ export async function handleFeishuProjectCommand(
   const low = (s: string) => s.toLowerCase()
 
   if (parts.length <= 1) {
-    const cur = getCurrentProject()
-    if (!cur) {
-      await reportCommandResult(port, messageId, true, `${PROJECT_HELP}\n\n📭 尚无当前项目`, chatId, [
-        { label: "列表 /p ls", cmd: "/p ls" },
-      ])
-      return
-    }
-    const list = listProjects()
-    const idx = list.findIndex((p) => p.id === cur.id) + 1
-    await reportCommandResult(port, messageId, true, formatProjectCard(cur, idx), chatId, projectButtons(cur))
+    await replyProjectMenu(port, messageId, chatId)
     return
   }
 
   const sub = low(parts[1])
   if (sub === "help" || sub === "-h" || sub === "--help") {
-    await reportCommandResult(port, messageId, true, PROJECT_HELP, chatId)
+    await reportCommandResult(port, messageId, true, projectHelpText(), chatId)
+    return
+  }
+
+  if (sub === "menu") {
+    await replyProjectMenu(port, messageId, chatId)
     return
   }
 
   if (sub === "ls" || sub === "list") {
-    const list = listProjects()
-    if (list.length === 0) {
-      await reportCommandResult(port, messageId, true, "📭 暂无项目。发 /p new 创建", chatId, [
-        { label: "创建项目 /p new", cmd: "/p new" },
-      ])
-      return
-    }
-    const curId = getCurrentProject()?.id
-    const lines = list.map((p, i) => `#${i + 1}\t${p.name}${p.id === curId ? " ★" : ""} · ${p.status} · ${p.featureBranch}`)
-    const btns: CommandButton[] = list.slice(0, 10).map((p, i) => ({
-      label: `进入 ${p.name}`,
-      cmd: `/p use ${i + 1}`,
-    }))
-    btns.push({ label: "创建 /p new", cmd: "/p new" })
-    await reportCommandResult(port, messageId, true, `📦 项目一览\n\n${lines.join("\n")}`, chatId, btns)
+    await replyProjectMenu(port, messageId, chatId)
     return
   }
 
@@ -790,7 +1152,8 @@ export async function handleFeishuProjectCommand(
       true,
       withChatFooter(`✅ 已进入项目会话\n\n${formatProjectCard(target)}`),
       chatId,
-      projectButtons(target),
+      projectButtons(),
+      { cardTitle: projectCardTitle(target) },
     )
     if (chatId) await enterProjectSession(port, chatId, target)
     return
@@ -802,9 +1165,9 @@ export async function handleFeishuProjectCommand(
       return
     }
     await syncActiveSession(port, chatId, chatId)
-    await reportCommandResult(port, messageId, true, "✅ 已退出项目流程，回到普通会话", chatId, [
-      { label: "项目列表 /p ls", cmd: "/p ls" },
-      { label: "创建 /p new", cmd: "/p new" },
+    await reportCommandResult(port, messageId, true, "✅ 已退出项目，回到普通会话", chatId, [
+      { label: "项目菜单 /p", cmd: "/p" },
+      { label: "新建项目 /p new", cmd: "/p new" },
     ])
     return
   }
@@ -815,7 +1178,9 @@ export async function handleFeishuProjectCommand(
       await reportCommandResult(port, messageId, false, "❌ 没有当前项目", chatId)
       return
     }
-    await reportCommandResult(port, messageId, true, formatProjectCard(cur), chatId, projectButtons(cur))
+    await reportCommandResult(port, messageId, true, formatProjectCard(cur), chatId, projectButtons(), {
+      cardTitle: projectCardTitle(cur),
+    })
     return
   }
 
@@ -824,23 +1189,22 @@ export async function handleFeishuProjectCommand(
     return
   }
 
-  if (sub === "setup") {
-    if (!chatId) {
-      await reportCommandResult(port, messageId, false, "❌ 无法解析会话", chatId)
-      return
-    }
-    const cfgNow = getConfig()
-    const draft: ProjectNewDraft = {
-      chatKey: chatId,
-      step: !cfgNow.worktreeRoot?.trim() ? "setup_worktree" : "setup_repo",
-      setupOnly: true,
-      updatedAt: Date.now(),
-    }
-    await promptNewStep(port, messageId, chatId, draft)
+  if (sub === "del" || sub === "delete" || sub === "rm") {
+    await handleDeleteProjectCommand(port, messageId, chatId, parts.slice(2))
     return
   }
 
-  if (isProjectActionType(sub)) {
+  if (sub === "setup") {
+    await handleSetupCommand(port, messageId, chatId, parts.slice(2))
+    return
+  }
+
+  if (sub === "ship") {
+    await handleShipCommand(port, messageId, chatId, parts.slice(2))
+    return
+  }
+
+  if (!PROJECT_RESERVED_SUBCOMMANDS.includes(sub) && getProjectNodes().some((n) => n.id === sub)) {
     await runAction(port, messageId, chatId, sub)
     return
   }
@@ -877,7 +1241,7 @@ export async function handleFeishuProjectCommand(
     return
   }
 
-  await reportCommandResult(port, messageId, false, `😅 未知子命令: ${parts[1]}\n\n${PROJECT_HELP}`, chatId)
+  await reportCommandResult(port, messageId, false, `😅 未知指令: ${parts[1]}\n\n${projectHelpText()}`, chatId)
 }
 
 export async function handleProjectSyncSignal(payload: {
