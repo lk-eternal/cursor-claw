@@ -371,6 +371,26 @@ async function handleSetupCommand(
       await reportCommandResult(port, messageId, false, "用法：/p setup del <序号>", chatId)
       return
     }
+    const profiles = getRepoProfiles(getConfig())
+    const target = profiles[n - 1]
+    if (!target) {
+      await reportCommandResult(port, messageId, false, `❌ 序号无效：${n}`, chatId)
+      return
+    }
+    if (!args.includes("--yes")) {
+      // 确认视图（原卡切换）：误触可取消返回总览
+      await reportCommandResult(
+        port, messageId, true,
+        `⚠️ 确认删除主仓配置 #${n}？\n${target.path}\n\n仅移除记录，不影响磁盘上的仓库。`,
+        chatId,
+        [
+          { label: `确认删除 #${n}`, cmd: `/p setup del ${n} --yes` },
+          { label: "取消", cmd: "/p setup" },
+        ],
+        patchMessageId ? { patchMessageId } : undefined,
+      )
+      return
+    }
     const removed = removeRepoProfile(n)
     if (!removed) {
       await reportCommandResult(port, messageId, false, `❌ 序号无效：${n}`, chatId)
@@ -427,7 +447,6 @@ export async function replySetupHub(port: number, messageId: string, chatId: str
     { label: "设置工作区目录", cmd: "/p setup worktree" },
     { label: "添加主仓", cmd: "/p setup add" },
     { label: "设置 GitLab", cmd: "/p setup gitlab" },
-    { label: "← 项目菜单", cmd: "/p menu --back" },
   ]
   for (let i = 0; i < Math.min(profiles.length, 8); i++) {
     btns.push({
@@ -435,6 +454,7 @@ export async function replySetupHub(port: number, messageId: string, chatId: str
       cmd: `/p setup del ${i + 1}`,
     })
   }
+  btns.push({ label: "← 项目菜单", cmd: "/p menu --back" })
   await reportCommandResult(
     port,
     messageId,

@@ -784,7 +784,7 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
       queueMessages: qAll,
       now,
     }))
-    const chatBtns: { label: string; cmd: string }[] = []
+    const chatBtns: { label: string; cmd: string }[] = [{ label: "🔄 刷新", cmd: "/c ls" }]
     sessions.slice(0, 10).forEach((_s2, i) => {
       chatBtns.push({ label: `#${i + 1}`, cmd: `/c ${i + 1}` })
     })

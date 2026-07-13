@@ -334,6 +334,23 @@ export class LarkSender {
       field("name", "项目名称", "例如 login", true),
     ]
 
+    const groups = opts.nodeGroups || []
+    if (groups.length > 0) {
+      // form 内 select_static 不支持 label/label_position（飞书 200621），字段名用 markdown 行
+      formElements.push({ tag: "markdown", content: "流程组" })
+      formElements.push({
+        tag: "select_static",
+        name: "group_id",
+        required: false,
+        width: "fill",
+        placeholder: { tag: "plain_text", content: `不选则默认「${groups[0].name.slice(0, 20)}」` },
+        options: groups.slice(0, 20).map((g) => ({
+          text: { tag: "plain_text", content: g.name.slice(0, 30) },
+          value: g.id,
+        })),
+      })
+    }
+
     const encode = encodeRepoPair
     const labelOf = (rp: string, b: string, t?: string, d?: string) => {
       const norm = rp.replace(/\\/g, "/").replace(/\/+$/, "")
@@ -351,23 +368,6 @@ export class LarkSender {
         options: profiles.slice(0, 50).map((pr) => ({
           text: { tag: "plain_text", content: labelOf(pr.path, pr.baseBranch, pr.testBranch, pr.developBranch) },
           value: encode(pr.path, pr.baseBranch, pr.testBranch, pr.developBranch),
-        })),
-      })
-    }
-
-    const groups = opts.nodeGroups || []
-    if (groups.length > 0) {
-      // form 内 select_static 不支持 label/label_position（飞书 200621），字段名用 markdown 行
-      formElements.push({ tag: "markdown", content: "流程组" })
-      formElements.push({
-        tag: "select_static",
-        name: "group_id",
-        required: false,
-        width: "fill",
-        placeholder: { tag: "plain_text", content: `不选则默认「${groups[0].name.slice(0, 20)}」` },
-        options: groups.slice(0, 20).map((g) => ({
-          text: { tag: "plain_text", content: g.name.slice(0, 30) },
-          value: g.id,
         })),
       })
     }
@@ -508,7 +508,7 @@ export class LarkSender {
         },
       ]
       : [
-        field("gitlabToken", "GitLab Token", `当前 ${opts.tokenMasked || "（未设置）"}；留空保持不变`),
+        Object.assign(field("gitlabToken", "GitLab Token", `当前 ${opts.tokenMasked || "（未设置）"}；留空保持不变`), { input_type: "password" }),
         field("gitlabHost", "GitLab Host", `当前 ${opts.gitlabHost || "默认从 origin 推断"}；留空保持不变，填 clear 清空`),
         {
           tag: "button", name: "submit", text: { tag: "plain_text", content: "保存" }, type: "primary",
