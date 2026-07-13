@@ -45,6 +45,8 @@ interface SdkSessionAgent {
 
 const sdkSessions = new Map<string, SdkSessionAgent>()
 const pendingLaunches = new Set<string>()
+/** /reset 代数：拉起过程中被重置的会话丢弃本次拉起，防止 rememberResumable 把旧上下文写回 */
+const sessionResetGen = new Map<string, number>()
 
 // ── 会话上下文恢复（Resume）──────────────────────────────
 // 不保留闲置 agent 进程：闲置连接会被代理/NAT 静默掐死，复用必报 SSL WRONG_VERSION_NUMBER。
@@ -523,6 +525,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
   }
 
   pendingLaunches.add(sessionKey)
+  const resetGenAtStart = sessionResetGen.get(sessionKey) ?? 0
 
   const apiKey = opts.apiKey?.trim()
   if (!apiKey) {
@@ -581,6 +584,13 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       agent = await Agent.create({ apiKey, model: modelSelection, local: localOptions })
     }
 
+    // 拉起期间被 /reset：本次 agent 可能带着旧上下文，直接丢弃（队列消息会驱动下一次全新拉起）
+    if ((sessionResetGen.get(sessionKey) ?? 0) !== resetGenAtStart) {
+      try { agent.close() } catch { /* best-effort */ }
+      pushUiLog("SDK", "INFO", `[${sessionKey}] 拉起期间会话被重置，丢弃本次拉起（下次全新会话）`)
+      return { ok: false, error: "会话已重置" }
+    }
+
     const abortController = new AbortController()
     const session: SdkSessionAgent = {
       sessionKey,
@@ -629,7 +639,10 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     // 失败计数不在拉起时清零（断网时 Resume 总能成功、run 中途才死，清了会导致退避永不生效）：
     // run 成功跑完由 scheduleSdkIdle 清零；新消息经 hasPending 无视冷却立即放行
     // 持久化最新 agentId：run 结束释放进程后靠它 Resume，应用重启后依然有效
-    rememberResumable(session)
+    // send 期间被 /reset 则不回写（否则旧上下文的 agentId 会覆盖掉刚删的映射）
+    if ((sessionResetGen.get(sessionKey) ?? 0) === resetGenAtStart) {
+      rememberResumable(session)
+    }
 
     return { ok: true }
   } catch (e: unknown) {
@@ -737,8 +750,11 @@ export async function switchSdkSessionModel(
   return { ok: true }
 }
 
-/** 显式重置会话上下文（/reset）：丢弃 resume 映射，下条消息全新会话 */
+/** 显式重置会话上下文（/reset）：停掉在跑的 run、丢弃 resume 映射，下条消息全新会话 */
 export function resetSdkSessionContext(sessionKey: string): void {
+  sessionResetGen.set(sessionKey, (sessionResetGen.get(sessionKey) ?? 0) + 1)
+  const live = sdkSessions.get(sessionKey)
+  if (live) void releaseSession(live)
   forgetResumable(sessionKey)
 }
 
