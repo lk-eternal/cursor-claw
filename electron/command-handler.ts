@@ -10,7 +10,7 @@ import { listSdkModels, switchSdkSessionModel, getSdkSessionList, hasResumableSd
 import { listQuickModels, getSessionOverride, type ModelEntry } from "../src/shared/session-model-store.js"
 import { resolveModelLabel, rememberModelLabel } from "../src/shared/model-utils.js"
 import { McpServerEntry, getMcpServerList, getMcpEnabledMap, toggleMcpServer, deleteMcpServer, saveMcpServer } from "./mcp-manager"
-import { httpPost } from "./daemon-client"
+import { httpPost, getCurrentActiveSession } from "./daemon-client"
 
 // ── 共享类型与工具 ─────────────────────────────────────────
 
@@ -97,8 +97,11 @@ const MODEL_SUBCMD_HELP = [
   "🔹 /m use <序号|id> — 同 set",
 ].join("\n")
 
-function resolveModelSessionKey(chatId?: string, channel?: MessageChannel): string | undefined {
+async function resolveModelSessionKey(port: number, chatId?: string, channel?: MessageChannel): Promise<string | undefined> {
   if (!chatId) return undefined
+  // 活跃路由优先：用户在项目/目录会话里切模型，必须落在正聊的那个会话上
+  const active = await getCurrentActiveSession(port, chatId)
+  if (active?.trim()) return active
   const live = getSdkSessionList().find((s) => s.sessionKey === chatId || s.sessionKey.startsWith(chatId + "::"))
   if (live) return live.sessionKey
   const ws = effectiveWorkspaceDir(channel)
@@ -113,7 +116,7 @@ async function applySessionModelPick(
   picked: ListedModel,
   idxLabel?: string,
 ): Promise<void> {
-  const sessionKey = resolveModelSessionKey(chatId, channel)
+  const sessionKey = await resolveModelSessionKey(port, chatId, channel)
   if (!sessionKey) {
     await reportCommandResult(port, messageId, false, "❌ 无法解析会话（缺少 chatId）", chatId)
     return
@@ -168,7 +171,7 @@ export async function handleFeishuModelCommand(port: number, messageId: string, 
   }
 
   if (sub === "info") {
-    const sessionKey = resolveModelSessionKey(chatId, channel)
+    const sessionKey = await resolveModelSessionKey(port, chatId, channel)
     const cfgDisplay = resolveModelLabel(channel.model, channel.modelParams) || channel.model?.trim() || "auto"
     const ov = sessionKey ? getSessionOverride(sessionKey) : undefined
     const ovDisplay = ov ? resolveModelLabel(ov.model, ov.modelParams) : undefined
