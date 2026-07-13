@@ -1127,8 +1127,10 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           const channelModel = channel
             ? resolveChannelModel(channel, isAdmin ? "primary" : "others")
             : { model: "", modelParams: "" }
-          const effModel = matched?.model || channelModel.model
-          const effParams = matched?.modelParams ?? channelModel.modelParams
+          // 未运行会话优先取持久化的会话级模型覆盖，仅通道默认作兜底（否则 /m set 后未启动时显示错）
+          const override = sessionKey ? getSessionOverride(sessionKey) : undefined
+          const effModel = matched?.model || override?.model || channelModel.model
+          const effParams = matched?.modelParams ?? override?.modelParams ?? channelModel.modelParams
           if (channel) {
             const resource = getAgentResource(channel.agentResourceId)
             if (resource.type === "sdk") {
