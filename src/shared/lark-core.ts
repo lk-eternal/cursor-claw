@@ -357,15 +357,14 @@ export class LarkSender {
 
     const groups = opts.nodeGroups || []
     if (groups.length > 0) {
+      // form 内 select_static 不支持 label/label_position（飞书 200621），字段名用 markdown 行
+      formElements.push({ tag: "markdown", content: "流程组" })
       formElements.push({
         tag: "select_static",
         name: "group_id",
         required: false,
-        label: { tag: "plain_text", content: "流程组" },
-        label_position: "top",
         width: "fill",
-        initial_option: groups[0].id,
-        placeholder: { tag: "plain_text", content: "选择项目流程组" },
+        placeholder: { tag: "plain_text", content: `不选则默认「${groups[0].name.slice(0, 20)}」` },
         options: groups.slice(0, 20).map((g) => ({
           text: { tag: "plain_text", content: g.name.slice(0, 30) },
           value: g.id,
