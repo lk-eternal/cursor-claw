@@ -289,6 +289,7 @@ async function handleSetupCommand(
   messageId: string,
   chatId: string | undefined,
   args: string[],
+  patchMessageId?: string,
 ): Promise<void> {
   ensureStore()
   if (!chatId) {
@@ -298,7 +299,7 @@ async function handleSetupCommand(
   const mode = (args[0] || "").toLowerCase()
   if (!mode) {
     clearProjectNewDraft(chatId)
-    await replySetupHub(port, messageId, chatId)
+    await replySetupHub(port, messageId, chatId, patchMessageId)
     return
   }
   if (mode === "worktree") {
@@ -309,7 +310,7 @@ async function handleSetupCommand(
       returnToSetup: true,
       updatedAt: Date.now(),
     }
-    await promptNewStep(port, messageId, chatId, draft)
+    await promptNewStep(port, messageId, chatId, draft, patchMessageId)
     return
   }
   if (mode === "add") {
@@ -318,7 +319,7 @@ async function handleSetupCommand(
     if (flag === "--skip-test" && cur?.step === "setup_add_test") {
       cur.testBranch = undefined
       cur.step = "setup_add_dev"
-      await promptNewStep(port, messageId, chatId, cur)
+      await promptNewStep(port, messageId, chatId, cur, patchMessageId)
       return
     }
     if (flag === "--skip-dev" && cur?.step === "setup_add_dev") {
@@ -330,8 +331,8 @@ async function handleSetupCommand(
         developBranch: undefined,
       }])
       clearProjectNewDraft(chatId)
-      await reportCommandResult(port, messageId, true, `✅ 已添加主仓 ${path.basename(cur.repoPath!)}`, chatId)
-      await replySetupHub(port, messageId, chatId)
+      // 向导收尾：原卡直接更新为 setup 总览（省一条“已添加”插播消息）
+      await replySetupHub(port, messageId, chatId, patchMessageId)
       return
     }
     // 优先发飞书表单（四项一次填完）；被拒/微信降级走分步问答
@@ -349,7 +350,7 @@ async function handleSetupCommand(
       returnToSetup: true,
       updatedAt: Date.now(),
     }
-    await promptNewStep(port, messageId, chatId, draft)
+    await promptNewStep(port, messageId, chatId, draft, patchMessageId)
     return
   }
   if (mode === "del" || mode === "delete" || mode === "rm") {
@@ -363,14 +364,8 @@ async function handleSetupCommand(
       await reportCommandResult(port, messageId, false, `❌ 序号无效：${n}`, chatId)
       return
     }
-    await reportCommandResult(
-      port,
-      messageId,
-      true,
-      `✅ 已删除 #${n} ${path.basename(removed.path)}`,
-      chatId,
-      [{ label: "返回 setup", cmd: "/p setup" }],
-    )
+    // 原卡更新为最新总览，删除结果并入首行提示
+    await replySetupHub(port, messageId, chatId, patchMessageId, `✅ 已删除 #${n} ${path.basename(removed.path)}`)
     return
   }
   if (mode === "gitlab") {
@@ -381,7 +376,7 @@ async function handleSetupCommand(
       returnToSetup: true,
       updatedAt: Date.now(),
     }
-    await promptNewStep(port, messageId, chatId, draft)
+    await promptNewStep(port, messageId, chatId, draft, patchMessageId)
     return
   }
   await reportCommandResult(port, messageId, false, "用法：/p setup（总览）· /p setup worktree（目录）· /p setup add（加主仓）· /p setup gitlab · /p setup del <序号>", chatId)
@@ -393,7 +388,7 @@ function maskToken(token: string): string {
   return t.length <= 8 ? `${t.slice(0, 2)}***` : `${t.slice(0, 6)}***${t.slice(-3)}`
 }
 
-export async function replySetupHub(port: number, messageId: string, chatId: string): Promise<void> {
+export async function replySetupHub(port: number, messageId: string, chatId: string, patchMessageId?: string, notice?: string): Promise<void> {
   const cfg = getConfig()
   const profiles = getRepoProfiles(cfg)
   const wt = cfg.worktreeRoot?.trim() ? path.normalize(cfg.worktreeRoot.trim()) : ""
@@ -420,6 +415,7 @@ export async function replySetupHub(port: number, messageId: string, chatId: str
     messageId,
     true,
     [
+      ...(notice ? [notice, ""] : []),
       "⚙️ 项目工作区",
       "",
       `工作区目录：${wt || "（未设置）"}`,
@@ -432,6 +428,7 @@ export async function replySetupHub(port: number, messageId: string, chatId: str
     ].join("\n"),
     chatId,
     btns,
+    patchMessageId ? { patchMessageId } : undefined,
   )
 }
 
@@ -440,89 +437,61 @@ async function promptNewStep(
   messageId: string,
   chatId: string | undefined,
   draft: ProjectNewDraft,
+  patchMessageId?: string,
 ): Promise<void> {
   const cfg = getConfig()
   saveProjectNewDraft(draft)
+  // 向导步骤卡：按钮点击来源时原卡推进，避免每步刷一条新消息
+  const send = (text: string, buttons: CommandButton[]) => reportCommandResult(
+    port, messageId, true, text, chatId, buttons, patchMessageId ? { patchMessageId } : undefined,
+  )
 
   if (draft.step === "setup_worktree") {
-    await reportCommandResult(
-      port,
-      messageId,
-      true,
-      [
-        "⚙️ 设置工作区目录",
-        "",
-        "请直接回复绝对路径",
-        "例：`D:\\claw-projects`",
-      ].join("\n"),
-      chatId,
+    await send(
+      ["⚙️ 设置工作区目录", "", "请直接回复绝对路径", "例：`D:\\claw-projects`"].join("\n"),
       [{ label: "返回 setup", cmd: "/p setup" }, { label: "取消", cmd: "/p new --cancel" }],
     )
     return
   }
 
   if (draft.step === "setup_add_path") {
-    await reportCommandResult(
-      port,
-      messageId,
-      true,
+    await send(
       "➕ 添加主仓 · 请回复主仓绝对路径（git 根目录）",
-      chatId,
       [{ label: "返回 setup", cmd: "/p setup" }, { label: "取消", cmd: "/p new --cancel" }],
     )
     return
   }
   if (draft.step === "setup_add_base") {
-    await reportCommandResult(
-      port,
-      messageId,
-      true,
+    await send(
       `➕ 主仓 ${draft.repoPath}\n请回复 **生产基线分支**（必填）`,
-      chatId,
       [{ label: "返回 setup", cmd: "/p setup" }, { label: "取消", cmd: "/p new --cancel" }],
     )
     return
   }
   if (draft.step === "setup_add_test") {
-    await reportCommandResult(
-      port,
-      messageId,
-      true,
+    await send(
       "➕ 请回复 **测试分支**（可空，回 `-` 跳过）",
-      chatId,
       [{ label: "跳过", cmd: "/p setup add --skip-test" }, { label: "返回 setup", cmd: "/p setup" }],
     )
     return
   }
   if (draft.step === "setup_add_dev") {
-    await reportCommandResult(
-      port,
-      messageId,
-      true,
+    await send(
       "➕ 请回复 **开发分支**（可空，回 `-` 跳过）",
-      chatId,
       [{ label: "跳过并完成", cmd: "/p setup add --skip-dev" }, { label: "返回 setup", cmd: "/p setup" }],
     )
     return
   }
   if (draft.step === "setup_gitlab_token") {
-    await reportCommandResult(
-      port,
-      messageId,
-      true,
+    await send(
       `🔑 请回复 **GitLab Token**（当前 ${maskToken(cfg.gitlabToken || "")}；回 \`-\` 保持不变）`,
-      chatId,
       [{ label: "返回 setup", cmd: "/p setup" }],
     )
     return
   }
   if (draft.step === "setup_gitlab_host") {
-    await reportCommandResult(
-      port,
-      messageId,
-      true,
+    await send(
       `🌐 请回复 **GitLab Host**（当前 ${cfg.gitlabHost?.trim() || "默认从 origin 推断"}；回 \`-\` 保持不变，回 \`clear\` 清空）`,
-      chatId,
       [{ label: "返回 setup", cmd: "/p setup" }],
     )
     return
@@ -996,15 +965,18 @@ async function handleDeleteProjectCommand(
   messageId: string,
   chatId: string | undefined,
   args: string[],
+  patchMessageId?: string,
 ): Promise<void> {
   ensureStore()
   const token = args.filter((a) => a !== "--yes")[0]
   const confirmed = args.includes("--yes")
+  // 选择/确认是瞬态卡：按钮点击来源时原卡推进；最终删除结果新发留痕
+  const patchExtra = patchMessageId ? { patchMessageId } : undefined
 
   if (!token) {
     const list = listProjects()
     if (!list.length) {
-      await reportCommandResult(port, messageId, true, "📭 暂无项目", chatId)
+      await reportCommandResult(port, messageId, true, "📭 暂无项目", chatId, undefined, patchExtra)
       return
     }
     const lines = list.map((p, i) => `#${i + 1} ${p.name} · ${p.featureBranch}`)
@@ -1013,13 +985,13 @@ async function handleDeleteProjectCommand(
       cmd: `/p del ${i + 1}`,
     }))
     btns.push({ label: "返回菜单 /p", cmd: "/p" })
-    await reportCommandResult(port, messageId, true, `选择要删除的项目：\n${lines.join("\n")}`, chatId, btns)
+    await reportCommandResult(port, messageId, true, `选择要删除的项目：\n${lines.join("\n")}`, chatId, btns, patchExtra)
     return
   }
 
   const target = resolveProjectRef(token)
   if (!target) {
-    await reportCommandResult(port, messageId, false, `❌ 未找到项目：${token}`, chatId)
+    await reportCommandResult(port, messageId, false, `❌ 未找到项目：${token}`, chatId, undefined, patchExtra)
     return
   }
   const repos = target.repos?.length
@@ -1043,6 +1015,7 @@ async function handleDeleteProjectCommand(
         { label: `确认删除 ${target.name}`, cmd: `/p del ${target.id} --yes` },
         { label: "取消", cmd: "/p" },
       ],
+      patchExtra,
     )
     return
   }
@@ -1050,6 +1023,7 @@ async function handleDeleteProjectCommand(
   const wasCurrent = getCurrentProject()?.id === target.id
   executeProjectDelete(target.id)
   if (wasCurrent && chatId) await leaveProjectSession(port, chatId)
+  // 确认卡原地置为结果态（防再点）；删除结果本身即留痕
   await reportCommandResult(
     port,
     messageId,
@@ -1057,6 +1031,7 @@ async function handleDeleteProjectCommand(
     `🗑 已删除项目「${target.name}」并移除 worktree`,
     chatId,
     [{ label: "项目菜单 /p", cmd: "/p" }],
+    patchExtra,
   )
 }
 
@@ -1138,6 +1113,7 @@ export async function handleFeishuProjectCommand(
   messageId: string,
   raw: string,
   chatId?: string,
+  patchMessageId?: string,
 ): Promise<void> {
   ensureStore()
   const parts = raw.trim().split(/\s+/).filter(Boolean)
@@ -1215,12 +1191,12 @@ export async function handleFeishuProjectCommand(
   }
 
   if (sub === "del" || sub === "delete" || sub === "rm") {
-    await handleDeleteProjectCommand(port, messageId, chatId, parts.slice(2))
+    await handleDeleteProjectCommand(port, messageId, chatId, parts.slice(2), patchMessageId)
     return
   }
 
   if (sub === "setup") {
-    await handleSetupCommand(port, messageId, chatId, parts.slice(2))
+    await handleSetupCommand(port, messageId, chatId, parts.slice(2), patchMessageId)
     return
   }
 

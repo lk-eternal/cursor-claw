@@ -756,8 +756,8 @@ export async function switchMainSession(sessionKey: string): Promise<{ ok: boole
 
 // ── /chat 命令处理 ────────────────────────────────────────
 
-export async function handleChatCommand(tokens: string[], port: number, messageId: string, chatId?: string): Promise<void> {
-  const reply = (ok: boolean, msg: string, buttons?: { label: string; cmd: string }[]) => reportCommandResult(port, messageId, ok, msg, chatId, buttons)
+export async function handleChatCommand(tokens: string[], port: number, messageId: string, chatId?: string, patchMessageId?: string): Promise<void> {
+  const reply = (ok: boolean, msg: string, buttons?: { label: string; cmd: string }[]) => reportCommandResult(port, messageId, ok, msg, chatId, buttons, patchMessageId ? { patchMessageId } : undefined)
   const sub = tokens[1]?.toLowerCase()
 
   const sessions = getSessionAgentList().sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0))

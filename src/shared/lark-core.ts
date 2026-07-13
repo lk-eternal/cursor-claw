@@ -540,11 +540,19 @@ export class LarkSender {
     } catch (e: any) { this.log("ERROR", `按钮卡片发送异常: ${e?.message ?? e}`); return undefined; }
   }
 
-  /** 主动更新已发送的交互卡片（需 config.update_multi=true） */
-  async patchCard(messageId: string, text: string, title?: CardTitle, template?: string, footer?: string): Promise<boolean> {
+  /** 主动更新已发送的交互卡片（需 config.update_multi=true）；带 buttons/sections 时保留交互能力 */
+  async patchCard(
+    messageId: string,
+    text: string,
+    title?: CardTitle,
+    template?: string,
+    footer?: string,
+    buttons?: CardButton[],
+    sections?: { text: string; buttons?: CardButton[] }[],
+  ): Promise<boolean> {
     if (!messageId || messageId.startsWith("internal_")) return false;
     try {
-      const card = LarkSender.buildCard(`${this.messagePrefix}${text}`, title, undefined, undefined, template, footer);
+      const card = LarkSender.buildCard(`${this.messagePrefix}${text}`, title, buttons, undefined, template, footer, sections);
       const res = await this.client.im.message.patch({
         path: { message_id: messageId },
         data: { content: JSON.stringify(card) },

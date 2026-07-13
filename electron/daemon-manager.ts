@@ -1036,12 +1036,12 @@ async function checkAndExecutePendingCommands(): Promise<void> {
   if (!cmds || cmds.length === 0) return
 
   for (const cmd of cmds) {
-    let claimed: { command: string; messageId: string; chatId?: string; chatType?: string } | null
+    let claimed: { command: string; messageId: string; chatId?: string; chatType?: string; fromCard?: boolean } | null
     try {
       const claimRes = await httpPost(`http://127.0.0.1:${lock.port}/commands/claim`, { id: cmd.id }) as
-        { ok: boolean; command?: string; messageId?: string; chatId?: string; chatType?: string }
+        { ok: boolean; command?: string; messageId?: string; chatId?: string; chatType?: string; fromCard?: boolean }
       if (!claimRes.ok) continue
-      claimed = { command: claimRes.command!, messageId: claimRes.messageId!, chatId: claimRes.chatId, chatType: claimRes.chatType }
+      claimed = { command: claimRes.command!, messageId: claimRes.messageId!, chatId: claimRes.chatId, chatType: claimRes.chatType, fromCard: claimRes.fromCard }
     } catch { continue }
 
     const rawCmd = claimed.command.trim()
@@ -1050,6 +1050,8 @@ async function checkAndExecutePendingCommands(): Promise<void> {
     const isAdmin = isMainUser(claimed.chatId, claimed.chatType)
     const reply = (ok: boolean, msg: string, buttons?: { label: string; cmd: string; section?: string }[]) => reportCommandResult(lock.port, claimed!.messageId, ok, msg, claimed!.chatId, buttons)
     const denyNonAdmin = () => reply(false, "🔒 该指令仅管理员可用")
+    // 原卡更新目标：仅按钮点击来源才 patch（手输指令的 messageId 是用户消息，不可 patch）
+    const patchTarget = claimed.fromCard ? claimed.messageId : undefined
 
     broadcastLog(`[指令] 执行 ${rawCmd} (msgId=${claimed.messageId} admin=${isAdmin})`)
     try {
@@ -1153,6 +1155,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           const sessionMd = sessionLines.join("\n")
 
           await reportCommandResult(lock.port, claimed!.messageId, true, "状态", claimed!.chatId, undefined, {
+            patchMessageId: patchTarget,
             cardTitle: { title: "状态", subtitle: "当前对话" },
             sections: [
               {
@@ -1200,7 +1203,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
         case "/m":
         case "/model": {
           if (!isAdmin) { await denyNonAdmin(); break }
-          await handleFeishuModelCommand(lock.port, claimed.messageId, rawCmd, claimed.chatId)
+          await handleFeishuModelCommand(lock.port, claimed.messageId, rawCmd, claimed.chatId, patchTarget)
           break
         }
 
@@ -1214,7 +1217,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
         case "/project":
         case "/p": {
           if (!isAdmin) { await denyNonAdmin(); break }
-          await handleFeishuProjectCommand(lock.port, claimed.messageId, rawCmd, claimed.chatId)
+          await handleFeishuProjectCommand(lock.port, claimed.messageId, rawCmd, claimed.chatId, patchTarget)
           break
         }
 
@@ -1315,7 +1318,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
         case "/c":
         case "/chat": {
           if (!isAdmin) { await denyNonAdmin(); break }
-          await handleChatCommand(cmdTokens, lock.port, claimed!.messageId, claimed!.chatId)
+          await handleChatCommand(cmdTokens, lock.port, claimed!.messageId, claimed!.chatId, patchTarget)
           break
         }
 

@@ -14,7 +14,7 @@ import { httpPost, getCurrentActiveSession } from "./daemon-client"
 
 // ── 共享类型与工具 ─────────────────────────────────────────
 
-export interface FileCommand { id: string; command: string; messageId: string; chatId?: string; chatType?: string }
+export interface FileCommand { id: string; command: string; messageId: string; chatId?: string; chatType?: string; fromCard?: boolean }
 
 export interface CommandButton { label: string; cmd: string; /** 分组标题（飞书插在按钮前，微信列表分段） */ section?: string }
 
@@ -25,6 +25,8 @@ export type CommandResultExtra = {
   sections?: CommandCardSection[]
   /** 出站消息登记到此会话：用户引用该消息回复可路由回原会话 */
   sessionKey?: string
+  /** 原卡更新：patch 该卡片替代新发消息（仅飞书按钮点击场景；失败自动回退新发） */
+  patchMessageId?: string
 }
 
 export async function reportCommandResult(
@@ -42,6 +44,7 @@ export async function reportCommandResult(
       cardTitle: extra?.cardTitle,
       sections: extra?.sections,
       sessionKey: extra?.sessionKey,
+      patchMessageId: extra?.patchMessageId,
     })
   } catch (e: unknown) {
     broadcastLog(`指令结果回报失败: ${e instanceof Error ? e.message : e}`, "WARN")
@@ -115,6 +118,7 @@ async function applySessionModelPick(
   chatId: string | undefined,
   picked: ListedModel,
   idxLabel?: string,
+  patchMessageId?: string,
 ): Promise<void> {
   const sessionKey = await resolveModelSessionKey(port, chatId, channel)
   if (!sessionKey) {
@@ -136,10 +140,10 @@ async function applySessionModelPick(
     `🧠 ${display}`,
     `应用默认模型未改：${resolveModelLabel(channel.model, channel.modelParams) || channel.model?.trim() || "auto"}`,
   ].filter(Boolean) as string[]
-  await reportCommandResult(port, messageId, true, lines.join("\n"), chatId)
+  await reportCommandResult(port, messageId, true, lines.join("\n"), chatId, undefined, { patchMessageId })
 }
 
-export async function handleFeishuModelCommand(port: number, messageId: string, raw: string, chatId?: string): Promise<void> {
+export async function handleFeishuModelCommand(port: number, messageId: string, raw: string, chatId?: string, patchMessageId?: string): Promise<void> {
   const parts = raw.trim().split(/\s+/).filter((p) => p.length > 0)
   const low = (s: string) => s.toLowerCase()
 
@@ -204,7 +208,7 @@ export async function handleFeishuModelCommand(port: number, messageId: string, 
       const display = resolveModelLabel(m.id, m.params, m.label) || m.label || m.id
       return { label: `#${i + 1} ${display}`.slice(0, 40), cmd }
     })
-    await reportCommandResult(port, messageId, true, body, chatId, btns)
+    await reportCommandResult(port, messageId, true, body, chatId, btns, { patchMessageId })
     return
   }
 
@@ -230,7 +234,7 @@ export async function handleFeishuModelCommand(port: number, messageId: string, 
         current: false,
         params: fromQuick.modelParams,
       }
-      await applySessionModelPick(port, messageId, channel, chatId, picked, `q${qi}`)
+      await applySessionModelPick(port, messageId, channel, chatId, picked, `q${qi}`, patchMessageId)
       return
     }
     const lr = await listCursorModelsForCommands(channel)
@@ -281,7 +285,7 @@ export async function handleFeishuModelCommand(port: number, messageId: string, 
       const hit = listQuickModels(favs, 20).find((m) => m.model === picked!.id)
       if (hit?.modelParams) picked = { ...picked, params: hit.modelParams }
     }
-    await applySessionModelPick(port, messageId, channel, chatId, picked, idxLabel)
+    await applySessionModelPick(port, messageId, channel, chatId, picked, idxLabel, patchMessageId)
     return
   }
 

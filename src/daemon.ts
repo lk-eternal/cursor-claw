@@ -1285,7 +1285,7 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
     log("INFO", `[${rt.cfg.name}] 卡片指令点击: ${cmd}`);
     // 主用户私聊内点击按钮等价于主用户发指令（缺 chatType 会被 isMainUser 误判非管理员）
     const chatType = rt.cfg.mainUserEnabled && rt.cfg.mainUserChatId === evt.chatId ? "p2p" : undefined;
-    handleCommand(cmd, evt.messageId, chatKey, chatType).catch((e: any) => log("ERROR", `卡片指令失败: ${e?.message ?? e}`));
+    handleCommand(cmd, evt.messageId, chatKey, chatType, true).catch((e: any) => log("ERROR", `卡片指令失败: ${e?.message ?? e}`));
     return { toast: { type: "info", content: `已执行 ${cmd}` } };
   }
 
@@ -1401,6 +1401,8 @@ async function replyToMessage(
     sections?: { text: string; buttons?: { label: string; cmd: string; section?: string }[] }[];
     /** 出站消息登记到此会话：用户引用该卡片回复可路由回原会话（如项目通知） */
     sessionKey?: string;
+    /** 原卡更新：patch 该卡片替代新发消息（仅飞书；失败自动回退新发） */
+    patchMessageId?: string;
   },
 ): Promise<void> {
   // 优先显式 chatId；缺省时从消息路由表找回，禁止 allowDefault 兜底到别的通道（防微信指令回飞书）
@@ -1460,6 +1462,12 @@ async function replyToMessage(
       label: b.label, value: { kind: "cmd", cmd: b.cmd }, type: "default" as const, section: b.section,
     }));
   const cardSections = opts?.sections?.map((s) => ({ text: s.text, buttons: mapBtns(s.buttons) }));
+  // 原卡更新：patch 点击来源卡片，成功即结束；失败回退新发
+  if (opts?.patchMessageId && !opts.patchMessageId.startsWith("internal_")) {
+    const patched = await sender.patchCard(opts.patchMessageId, text, title, headerTemplate, undefined, mapBtns(buttons), cardSections);
+    if (patched) return;
+    log("WARN", `原卡更新失败，回退新发消息 (${opts.patchMessageId})`);
+  }
   if ((buttons && buttons.length > 0) || (cardSections && cardSections.length > 0)) {
     const btns = mapBtns(buttons);
     let sent = await sender.sendCardWithButtons(text, btns, replyId, ch.chatId, title, undefined, headerTemplate, undefined, cardSections);
@@ -1483,7 +1491,7 @@ async function replyToMessage(
 
 // ── 共享指令文件队列（.fcmd）──────────────────────────────
 
-function pushCommandToQueue(command: string, messageId: string, source: string, chatId?: string, chatType?: string): boolean {
+function pushCommandToQueue(command: string, messageId: string, source: string, chatId?: string, chatType?: string, fromCard?: boolean): boolean {
   const queueDir = getQueueDir();
   if (!queueDir) return false;
   const ts = Date.now();
@@ -1495,7 +1503,7 @@ function pushCommandToQueue(command: string, messageId: string, source: string, 
   } catch { /* ignore */ }
 
   try {
-    const data = JSON.stringify({ command, messageId, timestamp: ts, source, chatId, chatType });
+    const data = JSON.stringify({ command, messageId, timestamp: ts, source, chatId, chatType, fromCard });
     const filename = `${ts}_${safeId}.fcmd`;
     const tmpPath = path.join(queueDir, filename + ".tmp");
     const finalPath = path.join(queueDir, filename);
@@ -1508,7 +1516,7 @@ function pushCommandToQueue(command: string, messageId: string, source: string, 
   } catch { return false; }
 }
 
-interface CmdEntry { id: string; command: string; messageId: string; chatId?: string; chatType?: string }
+interface CmdEntry { id: string; command: string; messageId: string; chatId?: string; chatType?: string; fromCard?: boolean }
 
 function getPendingCommands(): CmdEntry[] {
   const queueDir = getQueueDir();
@@ -1519,7 +1527,7 @@ function getPendingCommands(): CmdEntry[] {
       try {
         const raw = fs.readFileSync(path.join(queueDir, f), "utf-8");
         const p = JSON.parse(raw);
-        return { id: f, command: p.command, messageId: p.messageId, chatId: p.chatId, chatType: p.chatType };
+        return { id: f, command: p.command, messageId: p.messageId, chatId: p.chatId, chatType: p.chatType, fromCard: p.fromCard };
       } catch { return null; }
     }).filter(Boolean) as CmdEntry[];
   } catch { return []; }
@@ -1535,7 +1543,7 @@ function claimCommand(fileId: string): Omit<CmdEntry, "id"> | null {
     const raw = fs.readFileSync(claimedPath, "utf-8");
     fs.unlinkSync(claimedPath);
     const p = JSON.parse(raw);
-    return { command: p.command, messageId: p.messageId, chatId: p.chatId, chatType: p.chatType };
+    return { command: p.command, messageId: p.messageId, chatId: p.chatId, chatType: p.chatType, fromCard: p.fromCard };
   } catch { return null; }
 }
 
@@ -1561,12 +1569,12 @@ function cleanExpiredCommands(): void {
   } catch { /* ignore */ }
 }
 
-async function handleCommand(text: string, messageId: string, chatId?: string, chatType?: string): Promise<void> {
+async function handleCommand(text: string, messageId: string, chatId?: string, chatType?: string, fromCard?: boolean): Promise<void> {
   const trimmed = text.trim();
   if (chatId && ["/stop", "/restart"].includes(trimmed.toLowerCase())) {
     terminateSessionsByChat(chatId);
   }
-  pushCommandToQueue(trimmed, messageId, `daemon-${process.pid}`, chatId, chatType);
+  pushCommandToQueue(trimmed, messageId, `daemon-${process.pid}`, chatId, chatType, fromCard);
 }
 
 // ── HTTP Server ──────────────────────────────────────────
@@ -1905,6 +1913,7 @@ function startHttpServer(): Promise<number> {
             cardTitle?: { title: string; subtitle?: string };
             sections?: { text: string; buttons?: { label: string; cmd: string; section?: string }[] }[];
             sessionKey?: string;
+            patchMessageId?: string;
           };
           log("INFO", `指令执行完成: ok=${body.ok}, msgId=${body.messageId}, chatId=${body.chatId ?? "N/A"}`);
           // 空 messageId 但有 chatId 时仍需投递（如项目节点完成通知）：replyToMessage 会走 chat 直发
@@ -1913,6 +1922,7 @@ function startHttpServer(): Promise<number> {
               cardTitle: body.cardTitle,
               sections: body.sections,
               sessionKey: body.sessionKey,
+              patchMessageId: body.patchMessageId,
             });
           }
           json(res, { ok: true });
