@@ -659,19 +659,46 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
               chatId?: string; messageId?: string
             }
             const port = cachedPort ?? readLockFile()?.port
-            // setup 表单提交（带 chatId）：路径必须是 git 根目录，否则拒绝并回错误
+            // setup 表单提交（带 chatId）：路径必须是 git 根目录，否则拒绝并回错误（原卡置为错误视图）
             if (payload.chatId && !isGitRepoRoot(payload.path)) {
               if (port) {
                 void reportCommandResult(port, payload.messageId || "", false,
                   `❌ 不是有效 git 根目录，未保存：${payload.path}`, payload.chatId,
-                  [{ label: "重新添加", cmd: "/p setup add" }, { label: "返回 setup", cmd: "/p setup" }])
+                  [{ label: "重新添加", cmd: "/p setup add" }, { label: "返回 setup", cmd: "/p setup" }],
+                  payload.messageId ? { patchMessageId: payload.messageId } : undefined)
               }
               continue
             }
             upsertRepoProfiles([payload])
-            // setup 表单提交：保存后回一张最新的工作区总览
+            // 单卡多视图：保存后原表单卡直接回到 setup 总览
             if (port && payload.chatId) {
-              void replySetupHub(port, payload.messageId || "", payload.chatId)
+              void replySetupHub(port, payload.messageId || "", payload.chatId, payload.messageId, `✅ 已保存主仓 ${path.basename(payload.path)}`)
+            }
+          } catch { /* ignore */ }
+          continue
+        }
+        if (line.startsWith("__PROJECT_SETUP_FIELD__:")) {
+          try {
+            const payload = JSON.parse(line.slice("__PROJECT_SETUP_FIELD__:".length)) as {
+              kind: "worktree" | "gitlab"; worktreeRoot?: string; gitlabToken?: string; gitlabHost?: string
+              chatId?: string; messageId?: string
+            }
+            const port = cachedPort ?? readLockFile()?.port
+            let notice = ""
+            if (payload.kind === "worktree" && payload.worktreeRoot) {
+              try { if (!fs.existsSync(payload.worktreeRoot)) fs.mkdirSync(payload.worktreeRoot, { recursive: true }) } catch { /* replySetupHub 会显示未变更 */ }
+              saveConfig({ worktreeRoot: payload.worktreeRoot })
+              notice = `✅ 工作区目录已设为 ${payload.worktreeRoot}`
+            } else if (payload.kind === "gitlab") {
+              const patch: { gitlabToken?: string; gitlabHost?: string } = {}
+              if (payload.gitlabToken && payload.gitlabToken !== "-") patch.gitlabToken = payload.gitlabToken
+              if (payload.gitlabHost) patch.gitlabHost = payload.gitlabHost.toLowerCase() === "clear" ? "" : payload.gitlabHost
+              if (Object.keys(patch).length) saveConfig(patch)
+              notice = "✅ GitLab 配置已更新"
+            }
+            // 单卡多视图：保存后原表单卡回到 setup 总览
+            if (port && payload.chatId) {
+              void replySetupHub(port, payload.messageId || "", payload.chatId, payload.messageId, notice)
             }
           } catch { /* ignore */ }
           continue

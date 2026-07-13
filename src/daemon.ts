@@ -1379,11 +1379,38 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
       path: repoPath, baseBranch, testBranch, developBranch,
       chatId: chatKey, messageId: evt.messageId,
     })}\n`);
-    const summary = [repoPath, `base=${baseBranch}`, testBranch ? `test=${testBranch}` : "", developBranch ? `dev=${developBranch}` : ""]
-      .filter(Boolean).join(" · ");
+    // 宿主保存后会把本卡 patch 回 setup 总览（单卡多视图）
     return {
-      toast: { type: "success", content: "已保存" },
-      card: { type: "raw", data: LarkSender.buildCard(`✅ 已保存主仓\n${summary}`, "添加主仓", undefined, undefined, "green") },
+      toast: { type: "success", content: "已提交" },
+      card: { type: "raw", data: LarkSender.buildCard("⏳ 正在保存主仓…", "添加主仓", undefined, undefined, "orange") },
+    };
+  }
+
+  if (value?.kind === "setup_worktree_form") {
+    const f = evt.formValue || {};
+    const raw = (f.worktreeRoot || "").trim();
+    if (!raw) return { toast: { type: "error", content: "请填写目录" } };
+    if (!path.isAbsolute(raw)) return { toast: { type: "error", content: "请填写绝对路径" } };
+    process.stdout.write(`__PROJECT_SETUP_FIELD__:${JSON.stringify({
+      kind: "worktree", worktreeRoot: path.normalize(raw), chatId: chatKey, messageId: evt.messageId,
+    })}\n`);
+    return {
+      toast: { type: "success", content: "已提交" },
+      card: { type: "raw", data: LarkSender.buildCard("⏳ 正在保存工作区目录…", "设置工作区目录", undefined, undefined, "orange") },
+    };
+  }
+
+  if (value?.kind === "setup_gitlab_form") {
+    const f = evt.formValue || {};
+    const token = (f.gitlabToken || "").trim();
+    const host = (f.gitlabHost || "").trim();
+    if (!token && !host) return { toast: { type: "info", content: "未填写任何变更" } };
+    process.stdout.write(`__PROJECT_SETUP_FIELD__:${JSON.stringify({
+      kind: "gitlab", gitlabToken: token || undefined, gitlabHost: host || undefined, chatId: chatKey, messageId: evt.messageId,
+    })}\n`);
+    return {
+      toast: { type: "success", content: "已提交" },
+      card: { type: "raw", data: LarkSender.buildCard("⏳ 正在保存 GitLab 配置…", "设置 GitLab", undefined, undefined, "orange") },
     };
   }
 
@@ -2410,7 +2437,11 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
 
   if (method === "POST" && pathname === "/api/project-setup-form") {
     const body = JSON.parse(await readBody(req));
-    const { message_id, session_key } = body as { message_id?: string; session_key?: string };
+    const { message_id, session_key, form, patch_message_id, worktree_root, gitlab_host, token_masked } = body as {
+      message_id?: string; session_key?: string;
+      form?: "repo" | "worktree" | "gitlab"; patch_message_id?: string;
+      worktree_root?: string; gitlab_host?: string; token_masked?: string;
+    };
     if (rejectUnroutedSend(res, "project-setup-form", session_key, message_id)) return true;
     const ch = resolveChannel(routeTargetKey(session_key, message_id), { allowDefault: false });
     if (ch.type === "error") { json(res, { ok: false, error: ch.message }, 400); return true; }
@@ -2420,7 +2451,14 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       return true;
     }
     const sender = ch.rt.sender!;
-    const card = LarkSender.buildRepoSetupFormCard();
+    const card = (form === "worktree" || form === "gitlab")
+      ? LarkSender.buildSetupFieldFormCard({ form, worktreeRoot: worktree_root, gitlabHost: gitlab_host, tokenMasked: token_masked })
+      : LarkSender.buildRepoSetupFormCard();
+    // 单卡多视图：按钮点击来源时原卡直接切到表单视图
+    if (patch_message_id && !patch_message_id.startsWith("internal_")) {
+      const patched = await sender.patchRawCard(patch_message_id, card);
+      if (patched) { json(res, { ok: true, message_id: patch_message_id }); return true; }
+    }
     let sent = message_id && !message_id.startsWith("internal_")
       ? await sender.sendInteractiveCard(card, message_id, undefined)
       : undefined;

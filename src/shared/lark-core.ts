@@ -456,6 +456,85 @@ export class LarkSender {
     }
   }
 
+  /** patch 任意卡片 JSON（单卡多视图导航用：原卡在 总览↔表单 间跳转） */
+  async patchRawCard(messageId: string, card: any): Promise<boolean> {
+    if (!messageId || messageId.startsWith("internal_")) return false
+    try {
+      const res = await this.client.im.message.patch({
+        path: { message_id: messageId },
+        data: { content: JSON.stringify(card) },
+      })
+      const code = (res as any)?.code
+      if (code !== undefined && code !== 0) {
+        this.log("WARN", `卡片视图切换失败 code=${code} (${messageId})`)
+        return false
+      }
+      return true
+    } catch (e: any) {
+      this.log("WARN", `卡片视图切换异常 (${messageId}): ${e?.message ?? e}`)
+      return false
+    }
+  }
+
+  /** /p setup 单字段表单：worktree 目录 / GitLab 配置（卡内输入框，提交回调保存，原卡回总览） */
+  static buildSetupFieldFormCard(opts: {
+    form: "worktree" | "gitlab"
+    worktreeRoot?: string
+    gitlabHost?: string
+    tokenMasked?: string
+  }): any {
+    const field = (name: string, label: string, placeholder: string, required?: boolean, defaultValue?: string) => {
+      const el: any = {
+        tag: "input",
+        name,
+        required: !!required,
+        label: { tag: "plain_text", content: label },
+        placeholder: { tag: "plain_text", content: placeholder.slice(0, 100) },
+        label_position: "top",
+        width: "fill",
+      }
+      if (defaultValue) el.default_value = defaultValue.replace(/\\/g, "/")
+      return el
+    }
+    const isWorktree = opts.form === "worktree"
+    const formElements: any[] = isWorktree
+      ? [
+        field("worktreeRoot", "worktree 根目录", "绝对路径，例如 D:/claw-projects", true, opts.worktreeRoot),
+        {
+          tag: "button", name: "submit", text: { tag: "plain_text", content: "保存" }, type: "primary",
+          form_action_type: "submit",
+          behaviors: [{ type: "callback", value: { kind: "setup_worktree_form" } }],
+        },
+      ]
+      : [
+        field("gitlabToken", "GitLab Token", `当前 ${opts.tokenMasked || "（未设置）"}；留空保持不变`),
+        field("gitlabHost", "GitLab Host", `当前 ${opts.gitlabHost || "默认从 origin 推断"}；留空保持不变，填 clear 清空`),
+        {
+          tag: "button", name: "submit", text: { tag: "plain_text", content: "保存" }, type: "primary",
+          form_action_type: "submit",
+          behaviors: [{ type: "callback", value: { kind: "setup_gitlab_form" } }],
+        },
+      ]
+    const elements: any[] = [
+      { tag: "markdown", content: isWorktree ? "项目 worktree 将在此目录下创建；不存在会自动创建。" : "保存后立即生效；Token 仅用于开提测 MR。" },
+      { tag: "form", name: `setup_${opts.form}`, elements: formElements },
+      {
+        tag: "button",
+        text: { tag: "plain_text", content: "← 返回 setup" },
+        type: "default",
+        behaviors: [{ type: "callback", value: { kind: "cmd", cmd: "/p setup" } }],
+      },
+    ]
+    return {
+      schema: "2.0",
+      config: { update_multi: true, width_mode: "fill" },
+      header: {
+        title: { tag: "plain_text", content: isWorktree ? "设置工作区目录" : "设置 GitLab" },
+        template: "orange",
+      },
+      body: { horizontal_align: "left", elements },
+    }
+  }
   async sendInteractiveCard(card: any, replyMessageId?: string, chatId?: string): Promise<string | null | undefined> {
     const content = JSON.stringify(card)
     if (replyMessageId && !replyMessageId.startsWith("internal_")) {

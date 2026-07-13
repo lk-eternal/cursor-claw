@@ -303,6 +303,17 @@ async function handleSetupCommand(
     return
   }
   if (mode === "worktree") {
+    // 优先卡内表单（原卡切视图）；被拒/微信降级走分步问答
+    try {
+      const r = await httpPost(`http://127.0.0.1:${port}/api/project-setup-form`, {
+        message_id: messageId,
+        session_key: chatId,
+        form: "worktree",
+        patch_message_id: patchMessageId,
+        worktree_root: getConfig().worktreeRoot?.trim() || undefined,
+      }) as { ok?: boolean }
+      if (r?.ok) return
+    } catch { /* fall through to Q&A */ }
     const draft: ProjectNewDraft = {
       chatKey: chatId,
       step: "setup_worktree",
@@ -335,11 +346,12 @@ async function handleSetupCommand(
       await replySetupHub(port, messageId, chatId, patchMessageId)
       return
     }
-    // 优先发飞书表单（四项一次填完）；被拒/微信降级走分步问答
+    // 优先发飞书表单（四项一次填完，按钮来源原卡切视图）；被拒/微信降级走分步问答
     try {
       const r = await httpPost(`http://127.0.0.1:${port}/api/project-setup-form`, {
         message_id: messageId,
         session_key: chatId,
+        patch_message_id: patchMessageId,
       }) as { ok?: boolean }
       if (r?.ok) return
     } catch { /* fall through to Q&A */ }
@@ -369,6 +381,18 @@ async function handleSetupCommand(
     return
   }
   if (mode === "gitlab") {
+    try {
+      const cfg = getConfig()
+      const r = await httpPost(`http://127.0.0.1:${port}/api/project-setup-form`, {
+        message_id: messageId,
+        session_key: chatId,
+        form: "gitlab",
+        patch_message_id: patchMessageId,
+        gitlab_host: cfg.gitlabHost?.trim() || undefined,
+        token_masked: maskToken(cfg.gitlabToken || ""),
+      }) as { ok?: boolean }
+      if (r?.ok) return
+    } catch { /* fall through to Q&A */ }
     const draft: ProjectNewDraft = {
       chatKey: chatId,
       step: "setup_gitlab_token",
