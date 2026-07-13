@@ -478,6 +478,14 @@ export interface QueueSessionInfo {
   hasPending?: boolean;
 }
 
+/** meta 缺 chatType 时按 key 形态推断，防群/项目会话被误当 p2p 访客拉起 */
+function inferChatType(sessionKey: string): string {
+  const chatPart = sessionKey.includes("::") ? sessionKey.slice(0, sessionKey.indexOf("::")) : sessionKey;
+  const rawChatId = chatPart.includes("|") ? chatPart.slice(chatPart.indexOf("|") + 1) : chatPart;
+  if (rawChatId.startsWith("oc_") || rawChatId.startsWith("on_")) return "group";
+  return "p2p";
+}
+
 /** 有未处理完消息的会话（含 .claimed 未确认：Agent 掉线后调度器据此重新拉起并重投） */
 export function getDistinctSessions(): QueueSessionInfo[] {
   if (!queueDir) return [];
@@ -492,7 +500,7 @@ export function getDistinctSessions(): QueueSessionInfo[] {
           const parsed = JSON.parse(raw);
           const key = parsed.sessionKey || parsed.chatId || "";
           if (!key) continue;
-          const entry = map.get(key) ?? { chatType: parsed.meta?.chatType || parsed.chatType || "p2p", senderOpenId: parsed.meta?.senderOpenId || parsed.senderOpenId || undefined, hasPending: false };
+          const entry = map.get(key) ?? { chatType: parsed.meta?.chatType || parsed.chatType || inferChatType(key), senderOpenId: parsed.meta?.senderOpenId || parsed.senderOpenId || undefined, hasPending: false };
           if (f.endsWith(".qmsg")) entry.hasPending = true;
           map.set(key, entry);
         } catch { /* ignore */ }
@@ -503,6 +511,8 @@ export function getDistinctSessions(): QueueSessionInfo[] {
     sessionKey: key,
     chatType: v.chatType,
     senderOpenId: v.senderOpenId,
+    // 之前漏传该字段：调度器「有新消息无视失败冷却」机制因此失效，异常后的新消息被冷却挡住
+    hasPending: v.hasPending,
   }));
 }
 

@@ -36,7 +36,7 @@ import { buildProjectSessionPrompt, buildActionPrompt } from "./project-prompts"
 import { pushAndCreateMergeRequest } from "./project-gitlab"
 import { syncArtifactToFeishu } from "./project-feishu-sync"
 import { httpPost, syncActiveSession, enqueueToSession } from "./daemon-client"
-import { launchProjectAgent, leaveProjectSession } from "./session-dispatcher"
+import { leaveProjectSession } from "./session-dispatcher"
 
 function projectHelpText(): string {
   const nodeIds = getProjectNodes(getCurrentProject()?.groupId).map((n) => n.id).join("|")
@@ -147,11 +147,11 @@ function withChatFooter(text: string, footer = "也可直接发消息，在项�
   return `${text}\n\n---\n${footer}`
 }
 
+/** 进入项目会话（懒加载）：只落元数据与消息路由，Agent 等首条消息/节点任务到队列时由调度器拉起并注入项目上下文 */
 async function enterProjectSession(
   port: number,
   chatId: string,
   project: Project,
-  welcome?: string,
 ): Promise<void> {
   const sessionKey = project.sessionKey || projectSessionKey(chatId, project.id)
   project.sessionKey = sessionKey
@@ -159,13 +159,6 @@ async function enterProjectSession(
   const { saveProject } = await import("../src/shared/project-store.js")
   saveProject(project)
   await syncActiveSession(port, chatId, sessionKey)
-  await launchProjectAgent({
-    projectId: project.id,
-    projectName: project.name,
-    workingDirectory: project.worktreePath,
-    notifyChatId: chatId,
-    prompt: welcome || buildProjectSessionPrompt(project),
-  })
 }
 
 interface NewProjectInput {

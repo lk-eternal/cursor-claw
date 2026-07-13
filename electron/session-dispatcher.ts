@@ -475,27 +475,6 @@ export async function launchIndependentAgent(
   })
 }
 
-export async function launchProjectAgent(p: {
-  projectId: string
-  projectName: string
-  prompt: string
-  workingDirectory: string
-  notifyChatId: string
-  model?: string
-}): Promise<{ ok: boolean; error?: string }> {
-  const sessionKey = `${p.notifyChatId}::project_${p.projectId}`
-  return launchAgent({
-    sessionKey,
-    chatType: "project",
-    chatName: `P: ${p.projectName}`,
-    taskMessage: p.prompt,
-    workingDirectory: p.workingDirectory,
-    meta: { chatId: p.notifyChatId, chatType: "project" },
-    channelId: parseChatKey(extractChatId(p.notifyChatId)).channelId,
-    modelOverride: p.model,
-  })
-}
-
 export async function notifyChatFallback(chatId: string, text: string): Promise<void> {
   const lock = cachedLock()
   if (!lock?.port) return

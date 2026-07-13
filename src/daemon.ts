@@ -46,7 +46,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { registerAdminTools } from "./server-admin.js";
 import { registerProjectAgentTools } from "./server-project.js";
-import { initProjectStore, hasProjectNewDraft, getProject, getNodeGroups } from "./shared/project-store.js";
+import { initProjectStore, hasProjectNewDraft, getProject, getNodeGroups, listProjects } from "./shared/project-store.js";
 import { projectIdFromSessionKey, decodeRepoPair } from "./shared/project-types.js";
 import { buildSessionCardTitle, isSpecialSessionSuffix, resolveWorkspaceFromSessionKey, sessionHeaderTemplate } from "./shared/session-label.js";
 
@@ -869,6 +869,15 @@ function pushMessage(content: string, messageId?: string, chatId?: string, chatT
           routedId = mainSessionKey;
         }
       }
+    }
+  }
+  // 群聊无活跃会话映射（如 daemon 重启后路由丢失）：唯一活跃项目兜底，防消息落入裸 chatKey 幽灵会话
+  if (!resolved.viaReply && chatId && chatType === "group" && routedId === chatId) {
+    const owned = listProjects().filter((p) => p.status === "active" && p.notifyChatId === chatId && p.sessionKey);
+    if (owned.length === 1) {
+      setActiveSession(chatId, owned[0].sessionKey!);
+      routedId = owned[0].sessionKey!;
+      log("INFO", `[Routing] 群会话映射缺失，兜底路由到项目「${owned[0].name}」: ${routedId}`);
     }
   }
   if (chatId && chatType) rememberChatType(chatId, chatType);
