@@ -63,7 +63,7 @@ import {
 export { applyProxyEnv, checkCliInstalled, installCli, execAgentSync, execAgentAsync, type ExecAgentOptions as ExecAgentSyncOptions } from "./agent-cli"
 export { checkAgentLoggedIn, loginCli } from "./agent-launcher"
 export { getLogBuffer } from "./ui-logger"
-export { checkSdkApiKey, listSdkModels } from "./agent-sdk"
+export { checkSdkApiKey, listSdkModels, noteGlobalSdkError } from "./agent-sdk"
 export { injectWorkspaceMcpAndRules, injectWorkspaceToDir, clearInjectionCache } from "./workspace-injector"
 export { getQueueMessages, clearMessageQueue, deleteQueueMessage } from "./session-dispatcher"
 

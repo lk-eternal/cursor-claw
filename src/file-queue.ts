@@ -503,6 +503,7 @@ export function getDistinctSessions(): QueueSessionInfo[] {
     sessionKey: key,
     chatType: v.chatType,
     senderOpenId: v.senderOpenId,
+    hasPending: v.hasPending,
   }));
 }
 

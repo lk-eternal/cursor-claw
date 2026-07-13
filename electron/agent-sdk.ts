@@ -163,6 +163,23 @@ export function clearSdkFailStreak(sessionKey: string): void {
   sdkFailStreak.delete(sessionKey)
 }
 
+// SDK socket 深处的网络错误只会抛到主进程全局兜底，无法关联到具体 run；
+// 记一份近期错误，run 报错时附到详情里还原真实原因（如代理断连）
+const recentGlobalErrors: { at: number; msg: string }[] = []
+
+export function noteGlobalSdkError(msg: string): void {
+  recentGlobalErrors.push({ at: Date.now(), msg })
+  if (recentGlobalErrors.length > 20) recentGlobalErrors.shift()
+}
+
+function recentGlobalErrorHint(withinMs: number): string {
+  const cutoff = Date.now() - withinMs
+  for (let i = recentGlobalErrors.length - 1; i >= 0; i--) {
+    if (recentGlobalErrors[i].at >= cutoff) return recentGlobalErrors[i].msg
+  }
+  return ""
+}
+
 /** 失败冷却剩余毫秒：2s→60s 指数递增，超 8 次降频为 10 分钟一次（自愈不放弃） */
 export function sdkFailCooldownRemaining(sessionKey: string): number {
   const st = sdkFailStreak.get(sessionKey)
@@ -465,7 +482,8 @@ function startRunLifecycle(session: SdkSessionAgent, run: Run): void {
       }
       const last = session.lastStatus
       const lastStr = last ? `lastStatus=${last.status}${last.message ? ` msg=${last.message}` : ""} ` : ""
-      errorDetail = `${lastStr}${detail}`.slice(0, 800)
+      const netHint = recentGlobalErrorHint(120_000)
+      errorDetail = `${lastStr}${detail}${netHint ? ` | 疑似底层网络/代理错误: ${netHint}` : ""}`.slice(0, 800)
       pushUiLog("SDK", "ERROR", `[${sessionKey}] 运行错误详情: ${errorDetail}`)
     }
 
@@ -608,8 +626,8 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       run = await agent.send(prompt, { local: { force: true } })
     }
     startRunLifecycle(session, run)
-    // 成功拉起即清零失败计数：封顶停手的会话由新消息重新给满重试额度
-    clearSdkFailStreak(sessionKey)
+    // 失败计数不在拉起时清零（断网时 Resume 总能成功、run 中途才死，清了会导致退避永不生效）：
+    // run 成功跑完由 scheduleSdkIdle 清零；新消息经 hasPending 无视冷却立即放行
     // 持久化最新 agentId：run 结束释放进程后靠它 Resume，应用重启后依然有效
     rememberResumable(session)
 

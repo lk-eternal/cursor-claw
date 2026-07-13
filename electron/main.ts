@@ -21,6 +21,7 @@ import {
   saveAppConfigFromRenderer,
   checkSdkApiKey,
   listSdkModels,
+  noteGlobalSdkError,
 } from "./daemon-manager"
 import { parseListModelsStdout } from "./command-handler"
 import {
@@ -376,11 +377,13 @@ let isQuitting = false
 // 第三方 SDK（如 @cursor/sdk）深处的异步 socket 错误无法在调用点捕获，
 // 全局兜底记日志，避免 Electron 默认弹出 "JavaScript error in main process" 并中断运行
 // 网络类抖动（代理/NAT 掐掉闲置长连接等）降为 WARN：会话层已有 Resume 自愈机制
-const NETWORK_NOISE_RE = /WRONG_VERSION_NUMBER|SSL routines|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EPIPE|socket hang up|fetch failed|GOAWAY/i
+const NETWORK_NOISE_RE = /WRONG_VERSION_NUMBER|SSL routines|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EPIPE|socket hang up|fetch failed|GOAWAY|socket disconnected|secure TLS connection|stream closed with error code/i
 
 function logGlobalError(kind: string, raw: unknown): void {
   const msg = raw instanceof Error ? raw.message : String(raw)
   try {
+    // 记入近期错误环形缓冲：run 报错时把真实网络原因附到错误详情
+    noteGlobalSdkError(msg)
     if (NETWORK_NOISE_RE.test(msg)) {
       broadcastLog(`[Main] SDK 后台连接抖动（已由会话恢复机制兜底）: ${msg}`, "WARN")
     } else {
