@@ -144,7 +144,7 @@ export function getIndependentTaskStatuses(): Record<string, { running: boolean;
 
 export interface LaunchMeta { messageIds?: string[]; chatId?: string; chatType?: string }
 
-export function buildPrompt(meta?: LaunchMeta, taskMessage?: string, sessionKey?: string, useMainWorkspace?: boolean, keepAlive = true): string {
+export function buildPrompt(meta?: LaunchMeta, taskMessage?: string, sessionKey?: string, useMainWorkspace?: boolean): string {
   const prompts: string[] = []
   // 数字身份（拟人人设）只用于聊天类会话；工作流/项目等干活会话不注入
   if (useMainWorkspace || meta?.chatType === "project") {
@@ -165,7 +165,6 @@ export function buildPrompt(meta?: LaunchMeta, taskMessage?: string, sessionKey?
     prompts.push(`[session_key=${sessionKey}]`)
   }
   prompts.push(`[chat_type=${meta?.chatType}]`)
-  prompts.push(`[keep_alive=${keepAlive}]`)
 
   return prompts.join("\n")
 }
@@ -275,7 +274,7 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
   if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true })
   if (!resolveAgentBinary()) { pendingLaunches.delete(sessionKey); return { ok: false, error: "Cursor CLI 未安装" } }
 
-  const prompt = buildPrompt(meta, taskMessage, sessionKey, useMainWorkspace, opts.persistentPoll ?? true)
+  const prompt = buildPrompt(meta, taskMessage, sessionKey, useMainWorkspace)
   const spawnEnv = createAgentEnv({ LARK_WORKSPACE_DIR: workDir })
 
   let resumeChatId: string | false = false

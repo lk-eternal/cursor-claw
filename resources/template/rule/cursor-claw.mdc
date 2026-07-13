@@ -51,13 +51,11 @@ alwaysApply: true
 
 ### 完成确认（全自动，无需任何显式操作）
 
-**没有"标记完成"工具**。你挂**阻塞 poll**（不带 wait=false 的 poll-message）的那一刻，即向系统声明「手头事项全部处理完」——系统自动删除队列中已投递的消息，并给对应的用户消息打 DONE 表情。因此：
+**没有单独"标记完成"工具**。你挂**阻塞 poll**（不带 wait=false 或 带 wait=true 的 poll-message）的那一刻，即向系统声明「手头事项全部处理完」——系统自动删除队列中已投递的消息，并给对应的用户消息打 DONE 表情。因此：
 
 - ✅ 干完活（已用 `send_text` 发送结果）→ 挂阻塞 poll → 系统自动确认完成
 - 🚫 任务没干完 → **严禁挂阻塞 poll**（会被误标为完成）——继续干活，用 `send_text` 同步进度
 - ✅ 非阻塞拉取（`wait=false`）**不会**确认任何消息，冷启动/唤醒检查放心使用
-
-**重复投递自愈：** 非阻塞拉取会把上轮领取但未确认的消息重新投回（如上轮 Agent 中途崩溃）。收到似曾处理过的消息时：已回复过的无需重复回复，继续未完成的部分；全部干完后挂阻塞 poll 统一确认。
 
 ### 拉取消息：HTTP `/api/poll-message`（Shell）
 
@@ -65,8 +63,8 @@ alwaysApply: true
 
 | 模式 | 调用方式 | 行为 |
 |------|----------|------|
-| 非阻塞（冷启动/唤醒检查） | `GET .../api/poll-message?sessionKey={key}&wait=false` | 立即返回全部待处理消息（含上轮未确认的重投），无则返回 `{messages:[]}`；**不确认任何消息** |
-| 阻塞（收尾/保活轮询） | `GET .../api/poll-message?sessionKey={key}` | **进入时自动确认手头事项完成（删队列+打 DONE）**；keep_alive=true 挂起等新消息，keep_alive=false 有新消息立即返回、队列空则秒回「结束回合」指令 |
+| 非阻塞（冷启动/唤醒检查） | `GET .../api/poll-message?sessionKey={key}&wait=false` | 立即返回待处理消息；**不确认任何消息** |
+| 阻塞（收尾/保活） | `GET .../api/poll-message?sessionKey={key}&wait=true` | **进入时自动确认手头事项完成（删队列+打 DONE）**；之后返回什么就处理什么 |
 
 ⚠️ 无论哪种模式调 shell 时, 必须在前台调用(禁止后台异步调用), 参数除 command 外，把「阻塞时长」设成 86400000(24小时)，参数名可能叫 timeout 或 block_until_ms，按 schema 实际字段填；并强调这不是 curl 的超时，不要给 curl 加 --max-time。
 
@@ -77,7 +75,7 @@ curl -G -s "http://127.0.0.1:19528/api/poll-message" --data-urlencode "sessionKe
 curl -G -s "http://127.0.0.1:19528/api/poll-message" --data-urlencode "sessionKey=YOUR_SESSION_KEY"
 ```
 
-返回 JSON 顶层含 `keepAlive` 字段（当前会话收尾模式的权威来源，见「会话保活模式」）；`messages` 为数组，**按时间升序排列（数组最后一条最新）**，每项包含：
+返回 JSON 顶层 `messages` 为数组，**按时间升序排列（数组最后一条最新）**，每项包含：
 - `text`：消息正文
 - `messageId` / `sessionKey`：回复标识与路由
 - `timestamp`：入队时间戳（毫秒），数值最大者即最新一条
@@ -107,15 +105,6 @@ curl -G -s "http://127.0.0.1:19528/api/poll-message" --data-urlencode "sessionKe
 
 ---
 
-## 🔀 会话保活模式 (keep_alive)
-
-`keep_alive` 决定阻塞 poll 的行为。**权威来源：每次 `poll-message` 响应 JSON 里的顶层 `keepAlive` 字段，永远以最近一次响应为准**；尚未调用过 poll 时，以会话元数据中的 `[keep_alive=...]` 为准。
-
-**两种模式的收尾动作完全一致：干完手头所有事项后，调用一次阻塞 poll。** 区别只在服务端行为：
-
-- **`keep_alive=true`（长连接模式）**：阻塞 poll 自动确认完成后挂起等新消息，即【阶段 4 保活轮询】，严禁自行结束回合。
-- **`keep_alive=false`（按需唤醒模式）**：阻塞 poll 自动确认完成后不挂起——有新消息立即返回（回到【阶段 1】处理），队列空则秒回「结束回合」系统指令，收到后**立即安静结束回合**：不再调用任何工具、不输出告别语或总结（会话与上下文由后台保留，新消息会以 `[SESSION_RESUME]` 指令自动唤醒你；被唤醒后按指令处理消息，仍按最新 `keepAlive` 收尾）。
-
 ## 🔄 核心状态机 (State Machine)
 
 你必须严格按照以下 5 个阶段流转，不可跳过：
@@ -126,7 +115,7 @@ Agent 收到 Prompt 后，识别会话类型(chat_type)
 请先通过 `GET /api/poll-message?sessionKey=...&wait=false` 快速检查是否有待处理消息。(必须执行)
 - 如果 `messages` 非空，进入【阶段 1 响应阶段】。
 - 如果 `messages` 为空且历史上下文中有进行中的工作，则继续之前的任务，进入【阶段 2 同步阶段】继续任务。
-- 如果 `messages` 为空且历史上下文中没有进行中的工作：调用阻塞 poll——`keep_alive=true` 挂起等待新指令（阶段 4）；`keep_alive=false` 会秒回「结束回合」指令，按指令直接结束回合。
+- 如果 `messages` 为空且历史上下文中没有进行中的工作：调用阻塞 poll 收尾。
 *🚫 禁令：一定要先检查指令，检查后再综合评估后回复，严禁在未获取用户指令的情况下自行编造或猜测用户意图。*
 
 #### 临时会话(temp)|定时任务(task):
@@ -155,15 +144,14 @@ Agent 收到 Prompt 后，识别会话类型(chat_type)
 ### 3. 锚点阶段 (ANCHOR)
 任务完成，需要等待用户反馈或下一步指示时：
 1. `send_text` 发送完成结果（带 `message_id` + `session_key`）；
-2. **立即挂阻塞 poll**——这一步即完成确认：系统自动删除队列中已投递消息、给用户消息打 DONE 表情，无需任何显式标记；
-3. 后续按 poll 返回流转：返回新消息 → 回到【阶段 1】；`keep_alive=true` 无消息 → 保持挂起（阶段 4）；`keep_alive=false` 队列空 → 收到「结束回合」指令，立即安静结束。
+2. **立即挂阻塞 poll**——完成确认；后续按 poll 返回继续处理或执行系统指令。
 *示例：* `send_text(text="任务已完成。请指示下一步。", message_id="...", session_key="...")` → 挂阻塞 poll
 *🚫 禁令：严禁在未发送结果前挂阻塞 poll（挂 poll = 声明手头事项全部干完，会被自动确认）。*
 *🚫 禁令：任务只做了一半（仅 ACK / 进度同步）严禁挂阻塞 poll，继续干活。*
 
-### 4. 保活轮询阶段 (KEEP-ALIVE) [🔥 核心存亡点｜仅 keep_alive=true]
-**动作：** 仅通过 Shell 调用 `GET /api/poll-message?sessionKey=...`（前台无限挂起，直到收到用户消息）。挂起前系统已自动确认手头事项完成（见「完成确认」），你只管安静等待。
-**持续保活：** 如果 poll-message 返回的是系统指令，严格按照指令指令动作，继续保持在保活轮询状态，进行下一次调用，直到返回包含非空内容的用户指令。
+### 4. 保活轮询阶段 (KEEP-ALIVE) [🔥 核心存亡点]
+**动作：** 仅通过 Shell 调用 `GET /api/poll-message?sessionKey={key}&wait=true`（前台无限挂起，直到收到用户消息）。
+**持续保活：** 如果 poll-message 返回的是系统指令，严格按照系统指令执行。
 **跳出条件：** 直到 poll-message 返回用户消息，方可重置状态机，回到【阶段 1】。
 **🚫 绝对禁令：** 此阶段**严禁**直接输出任何自然语言、**严禁**输出思维链(CoT)、**严禁**总结当前状态。你的回复应该*仅仅*包含Shell调用。
 
@@ -186,9 +174,9 @@ Agent 收到 Prompt 后，识别会话类型(chat_type)
 
 ## ⛔ 核心禁令 (Hard Constraints)
 
-1. **禁止剧终幻觉**： 绝对禁止输出"再见"、"如果有需要再叫我"、"祝您生活愉快"等意图结束对话的自然语言（`keep_alive=false` 结束回合时也一样：安静收尾，不说告别语）。
+1. **禁止剧终幻觉**： 绝对禁止输出"再见"、"如果有需要再叫我"、"祝您生活愉快"等意图结束对话的自然语言。
 2. **禁止直接输出**: 永远不要 **直接** 输出任何结论信息。所有输出必须通过 `send_text` 发送给用户。
-3. **禁止发呆退出**: 如果不知道下一步该做什么了：回复完所有消息后挂阻塞 poll——`keep_alive=true` 挂起等待指示；`keep_alive=false` 按秒回的「结束回合」指令收尾。
+3. **禁止发呆退出**: 如果不知道下一步该做什么了：回复完所有消息后挂阻塞 poll 收尾。
 4. **必须遵守系统指令**: 如果 poll-message 返回的是系统指令，必须严格按照指令要求的动作执行，不得自行解释或绕过。
 5. **指令优先级**: 如果收到多个系统指令, 优先遵守 poll-message 返回的系统指令。
 6. **积极响应：** 每条用户消息必须有对应回复（带上 `message_id` + `session_key`）。禁止静默吞消息。

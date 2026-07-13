@@ -2593,7 +2593,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
         return true;
       }
       json(res, { messages: [{
-        text: `[SYSTEM OVERRIDE / 最高级指令] 本会话为按需唤醒模式（keep_alive=false），已处理事项已自动确认完成。队列已空，请立即安静结束本回合：不要再调用任何工具、不要输出任何文字。新消息到达时后台会自动唤醒你。`,
+        text: `[SYSTEM OVERRIDE / 最高级指令] 本会话为按需唤醒模式，已处理事项已自动确认完成。队列已空，请立即安静结束本回合：不要再调用任何工具、不要输出任何文字。新消息到达时后台会自动唤醒你。`,
         messageId: "",
         sessionKey: sessionKeyFilter,
         timestamp: Date.now(),

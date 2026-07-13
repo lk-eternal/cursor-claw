@@ -130,12 +130,12 @@ function buildWakePrompt(session: SdkSessionAgent, rulesUpdated = false, taskMes
       "任务内容:",
       taskMessage,
       "---",
-      "直接开始执行上述任务；执行中按 cursor-claw 协议同步进度，完成后按 keep_alive 模式收尾。",
+      "直接开始执行上述任务；执行中按 cursor-claw 协议同步进度，完成后挂阻塞 poll 收尾。",
       "禁止向用户发送问候、唤醒说明等任何多余消息。",
     ]
     : [
       "[SESSION_RESUME / 系统指令] 会话已由后台唤醒（历史上下文完整保留），有新消息待处理。",
-      "立即执行：非阻塞检查 poll-message（wait=false），按 cursor-claw 协议处理所有消息并逐条回复，然后按 keep_alive 模式收尾。",
+      "立即执行：非阻塞检查 poll-message（wait=false），按 cursor-claw 协议处理所有消息并逐条回复，完成后挂阻塞 poll 收尾。",
       "禁止向用户发送问候、唤醒说明等任何多余消息。",
     ]
   if (rulesUpdated) {
@@ -146,7 +146,6 @@ function buildWakePrompt(session: SdkSessionAgent, rulesUpdated = false, taskMes
     "会话元数据:",
     `[session_key=${session.sessionKey}]`,
     `[chat_type=${session.chatType}]`,
-    `[keep_alive=${session.persistentPoll}]`,
   )
   return lines.join("\n")
 }
@@ -595,7 +594,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     if (rulesUpdated) pushUiLog("SDK", "INFO", `[${sessionKey}] 检测到规则更新，唤醒时要求重读规则`)
     const prompt = resumed
       ? buildWakePrompt(session, rulesUpdated, taskMessage)
-      : buildPrompt(meta, taskMessage, sessionKey, opts.useMainWorkspace, persistentPoll)
+      : buildPrompt(meta, taskMessage, sessionKey, opts.useMainWorkspace)
     pushUiLog("SDK", "INFO", `[${sessionKey}] ${resumed ? "恢复" : "启动"} Prompt:\n${prompt}`)
     let run: Run
     try {
