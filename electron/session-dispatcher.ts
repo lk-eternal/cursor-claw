@@ -638,6 +638,30 @@ export async function leaveProjectSession(
   }
 }
 
+/** 生成某会话的完整状态块（同 /s 当前对话段），供 /p leave 等场景复用 */
+export async function formatCurrentSessionBlock(sessionKey: string, workspaceDir?: string): Promise<string> {
+  const matched = getSessionAgentList().find((s) => s.sessionKey === sessionKey)
+  const qMsgs = await getQueueMessages()
+  const channel = resolveChannelForSession(sessionKey)
+  const channelModel = resolveChannelModel(channel, "primary")
+  const override = getSessionOverride(sessionKey)
+  return formatSessionStatusBlock({
+    sessionKey,
+    chatType: matched?.chatType,
+    workspaceDir: matched?.workspaceDir || workspaceDir,
+    chatName: matched?.chatName,
+    pid: matched?.pid,
+    model: matched?.model || override?.model || channelModel.model,
+    modelParams: matched?.modelParams ?? override?.modelParams ?? channelModel.modelParams,
+    startedAt: matched?.startedAt,
+  }, {
+    current: true,
+    queueMessages: qMsgs.filter((m) => m.sessionKey === sessionKey),
+    agentRunning: !!matched,
+    showType: false,
+  })
+}
+
 /** 删除会话：停止 Agent、清 Resume、移出常用目录；若当前活跃则回主会话。项目会话请用 /p del。 */
 export async function deleteUserSession(
   sessionKey: string,

@@ -36,7 +36,7 @@ import { buildProjectSessionPrompt, buildActionPrompt } from "./project-prompts"
 import { pushAndCreateMergeRequest } from "./project-gitlab"
 import { syncArtifactToFeishu } from "./project-feishu-sync"
 import { httpPost, syncActiveSession, enqueueToSession } from "./daemon-client"
-import { leaveProjectSession } from "./session-dispatcher"
+import { leaveProjectSession, formatCurrentSessionBlock } from "./session-dispatcher"
 
 function projectHelpText(): string {
   const nodeIds = getProjectNodes(getCurrentProject()?.groupId).map((n) => n.id).join("|")
@@ -1213,18 +1213,21 @@ export async function handleFeishuProjectCommand(
       return
     }
     const back = await leaveProjectSession(port, chatId)
-    const lines = [
-      "✅ 已退出项目，回到普通会话",
-      back.workspaceDir ? `📁 ${back.workspaceDir}` : "",
-      back.branch ? `🌿 ${back.branch}` : "",
-    ].filter(Boolean)
-    await reportCommandResult(port, messageId, true, lines.join("\n"), chatId, [
-      { label: "会话状态 /s", cmd: "/s" },
-      { label: "切换会话 /c", cmd: "/c" },
-    ], {
-      cardTitle: buildSessionCardTitle({ workspaceDir: back.workspaceDir }),
-      sessionKey: back.sessionKey,
-    })
+    const block = back.sessionKey
+      ? await formatCurrentSessionBlock(back.sessionKey, back.workspaceDir)
+      : ""
+    await reportCommandResult(
+      port,
+      messageId,
+      true,
+      ["✅ 已退出项目，回到普通会话", "", block].filter(Boolean).join("\n"),
+      chatId,
+      [{ label: "切换会话 /c", cmd: "/c" }],
+      {
+        cardTitle: buildSessionCardTitle({ workspaceDir: back.workspaceDir }),
+        sessionKey: back.sessionKey,
+      },
+    )
     return
   }
 
