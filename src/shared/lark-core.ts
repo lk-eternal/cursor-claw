@@ -402,12 +402,7 @@ export class LarkSender {
     )
 
     elements.push({ tag: "form", name: "project_new", elements: formElements })
-    elements.push({
-      tag: "button",
-      text: { tag: "plain_text", content: "← 返回菜单" },
-      type: "default",
-      behaviors: [{ type: "callback", value: { kind: "cmd", cmd: "/p menu --back" } }],
-    })
+    LarkSender.appendButtonRows(elements, [{ label: "← 返回菜单", value: { kind: "cmd", cmd: "/p menu --back" }, type: "default" }])
 
     return {
       schema: "2.0",
@@ -450,13 +445,8 @@ export class LarkSender {
           },
         ],
       },
-      {
-        tag: "button",
-        text: { tag: "plain_text", content: "← 返回 setup" },
-        type: "default",
-        behaviors: [{ type: "callback", value: { kind: "cmd", cmd: "/p setup" } }],
-      },
     ]
+    LarkSender.appendButtonRows(elements, [{ label: "← 返回 setup", value: { kind: "cmd", cmd: "/p setup" }, type: "default" }])
     return {
       schema: "2.0",
       config: { update_multi: true, width_mode: "fill" },
@@ -530,13 +520,8 @@ export class LarkSender {
     const elements: any[] = [
       { tag: "markdown", content: isWorktree ? "项目 worktree 将在此目录下创建；不存在会自动创建。" : "保存后立即生效；Token 仅用于开提测 MR。" },
       { tag: "form", name: `setup_${opts.form}`, elements: formElements },
-      {
-        tag: "button",
-        text: { tag: "plain_text", content: "← 返回 setup" },
-        type: "default",
-        behaviors: [{ type: "callback", value: { kind: "cmd", cmd: "/p setup" } }],
-      },
     ]
+    LarkSender.appendButtonRows(elements, [{ label: "← 返回 setup", value: { kind: "cmd", cmd: "/p setup" }, type: "default" }])
     return {
       schema: "2.0",
       config: { update_multi: true, width_mode: "fill" },

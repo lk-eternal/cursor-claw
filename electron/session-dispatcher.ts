@@ -760,7 +760,8 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
   const reply = (ok: boolean, msg: string, buttons?: { label: string; cmd: string }[]) => reportCommandResult(port, messageId, ok, msg, chatId, buttons, patchMessageId ? { patchMessageId } : undefined)
   const sub = tokens[1]?.toLowerCase()
 
-  const sessions = getSessionAgentList().sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0))
+  // sessionKey 字典序：startedAt 会随重启抖动导致序号漂移，切换/停止按序号操作必须稳定
+  const sessions = getSessionAgentList().sort((a, b) => a.sessionKey.localeCompare(b.sessionKey))
   const activeKey = chatId ? await getCurrentActiveSession(port, chatId) : undefined
   const switchable = buildSwitchableSessions(chatId, sessions, activeKey ?? undefined)
 
@@ -770,7 +771,8 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
     if (channel) {
       const resource = getAgentResource(channel.agentResourceId)
       if (resource.type === "sdk") {
-        await listSdkModels(resource.apiKey ?? "", channel.model, channel.modelParams).catch(() => undefined)
+        // 后台预热模型名缓存即可，不阻塞列表渲染（网络慢时卡片等待明显）
+        void listSdkModels(resource.apiKey ?? "", channel.model, channel.modelParams).catch(() => undefined)
       }
     }
     const active = activeKey
@@ -783,8 +785,7 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
       now,
     }))
     const chatBtns: { label: string; cmd: string }[] = []
-    sessions.slice(0, 10).forEach((s2, i) => {
-      if (active && s2.sessionKey === active) return
+    sessions.slice(0, 10).forEach((_s2, i) => {
       chatBtns.push({ label: `#${i + 1}`, cmd: `/c ${i + 1}` })
     })
     const swLines = switchable.map((sw, i) => `#${sessions.length + i + 1}  ${sw.label}`)
