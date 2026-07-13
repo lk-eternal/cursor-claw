@@ -55,7 +55,7 @@ import {
   dispatchSessionAgents, launchSessionAgent, launchIndependentAgent,
   notifyChatFallback,
   getSessionAgentList, handleChatCommand, clearMessageQueue, getQueueMessages, formatSessionStatusBlock,
-  listMainSessionTabs, switchMainSession,
+  listMainSessionTabs, switchMainSession, deleteUserSession,
   pullMergedMessagesFromQueue, isMainUser, extractChatId, chatNameCache,
   fetchChatNames, fetchUserNames, initSessionDispatcher, previousActiveSessionMap,
 } from "./session-dispatcher"
@@ -1749,6 +1749,7 @@ export function initDaemonManager(): void {
   })
   ipcMain.handle("session:list-tabs", () => listMainSessionTabs())
   ipcMain.handle("session:switch", (_e, sessionKey: string) => switchMainSession(sessionKey))
+  ipcMain.handle("session:delete", async (_e, sessionKey: string) => deleteUserSession(sessionKey))
   ipcMain.handle("session:list-quick-models", () => {
     initSessionModelStore(app.getPath("userData"))
   initProjectStore(app.getPath("userData"))

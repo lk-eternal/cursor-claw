@@ -164,7 +164,9 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
   const [taskStatuses, setTaskStatuses] = useState<Record<string, { running: boolean; pid?: number; startedAt?: number }>>({})
 
   const loaded = useRef(false)
+  const projectsLoaded = useRef(false)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const projectsSaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   const [mcpRefreshing, setMcpRefreshing] = useState(false)
   const refreshMcpServers = useCallback(async (force = false) => {
@@ -299,14 +301,16 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
       })
     }
     if (tab === "projects") {
+      projectsLoaded.current = false
       window.electronAPI.getConfig().then((config) => {
         setGitlabToken(config.gitlabToken ?? "")
         setGitlabHost(config.gitlabHost ?? "")
         const profiles = (config.repoProfiles?.length)
           ? config.repoProfiles
-          : (config.repoRoots ?? []).map((p) => ({ path: p, baseBranch: "main" }))
+          : (config.repoRoots ?? []).map((p) => ({ path: p, baseBranch: "" }))
         setRepoProfiles(profiles)
         setWorktreeRoot(config.worktreeRoot ?? "")
+        projectsLoaded.current = true
       })
       window.electronAPI.getProjectNodes().then(setProjectNodes).catch(() => {})
     }
@@ -339,6 +343,32 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
   }, [workspaceDir, proxy, noProxy, closeWindowAction, refreshMcpServers])
 
   useEffect(() => { autoSave() }, [autoSave])
+
+  const autoSaveProjects = useCallback(() => {
+    if (!projectsLoaded.current || tab !== "projects") return
+    if (projectsSaveTimer.current) clearTimeout(projectsSaveTimer.current)
+    projectsSaveTimer.current = setTimeout(async () => {
+      const profiles = repoProfiles
+        .map((p) => ({
+          path: p.path.trim(),
+          baseBranch: p.baseBranch.trim(),
+          testBranch: p.testBranch?.trim() || undefined,
+          developBranch: p.developBranch?.trim() || undefined,
+        }))
+        .filter((p) => p.path)
+      await window.electronAPI.saveConfig({
+        gitlabToken: gitlabToken.trim(),
+        gitlabHost: gitlabHost.trim(),
+        repoProfiles: profiles,
+        repoRoots: profiles.map((p) => p.path),
+        worktreeRoot: worktreeRoot.trim(),
+      })
+      setSaved(true)
+      setTimeout(() => setSaved(false), 1500)
+    }, 500)
+  }, [tab, gitlabToken, gitlabHost, repoProfiles, worktreeRoot])
+
+  useEffect(() => { autoSaveProjects() }, [autoSaveProjects])
 
   const handleCheckUpdate = async () => {
     setUpdateBusy(true)
@@ -984,7 +1014,6 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
             {tab === "projects" && (<>
               <section className="space-y-4">
                 <h3 className="text-sm font-medium text-gray-300">项目工作区（/p）</h3>
-                <p className="text-xs text-gray-500">一条需求一个 git worktree；ship 使用 GitLab token 开 MR。飞书指令：/p new|ls|use|plan|build|review|ship|sync</p>
                 <div>
                   <label className="mb-1 block text-xs text-gray-500">GitLab Token</label>
                   <input type="password" value={gitlabToken} onChange={(e) => setGitlabToken(e.target.value)} placeholder="glpat-..." className={inputCls} />
@@ -1001,7 +1030,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                         <input type="text" value={p.path} placeholder="D:\repos\foo"
                           onChange={(e) => setRepoProfiles((list) => list.map((x, j) => j === i ? { ...x, path: e.target.value } : x))}
                           className={`${inputCls} flex-[3]`} />
-                        <input type="text" value={p.baseBranch} placeholder="基线 main"
+                        <input type="text" value={p.baseBranch} placeholder="基线"
                           onChange={(e) => setRepoProfiles((list) => list.map((x, j) => j === i ? { ...x, baseBranch: e.target.value } : x))}
                           className={`${inputCls} flex-1`} />
                         <input type="text" value={p.testBranch ?? ""} placeholder="测试"
@@ -1018,7 +1047,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                     ))}
                     <button
                       type="button"
-                      onClick={() => setRepoProfiles((list) => [...list, { path: "", baseBranch: "main" }])}
+                      onClick={() => setRepoProfiles((list) => [...list, { path: "", baseBranch: "" }])}
                       className="rounded-md border border-dashed border-gray-700 px-3 py-1.5 text-xs text-gray-400 hover:bg-gray-800"
                     >+ 添加主仓</button>
                   </div>
@@ -1037,30 +1066,6 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                     >浏览</button>
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    const profiles = repoProfiles
-                      .map((p) => ({
-                        path: p.path.trim(),
-                        baseBranch: p.baseBranch.trim() || "main",
-                        testBranch: p.testBranch?.trim() || undefined,
-                        developBranch: p.developBranch?.trim() || undefined,
-                      }))
-                      .filter((p) => p.path)
-                    await window.electronAPI.saveConfig({
-                      gitlabToken: gitlabToken.trim(),
-                      gitlabHost: gitlabHost.trim(),
-                      repoProfiles: profiles,
-                      repoRoots: profiles.map((p) => p.path),
-                      worktreeRoot: worktreeRoot.trim(),
-                    })
-                    setRepoProfiles(profiles)
-                    setSaved(true)
-                    setTimeout(() => setSaved(false), 1500)
-                  }}
-                  className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500"
-                >保存项目设置</button>
               </section>
 
               <section className="space-y-4 border-t border-gray-800 pt-4">

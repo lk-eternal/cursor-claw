@@ -162,6 +162,7 @@ declare global {
     setSessionModel(sessionKey: string, model: string, modelParams?: string): Promise<{ ok: boolean; deferred?: boolean; error?: string }>
     listSessionTabs(): Promise<{ ok: boolean; chatId?: string; activeKey?: string; tabs: { sessionKey: string; label: string; kind: "main" | "project" | "dir" | "temp" | "other"; running: boolean; current: boolean; removable?: boolean }[]; error?: string }>
     switchSession(sessionKey: string): Promise<{ ok: boolean; error?: string }>
+    deleteSession(sessionKey: string): Promise<{ ok: boolean; error?: string; label?: string }>
     listQuickModels(): Promise<{ ok: boolean; models: { model: string; modelParams?: string; label?: string }[] }>
     stopAllSessionAgents(): Promise<{ ok: boolean }>
     onSessionAgents(cb: (list: { sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string; workspaceDir?: string; source?: "cli" | "sdk" }[]) => void): () => void

@@ -189,6 +189,8 @@ const api = {
     ipcRenderer.invoke("session:list-tabs"),
   switchSession: (sessionKey: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke("session:switch", sessionKey),
+  deleteSession: (sessionKey: string): Promise<{ ok: boolean; error?: string; label?: string }> =>
+    ipcRenderer.invoke("session:delete", sessionKey),
   listQuickModels: (): Promise<{ ok: boolean; models: { model: string; modelParams?: string; label?: string }[] }> =>
     ipcRenderer.invoke("session:list-quick-models"),
   stopAllSessionAgents: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("agent:stop-all-sessions"),

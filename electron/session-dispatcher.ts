@@ -3,7 +3,7 @@ import * as fs from "node:fs"
 import { app } from "electron"
 import {
   getConfig, getChannel, getAgentResource, resolveChannelForSession,
-  resolveChannelModel, effectiveWorkspaceDir, mainChatScopeKey,
+  resolveChannelModel, effectiveWorkspaceDir, mainChatScopeKey, saveConfig,
   type MessageChannel, type ModelScenario,
 } from "./config-store"
 import { parseChatKey, workspaceDirFromSessionKey, normalizeSessionKey } from "../src/shared/channel-types"
@@ -24,6 +24,7 @@ import {
   isSdkSessionRunning, getSdkSessionList, setSdkIdleHandler, hasResumableSdkSession,
   sdkFailCooldownRemaining,
   listSdkModels,
+  resetSdkSessionContext, clearSdkFailStreak,
 } from "./agent-sdk"
 import { injectWorkspaceToDir } from "./workspace-injector"
 import { buildSessionCardTitle, readGitBranch, dirBaseName } from "../src/shared/session-label.js"
@@ -619,15 +620,73 @@ function sessionTabKind(sessionKey: string): SessionTabItem["kind"] {
   return "dir"
 }
 
-function isRemovableFavDirSession(sessionKey: string, chatId: string): boolean {
-  if (projectIdFromSessionKey(sessionKey)) return false
+function isMainSessionKey(sessionKey: string, chatId: string): boolean {
   const ws = workspaceDirFromSessionKey(sessionKey)
   if (!ws) return false
   const channel = resolveChannelForSession(chatId)
   const mainDir = effectiveWorkspaceDir(channel)
-  if (mainDir && sameDirPath(mainDir, ws)) return false
-  const favs = getConfig().favoriteWorkspaces ?? []
-  return favs.some((d) => sameDirPath(d, ws))
+  return !!mainDir && sameDirPath(mainDir, ws)
+}
+
+export function isDeletableSession(sessionKey: string, chatId: string): boolean {
+  if (!sessionKey?.trim() || !chatId) return false
+  if (projectIdFromSessionKey(sessionKey)) return false
+  if (isMainSessionKey(sessionKey, chatId)) return false
+  return true
+}
+
+function resolveMainSessionKey(chatId: string): string | undefined {
+  const channel = resolveChannelForSession(chatId)
+  const mainDir = effectiveWorkspaceDir(channel)
+  if (!mainDir) return chatId
+  return normalizeSessionKey(`${chatId}::${mainDir}`) || `${chatId}::${mainDir}`
+}
+
+/** 删除会话：停止 Agent、清 Resume、移出常用目录；若当前活跃则回主会话。项目会话请用 /p del。 */
+export async function deleteUserSession(
+  sessionKey: string,
+  chatId?: string,
+): Promise<{ ok: boolean; error?: string; label?: string }> {
+  const key = sessionKey?.trim()
+  if (!key) return { ok: false, error: "sessionKey 不能为空" }
+
+  const lock = cachedLock()
+  if (!lock?.port) return { ok: false, error: "服务未运行" }
+
+  const resolvedChatId = chatId || await resolveMainChatId(lock.port)
+  if (!resolvedChatId) return { ok: false, error: "未绑定主用户" }
+
+  if (projectIdFromSessionKey(key)) {
+    return { ok: false, error: "项目会话请用 /p del 删除" }
+  }
+  if (isMainSessionKey(key, resolvedChatId)) {
+    return { ok: false, error: "主会话不可删除" }
+  }
+
+  const label = tabLabelForSession(key)
+
+  if (isSessionAgentRunning(key)) stopSessionAgent(key)
+  resetSdkSessionContext(key)
+  clearSdkFailStreak(key)
+  previousActiveSessionMap.delete(key)
+
+  const ws = workspaceDirFromSessionKey(key)
+  if (ws) {
+    const favs = getConfig().favoriteWorkspaces ?? []
+    const next = favs.filter((d) => !sameDirPath(d, ws))
+    if (next.length !== favs.length) saveConfig({ favoriteWorkspaces: next })
+  }
+
+  const activeKey = await getCurrentActiveSession(lock.port, resolvedChatId)
+  if (activeKey === key) {
+    const mainKey = resolveMainSessionKey(resolvedChatId)
+    if (mainKey) {
+      await syncActiveSession(lock.port, resolvedChatId, mainKey)
+      setCurrentProjectId(null)
+    }
+  }
+
+  return { ok: true, label }
 }
 
 export type SessionTabItem = {
@@ -666,6 +725,7 @@ export async function listMainSessionTabs(): Promise<{
       kind: sessionTabKind(s.sessionKey),
       running: true,
       current: !!activeKey && s.sessionKey === activeKey,
+      removable: isDeletableSession(s.sessionKey, chatId),
     })
   }
   if (activeKey && !seen.has(activeKey)) {
@@ -675,7 +735,7 @@ export async function listMainSessionTabs(): Promise<{
       kind: sessionTabKind(activeKey),
       running: false,
       current: true,
-      removable: isRemovableFavDirSession(activeKey, chatId),
+      removable: isDeletableSession(activeKey, chatId),
     })
     seen.add(activeKey)
   }
@@ -687,7 +747,7 @@ export async function listMainSessionTabs(): Promise<{
       kind: sessionTabKind(sw.sessionKey),
       running: false,
       current: !!activeKey && sw.sessionKey === activeKey,
-      removable: isRemovableFavDirSession(sw.sessionKey, chatId),
+      removable: isDeletableSession(sw.sessionKey, chatId),
     })
   }
   return { ok: true, chatId, activeKey: activeKey ?? undefined, tabs }
@@ -744,7 +804,7 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
     for (let i = 0; i < switchable.length && chatBtns.length < 18; i++) {
       chatBtns.push({ label: `#${sessions.length + i + 1}`, cmd: `/c ${sessions.length + i + 1}` })
     }
-    const usage = "💡 点序号切换 · /c stop <序号> 停止 · /c new <描述> 新临时会话"
+    const usage = "💡 点序号切换 · /c stop <序号> 停止 · /c del <序号> 删除 · /c new <描述> 新临时会话"
     const parts = [`📋 活跃会话 (${sessions.length})　★=当前`, "", blocks.join("\n\n")]
     if (swLines.length) parts.push("", `▶ 可切换（未运行，切过去后下一条消息自动拉起）`, swLines.join("\n"))
     parts.push("", usage)
@@ -792,6 +852,25 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
     return
   }
 
+  if (sub === "del" || sub === "delete" || sub === "rm") {
+    const idx = parseInt(tokens[2], 10)
+    const total = sessions.length + switchable.length
+    if (isNaN(idx) || idx < 1 || idx > total) {
+      await reply(false, `❌ 无效序号，范围 1-${total}`)
+      return
+    }
+    const targetKey = idx <= sessions.length
+      ? sessions[idx - 1].sessionKey
+      : switchable[idx - sessions.length - 1].sessionKey
+    const result = await deleteUserSession(targetKey, chatId)
+    if (!result.ok) {
+      await reply(false, `❌ ${result.error ?? "删除失败"}`)
+      return
+    }
+    await reply(true, `🗑 已删除会话 #${idx}${result.label ? `: ${result.label}` : ""}`)
+    return
+  }
+
   const idx = parseInt(sub, 10)
   if (!isNaN(idx)) {
     const total = sessions.length + switchable.length
@@ -824,7 +903,7 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
     return
   }
 
-  await reply(false, ["💡 /c 子命令（全称 /chat）","🔹 /c ls — 列出活跃与可切换会话","🔹 /c <序号> — 切换到指定会话","🔹 /c stop <序号> — 停止指定会话","🔹 /c new <描述> — 创建新临时会话"].join("\n"))
+  await reply(false, ["💡 /c 子命令（全称 /chat）","🔹 /c ls — 列出活跃与可切换会话","🔹 /c <序号> — 切换到指定会话","🔹 /c stop <序号> — 停止指定会话","🔹 /c del <序号> — 删除指定会话","🔹 /c new <描述> — 创建新临时会话"].join("\n"))
 }
 
 // ── 僵尸 Agent 检测 ──────────────────────────────────────

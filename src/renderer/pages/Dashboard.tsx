@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, memo } from "react"
+import { useState, useEffect, useRef, useCallback, useMemo, memo } from "react"
 import {
   Play,
   Square,
@@ -66,6 +66,10 @@ export default function Dashboard({ onSettings, active }: Props) {
   const [onboardDismissed, setOnboardDismissed] = useState(false)
   const [wsTabs, setWsTabs] = useState<{ current: string; favorites: string[] }>({ current: "", favorites: [] })
   const [sessionTabs, setSessionTabs] = useState<{ sessionKey: string; label: string; kind: "main" | "project" | "dir" | "temp" | "other"; running: boolean; current: boolean; removable?: boolean }[]>([])
+  const deletableSessionKeys = useMemo(
+    () => new Set(sessionTabs.filter((t) => t.removable).map((t) => t.sessionKey)),
+    [sessionTabs],
+  )
   const [activeSessionKey, setActiveSessionKey] = useState("")
   const [sessionSwitching, setSessionSwitching] = useState("")
   const [modelTabs, setModelTabs] = useState<{ model: string; modelParams?: string; label?: string }[]>([])
@@ -166,16 +170,12 @@ export default function Dashboard({ onSettings, active }: Props) {
     await refreshSessionTabs()
   }
 
-  const removeFavoriteSessionTab = async (sessionKey: string) => {
-    const marker = "::"
-    const idx = sessionKey.indexOf(marker)
-    if (idx < 0) return
-    const dir = sessionKey.slice(idx + marker.length)
-    if (!dir || dir.startsWith("project_")) return
-    const same = (a: string, b: string) => a.replace(/[\\/]+$/g, "").toLowerCase() === b.replace(/[\\/]+$/g, "").toLowerCase()
-    const favorites = wsTabs.favorites.filter((d) => !same(d, dir))
-    setWsTabs((t) => ({ ...t, favorites }))
-    await window.electronAPI.saveConfig({ favoriteWorkspaces: favorites })
+  const deleteSessionTab = async (sessionKey: string) => {
+    const r = await window.electronAPI.deleteSession(sessionKey)
+    if (!r.ok) {
+      setActionError(r.error ?? "删除会话失败")
+      return
+    }
     await refreshSessionTabs()
   }
 
@@ -800,9 +800,9 @@ export default function Dashboard({ onSettings, active }: Props) {
                 : <Icon size={11} className={t.current ? "text-blue-300" : "text-gray-500"} />}
               {t.running && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400" title="运行中" />}
               {short}
-              {t.removable && !t.current && (
-                <button onClick={(e) => { e.stopPropagation(); void removeFavoriteSessionTab(t.sessionKey) }}
-                  className="hidden text-gray-600 hover:text-red-400 group-hover:inline-flex" title="移除常用目录会话">
+              {t.removable && (
+                <button onClick={(e) => { e.stopPropagation(); void deleteSessionTab(t.sessionKey) }}
+                  className="hidden text-gray-600 hover:text-red-400 group-hover:inline-flex" title="删除会话">
                   <X size={11} />
                 </button>
               )}
@@ -1084,9 +1084,16 @@ export default function Dashboard({ onSettings, active }: Props) {
                         </span>
                       )}
                     </div>
+                    <div className="flex items-center gap-1">
                     <button onClick={(e) => { e.stopPropagation(); window.electronAPI.stopSessionAgent(s.sessionKey) }} className="rounded px-1.5 py-0.5 text-xs text-red-400 hover:bg-red-600/20" title="停止此会话">
                       <Square size={10} />
                     </button>
+                    {deletableSessionKeys.has(s.sessionKey) && (
+                      <button onClick={(e) => { e.stopPropagation(); void deleteSessionTab(s.sessionKey) }} className="rounded px-1.5 py-0.5 text-xs text-gray-500 hover:bg-red-600/20 hover:text-red-400" title="删除会话">
+                        <Trash2 size={10} />
+                      </button>
+                    )}
+                    </div>
                   </div>
                   {isExpanded && (
                     <div className="ml-4 mt-1 space-y-1 border-l-2 border-gray-700/50 pl-3">
