@@ -1099,7 +1099,7 @@ async function replyProjectMenu(port: number, messageId: string, chatId?: string
   const lines = list.map((p, i) => {
     const mark = cur?.id === p.id ? "（当前）" : ""
     const st = statusLabel[p.status] || p.status
-    return `#${i + 1}  ${p.name}${mark} · ${st} · ${p.featureBranch}`
+    return `#${i + 1} 📦 ${p.name}${mark} · ${st}\n     🌿 ${p.featureBranch}`
   })
   const head = cur
     ? [
