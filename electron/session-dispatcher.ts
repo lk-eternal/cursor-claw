@@ -622,11 +622,20 @@ function resolveMainSessionKey(chatId: string): string | undefined {
   return normalizeSessionKey(`${chatId}::${mainDir}`) || `${chatId}::${mainDir}`
 }
 
-/** 退出项目会话：清当前项目指针，活跃路由回主工作目录会话 */
-export async function leaveProjectSession(port: number, chatId: string): Promise<void> {
+/** 退出项目会话：清当前项目指针，活跃路由回主工作目录会话；返回回到的会话信息供回复展示 */
+export async function leaveProjectSession(
+  port: number,
+  chatId: string,
+): Promise<{ sessionKey?: string; workspaceDir?: string; branch?: string }> {
   setCurrentProjectId(null)
   const mainKey = resolveMainSessionKey(chatId)
   if (mainKey) await syncActiveSession(port, chatId, mainKey)
+  const ws = mainKey ? workspaceDirFromSessionKey(mainKey) : undefined
+  return {
+    sessionKey: mainKey,
+    workspaceDir: ws,
+    branch: ws ? readGitBranch(ws) : undefined,
+  }
 }
 
 /** 删除会话：停止 Agent、清 Resume、移出常用目录；若当前活跃则回主会话。项目会话请用 /p del。 */

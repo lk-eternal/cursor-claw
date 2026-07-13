@@ -1212,11 +1212,19 @@ export async function handleFeishuProjectCommand(
       await reportCommandResult(port, messageId, false, "❌ 无法解析会话", chatId)
       return
     }
-    await leaveProjectSession(port, chatId)
-    await reportCommandResult(port, messageId, true, "✅ 已退出项目，回到普通会话", chatId, [
-      { label: "项目菜单 /p", cmd: "/p" },
-      { label: "新建项目 /p new", cmd: "/p new" },
-    ])
+    const back = await leaveProjectSession(port, chatId)
+    const lines = [
+      "✅ 已退出项目，回到普通会话",
+      back.workspaceDir ? `📁 ${back.workspaceDir}` : "",
+      back.branch ? `🌿 ${back.branch}` : "",
+    ].filter(Boolean)
+    await reportCommandResult(port, messageId, true, lines.join("\n"), chatId, [
+      { label: "会话状态 /s", cmd: "/s" },
+      { label: "切换会话 /c", cmd: "/c" },
+    ], {
+      cardTitle: buildSessionCardTitle({ workspaceDir: back.workspaceDir }),
+      sessionKey: back.sessionKey,
+    })
     return
   }
 
