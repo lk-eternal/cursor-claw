@@ -835,6 +835,11 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
     }
     const target = sessions[idx - 1]
     stopSessionAgent(target.sessionKey)
+    if (patchMessageId) {
+      // 原卡刷新为最新列表（停止结果由列表状态体现）
+      await handleChatCommand(["/c", "ls"], port, messageId, chatId, patchMessageId)
+      return
+    }
     await reply(true, `✅ 已停止会话 #${idx}: ${target.chatName || target.sessionKey}`)
     return
   }
@@ -852,6 +857,10 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
     const result = await deleteUserSession(targetKey, chatId)
     if (!result.ok) {
       await reply(false, `❌ ${result.error ?? "删除失败"}`)
+      return
+    }
+    if (patchMessageId) {
+      await handleChatCommand(["/c", "ls"], port, messageId, chatId, patchMessageId)
       return
     }
     await reply(true, `🗑 已删除会话 #${idx}${result.label ? `: ${result.label}` : ""}`)
@@ -872,6 +881,10 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
         const pid2 = projectIdFromSessionKey(sw.sessionKey)
         if (pid2) setCurrentProjectId(pid2)
       }
+      if (patchMessageId) {
+        await handleChatCommand(["/c", "ls"], port, messageId, chatId, patchMessageId)
+        return
+      }
       await reply(true, `🔀 已切换到: ${sw.label}\n该会话未运行，下一条消息会自动拉起（有历史则恢复上下文）`)
       return
     }
@@ -883,6 +896,11 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
     const pid = projectIdFromSessionKey(s.sessionKey)
     if (pid) setCurrentProjectId(pid)
 
+    if (patchMessageId) {
+      // 原卡刷新为最新列表（★ 已指向新会话）
+      await handleChatCommand(["/c", "ls"], port, messageId, chatId, patchMessageId)
+      return
+    }
     // 与 /c ls 同一份会话状态块，信息口径一致
     const qAll = await getQueueMessages()
     const block = formatSessionStatusBlock(s, { queueMessages: qAll, now: Date.now(), current: true })

@@ -402,6 +402,12 @@ export class LarkSender {
     )
 
     elements.push({ tag: "form", name: "project_new", elements: formElements })
+    elements.push({
+      tag: "button",
+      text: { tag: "plain_text", content: "← 返回菜单" },
+      type: "default",
+      behaviors: [{ type: "callback", value: { kind: "cmd", cmd: "/p menu --back" } }],
+    })
 
     return {
       schema: "2.0",
@@ -443,6 +449,12 @@ export class LarkSender {
             behaviors: [{ type: "callback", value: { kind: "repo_setup_form" } }],
           },
         ],
+      },
+      {
+        tag: "button",
+        text: { tag: "plain_text", content: "← 返回 setup" },
+        type: "default",
+        behaviors: [{ type: "callback", value: { kind: "cmd", cmd: "/p setup" } }],
       },
     ]
     return {

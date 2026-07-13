@@ -427,6 +427,7 @@ export async function replySetupHub(port: number, messageId: string, chatId: str
     { label: "设置工作区目录", cmd: "/p setup worktree" },
     { label: "添加主仓", cmd: "/p setup add" },
     { label: "设置 GitLab", cmd: "/p setup gitlab" },
+    { label: "← 项目菜单", cmd: "/p menu --back" },
   ]
   for (let i = 0; i < Math.min(profiles.length, 8); i++) {
     btns.push({
@@ -1083,15 +1084,15 @@ export function executeProjectDelete(projectId: string): { ok: boolean; name?: s
   return { ok: true, name: target.name }
 }
 
-/** 项目二级菜单：列表 + 快速进入，不自动进当前项目 */
-async function replyProjectMenu(port: number, messageId: string, chatId?: string): Promise<void> {
+/** 项目二级菜单：列表 + 快速进入，不自动进当前项目；patchMessageId 用于域内「返回菜单」原卡跳转 */
+async function replyProjectMenu(port: number, messageId: string, chatId?: string, patchMessageId?: string): Promise<void> {
   const list = listProjects()
   const cur = getCurrentProject()
   if (list.length === 0) {
     await reportCommandResult(port, messageId, true, `${projectHelpText()}\n\n📭 暂无项目`, chatId, [
       { label: "新建项目 /p new", cmd: "/p new" },
       { label: "配置工作区 /p setup", cmd: "/p setup" },
-    ], { cardTitle: { title: "项目", subtitle: "菜单" } })
+    ], { cardTitle: { title: "项目", subtitle: "菜单" }, patchMessageId })
     return
   }
   const statusLabel: Record<string, string> = { active: "进行中", paused: "已暂停", done: "已完成" }
@@ -1128,7 +1129,7 @@ async function replyProjectMenu(port: number, messageId: string, chatId?: string
     `${head}\n\n💡 点「进入」才会切换到该项目；直接发消息不会自动进入`,
     chatId,
     btns,
-    { cardTitle: { title: "项目", subtitle: "菜单" } },
+    { cardTitle: { title: "项目", subtitle: "菜单" }, patchMessageId },
   )
 }
 
@@ -1155,7 +1156,9 @@ export async function handleFeishuProjectCommand(
   }
 
   if (sub === "menu") {
-    await replyProjectMenu(port, messageId, chatId)
+    // --back：setup/new 等域内「返回菜单」按钮——原卡跳回；普通入口保持新发（导航锚点不吃卡）
+    const back = parts.slice(2).some((t) => low(t) === "--back")
+    await replyProjectMenu(port, messageId, chatId, back ? patchMessageId : undefined)
     return
   }
 
