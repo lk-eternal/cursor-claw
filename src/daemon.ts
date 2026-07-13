@@ -46,7 +46,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { registerAdminTools } from "./server-admin.js";
 import { registerProjectAgentTools } from "./server-project.js";
-import { initProjectStore, hasProjectNewDraft, getProject } from "./shared/project-store.js";
+import { initProjectStore, hasProjectNewDraft, getProject, getNodeGroups } from "./shared/project-store.js";
 import { projectIdFromSessionKey, decodeRepoPair } from "./shared/project-types.js";
 import { buildSessionCardTitle, isSpecialSessionSuffix, resolveWorkspaceFromSessionKey, sessionHeaderTemplate } from "./shared/session-label.js";
 
@@ -1288,6 +1288,7 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
     const worktreeRoot = worktreeRaw ? path.normalize(worktreeRaw) : "";
     const featureBranch = (f.featureBranch || "").trim();
     const storyUrl = (f.storyUrl || "").trim();
+    const groupId = String(f.group_id || "").trim();
     const productDocUrl = (f.productDocUrl || "").trim();
     const techDocUrl = (f.techDocUrl || "").trim();
 
@@ -1341,6 +1342,7 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
       messageId: evt.messageId,
       name, goal, worktreeRoot, featureBranch,
       storyUrl, productDocUrl, techDocUrl,
+      groupId,
       repos,
       repoPath: primary.repoPath,
       baseBranch: primary.baseBranch,
@@ -1896,8 +1898,9 @@ function startHttpServer(): Promise<number> {
             sessionKey?: string;
           };
           log("INFO", `指令执行完成: ok=${body.ok}, msgId=${body.messageId}, chatId=${body.chatId ?? "N/A"}`);
-          if (body.messageId) {
-            await replyToMessage(body.messageId, body.message, body.chatId, body.buttons, undefined, {
+          // 空 messageId 但有 chatId 时仍需投递（如项目节点完成通知）：replyToMessage 会走 chat 直发
+          if (body.messageId || body.chatId) {
+            await replyToMessage(body.messageId || "", body.message, body.chatId, body.buttons, undefined, {
               cardTitle: body.cardTitle,
               sections: body.sections,
               sessionKey: body.sessionKey,
@@ -2360,6 +2363,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       repoProfiles: repo_profiles || [],
       repoRoots: repo_roots || [],
       worktreeRoot: worktree_root,
+      nodeGroups: getNodeGroups().map((g) => ({ id: g.id, name: g.name })),
     });
     let sent = message_id && !message_id.startsWith("internal_")
       ? await sender.sendInteractiveCard(card, message_id, undefined)

@@ -41,8 +41,8 @@ import { FileCommand, reportCommandResult, handleFeishuModelCommand, handleFeish
 import { handleFeishuProjectCommand, handleProjectSyncSignal, fillProjectNewFromText, handleProjectNewSubmit, replySetupHub, executeProjectDelete } from "./project-commands"
 import { isGitRepoRoot } from "./project-worktree"
 import { getDefaultNodeGuide } from "./project-prompts"
-import { initProjectStore, getProject, getProjectNodes, saveProjectNodes } from "../src/shared/project-store.js"
-import { projectIdFromSessionKey } from "../src/shared/project-types.js"
+import { initProjectStore, getProject, listProjects, getNodeGroups, saveNodeGroups } from "../src/shared/project-store.js"
+import { projectIdFromSessionKey, DEFAULT_NODE_GROUP_ID } from "../src/shared/project-types.js"
 import {
   readGitBranch,
   formatSessionLabel,
@@ -604,7 +604,7 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
                                 if (line.startsWith("__PROJECT_NOTIFY__:")) {
           try {
             const { chatId, text, buttons, footer, filePath, sessionKey } = JSON.parse(line.slice("__PROJECT_NOTIFY__:".length)) as {
-              chatId: string; text: string; buttons?: { label: string; cmd: string }[]; footer?: string; filePath?: string; sessionKey?: string
+              chatId: string; text: string; buttons?: { label: string; cmd: string; section?: string }[]; footer?: string; filePath?: string; sessionKey?: string
             }
             if (chatId && text) {
               const port = cachedPort ?? readLockFile()?.port
@@ -683,6 +683,7 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
               name: string; goal: string; repoPath: string; worktreeRoot: string
               baseBranch: string; featureBranch?: string
               storyUrl?: string; productDocUrl?: string; techDocUrl?: string
+              groupId?: string
               repos?: { repoPath: string; baseBranch: string; testBranch?: string; developBranch?: string }[]
             }
             const port = cachedPort ?? readLockFile()?.port
@@ -1891,15 +1892,27 @@ export function initDaemonManager(): void {
 
   ipcMain.handle("scheduled-tasks:get-status", () => getIndependentTaskStatuses())
 
-  // ── 项目流程节点 ──────────────────────────────────────
-  ipcMain.handle("project-nodes:get", () => {
+  // ── 项目流程组 ──────────────────────────────────────
+  ipcMain.handle("project-node-groups:get", () => {
     initProjectStore(app.getPath("userData"))
-    return getProjectNodes().map((n) => ({ ...n, defaultPrompt: getDefaultNodeGuide(n.id) }))
+    return getNodeGroups().map((g) => ({
+      ...g,
+      nodes: g.nodes.map((n) => ({ ...n, defaultPrompt: getDefaultNodeGuide(n.id) })),
+    }))
   })
-  ipcMain.handle("project-nodes:save", (_e, nodes: { id: string; label: string; prompt?: string; builtin?: boolean }[]) => {
+  ipcMain.handle("project-node-groups:save", (_e, groups: { id: string; name: string; nodes: { id: string; label: string; prompt?: string }[] }[]) => {
     initProjectStore(app.getPath("userData"))
-    saveProjectNodes(nodes)
+    saveNodeGroups(groups)
     return { ok: true }
+  })
+  ipcMain.handle("project-node-groups:usage", () => {
+    initProjectStore(app.getPath("userData"))
+    const usage: Record<string, number> = {}
+    for (const p of listProjects()) {
+      const gid = p.groupId || DEFAULT_NODE_GROUP_ID
+      usage[gid] = (usage[gid] ?? 0) + 1
+    }
+    return usage
   })
 
   void autoStartDaemonOnLaunch()

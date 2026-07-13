@@ -141,8 +141,9 @@ declare global {
     onUpdaterError(cb: (message: string) => void): () => void
     onUpdaterStatus(cb: (payload: { kind: "available" } | { kind: "downloaded"; version: string } | { kind: "downloading" }) => void): () => void
     getConfig(): Promise<AppConfig>
-    getProjectNodes(): Promise<{ id: string; label: string; prompt?: string; builtin?: boolean; defaultPrompt?: string }[]>
-    saveProjectNodes(nodes: { id: string; label: string; prompt?: string; builtin?: boolean }[]): Promise<{ ok: boolean }>
+    getProjectNodeGroups(): Promise<{ id: string; name: string; nodes: { id: string; label: string; prompt?: string; defaultPrompt?: string }[] }[]>
+    saveProjectNodeGroups(groups: { id: string; name: string; nodes: { id: string; label: string; prompt?: string }[] }[]): Promise<{ ok: boolean }>
+    getProjectNodeGroupUsage(): Promise<Record<string, number>>
     saveConfig(config: Partial<AppConfig>): Promise<ConfigSaveResult>
     setAutoStart(enabled: boolean): Promise<{ ok: boolean }>
     applyWorkspaceSwitch(workspaceDir: string, stopOldSessions: boolean, notifyMain?: boolean): Promise<{ ok: boolean; error?: string }>

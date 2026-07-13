@@ -3,6 +3,12 @@
 > 日期: 2026-07-11
 > 状态: Draft（待实现计划）
 > 参考: fe-ai-flow（task + 任意 action + HITL + artifact）；现有 `/wf` YAML 有序引擎保持不动
+>
+> ⚠️ 2026-07-13 迭代后与本文档的差异（以代码为准）：
+> - HITL 已移除：`project_action_done` 产出即完成（`awaiting_ack` 归一为 `accepted`），完成卡片附全部节点推进按钮
+> - 节点改为**流程组**管理（`project-node-groups.json`，默认 develop/test 两组），项目创建时选组（`Project.groupId`）；节点无内置/自定义之分，全部可增删改
+> - `ship` 交付节点已拆分为 `deploy`（推送开发分支）与 `submit-test`（MR→测试分支 + 飞书项目评论@测试）；`/p ship` 仅保留 `--set` 分支配置与说明卡
+> - ship/MR 目标为 testBranch/developBranch，禁止默认打生产基线 baseBranch
 
 ---
 

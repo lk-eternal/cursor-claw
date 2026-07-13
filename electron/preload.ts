@@ -222,11 +222,13 @@ const api = {
   getScheduledTaskStatus: (): Promise<Record<string, { running: boolean; pid?: number; startedAt?: number }>> =>
     ipcRenderer.invoke("scheduled-tasks:get-status"),
 
-  // ── 项目流程节点 ──────────────────────────────────────
-  getProjectNodes: (): Promise<{ id: string; label: string; prompt?: string; builtin?: boolean }[]> =>
-    ipcRenderer.invoke("project-nodes:get"),
-  saveProjectNodes: (nodes: { id: string; label: string; prompt?: string; builtin?: boolean }[]): Promise<{ ok: boolean }> =>
-    ipcRenderer.invoke("project-nodes:save", nodes),
+  // ── 项目流程组 ──────────────────────────────────────
+  getProjectNodeGroups: (): Promise<{ id: string; name: string; nodes: { id: string; label: string; prompt?: string; defaultPrompt?: string }[] }[]> =>
+    ipcRenderer.invoke("project-node-groups:get"),
+  saveProjectNodeGroups: (groups: { id: string; name: string; nodes: { id: string; label: string; prompt?: string }[] }[]): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke("project-node-groups:save", groups),
+  getProjectNodeGroupUsage: (): Promise<Record<string, number>> =>
+    ipcRenderer.invoke("project-node-groups:usage"),
   onScheduledTaskStatus: (cb: (statuses: Record<string, { running: boolean; pid?: number; startedAt?: number }>) => void) => {
     const handler = (_: unknown, statuses: Record<string, { running: boolean; pid?: number; startedAt?: number }>) => cb(statuses)
     ipcRenderer.on("scheduled-tasks:status", handler)

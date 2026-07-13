@@ -99,15 +99,18 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
   const [firstFeishuAppId, setFirstFeishuAppId] = useState("")
   const [taskChannels, setTaskChannels] = useState<ChannelConfig[]>([])
   const [agentResources, setAgentResources] = useState<AgentResource[]>([])
-  const { showAlert, ModalPortal } = useInlineModal()
+  const { showAlert, showConfirm, ModalPortal } = useInlineModal()
 
   const [appVersion, setAppVersion] = useState("")
   const [gitlabToken, setGitlabToken] = useState("")
   const [gitlabHost, setGitlabHost] = useState("")
   const [repoProfiles, setRepoProfiles] = useState<{ path: string; baseBranch: string; testBranch?: string; developBranch?: string }[]>([])
-  type ProjectNodeItem = { id: string; label: string; prompt?: string; builtin?: boolean; defaultPrompt?: string }
-  const [projectNodes, setProjectNodes] = useState<ProjectNodeItem[]>([])
+  type ProjectNodeItem = { id: string; label: string; prompt?: string; defaultPrompt?: string }
+  type ProjectNodeGroup = { id: string; name: string; nodes: ProjectNodeItem[] }
+  const [nodeGroups, setNodeGroups] = useState<ProjectNodeGroup[]>([])
+  const [activeGroupId, setActiveGroupId] = useState("")
   const [nodeEditing, setNodeEditing] = useState<(ProjectNodeItem & { index: number }) | null>(null)
+  const [groupEditing, setGroupEditing] = useState<{ id: string; name: string; index: number } | null>(null)
   const [worktreeRoot, setWorktreeRoot] = useState("")
   const [updateBusy, setUpdateBusy] = useState(false)
   const [updateCheck, setUpdateCheck] = useState<Awaited<ReturnType<typeof window.electronAPI.checkAppUpdate>> | null>(null)
@@ -312,7 +315,10 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
         setWorktreeRoot(config.worktreeRoot ?? "")
         projectsLoaded.current = true
       })
-      window.electronAPI.getProjectNodes().then(setProjectNodes).catch(() => {})
+      window.electronAPI.getProjectNodeGroups().then((gs) => {
+        setNodeGroups(gs)
+        setActiveGroupId((prev) => gs.some((g) => g.id === prev) ? prev : (gs[0]?.id ?? ""))
+      }).catch(() => {})
     }
   }, [tab, refreshMcpServers, refreshRules, refreshSkills, refreshTasks])
 
@@ -673,6 +679,58 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
     const updated = exists ? tasks.map((t) => t.id === taskEditing.id ? taskEditing : t) : [...tasks, taskEditing]
     await window.electronAPI.saveScheduledTasks(updated)
     setTaskEditing(null); refreshTasks()
+  }
+
+  const activeGroup = nodeGroups.find((g) => g.id === activeGroupId) ?? nodeGroups[0]
+
+  const persistNodeGroups = async (groups: ProjectNodeGroup[]) => {
+    await window.electronAPI.saveProjectNodeGroups(groups.map((g) => ({ id: g.id, name: g.name, nodes: g.nodes.map(({ defaultPrompt: _d, ...n }) => n) })))
+    const fresh = await window.electronAPI.getProjectNodeGroups()
+    setNodeGroups(fresh)
+  }
+  const saveActiveGroupNodes = async (nodes: ProjectNodeItem[]) => {
+    if (!activeGroup) return
+    await persistNodeGroups(nodeGroups.map((g) => g.id === activeGroup.id ? { ...g, nodes } : g))
+  }
+  const handleNodeMove = async (i: number, delta: number) => {
+    if (!activeGroup) return
+    const j = i + delta
+    if (j < 0 || j >= activeGroup.nodes.length) return
+    const nodes = [...activeGroup.nodes]
+    ;[nodes[i], nodes[j]] = [nodes[j], nodes[i]]
+    await saveActiveGroupNodes(nodes)
+  }
+  const handleGroupDelete = async () => {
+    if (!activeGroup) return
+    if (nodeGroups.length <= 1) { void showAlert("无法删除", "至少保留 1 个流程组"); return }
+    const usage = await window.electronAPI.getProjectNodeGroupUsage().catch(() => ({} as Record<string, number>))
+    const count = usage[activeGroup.id] ?? 0
+    if (count > 0) { void showAlert("无法删除", `有 ${count} 个项目正在使用该组`); return }
+    if (!(await showConfirm("删除流程组", `确定删除「${activeGroup.name}」？组内 ${activeGroup.nodes.length} 个节点将一并删除。`))) return
+    const next = nodeGroups.filter((g) => g.id !== activeGroup.id)
+    await persistNodeGroups(next)
+    setActiveGroupId(next[0]?.id ?? "")
+  }
+  const handleGroupSave = async () => {
+    if (!groupEditing) return
+    const id = groupEditing.id.trim()
+    const name = groupEditing.name.trim()
+    if (!name) return
+    if (groupEditing.index < 0) {
+      if (!/^[a-z][a-z0-9-]*$/.test(id)) {
+        void showAlert("组 id 不可用", `「${id}」需小写字母开头（可含数字/-）`)
+        return
+      }
+      if (nodeGroups.some((g) => g.id === id)) {
+        void showAlert("无法保存", "组 id 与已有组重复")
+        return
+      }
+      await persistNodeGroups([...nodeGroups, { id, name, nodes: [] }])
+      setActiveGroupId(id)
+    } else {
+      await persistNodeGroups(nodeGroups.map((g) => g.id === groupEditing.id ? { ...g, name } : g))
+    }
+    setGroupEditing(null)
   }
 
   const inputCls = "w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm outline-none transition focus:border-blue-500"
@@ -1069,24 +1127,56 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
               </section>
 
               <section className="space-y-4 border-t border-gray-800 pt-4">
-                <h3 className="text-sm font-medium text-gray-300">流程节点</h3>
-                <p className="text-xs text-gray-500">推进按钮与节点提示词的唯一来源，点击节点编辑。内置节点可改名称与提示词；自定义节点会一并出现在推进按钮里。</p>
-                <div className="space-y-1.5">
-                  {projectNodes.map((n, i) => (
-                    <button key={n.id || i} type="button"
-                      onClick={() => setNodeEditing({ ...n, index: i })}
-                      className="flex w-full items-center gap-3 rounded-lg border border-gray-800 px-3 py-2 text-left transition hover:border-gray-600 hover:bg-gray-900">
-                      <span className="text-sm text-gray-200">{n.label}</span>
-                      <span className="font-mono text-xs text-gray-500">/p {n.id}</span>
-                      <span className="ml-auto shrink-0 text-[10px] text-gray-500">{n.builtin ? "内置" : "自定义"}{n.prompt?.trim() ? " · 已自定义提示词" : ""}</span>
-                    </button>
+                <h3 className="text-sm font-medium text-gray-300">流程组</h3>
+                <p className="text-xs text-gray-500">项目创建时选择流程组；推进按钮与节点提示词以组内节点为准，点击节点编辑。</p>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {nodeGroups.map((g) => (
+                    <button key={g.id} type="button"
+                      onClick={() => setActiveGroupId(g.id)}
+                      className={`rounded-md border px-3 py-1.5 text-xs transition ${g.id === activeGroup?.id ? "border-blue-500 bg-blue-500/10 font-medium text-white" : "border-gray-700 text-gray-400 hover:bg-gray-800 hover:text-gray-200"}`}
+                    >{g.name}</button>
                   ))}
                   <button
                     type="button"
-                    onClick={() => setNodeEditing({ id: "", label: "", index: -1 })}
-                    className="w-full rounded-md border border-dashed border-gray-700 px-3 py-2 text-xs text-gray-400 hover:bg-gray-800"
-                  >+ 添加节点</button>
+                    onClick={() => setGroupEditing({ id: "", name: "", index: -1 })}
+                    className="rounded-md border border-dashed border-gray-700 px-3 py-1.5 text-xs text-gray-400 hover:bg-gray-800"
+                  >+ 新增组</button>
                 </div>
+                {activeGroup && (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center gap-3 text-xs text-gray-500">
+                      <span>当前组 <span className="font-mono">{activeGroup.id}</span> · {activeGroup.nodes.length} 个节点</span>
+                      <button type="button" className="text-blue-400 hover:text-blue-300"
+                        onClick={() => setGroupEditing({ id: activeGroup.id, name: activeGroup.name, index: nodeGroups.findIndex((g) => g.id === activeGroup.id) })}
+                      >重命名</button>
+                      {nodeGroups.length > 1 && (
+                        <button type="button" className="text-red-400 hover:text-red-300" onClick={handleGroupDelete}>删除组</button>
+                      )}
+                    </div>
+                    {activeGroup.nodes.map((n, i) => (
+                      <div key={n.id || i} className="flex items-center gap-1">
+                        <button type="button"
+                          onClick={() => setNodeEditing({ ...n, index: i })}
+                          className="flex min-w-0 flex-1 items-center gap-3 rounded-lg border border-gray-800 px-3 py-2 text-left transition hover:border-gray-600 hover:bg-gray-900">
+                          <span className="text-sm text-gray-200">{n.label}</span>
+                          <span className="font-mono text-xs text-gray-500">/p {n.id}</span>
+                          {(n.prompt ?? "").trim() !== "" && <span className="ml-auto shrink-0 text-[10px] text-gray-500">已自定义提示词</span>}
+                        </button>
+                        <button type="button" title="上移" disabled={i === 0}
+                          onClick={() => handleNodeMove(i, -1)}
+                          className="shrink-0 rounded p-1 text-xs text-gray-500 hover:bg-gray-800 hover:text-white disabled:opacity-30">↑</button>
+                        <button type="button" title="下移" disabled={i === activeGroup.nodes.length - 1}
+                          onClick={() => handleNodeMove(i, 1)}
+                          className="shrink-0 rounded p-1 text-xs text-gray-500 hover:bg-gray-800 hover:text-white disabled:opacity-30">↓</button>
+                      </div>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => setNodeEditing({ id: "", label: "", index: -1 })}
+                      className="w-full rounded-md border border-dashed border-gray-700 px-3 py-2 text-xs text-gray-400 hover:bg-gray-800"
+                    >+ 新增节点</button>
+                  </div>
+                )}
               </section>
             </>)}
 
@@ -1331,9 +1421,9 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
             <div className="flex-1 space-y-3 overflow-y-auto px-6 py-4">
               <div className="flex gap-3">
                 <div className="flex-1"><label className="mb-1 block text-xs text-gray-500">节点 id（/p 命令）</label>
-                  <input type="text" value={nodeEditing.id} disabled={!!nodeEditing.builtin}
+                  <input type="text" value={nodeEditing.id}
                     onChange={(e) => setNodeEditing({ ...nodeEditing, id: e.target.value.trim() })}
-                    className={`${inputCls} ${nodeEditing.builtin ? "opacity-60" : ""}`} placeholder="如 test-report" /></div>
+                    className={inputCls} placeholder="如 test-report" /></div>
                 <div className="flex-1"><label className="mb-1 block text-xs text-gray-500">按钮名称</label>
                   <input type="text" value={nodeEditing.label}
                     onChange={(e) => setNodeEditing({ ...nodeEditing, label: e.target.value })}
@@ -1342,7 +1432,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
               <div>
                 <div className="mb-1 flex items-center justify-between">
                   <label className="block text-xs text-gray-500">节点提示词（告诉 AI 该节点做什么、产出标准）</label>
-                  {nodeEditing.builtin && (nodeEditing.prompt ?? "").trim() !== "" && (
+                  {(nodeEditing.defaultPrompt ?? "").trim() !== "" && (nodeEditing.prompt ?? "").trim() !== "" && (
                     <button type="button" className="text-xs text-blue-400 hover:text-blue-300"
                       onClick={() => setNodeEditing({ ...nodeEditing, prompt: undefined })}
                     >恢复默认模板</button>
@@ -1353,19 +1443,19 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                   onChange={(e) => setNodeEditing({ ...nodeEditing, prompt: e.target.value })}
                   className={inputCls + " font-mono text-xs leading-relaxed"}
                   placeholder="每行一条要求，会原样进入节点任务提示词" />
-                {nodeEditing.builtin && (nodeEditing.prompt ?? "").trim() === "" && (
+                {(nodeEditing.defaultPrompt ?? "").trim() !== "" && (nodeEditing.prompt ?? "").trim() === "" && (
                   <p className="mt-1 text-[10px] text-gray-500">当前使用内置默认模板（上方内容即模板全文，编辑即覆盖）</p>
                 )}
               </div>
             </div>
             <div className="flex items-center justify-between border-t border-gray-800 px-6 py-4">
               <div>
-                {!nodeEditing.builtin && nodeEditing.index >= 0 && (
+                {nodeEditing.index >= 0 && (
                   <button
                     onClick={async () => {
-                      const next = projectNodes.filter((_, j) => j !== nodeEditing.index)
-                      await window.electronAPI.saveProjectNodes(next.map(({ defaultPrompt: _d, ...n }) => n))
-                      setProjectNodes(next)
+                      if (!activeGroup) return
+                      if (!(await showConfirm("删除节点", `确定删除「${nodeEditing.label || nodeEditing.id}」？`))) return
+                      await saveActiveGroupNodes(activeGroup.nodes.filter((_, j) => j !== nodeEditing.index))
                       setNodeEditing(null)
                     }}
                     className="rounded-md px-4 py-1.5 text-xs text-red-400 transition hover:bg-gray-800"
@@ -1377,31 +1467,56 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                 <button
                   disabled={!nodeEditing.id.trim() || !nodeEditing.label.trim()}
                   onClick={async () => {
-                    const reserved = ["help", "menu", "ls", "list", "use", "leave", "status", "new", "del", "delete", "rm", "setup", "sync"]
+                    if (!activeGroup) return
+                    const reserved = ["help", "menu", "ls", "list", "use", "leave", "status", "new", "del", "delete", "rm", "setup", "sync", "ship"]
                     const id = nodeEditing.id.trim()
-                    if (!nodeEditing.builtin && (reserved.includes(id) || !/^[a-z][a-z0-9-]*$/.test(id))) {
+                    if (reserved.includes(id) || !/^[a-z][a-z0-9-]*$/.test(id)) {
                       void showAlert("节点 id 不可用", `「${id}」需小写字母开头（可含数字/-），且不能与保留命令冲突`)
                       return
                     }
-                    if (projectNodes.some((n, j) => n.id === id && j !== nodeEditing.index)) {
-                      void showAlert("无法保存", "节点 id 与已有节点重复")
+                    if (activeGroup.nodes.some((n, j) => n.id === id && j !== nodeEditing.index)) {
+                      void showAlert("无法保存", "节点 id 与组内已有节点重复")
                       return
                     }
                     // 与默认模板一致的内容不落库（保持跟随模板升级）
                     const raw = (nodeEditing.prompt ?? "").trim()
                     const promptVal = raw && raw !== (nodeEditing.defaultPrompt ?? "").trim() ? raw : undefined
-                    const item: ProjectNodeItem = { id, label: nodeEditing.label.trim(), prompt: promptVal, builtin: nodeEditing.builtin, defaultPrompt: nodeEditing.defaultPrompt }
-                    const next: ProjectNodeItem[] = nodeEditing.index < 0
-                      ? [...projectNodes, item]
-                      : projectNodes.map((n, j) => j === nodeEditing.index ? { ...n, ...item } : n)
-                    await window.electronAPI.saveProjectNodes(next.map(({ defaultPrompt: _d, ...n }) => n))
-                    const fresh = await window.electronAPI.getProjectNodes()
-                    setProjectNodes(fresh)
+                    const item: ProjectNodeItem = { id, label: nodeEditing.label.trim(), prompt: promptVal }
+                    const nodes: ProjectNodeItem[] = nodeEditing.index < 0
+                      ? [...activeGroup.nodes, item]
+                      : activeGroup.nodes.map((n, j) => j === nodeEditing.index ? { ...n, ...item } : n)
+                    await saveActiveGroupNodes(nodes)
                     setNodeEditing(null)
                   }}
                   className="rounded-md bg-blue-600 px-4 py-1.5 text-xs font-medium text-white transition hover:bg-blue-500 disabled:opacity-40"
                 >保存</button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═══ Node Group Edit Modal ═══ */}
+      {groupEditing && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="flex w-full max-w-sm flex-col rounded-xl border border-gray-700 bg-gray-900 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-gray-800 px-6 py-4">
+              <h3 className="text-sm font-semibold text-gray-200">{groupEditing.index < 0 ? "新增流程组" : "重命名流程组"}</h3>
+              <button onClick={() => setGroupEditing(null)} className="text-gray-500 hover:text-white"><X size={16} /></button>
+            </div>
+            <div className="space-y-3 px-6 py-4">
+              <div><label className="mb-1 block text-xs text-gray-500">组 id</label>
+                <input type="text" value={groupEditing.id} disabled={groupEditing.index >= 0}
+                  onChange={(e) => setGroupEditing({ ...groupEditing, id: e.target.value.trim() })}
+                  className={`${inputCls} ${groupEditing.index >= 0 ? "opacity-60" : ""}`} placeholder="如 design" /></div>
+              <div><label className="mb-1 block text-xs text-gray-500">组名</label>
+                <input type="text" value={groupEditing.name}
+                  onChange={(e) => setGroupEditing({ ...groupEditing, name: e.target.value })}
+                  className={inputCls} placeholder="如 设计" /></div>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-gray-800 px-6 py-4">
+              <button onClick={() => setGroupEditing(null)} className="rounded-md px-4 py-1.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white">取消</button>
+              <button onClick={handleGroupSave} disabled={!groupEditing.id.trim() || !groupEditing.name.trim()} className="rounded-md bg-blue-600 px-4 py-1.5 text-xs font-medium text-white transition hover:bg-blue-500 disabled:opacity-40">保存</button>
             </div>
           </div>
         </div>

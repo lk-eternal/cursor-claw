@@ -301,6 +301,7 @@ export class LarkSender {
     repoRoots?: string[]
     worktreeRoot?: string
     prefix?: string
+    nodeGroups?: { id: string; name: string }[]
   }): any {
     type Profile = { path: string; baseBranch: string; testBranch?: string; developBranch?: string }
     const profiles: Profile[] = (opts.repoProfiles && opts.repoProfiles.length)
@@ -350,6 +351,24 @@ export class LarkSender {
         options: profiles.slice(0, 50).map((pr) => ({
           text: { tag: "plain_text", content: labelOf(pr.path, pr.baseBranch, pr.testBranch, pr.developBranch) },
           value: encode(pr.path, pr.baseBranch, pr.testBranch, pr.developBranch),
+        })),
+      })
+    }
+
+    const groups = opts.nodeGroups || []
+    if (groups.length > 0) {
+      formElements.push({
+        tag: "select_static",
+        name: "group_id",
+        required: false,
+        label: { tag: "plain_text", content: "流程组" },
+        label_position: "top",
+        width: "fill",
+        initial_option: groups[0].id,
+        placeholder: { tag: "plain_text", content: "选择项目流程组" },
+        options: groups.slice(0, 20).map((g) => ({
+          text: { tag: "plain_text", content: g.name.slice(0, 30) },
+          value: g.id,
         })),
       })
     }

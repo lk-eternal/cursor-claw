@@ -88,6 +88,35 @@ function requestJson(
   })
 }
 
+/** 从 MR web_url 解析 host / project path / iid */
+export function parseMrUrl(mrUrl: string): { ok: true; host: string; projectPath: string; iid: number } | { ok: false; error: string } {
+  const m = (mrUrl || "").trim().match(/^(https?:\/\/[^/]+)\/(.+?)\/-\/merge_requests\/(\d+)/i)
+  if (!m) return { ok: false, error: `无法解析 MR URL: ${mrUrl}` }
+  return { ok: true, host: m[1], projectPath: m[2], iid: Number(m[3]) }
+}
+
+export interface AcceptMrResult {
+  ok: boolean
+  merged?: boolean
+  error?: string
+}
+
+/** 合并（accept）一个已存在的 MR；host 缺省用 MR URL 自带的 */
+export async function acceptMergeRequest(input: GitlabConfig & { mrUrl: string }): Promise<AcceptMrResult> {
+  if (!input.token?.trim()) return { ok: false, error: "未配置 GitLab token（设置 → 项目工作区）" }
+  const parsed = parseMrUrl(input.mrUrl)
+  if (!parsed.ok) return parsed
+  const host = (input.host?.trim() || parsed.host).replace(/\/$/, "")
+  const api = `${host}/api/v4/projects/${encodeURIComponent(parsed.projectPath)}/merge_requests/${parsed.iid}/merge`
+  try {
+    const res = await requestJson("PUT", api, input.token.trim(), {})
+    if (res.status >= 200 && res.status < 300) return { ok: true, merged: true }
+    return { ok: false, error: `合并 MR 失败 (${res.status}): ${res.json?.message || res.text}` }
+  } catch (e: any) {
+    return { ok: false, error: `GitLab API 异常: ${e?.message || e}` }
+  }
+}
+
 export async function pushAndCreateMergeRequest(input: CreateMrInput): Promise<CreateMrResult> {
   if (!input.token?.trim()) return { ok: false, error: "未配置 GitLab token（设置 → 项目工作区）" }
 

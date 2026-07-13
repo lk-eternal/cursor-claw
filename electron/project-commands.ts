@@ -20,12 +20,14 @@ import {
   saveProjectNewDraft,
   clearProjectNewDraft,
   getProjectNodes,
+  resolveNodeGroup,
   projectNodeLabel,
   type ProjectNewDraft,
 } from "../src/shared/project-store.js"
 import { repoShortName,
   projectSessionKey,
   PROJECT_RESERVED_SUBCOMMANDS,
+  DEFAULT_NODE_GROUP_ID,
   type Project,
   type ProjectActionType,
 } from "../src/shared/project-types.js"
@@ -37,7 +39,7 @@ import { httpPost, syncActiveSession, enqueueToSession } from "./daemon-client"
 import { launchProjectAgent, leaveProjectSession } from "./session-dispatcher"
 
 function projectHelpText(): string {
-  const nodeIds = getProjectNodes().map((n) => n.id).join("|")
+  const nodeIds = getProjectNodes(getCurrentProject()?.groupId).map((n) => n.id).join("|")
   return [
     "💡 /p 项目指令",
     "🔹 /p — 打开项目菜单",
@@ -121,10 +123,12 @@ function formatProjectCard(p: Project, index?: number): string {
   return lines.filter(Boolean).join("\n")
 }
 
-function projectButtons(): CommandButton[] {
-  const nodeBtns: CommandButton[] = getProjectNodes().map((n) => ({
+function projectButtons(p?: Project): CommandButton[] {
+  const group = resolveNodeGroup(p?.groupId ?? getCurrentProject()?.groupId)
+  const nodeBtns: CommandButton[] = group.nodes.map((n) => ({
     label: `${n.label} /p ${n.id}`,
     cmd: `/p ${n.id}`,
+    section: group.name,
   }))
   return [
     ...nodeBtns,
@@ -175,6 +179,7 @@ interface NewProjectInput {
   productDocUrl?: string
   techDocUrl?: string
   worktreeRootOverride?: string
+  groupId?: string
   repos?: { repoPath: string; baseBranch: string; testBranch?: string; developBranch?: string }[]
 }
 
@@ -258,6 +263,7 @@ async function finalizeNewProject(
       featureBranch,
       worktreePath: primary.worktreePath,
       repos: projectRepos,
+      groupId: resolveNodeGroup(draft.groupId).id,
       notifyChatId: chatId,
     })
     if (chatId) {
@@ -273,7 +279,7 @@ async function finalizeNewProject(
       true,
       withChatFooter(`✅ 项目已创建并进入项目会话\n\n${formatProjectCard(project)}`),
       chatId,
-      projectButtons(),
+      projectButtons(project),
       { cardTitle: projectCardTitle(project) },
     )
     if (chatId) {
@@ -706,6 +712,7 @@ export async function handleProjectNewSubmit(
     storyUrl?: string
     productDocUrl?: string
     techDocUrl?: string
+    groupId?: string
     repos?: { repoPath: string; baseBranch: string; testBranch?: string; developBranch?: string }[]
   },
 ): Promise<void> {
@@ -721,6 +728,7 @@ export async function handleProjectNewSubmit(
     productDocUrl: fields.productDocUrl || undefined,
     techDocUrl: fields.techDocUrl || undefined,
     worktreeRootOverride: fields.worktreeRoot,
+    groupId: fields.groupId,
     repos: fields.repos,
   })
 }
@@ -744,39 +752,22 @@ async function handleShipCommand(
   const mode = (args[0] || "").toLowerCase()
 
   if (!mode) {
-    const btns: { label: string; cmd: string }[] = []
-    if (developBranch) btns.push({ label: `部署到开发 (${developBranch})`, cmd: "/p ship --to develop" })
-    if (testBranch) btns.push({ label: `开 MR → 测试 (${testBranch})`, cmd: "/p ship --mr test" })
-    if (!btns.length) {
-      await reportCommandResult(
-        port,
-        messageId,
-        false,
-        [
-          "❌ 未配置开发/测试分支，不能 ship 到生产基线。",
-          "",
-          `生产基线(只读起点): ${primary?.baseBranch || p.baseBranch}`,
-          "请补齐：/p ship --set develop <名> 或 /p ship --set test <名>",
-          "也可在项目会话里让 AI 用 project_update 写入。",
-        ].join("\n"),
-        chatId,
-        [{ label: "查看项目 /p status", cmd: "/p status" }],
-      )
-      return
-    }
     await reportCommandResult(
       port,
       messageId,
       true,
       [
-        "🚢 选择交付方式（禁止默认打生产基线）",
-        `feature: ${p.featureBranch}`,
-        `生产基线: ${primary?.baseBranch || p.baseBranch}（不可作默认目标）`,
-        developBranch ? `开发: ${developBranch}` : "开发: （未配置）",
-        testBranch ? `测试: ${testBranch}` : "测试: （未配置）",
+        "🚢 交付已拆分为两个节点：",
+        "· 部署 /p deploy — 推送到开发分支",
+        "· 提测 /p submit-test — 开 MR 到测试分支并通知测试",
+        "",
+        "分支配置仍可用 /p ship --set develop|test <名>",
       ].join("\n"),
       chatId,
-      btns,
+      [
+        { label: "部署 /p deploy", cmd: "/p deploy" },
+        { label: "提测 /p submit-test", cmd: "/p submit-test" },
+      ],
     )
     return
   }
@@ -815,35 +806,72 @@ async function handleShipCommand(
     return
   }
 
+  // 兼容旧卡片按钮：转发到拆分后的节点流程
   if ((mode === "--to" || mode === "to") && (args[1] || "").toLowerCase() === "develop") {
-    if (!developBranch) {
-      await reportCommandResult(port, messageId, false, "❌ 未配置 developBranch，先 /p ship --set develop <名>", chatId)
-      return
-    }
-    await runShipDeployDevelop(port, messageId, chatId, p, developBranch)
+    await handleDeployCommand(port, messageId, chatId)
     return
   }
 
   if ((mode === "--mr" || mode === "mr") && (args[1] || "").toLowerCase() === "test") {
-    if (!testBranch) {
-      await reportCommandResult(port, messageId, false, "❌ 未配置 testBranch，先 /p ship --set test <名>", chatId)
-      return
-    }
-    await runShipMrTest(port, messageId, chatId, p, testBranch)
+    await handleSubmitTestCommand(port, messageId, chatId)
     return
   }
 
-  await reportCommandResult(port, messageId, false, "用法：/p ship | /p ship --to develop | /p ship --mr test | /p ship --set develop|test <名>", chatId)
+  await reportCommandResult(port, messageId, false, "用法：/p deploy | /p submit-test | /p ship --set develop|test <名>", chatId)
 }
 
-async function runShipDeployDevelop(
+/** 部署节点：校验配置后推送开发分支（宿主动作 + Agent 摘要） */
+async function handleDeployCommand(
+  port: number,
+  messageId: string,
+  chatId: string | undefined,
+): Promise<void> {
+  ensureStore()
+  const p = getCurrentProject()
+  if (!p) {
+    await reportCommandResult(port, messageId, false, "❌ 没有当前项目，先 /p new 或 /p use", chatId)
+    return
+  }
+  const developBranch = p.repos?.[0]?.developBranch?.trim()
+  if (!developBranch) {
+    await reportCommandResult(port, messageId, false, "❌ 未配置开发分支，先 /p ship --set develop <名>（或在项目会话让 AI 用 project_update 写入）", chatId)
+    return
+  }
+  await runDeployDevelop(port, messageId, chatId, p, developBranch)
+}
+
+/** 提测节点：校验配置后推 MR 到测试分支（宿主动作 + Agent 评论/产物） */
+async function handleSubmitTestCommand(
+  port: number,
+  messageId: string,
+  chatId: string | undefined,
+): Promise<void> {
+  ensureStore()
+  const p = getCurrentProject()
+  if (!p) {
+    await reportCommandResult(port, messageId, false, "❌ 没有当前项目，先 /p new 或 /p use", chatId)
+    return
+  }
+  const testBranch = p.repos?.[0]?.testBranch?.trim()
+  if (!testBranch) {
+    await reportCommandResult(port, messageId, false, "❌ 未配置测试分支，先 /p ship --set test <名>（或在项目会话让 AI 用 project_update 写入）", chatId)
+    return
+  }
+  if (!getConfig().gitlabToken?.trim()) {
+    await reportCommandResult(port, messageId, false, "❌ 未配置 GitLab token（设置 → 项目）", chatId)
+    return
+  }
+  await runSubmitTestMr(port, messageId, chatId, p, testBranch)
+}
+
+async function runDeployDevelop(
   port: number,
   messageId: string,
   chatId: string | undefined,
   project: Project,
   developBranch: string,
 ): Promise<void> {
-  const started = startAction(project.id, "ship")
+  const started = startAction(project.id, "deploy")
   if (!started.ok) {
     await reportCommandResult(port, messageId, false, `❌ ${started.error}`, chatId)
     return
@@ -870,23 +898,23 @@ async function runShipDeployDevelop(
   }
   updateAction(project.id, action.id, { status: "accepted", summary: `已推送到开发分支 ${developBranch}` })
   const latest = getProject(project.id)!
-  const prompt = buildActionPrompt(latest, action.id, "ship")
+  const prompt = buildActionPrompt(latest, action.id, "deploy")
   const notify = chatId || project.notifyChatId || ""
   if (notify) {
     await enqueueToSession(port, projectSessionKey(notify, project.id),
       prompt + `\n\n宿主已将 HEAD 推送到开发分支 ${developBranch}。请写 artifact 摘要登记完成。`)
   }
-  await reportCommandResult(port, messageId, true, `✅ 已部署到开发分支 ${developBranch}\n并启动 ship 会话做摘要确认`, chatId)
+  await reportCommandResult(port, messageId, true, `✅ 已部署到开发分支 ${developBranch}\n并启动部署节点会话做摘要`, chatId)
 }
 
-async function runShipMrTest(
+async function runSubmitTestMr(
   port: number,
   messageId: string,
   chatId: string | undefined,
   project: Project,
   testBranch: string,
 ): Promise<void> {
-  const started = startAction(project.id, "ship")
+  const started = startAction(project.id, "submit-test")
   if (!started.ok) {
     await reportCommandResult(port, messageId, false, `❌ ${started.error}`, chatId)
     return
@@ -909,13 +937,17 @@ async function runShipMrTest(
   }
   updateAction(project.id, action.id, { mrUrl: mr.mrUrl, status: "accepted", summary: `MR → ${testBranch}` })
   const latest = getProject(project.id)!
-  const prompt = buildActionPrompt(latest, action.id, "ship")
+  const prompt = buildActionPrompt(latest, action.id, "submit-test")
   const notify = chatId || project.notifyChatId || ""
   if (notify) {
     await enqueueToSession(port, projectSessionKey(notify, project.id),
-      prompt + `\n\n宿主已创建指向测试分支 ${testBranch} 的 MR: ${mr.mrUrl}\n请写 artifact 摘要登记完成（project_action_done 带 mr_url）。`)
+      prompt + [
+        "",
+        `宿主已创建提测 MR（source: ${latest.featureBranch} → target: ${testBranch}）: ${mr.mrUrl}`,
+        "请按节点要求完成飞书项目评论通知与提测说明产物，project_action_done 带 mr_url。",
+      ].join("\n"))
   }
-  await reportCommandResult(port, messageId, true, `✅ 已开 MR → 测试分支 ${testBranch}\n${mr.mrUrl}\n并启动 ship 会话`, chatId)
+  await reportCommandResult(port, messageId, true, `✅ 已开提测 MR → 测试分支 ${testBranch}\n${mr.mrUrl}\n并启动提测节点会话`, chatId)
 }
 
 async function runAction(
@@ -961,7 +993,7 @@ async function runAction(
     port,
     messageId,
     true,
-    `🚀 已启动${projectNodeLabel(type)}\n项目：${project.name}${type === "ship" && getProject(project.id)?.actions.find((a) => a.id === action.id)?.mrUrl ? `\nMR：${getProject(project.id)!.actions.find((a) => a.id === action.id)!.mrUrl}` : ""}`,
+    `🚀 已启动${projectNodeLabel(type, project.groupId)}\n项目：${project.name}`,
     chatId,
   )
 }
@@ -1152,7 +1184,7 @@ export async function handleFeishuProjectCommand(
       true,
       withChatFooter(`✅ 已进入项目会话\n\n${formatProjectCard(target)}`),
       chatId,
-      projectButtons(),
+      projectButtons(target),
       { cardTitle: projectCardTitle(target) },
     )
     if (chatId) await enterProjectSession(port, chatId, target)
@@ -1178,7 +1210,7 @@ export async function handleFeishuProjectCommand(
       await reportCommandResult(port, messageId, false, "❌ 没有当前项目", chatId)
       return
     }
-    await reportCommandResult(port, messageId, true, formatProjectCard(cur), chatId, projectButtons(), {
+    await reportCommandResult(port, messageId, true, formatProjectCard(cur), chatId, projectButtons(cur), {
       cardTitle: projectCardTitle(cur),
     })
     return
@@ -1204,7 +1236,18 @@ export async function handleFeishuProjectCommand(
     return
   }
 
-  if (!PROJECT_RESERVED_SUBCOMMANDS.includes(sub) && getProjectNodes().some((n) => n.id === sub)) {
+  // 宿主特殊节点（语义 id）：先于普通节点路由拦截
+  if (sub === "deploy") {
+    await handleDeployCommand(port, messageId, chatId)
+    return
+  }
+
+  if (sub === "submit-test") {
+    await handleSubmitTestCommand(port, messageId, chatId)
+    return
+  }
+
+  if (!PROJECT_RESERVED_SUBCOMMANDS.includes(sub) && getProjectNodes(getCurrentProject()?.groupId).some((n) => n.id === sub)) {
     await runAction(port, messageId, chatId, sub)
     return
   }

@@ -6,7 +6,7 @@ import {
   listProjects,
   updateAction,
   getCurrentProject,
-  getProjectNodes,
+  resolveNodeGroup,
   projectNodeLabel,
 } from "./shared/project-store.js"
 import { projectIdFromSessionKey } from "./shared/project-types.js"
@@ -18,7 +18,7 @@ function txt(text: string) {
 function emitProjectNotify(
   chatId: string | undefined,
   text: string,
-  buttons?: { label: string; cmd: string }[],
+  buttons?: { label: string; cmd: string; section?: string }[],
   footer?: string,
   filePath?: string,
   sessionKey?: string,
@@ -58,10 +58,12 @@ export function registerProjectAgentTools(mcpServer: McpServer): void {
       })
       if (!r.ok) return txt(`❌ ${r.error}`)
       const p = r.project
-      const typeName = projectNodeLabel(r.action.type)
-      const advanceBtns = getProjectNodes().map((n) => ({
+      const typeName = projectNodeLabel(r.action.type, p.groupId)
+      const group = resolveNodeGroup(p.groupId)
+      const advanceBtns = group.nodes.map((n) => ({
         label: `${n.label} /p ${n.id}`,
         cmd: `/p ${n.id}`,
+        section: group.name,
       }))
       const footer = "点按钮推进下一步；要改产物直接发消息说"
       if (status === "accepted") {

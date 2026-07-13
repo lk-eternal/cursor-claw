@@ -8,21 +8,50 @@ export type ProjectActionStatus =
   | "rejected"
   | "failed"
 
-/** 项目流程节点定义（推进按钮/命令/提示词的唯一来源） */
+/** 项目流程节点定义（推进按钮/命令/提示词的唯一来源；无内置/自定义之分，均可增删改） */
 export interface ProjectNodeDef {
   id: string
   label: string
-  /** 节点工作要求；内置节点留空时用代码里的默认模板 */
+  /** 节点工作要求；留空且 id 命中默认模板时用代码里的模板 */
   prompt?: string
-  builtin?: boolean
 }
 
-export const DEFAULT_PROJECT_NODES: ProjectNodeDef[] = [
-  { id: "plan", label: "规划", builtin: true },
-  { id: "build", label: "实现", builtin: true },
-  { id: "review", label: "审查", builtin: true },
-  { id: "ship", label: "交付", builtin: true },
+/** 流程组：项目创建时选定一组，推进按钮/命令只展示该组节点 */
+export interface ProjectNodeGroupDef {
+  id: string
+  name: string
+  nodes: ProjectNodeDef[]
+}
+
+/** 默认流程组种子：仅在无任何持久化数据时初始化用 */
+export const DEFAULT_NODE_GROUPS: ProjectNodeGroupDef[] = [
+  {
+    id: "develop",
+    name: "开发",
+    nodes: [
+      { id: "plan", label: "规划" },
+      { id: "build", label: "实现" },
+      { id: "review", label: "审查" },
+      { id: "deploy", label: "部署" },
+      { id: "submit-test", label: "提测" },
+    ],
+  },
+  {
+    id: "test",
+    name: "测试",
+    nodes: [
+      { id: "test-review", label: "测试评审" },
+      { id: "test-cases", label: "用例编写" },
+      { id: "test-deploy", label: "部署" },
+      { id: "test-exec", label: "测试" },
+      { id: "file-bug", label: "提缺陷" },
+      { id: "retest", label: "复测" },
+      { id: "release-doc", label: "上线文档" },
+    ],
+  },
 ]
+
+export const DEFAULT_NODE_GROUP_ID = DEFAULT_NODE_GROUPS[0].id
 
 export interface RepoProfile {
   path: string
@@ -66,6 +95,8 @@ export interface Project {
   worktreePath: string
   /** multi-repo worktrees */
   repos?: ProjectRepo[]
+  /** 流程组 id；旧项目缺省视为默认组 */
+  groupId?: string
   status: ProjectStatus
   actions: ProjectAction[]
   sessionKey?: string

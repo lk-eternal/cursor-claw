@@ -1,7 +1,7 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { randomUUID } from "node:crypto"
-import { DEFAULT_PROJECT_NODES, type Project, type ProjectAction, type ProjectActionStatus, type ProjectActionType, type ProjectNodeDef } from "./project-types.js"
+import { DEFAULT_NODE_GROUPS, DEFAULT_NODE_GROUP_ID, type Project, type ProjectAction, type ProjectActionStatus, type ProjectActionType, type ProjectNodeDef, type ProjectNodeGroupDef } from "./project-types.js"
 
 let baseDir = ""
 
@@ -14,34 +14,87 @@ export function getProjectStoreDir(): string {
   return baseDir
 }
 
-// ── 流程节点表（electron 设置页写，daemon MCP 读，共用一份文件） ──
+// ── 流程组表（electron 设置页写，daemon MCP 读，共用一份文件） ──
 
-function nodesPath(): string {
+function groupsPath(): string {
+  return path.join(baseDir, "project-node-groups.json")
+}
+
+/** 旧版扁平节点表：仅迁移用 */
+function legacyNodesPath(): string {
   return path.join(baseDir, "project-nodes.json")
 }
 
-export function getProjectNodes(): ProjectNodeDef[] {
-  const saved = baseDir ? readJsonSafe<ProjectNodeDef[] | null>(nodesPath(), null) : null
-  const list = (saved ?? []).filter((n) => n?.id?.trim() && n?.label?.trim())
-  if (!list.length) return DEFAULT_PROJECT_NODES.map((n) => ({ ...n }))
-  // 内置节点始终存在（用户可改 label/prompt，不可删）
-  for (const b of DEFAULT_PROJECT_NODES) {
-    if (!list.some((n) => n.id === b.id)) list.push({ ...b })
+function sanitizeGroups(groups: ProjectNodeGroupDef[] | null | undefined): ProjectNodeGroupDef[] {
+  return (groups ?? [])
+    .filter((g) => g?.id?.trim() && g?.name?.trim())
+    .map((g) => ({
+      id: g.id.trim(),
+      name: g.name.trim(),
+      nodes: (g.nodes ?? []).filter((n) => n?.id?.trim() && n?.label?.trim())
+        .map((n) => ({ id: n.id.trim(), label: n.label.trim(), ...(n.prompt?.trim() ? { prompt: n.prompt } : {}) })),
+    }))
+}
+
+/** 旧扁平表 → 默认组结构：plan/build/review 的自定义覆盖到开发组，ship 丢弃，其余节点并入开发组 */
+function migrateLegacyNodes(legacy: ProjectNodeDef[]): ProjectNodeGroupDef[] {
+  const groups = DEFAULT_NODE_GROUPS.map((g) => ({ ...g, nodes: g.nodes.map((n) => ({ ...n })) }))
+  const develop = groups.find((g) => g.id === DEFAULT_NODE_GROUP_ID) ?? groups[0]
+  for (const n of legacy) {
+    if (n.id === "ship") continue
+    const exist = develop.nodes.find((d) => d.id === n.id)
+    if (exist) {
+      exist.label = n.label || exist.label
+      if (n.prompt?.trim()) exist.prompt = n.prompt
+    } else {
+      develop.nodes.push({ id: n.id, label: n.label, ...(n.prompt?.trim() ? { prompt: n.prompt } : {}) })
+    }
   }
-  return list
+  return groups
 }
 
-export function saveProjectNodes(nodes: ProjectNodeDef[]): void {
+export function getNodeGroups(): ProjectNodeGroupDef[] {
+  if (!baseDir) return DEFAULT_NODE_GROUPS.map((g) => ({ ...g, nodes: g.nodes.map((n) => ({ ...n })) }))
+  const saved = sanitizeGroups(readJsonSafe<ProjectNodeGroupDef[] | null>(groupsPath(), null))
+  if (saved.length) return saved
+  const legacy = readJsonSafe<ProjectNodeDef[] | null>(legacyNodesPath(), null)
+  const migrated = legacy?.length
+    ? migrateLegacyNodes(legacy.filter((n) => n?.id?.trim() && n?.label?.trim()))
+    : DEFAULT_NODE_GROUPS.map((g) => ({ ...g, nodes: g.nodes.map((n) => ({ ...n })) }))
+  writeJson(groupsPath(), migrated)
+  return migrated
+}
+
+export function saveNodeGroups(groups: ProjectNodeGroupDef[]): void {
   if (!baseDir) throw new Error("project store not initialized")
-  writeJson(nodesPath(), nodes)
+  writeJson(groupsPath(), sanitizeGroups(groups))
 }
 
-export function getProjectNode(id: string): ProjectNodeDef | undefined {
-  return getProjectNodes().find((n) => n.id === id)
+/** 按组 id 解析流程组；缺省/失配回落默认组（再回落第一组） */
+export function resolveNodeGroup(groupId?: string): ProjectNodeGroupDef {
+  const groups = getNodeGroups()
+  return groups.find((g) => g.id === groupId)
+    ?? groups.find((g) => g.id === DEFAULT_NODE_GROUP_ID)
+    ?? groups[0]
 }
 
-export function projectNodeLabel(id: string): string {
-  return getProjectNode(id)?.label || id
+export function getProjectNodes(groupId?: string): ProjectNodeDef[] {
+  return resolveNodeGroup(groupId).nodes
+}
+
+/** 组内优先，其次全组检索（历史 action 的节点可能已换组/删除） */
+export function getProjectNode(id: string, groupId?: string): ProjectNodeDef | undefined {
+  const inGroup = resolveNodeGroup(groupId).nodes.find((n) => n.id === id)
+  if (inGroup) return inGroup
+  for (const g of getNodeGroups()) {
+    const hit = g.nodes.find((n) => n.id === id)
+    if (hit) return hit
+  }
+  return undefined
+}
+
+export function projectNodeLabel(id: string, groupId?: string): string {
+  return getProjectNode(id, groupId)?.label || id
 }
 
 function ensureDir(dir: string): void {
@@ -136,6 +189,7 @@ export function createProject(input: Omit<Project, "id" | "actions" | "status" |
     featureBranch: input.featureBranch,
     worktreePath: input.worktreePath,
     repos: input.repos,
+    groupId: input.groupId,
     status: input.status ?? "active",
     actions: input.actions ?? [],
     sessionKey: input.sessionKey,
