@@ -30,6 +30,7 @@ import { injectWorkspaceToDir } from "./workspace-injector"
 import { buildSessionCardTitle, readGitBranch, dirBaseName } from "../src/shared/session-label.js"
 import { getProject, listProjects, setCurrentProjectId } from "../src/shared/project-store.js"
 import { projectIdFromSessionKey, projectSessionKey } from "../src/shared/project-types.js"
+import { buildProjectSessionPrompt } from "./project-prompts"
 import { getSessionOverride } from "../src/shared/session-model-store.js"
 import { resolveModelLabel } from "../src/shared/model-utils.js"
 
@@ -642,6 +643,13 @@ function resolveMainSessionKey(chatId: string): string | undefined {
   return normalizeSessionKey(`${chatId}::${mainDir}`) || `${chatId}::${mainDir}`
 }
 
+/** 退出项目会话：清当前项目指针，活跃路由回主工作目录会话 */
+export async function leaveProjectSession(port: number, chatId: string): Promise<void> {
+  setCurrentProjectId(null)
+  const mainKey = resolveMainSessionKey(chatId)
+  if (mainKey) await syncActiveSession(port, chatId, mainKey)
+}
+
 /** 删除会话：停止 Agent、清 Resume、移出常用目录；若当前活跃则回主会话。项目会话请用 /p del。 */
 export async function deleteUserSession(
   sessionKey: string,
@@ -1006,6 +1014,7 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
         workingDirectory: proj.worktreePath,
         meta: { chatId, chatType: "project" },
         channelId: parseChatKey(chatId).channelId,
+        taskMessage: resumableP ? undefined : buildProjectSessionPrompt(proj),
       })
       if (!r.ok) {
         broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${r.error}`)

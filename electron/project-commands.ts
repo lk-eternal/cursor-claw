@@ -34,7 +34,7 @@ import { buildProjectSessionPrompt, buildActionPrompt } from "./project-prompts"
 import { pushAndCreateMergeRequest } from "./project-gitlab"
 import { syncArtifactToFeishu } from "./project-feishu-sync"
 import { httpPost, syncActiveSession, enqueueToSession } from "./daemon-client"
-import { launchProjectAgent } from "./session-dispatcher"
+import { launchProjectAgent, leaveProjectSession } from "./session-dispatcher"
 
 function projectHelpText(): string {
   const nodeIds = getProjectNodes().map((n) => n.id).join("|")
@@ -1024,7 +1024,7 @@ async function handleDeleteProjectCommand(
 
   const wasCurrent = getCurrentProject()?.id === target.id
   executeProjectDelete(target.id)
-  if (wasCurrent && chatId) await syncActiveSession(port, chatId, chatId)
+  if (wasCurrent && chatId) await leaveProjectSession(port, chatId)
   await reportCommandResult(
     port,
     messageId,
@@ -1164,7 +1164,7 @@ export async function handleFeishuProjectCommand(
       await reportCommandResult(port, messageId, false, "❌ 无法解析会话", chatId)
       return
     }
-    await syncActiveSession(port, chatId, chatId)
+    await leaveProjectSession(port, chatId)
     await reportCommandResult(port, messageId, true, "✅ 已退出项目，回到普通会话", chatId, [
       { label: "项目菜单 /p", cmd: "/p" },
       { label: "新建项目 /p new", cmd: "/p new" },

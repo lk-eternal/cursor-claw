@@ -1,5 +1,5 @@
 import * as path from "node:path"
-import { artifactRelPath, type Project, type ProjectActionType } from "../src/shared/project-types.js"
+import { artifactRelPath, type Project, type ProjectActionType, type ProjectRepo } from "../src/shared/project-types.js"
 import { lastAcceptedAction, getProjectNode, projectNodeLabel } from "../src/shared/project-store.js"
 
 // ════════════════════════════════════════════════════════════
@@ -55,16 +55,42 @@ function shipConstraints(p: Project): string[] {
   ]
 }
 
+/** 单仓分支行（会话/节点上下文共用，名称必须原样使用） */
+function repoBranchLines(r: ProjectRepo, multi: boolean, index: number): string[] {
+  const head = multi ? `主仓 #${index + 1}: ${r.repoPath}` : `主仓: ${r.repoPath}`
+  const unconfigured = "（未配置，须 project_get + project_update 补齐；禁止猜测或新建 dev/test 等分支名）"
+  return [
+    head,
+    `  worktree: ${r.worktreePath}`,
+    `  生产基线: ${r.baseBranch}（只作 feature 起点，禁止默认推送/MR 目标）`,
+    `  测试分支: ${r.testBranch?.trim() || unconfigured}`,
+    `  开发分支: ${r.developBranch?.trim() || unconfigured}`,
+  ]
+}
+
+function projectRepos(p: Project): ProjectRepo[] {
+  if (p.repos?.length) return p.repos
+  return [{
+    repoPath: p.repoPath,
+    baseBranch: p.baseBranch,
+    worktreePath: p.worktreePath,
+  }]
+}
+
 /** 项目上下文块（会话与节点共用） */
 function contextBlock(p: Project): string[] {
+  const repos = projectRepos(p)
   return [
     `项目: ${p.name}`,
+    `项目ID: ${p.id}`,
     `目标: ${p.goal || "（未填写，可在对话中与用户澄清）"}`,
     p.storyUrl ? `飞书项目: ${p.storyUrl}` : "",
     p.productDocUrl ? `产品文档: ${p.productDocUrl}` : "",
     p.techDocUrl ? `技术文档: ${p.techDocUrl}` : "",
-    `工作目录: ${p.worktreePath}`,
-    `feature 分支: ${p.featureBranch}（基线 ${p.baseBranch}，只作起点）`,
+    `feature 分支: ${p.featureBranch}`,
+    "",
+    "仓库与分支（git 操作必须使用下列确切全名，禁止缩写、猜测或自建分支）：",
+    ...repos.flatMap((r, i) => repoBranchLines(r, repos.length > 1, i)),
   ].filter(Boolean)
 }
 
@@ -85,6 +111,7 @@ export function buildProjectSessionPrompt(p: Project): string {
     "",
     "边界:",
     "- 禁止向生产基线推送或开 MR",
+    "- git 推送/MR 的开发、测试目标必须严格使用上文列出的开发分支、测试分支全名",
     "- 本提示为内部上下文：ID / 路径 / 分支等字段不向用户复述，回复只讲结论",
   ].join("\n")
 }
