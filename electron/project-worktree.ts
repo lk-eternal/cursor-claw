@@ -65,12 +65,15 @@ export function addProjectWorktree(input: WorktreeAddInput): WorktreeResult {
 
   const existing = resolveExistingBranch(repoPath, featureBranch)
   if (existing.ok && existing.ref) {
-    const add = runGit(repoPath, ["worktree", "add", worktreePath, existing.ref])
+    // origin/xxx 用 --track -b 建本地分支（直接挂远程 ref 会 detached HEAD）；本地分支原样检出
+    const add = existing.ref.startsWith("origin/")
+      ? runGit(repoPath, ["worktree", "add", "--track", "-b", featureBranch, worktreePath, existing.ref])
+      : runGit(repoPath, ["worktree", "add", worktreePath, existing.ref])
     if (!add.ok) {
       removeProjectWorktree(repoPath, worktreePath)
       return { ok: false, error: `挂接已有分支失败: ${add.stderr || add.stdout}` }
     }
-    unsetUpstream(worktreePath)
+    ensureFeatureUpstream(worktreePath, featureBranch)
     return { ok: true }
   }
 
@@ -82,13 +85,18 @@ export function addProjectWorktree(input: WorktreeAddInput): WorktreeResult {
     removeProjectWorktree(repoPath, worktreePath)
     return { ok: false, error: `worktree add 失败: ${add.stderr || add.stdout}` }
   }
-  unsetUpstream(worktreePath)
+  ensureFeatureUpstream(worktreePath, featureBranch)
   return { ok: true }
 }
 
-function unsetUpstream(worktreePath: string): void {
-  // 禁止 feature 跟踪生产基线；后续 push 默认走同名远程分支
-  runGit(worktreePath, ["branch", "--unset-upstream"])
+/** feature 的 upstream 只允许指向 origin 同名分支：有则对齐，无则清掉（防止跟踪生产基线导致误推） */
+function ensureFeatureUpstream(worktreePath: string, featureBranch: string): void {
+  const remote = runGit(worktreePath, ["rev-parse", "--verify", `origin/${featureBranch}`])
+  if (remote.ok) {
+    runGit(worktreePath, ["branch", `--set-upstream-to=origin/${featureBranch}`, featureBranch])
+  } else {
+    runGit(worktreePath, ["branch", "--unset-upstream"])
+  }
 }
 
 function ensureLocalBase(repoPath: string, baseBranch: string): WorktreeResult & { ref?: string } {
