@@ -41,6 +41,7 @@ const ACTION_GUIDES: Record<string, string[]> = {
     "  2. content 中每个 @ 都写成 mention 格式：@名字<!-- mention:{\"id\":\"<lark_user_id>\",\"cn_name\":\"<名字>\",\"blockType\":\"AT_USER_BLOCK\"} -->",
     "  3. add_comment 同时传 notify_user_list=[全部被 @ 人的 lark_user_id] 与 notify_user_type=lark_user_id",
     "- 测试人员从工作项团队 / 角色字段获取；找不到时在产物中说明并提醒用户手动通知",
+    "- 注意：API 评论的 @ 只在页面高亮、不触发飞书推送提醒——完成后必须在给用户的回复中提醒其手动转发提测信息给测试人员",
     "- 产物写提测说明：MR 链接、变更摘要、测试建议与关注点",
     "- project_action_done 必须带 mr_url",
   ],
