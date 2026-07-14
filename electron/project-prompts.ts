@@ -1,5 +1,5 @@
 import * as path from "node:path"
-import { artifactRelPath, type Project, type ProjectActionType, type ProjectRepo } from "../src/shared/project-types.js"
+import { artifactRelPath, isPlainProject, type Project, type ProjectActionType, type ProjectRepo } from "../src/shared/project-types.js"
 import { lastAcceptedAction, getProjectNode, getProjectNodes, projectNodeLabel } from "../src/shared/project-store.js"
 
 // ════════════════════════════════════════════════════════════
@@ -156,16 +156,22 @@ function projectRepos(p: Project): ProjectRepo[] {
   }]
 }
 
-/** 项目上下文块（会话与节点共用） */
+/** 项目上下文块（会话与节点共用）；纯会话型无仓库分支段 */
 function contextBlock(p: Project): string[] {
-  const repos = projectRepos(p)
-  return [
+  const head = [
     `项目: ${p.name}`,
     `项目ID: ${p.id}`,
     `目标: ${p.goal || "（未填写，可在对话中与用户澄清）"}`,
     p.storyUrl ? `飞书项目: ${p.storyUrl}` : "",
     p.productDocUrl ? `产品文档: ${p.productDocUrl}` : "",
     p.techDocUrl ? `技术文档: ${p.techDocUrl}` : "",
+  ]
+  if (isPlainProject(p)) {
+    return [...head, `工作目录: ${p.worktreePath}（纯会话型项目，无代码仓）`].filter(Boolean)
+  }
+  const repos = projectRepos(p)
+  return [
+    ...head,
     `feature 分支: ${p.featureBranch}`,
     "",
     "仓库与分支（git 操作必须使用下列确切全名，禁止缩写、猜测或自建分支）：",
@@ -176,12 +182,13 @@ function contextBlock(p: Project): string[] {
 /** 首次进入项目会话的提示词：角色 + 工作方式，一次讲清 */
 export function buildProjectSessionPrompt(p: Project): string {
   const nodeLabels = getProjectNodes(p.groupId).map((n) => n.label).join("/")
+  const plain = isPlainProject(p)
   return [
     `[PROJECT_SESSION] 项目「${p.name}」专属会话`,
     "",
     ...contextBlock(p),
     "",
-    "你的角色: 该项目的开发负责人，在本会话中与用户协作完成需求交付。",
+    `你的角色: 该项目的${plain ? "负责人" : "开发负责人"}，在本会话中与用户协作完成${plain ? "流程" : "需求"}交付。`,
     "",
     "工作方式:",
     "1. 用户直接发消息 → 正常对话：答疑、讨论方案、小修小改",
@@ -190,8 +197,10 @@ export function buildProjectSessionPrompt(p: Project): string {
     "4. 查项目字段用 project_get，补分支等配置用 project_update",
     "",
     "边界:",
-    "- 禁止向生产基线推送或开 MR",
-    "- git 推送/MR 的开发、测试目标必须严格使用上文列出的开发分支、测试分支全名",
+    ...(plain ? [] : [
+      "- 禁止向生产基线推送或开 MR",
+      "- git 推送/MR 的开发、测试目标必须严格使用上文列出的开发分支、测试分支全名",
+    ]),
     "- 本提示为内部上下文：ID / 路径 / 分支等字段不向用户复述，回复只讲结论",
   ].join("\n")
 }

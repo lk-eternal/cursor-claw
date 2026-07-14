@@ -223,9 +223,9 @@ const api = {
     ipcRenderer.invoke("scheduled-tasks:get-status"),
 
   // ── 项目流程组 ──────────────────────────────────────
-  getProjectNodeGroups: (): Promise<{ id: string; name: string; nodes: { id: string; label: string; prompt?: string; defaultPrompt?: string }[] }[]> =>
+  getProjectNodeGroups: (): Promise<{ id: string; name: string; workspace?: "worktree" | "plain"; nodes: { id: string; label: string; prompt?: string; defaultPrompt?: string }[] }[]> =>
     ipcRenderer.invoke("project-node-groups:get"),
-  saveProjectNodeGroups: (groups: { id: string; name: string; nodes: { id: string; label: string; prompt?: string }[] }[]): Promise<{ ok: boolean }> =>
+  saveProjectNodeGroups: (groups: { id: string; name: string; workspace?: "worktree" | "plain"; nodes: { id: string; label: string; prompt?: string }[] }[]): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke("project-node-groups:save", groups),
   getProjectNodeGroupUsage: (): Promise<Record<string, number>> =>
     ipcRenderer.invoke("project-node-groups:usage"),

@@ -29,7 +29,7 @@ import {
 import { injectWorkspaceToDir } from "./workspace-injector"
 import { buildSessionCardTitle, readGitBranch, dirBaseName } from "../src/shared/session-label.js"
 import { getProject, listProjects, setCurrentProjectId, saveProject } from "../src/shared/project-store.js"
-import { projectIdFromSessionKey, projectSessionKey, projectWorktrees } from "../src/shared/project-types.js"
+import { projectIdFromSessionKey, projectSessionKey, projectWorktrees, isPlainProject } from "../src/shared/project-types.js"
 import { checkoutFeatureAll } from "./project-worktree"
 import { buildProjectSessionPrompt } from "./project-prompts"
 import { getSessionOverride } from "../src/shared/session-model-store.js"
@@ -794,7 +794,7 @@ export async function switchMainSession(sessionKey: string): Promise<{ ok: boole
     if (proj?.status === "paused") {
       proj.status = "active"
       saveProject(proj)
-      checkoutFeatureAll(projectWorktrees(proj), proj.featureBranch)
+      if (!isPlainProject(proj)) checkoutFeatureAll(projectWorktrees(proj), proj.featureBranch)
     }
   }
   return { ok: true }
@@ -1057,8 +1057,8 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
         }
         continue
       }
-      // feature 可能被 /p leave 释放或被主仓（IDE）占用：拉起前切回；占用则拦下并节流提醒
-      const co = checkoutFeatureAll(projectWorktrees(proj), proj.featureBranch)
+      // feature 可能被 /p leave 释放或被主仓（IDE）占用：拉起前切回；占用则拦下并节流提醒（纯会话型无 git 直接放行）
+      const co = isPlainProject(proj) ? { ok: true as const, error: undefined } : checkoutFeatureAll(projectWorktrees(proj), proj.featureBranch)
       if (!co.ok) {
         broadcastLog(`[Agent] 项目「${proj.name}」feature 分支不可用，暂缓拉起: ${co.error}`, "WARN")
         const lastAt = featureOccupiedNotifyAt.get(sessionKey) ?? 0

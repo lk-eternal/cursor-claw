@@ -711,6 +711,7 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
               baseBranch: string; featureBranch?: string
               storyUrl?: string; productDocUrl?: string; techDocUrl?: string
               groupId?: string
+              workspaceType?: string
               repos?: { repoPath: string; baseBranch: string; testBranch?: string; developBranch?: string }[]
             }
             const port = cachedPort ?? readLockFile()?.port
@@ -1932,7 +1933,7 @@ export function initDaemonManager(): void {
       nodes: g.nodes.map((n) => ({ ...n, defaultPrompt: getDefaultNodeGuide(n.id) })),
     }))
   })
-  ipcMain.handle("project-node-groups:save", (_e, groups: { id: string; name: string; nodes: { id: string; label: string; prompt?: string }[] }[]) => {
+  ipcMain.handle("project-node-groups:save", (_e, groups: { id: string; name: string; workspace?: "worktree" | "plain"; nodes: { id: string; label: string; prompt?: string }[] }[]) => {
     initProjectStore(app.getPath("userData"))
     saveNodeGroups(groups)
     return { ok: true }

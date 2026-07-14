@@ -91,7 +91,9 @@ describe("project-store", () => {
     expect(groups.map((g) => g.id)).toEqual(["develop", "test"])
     const develop = resolveNodeGroup("develop")
     expect(develop.nodes.map((n) => n.id)).toEqual(["plan", "build", "review", "deploy", "submit-test", "analyze-bug", "fix-bug"])
+    expect(develop.workspace).toBe("worktree")
     expect(resolveNodeGroup("test").nodes).toHaveLength(7)
+    expect(resolveNodeGroup("test").workspace).toBe("plain")
     expect(develop.nodes.some((n) => n.id === "ship")).toBe(false)
   })
 

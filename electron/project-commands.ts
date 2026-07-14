@@ -20,6 +20,7 @@ import {
   saveProjectNewDraft,
   clearProjectNewDraft,
   getProjectNodes,
+  getNodeGroups,
   resolveNodeGroup,
   projectNodeLabel,
   type ProjectNewDraft,
@@ -27,10 +28,12 @@ import {
 import { repoShortName,
   projectSessionKey,
   projectWorktrees,
+  isPlainProject,
   PROJECT_RESERVED_SUBCOMMANDS,
   DEFAULT_NODE_GROUP_ID,
   type Project,
   type ProjectActionType,
+  type ProjectWorkspaceType,
 } from "../src/shared/project-types.js"
 import {
   addProjectWorktree, ensureArtifactDir, isGitRepoRoot, removeProjectWorktree,
@@ -104,6 +107,17 @@ function uniqueProjectSlug(name: string): string {
 function formatProjectCard(p: Project, index?: number): string {
   const last = [...p.actions].reverse()[0]
   const accepted = lastAcceptedAction(p)
+  const gitLines = isPlainProject(p)
+    ? [`🗂 纯会话型 · 📁 ${p.worktreePath}`]
+    : [
+      `🌿 feature: ${p.featureBranch}`,
+      ...(p.repos && p.repos.length
+        ? p.repos.map((r, i) => {
+            const tags = [`base=${r.baseBranch}`, r.testBranch ? `test=${r.testBranch}` : "", r.developBranch ? `dev=${r.developBranch}` : ""].filter(Boolean).join(" ")
+            return `📦#${i + 1} ${r.repoPath}\n   ${tags}\n   📁 ${r.worktreePath}`
+          })
+        : [`base=${p.baseBranch}`, `📁 ${p.worktreePath}`]),
+    ]
   const lines = [
     index != null ? `📦 项目 #${index} · ${p.name}` : `📦 项目 · ${p.name}`,
     `🆔 ${p.id}`,
@@ -111,13 +125,7 @@ function formatProjectCard(p: Project, index?: number): string {
     p.storyUrl ? `🔗 飞书项目 · ${p.storyUrl}` : "",
     p.productDocUrl ? `📘 产品文档 · ${p.productDocUrl}` : "",
     p.techDocUrl ? `📗 技术文档 · ${p.techDocUrl}` : "",
-    `🌿 feature: ${p.featureBranch}`,
-    ...(p.repos && p.repos.length
-      ? p.repos.map((r, i) => {
-          const tags = [`base=${r.baseBranch}`, r.testBranch ? `test=${r.testBranch}` : "", r.developBranch ? `dev=${r.developBranch}` : ""].filter(Boolean).join(" ")
-          return `📦#${i + 1} ${r.repoPath}\n   ${tags}\n   📁 ${r.worktreePath}`
-        })
-      : [`base=${p.baseBranch}`, `📁 ${p.worktreePath}`]),
+    ...gitLines,
     `💠 ${p.status}`,
     last ? `⏭ 最近 action · ${last.type} (${last.status})` : "⏭ 尚无 action",
     accepted?.artifactPath ? `📄 artifact · ${accepted.artifactPath}` : "",
@@ -157,8 +165,10 @@ async function enterProjectSession(
   chatId: string,
   project: Project,
 ): Promise<{ ok: boolean; error?: string }> {
-  const co = checkoutFeatureAll(projectWorktrees(project), project.featureBranch)
-  if (!co.ok) return { ok: false, error: co.error }
+  if (!isPlainProject(project)) {
+    const co = checkoutFeatureAll(projectWorktrees(project), project.featureBranch)
+    if (!co.ok) return { ok: false, error: co.error }
+  }
   const sessionKey = project.sessionKey || projectSessionKey(chatId, project.id)
   project.sessionKey = sessionKey
   project.notifyChatId = chatId
@@ -192,7 +202,66 @@ interface NewProjectInput {
   techDocUrl?: string
   worktreeRootOverride?: string
   groupId?: string
+  workspaceType?: ProjectWorkspaceType
   repos?: { repoPath: string; baseBranch: string; testBranch?: string; developBranch?: string }[]
+}
+
+/** 纯会话型项目：不建 worktree，自动创建独立会话目录 */
+async function finalizePlainProject(
+  port: number,
+  messageId: string,
+  chatId: string | undefined,
+  draft: NewProjectInput,
+): Promise<void> {
+  if (!draft.name) {
+    await reportCommandResult(port, messageId, false, "❌ 创建信息不完整（名称必填）", chatId)
+    return
+  }
+  if (!draft.storyUrl?.trim()) {
+    await reportCommandResult(port, messageId, false, "❌ 纯会话型项目必须填写飞书项目链接（信息枢纽）", chatId)
+    return
+  }
+  const cfg = getConfig()
+  const root = (draft.worktreeRootOverride || cfg.worktreeRoot || "").trim()
+    || path.join(app.getPath("userData"), "claw-projects")
+  const projectSlug = uniqueProjectSlug(draft.name)
+  const workDir = path.join(root, projectSlug, "workspace")
+  try {
+    if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true })
+    const project = createProject({
+      name: draft.name,
+      goal: draft.goal || "",
+      storyUrl: draft.storyUrl,
+      productDocUrl: draft.productDocUrl,
+      techDocUrl: draft.techDocUrl,
+      repoPath: "",
+      baseBranch: "",
+      featureBranch: "",
+      worktreePath: workDir,
+      groupId: resolveNodeGroup(draft.groupId).id,
+      workspaceType: "plain",
+      notifyChatId: chatId,
+    })
+    if (chatId) {
+      project.sessionKey = projectSessionKey(chatId, project.id)
+      const { saveProject } = await import("../src/shared/project-store.js")
+      saveProject(project)
+    }
+    ensureArtifactDir(workDir)
+    if (draft.chatKey) clearProjectNewDraft(draft.chatKey)
+    await reportCommandResult(
+      port,
+      messageId,
+      true,
+      withChatFooter(`✅ 项目已创建并进入项目会话\n\n${formatProjectCard(project)}`),
+      chatId,
+      projectButtons(project),
+      { cardTitle: projectCardTitle(project) },
+    )
+    if (chatId) await enterProjectSession(port, chatId, project)
+  } catch (e: any) {
+    await reportCommandResult(port, messageId, false, `❌ 创建失败: ${e?.message || e}`, chatId)
+  }
 }
 
 async function finalizeNewProject(
@@ -201,6 +270,10 @@ async function finalizeNewProject(
   chatId: string | undefined,
   draft: NewProjectInput,
 ): Promise<void> {
+  if (draft.workspaceType === "plain" || resolveNodeGroup(draft.groupId).workspace === "plain") {
+    await finalizePlainProject(port, messageId, chatId, draft)
+    return
+  }
   const cfg = getConfig()
   const worktreeRoot = (draft.worktreeRootOverride || cfg.worktreeRoot || "").trim()
   const repos = (draft.repos && draft.repos.length)
@@ -701,27 +774,57 @@ async function handleNewCommand(
     return
   }
 
-  // /p new  或  /p new 名字 → 大表单（名字可作表单预填提示，仍发空表单由用户改）
   if (!chatKey) {
     await reportCommandResult(port, messageId, false, "❌ 无法解析会话", chatId)
     return
   }
 
-  // 若带齐一行参数仍走旧路径；否则发大表单
-  try {
-    const r = await httpPost(`http://127.0.0.1:${port}/api/project-new-form`, {
-      message_id: messageId,
-      session_key: chatId,
-      repo_profiles: getRepoProfiles(cfg),
-      repo_roots: cfg.repoRoots || [],
-      worktree_root: cfg.worktreeRoot || "",
-    }) as { ok?: boolean; error?: string }
-    if (!r?.ok) {
-      await reportCommandResult(port, messageId, false, `❌ 创建表单发送失败（飞书卡片被拒）。可先 /p setup 检查主仓与 worktree，或用一行命令：\n/p new <名> <主仓路径> <基线> <feature> <目标…>`, chatId)
+  const groups = getNodeGroups()
+
+  // 第二步：已选组 → 按组的工作区类型发对应表单
+  if (flag === "--group") {
+    const gid = (parts[3] || "").trim()
+    const group = groups.find((g) => g.id === gid)
+    if (!group) {
+      await reportCommandResult(port, messageId, false, `❌ 流程组不存在：${gid}`, chatId)
+      return
     }
-  } catch (e: any) {
-    await reportCommandResult(port, messageId, false, `❌ 打不开创建表单: ${e?.message || e}`, chatId)
+    try {
+      const r = await httpPost(`http://127.0.0.1:${port}/api/project-new-form`, {
+        message_id: messageId,
+        session_key: chatId,
+        repo_profiles: getRepoProfiles(cfg),
+        repo_roots: cfg.repoRoots || [],
+        worktree_root: cfg.worktreeRoot || "",
+        group_id: group.id,
+      }) as { ok?: boolean; error?: string }
+      if (!r?.ok) {
+        await reportCommandResult(port, messageId, false, `❌ 创建表单发送失败（飞书卡片被拒）。可先 /p setup 检查配置，或用一行命令：\n/p new <名> <主仓路径> <基线> <feature> <目标…>`, chatId)
+      }
+    } catch (e: any) {
+      await reportCommandResult(port, messageId, false, `❌ 打不开创建表单: ${e?.message || e}`, chatId)
+    }
+    return
   }
+
+  // 第一步：选流程组（只有一个组时跳过直接进表单）
+  if (groups.length === 1) {
+    await handleNewCommand(port, messageId, chatId, ["/p", "new", "--group", groups[0].id])
+    return
+  }
+  await reportCommandResult(
+    port,
+    messageId,
+    true,
+    [
+      "📦 创建项目 · 先选流程组",
+      "",
+      ...groups.map((g) => `· ${g.name}（${g.workspace === "plain" ? "纯会话型：无需代码仓" : "代码开发型：主仓 + worktree"}）`),
+    ].join("\n"),
+    chatId,
+    groups.slice(0, 10).map((g) => ({ label: g.name, cmd: `/p new --group ${g.id}` })),
+    { cardTitle: { title: "创建项目", subtitle: "选择流程组" } },
+  )
 }
 
 /** 表单提交（daemon 卡片回调 → electron） */
@@ -740,6 +843,7 @@ export async function handleProjectNewSubmit(
     productDocUrl?: string
     techDocUrl?: string
     groupId?: string
+    workspaceType?: string
     repos?: { repoPath: string; baseBranch: string; testBranch?: string; developBranch?: string }[]
   },
 ): Promise<void> {
@@ -756,6 +860,7 @@ export async function handleProjectNewSubmit(
     techDocUrl: fields.techDocUrl || undefined,
     worktreeRootOverride: fields.worktreeRoot,
     groupId: fields.groupId,
+    workspaceType: fields.workspaceType === "plain" ? "plain" : undefined,
     repos: fields.repos,
   })
 }
@@ -898,6 +1003,10 @@ async function runDeployDevelop(
   project: Project,
   developBranch: string,
 ): Promise<void> {
+  if (isPlainProject(project)) {
+    await reportCommandResult(port, messageId, false, "❌ 纯会话型项目无代码仓，无法执行部署（推送分支）", chatId)
+    return
+  }
   const coDeploy = checkoutFeature(project.worktreePath, project.featureBranch)
   if (!coDeploy.ok) {
     await reportCommandResult(port, messageId, false, featureOccupiedText(project, coDeploy.error || ""), chatId)
@@ -946,6 +1055,10 @@ async function runSubmitTestMr(
   project: Project,
   testBranch: string,
 ): Promise<void> {
+  if (isPlainProject(project)) {
+    await reportCommandResult(port, messageId, false, "❌ 纯会话型项目无代码仓，无法开提测 MR", chatId)
+    return
+  }
   const coMr = checkoutFeature(project.worktreePath, project.featureBranch)
   if (!coMr.ok) {
     await reportCommandResult(port, messageId, false, featureOccupiedText(project, coMr.error || ""), chatId)
@@ -1003,10 +1116,12 @@ async function runAction(
     await reportCommandResult(port, messageId, false, "❌ 无法解析 chatId", chatId)
     return
   }
-  const co = checkoutFeatureAll(projectWorktrees(p), p.featureBranch)
-  if (!co.ok) {
-    await reportCommandResult(port, messageId, false, featureOccupiedText(p, co.error || ""), chatId)
-    return
+  if (!isPlainProject(p)) {
+    const co = checkoutFeatureAll(projectWorktrees(p), p.featureBranch)
+    if (!co.ok) {
+      await reportCommandResult(port, messageId, false, featureOccupiedText(p, co.error || ""), chatId)
+      return
+    }
   }
   const started = startAction(p.id, type)
   if (!started.ok) {
@@ -1258,7 +1373,19 @@ export async function handleFeishuProjectCommand(
     const mode = low(parts[2] || "")
     const cur = getCurrentProject()
     const notes: string[] = []
-    if (cur) {
+    if (cur && isPlainProject(cur)) {
+      // 纯会话型无 git：只停 Agent、挂起、切路由
+      const skPlain = cur.sessionKey || projectSessionKey(chatId, cur.id)
+      if (isSessionAgentRunning(skPlain)) {
+        stopSessionAgent(skPlain)
+        notes.push("⏹ 已停止运行中的项目会话")
+      }
+      if (cur.status === "active") {
+        cur.status = "paused"
+        const { saveProject } = await import("../src/shared/project-store.js")
+        saveProject(cur)
+      }
+    } else if (cur) {
       const wts = projectWorktrees(cur)
       const dirtyTotal = wts.reduce((n, wt) => n + worktreeDirtyCount(wt), 0)
       if (dirtyTotal > 0 && mode !== "--commit" && mode !== "--force") {

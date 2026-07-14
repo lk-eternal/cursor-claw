@@ -31,6 +31,7 @@ function sanitizeGroups(groups: ProjectNodeGroupDef[] | null | undefined): Proje
     .map((g) => ({
       id: g.id.trim(),
       name: g.name.trim(),
+      ...(g.workspace === "plain" || g.workspace === "worktree" ? { workspace: g.workspace } : {}),
       nodes: (g.nodes ?? []).filter((n) => n?.id?.trim() && n?.label?.trim())
         .map((n) => ({ id: n.id.trim(), label: n.label.trim(), ...(n.prompt?.trim() ? { prompt: n.prompt } : {}) })),
     }))
@@ -95,6 +96,11 @@ function seedMissingDefaults(file: NodeGroupsFile): boolean {
     }
     mark(`group:${dg.id}`)
     if (!group) { for (const n of dg.nodes) mark(n.id); continue }
+    // 旧版本无 workspace 字段：按默认组补上（用户在新版设置页保存后字段固化，不再覆盖）
+    if (group.workspace === undefined && dg.workspace) {
+      group.workspace = dg.workspace
+      changed = true
+    }
     for (const n of dg.nodes) {
       if (!group.nodes.some((x) => x.id === n.id) && !seeded.has(n.id)) {
         group.nodes.push({ ...n })
@@ -260,6 +266,7 @@ export function createProject(input: Omit<Project, "id" | "actions" | "status" |
     worktreePath: input.worktreePath,
     repos: input.repos,
     groupId: input.groupId,
+    workspaceType: input.workspaceType,
     status: input.status ?? "active",
     actions: input.actions ?? [],
     sessionKey: input.sessionKey,

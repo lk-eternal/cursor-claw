@@ -106,11 +106,11 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
   const [gitlabHost, setGitlabHost] = useState("")
   const [repoProfiles, setRepoProfiles] = useState<{ path: string; baseBranch: string; testBranch?: string; developBranch?: string }[]>([])
   type ProjectNodeItem = { id: string; label: string; prompt?: string; defaultPrompt?: string }
-  type ProjectNodeGroup = { id: string; name: string; nodes: ProjectNodeItem[] }
+  type ProjectNodeGroup = { id: string; name: string; nodes: ProjectNodeItem[]; workspace?: "worktree" | "plain" }
   const [nodeGroups, setNodeGroups] = useState<ProjectNodeGroup[]>([])
   const [activeGroupId, setActiveGroupId] = useState("")
   const [nodeEditing, setNodeEditing] = useState<(ProjectNodeItem & { index: number }) | null>(null)
-  const [groupEditing, setGroupEditing] = useState<{ id: string; name: string; index: number } | null>(null)
+  const [groupEditing, setGroupEditing] = useState<{ id: string; name: string; index: number; workspace: "worktree" | "plain" } | null>(null)
   const [worktreeRoot, setWorktreeRoot] = useState("")
   const [updateBusy, setUpdateBusy] = useState(false)
   const [updateCheck, setUpdateCheck] = useState<Awaited<ReturnType<typeof window.electronAPI.checkAppUpdate>> | null>(null)
@@ -684,7 +684,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
   const activeGroup = nodeGroups.find((g) => g.id === activeGroupId) ?? nodeGroups[0]
 
   const persistNodeGroups = async (groups: ProjectNodeGroup[]) => {
-    await window.electronAPI.saveProjectNodeGroups(groups.map((g) => ({ id: g.id, name: g.name, nodes: g.nodes.map(({ defaultPrompt: _d, ...n }) => n) })))
+    await window.electronAPI.saveProjectNodeGroups(groups.map((g) => ({ id: g.id, name: g.name, workspace: g.workspace, nodes: g.nodes.map(({ defaultPrompt: _d, ...n }) => n) })))
     const fresh = await window.electronAPI.getProjectNodeGroups()
     setNodeGroups(fresh)
   }
@@ -715,6 +715,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
     if (!groupEditing) return
     const id = groupEditing.id.trim()
     const name = groupEditing.name.trim()
+    const workspace = groupEditing.workspace
     if (!name) return
     if (groupEditing.index < 0) {
       if (!/^[a-z][a-z0-9-]*$/.test(id)) {
@@ -725,10 +726,10 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
         void showAlert("无法保存", "组 id 与已有组重复")
         return
       }
-      await persistNodeGroups([...nodeGroups, { id, name, nodes: [] }])
+      await persistNodeGroups([...nodeGroups, { id, name, workspace, nodes: [] }])
       setActiveGroupId(id)
     } else {
-      await persistNodeGroups(nodeGroups.map((g) => g.id === groupEditing.id ? { ...g, name } : g))
+      await persistNodeGroups(nodeGroups.map((g) => g.id === groupEditing.id ? { ...g, name, workspace } : g))
     }
     setGroupEditing(null)
   }
@@ -1138,17 +1139,17 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                   ))}
                   <button
                     type="button"
-                    onClick={() => setGroupEditing({ id: "", name: "", index: -1 })}
+                    onClick={() => setGroupEditing({ id: "", name: "", index: -1, workspace: "worktree" })}
                     className="rounded-md border border-dashed border-gray-700 px-3 py-1.5 text-xs text-gray-400 hover:bg-gray-800"
                   >+ 新增组</button>
                 </div>
                 {activeGroup && (
                   <div className="space-y-1.5">
                     <div className="flex items-center gap-3 text-xs text-gray-500">
-                      <span>当前组 <span className="font-mono">{activeGroup.id}</span> · {activeGroup.nodes.length} 个节点</span>
+                      <span>当前组 <span className="font-mono">{activeGroup.id}</span> · {activeGroup.nodes.length} 个节点 · {activeGroup.workspace === "plain" ? "纯会话型" : "代码开发型"}</span>
                       <button type="button" className="text-blue-400 hover:text-blue-300"
-                        onClick={() => setGroupEditing({ id: activeGroup.id, name: activeGroup.name, index: nodeGroups.findIndex((g) => g.id === activeGroup.id) })}
-                      >重命名</button>
+                        onClick={() => setGroupEditing({ id: activeGroup.id, name: activeGroup.name, index: nodeGroups.findIndex((g) => g.id === activeGroup.id), workspace: activeGroup.workspace === "plain" ? "plain" : "worktree" })}
+                      >编辑</button>
                       {nodeGroups.length > 1 && (
                         <button type="button" className="text-red-400 hover:text-red-300" onClick={handleGroupDelete}>删除组</button>
                       )}
@@ -1501,7 +1502,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
           <div className="flex w-full max-w-sm flex-col rounded-xl border border-gray-700 bg-gray-900 shadow-2xl">
             <div className="flex items-center justify-between border-b border-gray-800 px-6 py-4">
-              <h3 className="text-sm font-semibold text-gray-200">{groupEditing.index < 0 ? "新增流程组" : "重命名流程组"}</h3>
+              <h3 className="text-sm font-semibold text-gray-200">{groupEditing.index < 0 ? "新增流程组" : "编辑流程组"}</h3>
               <button onClick={() => setGroupEditing(null)} className="text-gray-500 hover:text-white"><X size={16} /></button>
             </div>
             <div className="space-y-3 px-6 py-4">
@@ -1513,6 +1514,20 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                 <input type="text" value={groupEditing.name}
                   onChange={(e) => setGroupEditing({ ...groupEditing, name: e.target.value })}
                   className={inputCls} placeholder="如 设计" /></div>
+              <div>
+                <label className="mb-1 block text-xs text-gray-500">工作区类型（决定建项表单与 git 行为）</label>
+                <div className="flex gap-2">
+                  {([
+                    { v: "worktree" as const, label: "代码开发型", tip: "主仓 + 隔离 worktree + 分支借还" },
+                    { v: "plain" as const, label: "纯会话型", tip: "无代码仓，自动创建会话目录" },
+                  ]).map((o) => (
+                    <button key={o.v} type="button" title={o.tip}
+                      onClick={() => setGroupEditing({ ...groupEditing, workspace: o.v })}
+                      className={`flex-1 rounded-md border px-3 py-1.5 text-xs transition ${groupEditing.workspace === o.v ? "border-blue-500 bg-blue-500/10 font-medium text-white" : "border-gray-700 text-gray-400 hover:bg-gray-800"}`}
+                    >{o.label}</button>
+                  ))}
+                </div>
+              </div>
             </div>
             <div className="flex justify-end gap-2 border-t border-gray-800 px-6 py-4">
               <button onClick={() => setGroupEditing(null)} className="rounded-md px-4 py-1.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white">取消</button>

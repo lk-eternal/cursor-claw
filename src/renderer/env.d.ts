@@ -141,8 +141,8 @@ declare global {
     onUpdaterError(cb: (message: string) => void): () => void
     onUpdaterStatus(cb: (payload: { kind: "available" } | { kind: "downloaded"; version: string } | { kind: "downloading" }) => void): () => void
     getConfig(): Promise<AppConfig>
-    getProjectNodeGroups(): Promise<{ id: string; name: string; nodes: { id: string; label: string; prompt?: string; defaultPrompt?: string }[] }[]>
-    saveProjectNodeGroups(groups: { id: string; name: string; nodes: { id: string; label: string; prompt?: string }[] }[]): Promise<{ ok: boolean }>
+    getProjectNodeGroups(): Promise<{ id: string; name: string; workspace?: "worktree" | "plain"; nodes: { id: string; label: string; prompt?: string; defaultPrompt?: string }[] }[]>
+    saveProjectNodeGroups(groups: { id: string; name: string; workspace?: "worktree" | "plain"; nodes: { id: string; label: string; prompt?: string }[] }[]): Promise<{ ok: boolean }>
     getProjectNodeGroupUsage(): Promise<Record<string, number>>
     saveConfig(config: Partial<AppConfig>): Promise<ConfigSaveResult>
     setAutoStart(enabled: boolean): Promise<{ ok: boolean }>

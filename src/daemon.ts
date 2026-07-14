@@ -1291,15 +1291,38 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
 
   if (value?.kind === "project_new_form") {
     const f = evt.formValue || {};
+    const cbv = value as { worktreeRoot?: string; groupId?: string; workspaceType?: string } | undefined;
     const name = (f.name || "").trim();
     const goal = (f.goal || "").trim();
-    const worktreeRaw = (f.worktreeRoot || String((value as { worktreeRoot?: string } | undefined)?.worktreeRoot || "")).trim();
+    const worktreeRaw = (f.worktreeRoot || String(cbv?.worktreeRoot || "")).trim();
     const worktreeRoot = worktreeRaw ? path.normalize(worktreeRaw) : "";
     const featureBranch = (f.featureBranch || "").trim();
     const storyUrl = (f.storyUrl || "").trim();
-    const groupId = String(f.group_id || "").trim();
+    const groupId = String(f.group_id || cbv?.groupId || "").trim();
+    const workspaceType = cbv?.workspaceType === "plain" ? "plain" : "worktree";
     const productDocUrl = (f.productDocUrl || "").trim();
     const techDocUrl = (f.techDocUrl || "").trim();
+
+    // 纯会话型：无 git 字段，storyUrl 必填（测试流程的信息枢纽），目录由 electron 侧自动创建
+    if (workspaceType === "plain") {
+      if (!name) return { toast: { type: "error", content: "请填写项目名称" } };
+      if (!storyUrl) return { toast: { type: "error", content: "请填写飞书项目链接" } };
+      process.stdout.write(`__PROJECT_NEW_SUBMIT__:${JSON.stringify({
+        chatId: chatKey,
+        messageId: evt.messageId,
+        name, goal, worktreeRoot, featureBranch: "",
+        storyUrl, productDocUrl, techDocUrl,
+        groupId,
+        workspaceType,
+        repos: [],
+        repoPath: "",
+        baseBranch: "",
+      })}\n`);
+      return {
+        toast: { type: "info", content: "正在创建项目…" },
+        card: { type: "raw", data: LarkSender.buildCard(`📦 正在创建项目 **${name}**…`, "创建项目", undefined, undefined, "orange") },
+      };
+    }
 
     const decodePair = (raw: string) => {
       const r = decodeRepoPair(String(raw || ""));
@@ -1352,6 +1375,7 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
       name, goal, worktreeRoot, featureBranch,
       storyUrl, productDocUrl, techDocUrl,
       groupId,
+      workspaceType,
       repos,
       repoPath: primary.repoPath,
       baseBranch: primary.baseBranch,
@@ -2385,9 +2409,9 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
 
   if (method === "POST" && pathname === "/api/project-new-form") {
     const body = JSON.parse(await readBody(req));
-    const { message_id, session_key, repo_roots, repo_profiles, worktree_root } = body as {
+    const { message_id, session_key, repo_roots, repo_profiles, worktree_root, group_id } = body as {
       message_id?: string; session_key?: string; repo_roots?: string[];
-      repo_profiles?: { path: string; baseBranch: string }[]; worktree_root?: string
+      repo_profiles?: { path: string; baseBranch: string }[]; worktree_root?: string; group_id?: string
     };
     if (rejectUnroutedSend(res, "project-new-form", session_key, message_id)) return true;
     const ch = resolveChannel(routeTargetKey(session_key, message_id), { allowDefault: false });
@@ -2405,11 +2429,13 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       return true;
     }
     const sender = ch.rt.sender!;
+    const pickedGroup = group_id ? getNodeGroups().find((g) => g.id === group_id) : undefined;
     const card = LarkSender.buildProjectNewFormCard({
       repoProfiles: repo_profiles || [],
       repoRoots: repo_roots || [],
       worktreeRoot: worktree_root,
       nodeGroups: getNodeGroups().map((g) => ({ id: g.id, name: g.name })),
+      group: pickedGroup ? { id: pickedGroup.id, name: pickedGroup.name, workspace: pickedGroup.workspace } : undefined,
     });
     let sent = message_id && !message_id.startsWith("internal_")
       ? await sender.sendInteractiveCard(card, message_id, undefined)

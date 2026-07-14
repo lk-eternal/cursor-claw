@@ -302,16 +302,21 @@ export class LarkSender {
     worktreeRoot?: string
     prefix?: string
     nodeGroups?: { id: string; name: string }[]
+    /** 已选定流程组（两步建项）：不再渲染组下拉；plain 型渲染纯会话表单（无 git 字段） */
+    group?: { id: string; name: string; workspace?: "worktree" | "plain" }
   }): any {
     type Profile = { path: string; baseBranch: string; testBranch?: string; developBranch?: string }
     const profiles: Profile[] = (opts.repoProfiles && opts.repoProfiles.length)
       ? opts.repoProfiles
       : (opts.repoRoots || []).map((p) => ({ path: p, baseBranch: "main" }))
+    const plain = opts.group?.workspace === "plain"
     const elements: any[] = []
-    const tip = [
-      `${opts.prefix || ""}一次填完提交；红 * 为必填（飞书自动标记；目标可空）。`,
-      "主仓可多选历史项，或下方追加手填（测试/开发可空）。生产基线只作切分支起点，默认不作 ship 目标。",
-    ].join("\n")
+    const tip = plain
+      ? `${opts.prefix || ""}纯会话型项目：无需代码仓，工作目录自动创建；红 * 为必填。`
+      : [
+        `${opts.prefix || ""}一次填完提交；红 * 为必填（飞书自动标记；目标可空）。`,
+        "主仓可多选历史项，或下方追加手填（测试/开发可空）。生产基线只作切分支起点，默认不作 ship 目标。",
+      ].join("\n")
     elements.push({ tag: "markdown", content: tip })
 
     const field = (name: string, label: string | null, placeholder: string, required?: boolean, defaultValue?: string) => {
@@ -334,21 +339,61 @@ export class LarkSender {
       field("name", "项目名称", "例如 login", true),
     ]
 
-    const groups = opts.nodeGroups || []
-    if (groups.length > 0) {
-      // form 内 select_static 不支持 label/label_position（飞书 200621），字段名用 markdown 行
-      formElements.push({ tag: "markdown", content: "流程组" })
-      formElements.push({
-        tag: "select_static",
-        name: "group_id",
-        required: false,
-        width: "fill",
-        placeholder: { tag: "plain_text", content: `不选则默认「${groups[0].name.slice(0, 20)}」` },
-        options: groups.slice(0, 20).map((g) => ({
-          text: { tag: "plain_text", content: g.name.slice(0, 30) },
-          value: g.id,
-        })),
-      })
+    if (opts.group) {
+      formElements.push({ tag: "markdown", content: `流程组：**${opts.group.name.slice(0, 30)}**（${plain ? "纯会话型" : "代码开发型"}）` })
+    } else {
+      const groups = opts.nodeGroups || []
+      if (groups.length > 0) {
+        // form 内 select_static 不支持 label/label_position（飞书 200621），字段名用 markdown 行
+        formElements.push({ tag: "markdown", content: "流程组" })
+        formElements.push({
+          tag: "select_static",
+          name: "group_id",
+          required: false,
+          width: "fill",
+          placeholder: { tag: "plain_text", content: `不选则默认「${groups[0].name.slice(0, 20)}」` },
+          options: groups.slice(0, 20).map((g) => ({
+            text: { tag: "plain_text", content: g.name.slice(0, 30) },
+            value: g.id,
+          })),
+        })
+      }
+    }
+
+    if (plain) {
+      formElements.push(
+        field("storyUrl", "飞书项目链接", "测试流程的信息枢纽，必填", true),
+        field("productDocUrl", "产品文档", "可空"),
+        field("techDocUrl", "技术文档", "可空"),
+        field("goal", "目标描述", "可空，可后续再定"),
+        {
+          tag: "button",
+          name: "submit",
+          text: { tag: "plain_text", content: "创建项目" },
+          type: "primary",
+          form_action_type: "submit",
+          behaviors: [{
+            type: "callback",
+            value: {
+              kind: "project_new_form",
+              worktreeRoot: opts.worktreeRoot || "",
+              groupId: opts.group?.id || "",
+              workspaceType: "plain",
+            },
+          }],
+        },
+      )
+      elements.push({ tag: "form", name: "project_new", elements: formElements })
+      LarkSender.appendButtonRows(elements, [{ label: "← 返回菜单", value: { kind: "cmd", cmd: "/p menu --back" }, type: "default" }])
+      return {
+        schema: "2.0",
+        config: { update_multi: true, width_mode: "fill" },
+        header: {
+          title: { tag: "plain_text", content: opts.title || "创建项目" },
+          template: "orange",
+        },
+        body: { horizontal_align: "left", elements },
+      }
     }
 
     const encode = encodeRepoPair
@@ -395,6 +440,8 @@ export class LarkSender {
           value: {
             kind: "project_new_form",
             worktreeRoot: opts.worktreeRoot || "",
+            groupId: opts.group?.id || "",
+            workspaceType: "worktree",
           },
         }],
       },

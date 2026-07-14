@@ -16,11 +16,16 @@ export interface ProjectNodeDef {
   prompt?: string
 }
 
+/** 项目工作区类型：worktree=代码开发（主仓+隔离 worktree+分支借还）；plain=纯会话目录（测试/文档协作，无 git） */
+export type ProjectWorkspaceType = "worktree" | "plain"
+
 /** 流程组：项目创建时选定一组，推进按钮/命令只展示该组节点 */
 export interface ProjectNodeGroupDef {
   id: string
   name: string
   nodes: ProjectNodeDef[]
+  /** 组的工作区类型（决定建项表单与 git 行为）；缺省 worktree 兼容存量 */
+  workspace?: ProjectWorkspaceType
 }
 
 /** 默认流程组种子：仅在无任何持久化数据时初始化用 */
@@ -28,6 +33,7 @@ export const DEFAULT_NODE_GROUPS: ProjectNodeGroupDef[] = [
   {
     id: "develop",
     name: "开发",
+    workspace: "worktree",
     nodes: [
       { id: "plan", label: "规划" },
       { id: "build", label: "实现" },
@@ -41,6 +47,7 @@ export const DEFAULT_NODE_GROUPS: ProjectNodeGroupDef[] = [
   {
     id: "test",
     name: "测试",
+    workspace: "plain",
     nodes: [
       { id: "test-review", label: "测试评审" },
       { id: "test-cases", label: "用例编写" },
@@ -99,6 +106,8 @@ export interface Project {
   repos?: ProjectRepo[]
   /** 流程组 id；旧项目缺省视为默认组 */
   groupId?: string
+  /** 工作区类型（建项时从流程组快照）；缺省 worktree 兼容存量 */
+  workspaceType?: ProjectWorkspaceType
   status: ProjectStatus
   actions: ProjectAction[]
   sessionKey?: string
@@ -128,6 +137,11 @@ export function projectSessionKey(chatKey: string, projectId: string): string {
 export function projectWorktrees(p: Project): string[] {
   const list = p.repos?.length ? p.repos.map((r) => r.worktreePath) : [p.worktreePath]
   return list.filter(Boolean)
+}
+
+/** 纯会话型项目（无 git 仓，跳过 worktree/分支借还等全部 git 行为） */
+export function isPlainProject(p: Project): boolean {
+  return p.workspaceType === "plain"
 }
 
 export function projectIdFromSessionKey(sessionKey: string): string | undefined {
