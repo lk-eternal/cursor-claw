@@ -28,7 +28,7 @@ import {
 } from "./agent-sdk"
 import { injectWorkspaceToDir } from "./workspace-injector"
 import { buildSessionCardTitle, readGitBranch, dirBaseName } from "../src/shared/session-label.js"
-import { getProject, listProjects, setCurrentProjectId } from "../src/shared/project-store.js"
+import { getProject, listProjects, setCurrentProjectId, saveProject } from "../src/shared/project-store.js"
 import { projectIdFromSessionKey, projectSessionKey, projectWorktrees } from "../src/shared/project-types.js"
 import { checkoutFeatureAll } from "./project-worktree"
 import { buildProjectSessionPrompt } from "./project-prompts"
@@ -787,7 +787,16 @@ export async function switchMainSession(sessionKey: string): Promise<{ ok: boole
   if (!chatId) return { ok: false, error: "未绑定主用户" }
   await syncActiveSession(lock.port, chatId, key)
   const pid = projectIdFromSessionKey(key)
-  if (pid) setCurrentProjectId(pid)
+  if (pid) {
+    setCurrentProjectId(pid)
+    // 切回 leave 挂起的项目视作重新进入：恢复调度 + 尽力切回 feature（占用时由调度闸口提示）
+    const proj = getProject(pid)
+    if (proj?.status === "paused") {
+      proj.status = "active"
+      saveProject(proj)
+      checkoutFeatureAll(projectWorktrees(proj), proj.featureBranch)
+    }
+  }
   return { ok: true }
 }
 
@@ -1039,6 +1048,15 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
     const projId = projectIdFromSessionKey(sessionKey)
     const proj = projId ? getProject(projId) : undefined
     if (proj) {
+      // leave 挂起的项目不自动拉起（会把刚释放的 feature 又占回去）；残留消息等 /p use 恢复后处理
+      if (proj.status === "paused") {
+        const lastAt = featureOccupiedNotifyAt.get(sessionKey) ?? 0
+        if (Date.now() - lastAt > 10 * 60_000) {
+          featureOccupiedNotifyAt.set(sessionKey, Date.now())
+          await notifyChat(sessionKey, `💤 项目「${proj.name}」已退出会话，有消息待处理：/p use 重新进入后会自动继续`)
+        }
+        continue
+      }
       // feature 可能被 /p leave 释放或被主仓（IDE）占用：拉起前切回；占用则拦下并节流提醒
       const co = checkoutFeatureAll(projectWorktrees(proj), proj.featureBranch)
       if (!co.ok) {

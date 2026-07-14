@@ -162,6 +162,8 @@ async function enterProjectSession(
   const sessionKey = project.sessionKey || projectSessionKey(chatId, project.id)
   project.sessionKey = sessionKey
   project.notifyChatId = chatId
+  // leave 挂起的项目重新激活（调度器恢复自动拉起）
+  if (project.status === "paused") project.status = "active"
   const { saveProject } = await import("../src/shared/project-store.js")
   saveProject(project)
   await syncActiveSession(port, chatId, sessionKey)
@@ -1016,6 +1018,8 @@ async function runAction(
   const sessionKey = projectSessionKey(chatId, project.id)
   project.sessionKey = sessionKey
   project.notifyChatId = chatId
+  // 点节点按钮 = 明确要干活：leave 挂起的项目自动恢复
+  if (project.status === "paused") project.status = "active"
   const { saveProject } = await import("../src/shared/project-store.js")
   saveProject(project)
 
@@ -1300,6 +1304,12 @@ export async function handleFeishuProjectCommand(
           await reportCommandResult(port, messageId, false, `❌ 释放分支失败，未退出项目: ${d.error}`, chatId)
           return
         }
+      }
+      // 挂起项目：否则残留队列消息会让调度器立刻重拉 Agent、把刚释放的 feature 又占回去
+      if (cur.status === "active") {
+        cur.status = "paused"
+        const { saveProject } = await import("../src/shared/project-store.js")
+        saveProject(cur)
       }
       notes.push(`🌿 已释放 ${cur.featureBranch}，可在 IDE 检出`)
     }

@@ -36,7 +36,11 @@ const ACTION_GUIDES: Record<string, string[]> = {
   "submit-test": [
     "提测（宿主已创建指向测试分支的 MR，信息见任务附带内容）：",
     "- 将 MR 信息（链接 / 源分支 / 目标分支 / 变更摘要）评论到飞书项目工作项：优先用 feishu-project-mcp 的 add_comment，或 meegle / lark-cli",
-    "- 评论中 @ 工作项的测试人员（从工作项团队 / 角色字段获取；找不到时在产物中说明并提醒用户手动通知）",
+    "- 评论 @ 测试人员必须真正生效，缺一步都会变成纯文本、对方收不到通知：",
+    "  1. 先用 search_user_info 逐个查测试人员，拿到 lark_user_id",
+    "  2. content 中每个 @ 都写成 mention 格式：@名字<!-- mention:{\"id\":\"<lark_user_id>\",\"cn_name\":\"<名字>\",\"blockType\":\"AT_USER_BLOCK\"} -->",
+    "  3. add_comment 同时传 notify_user_list=[全部被 @ 人的 lark_user_id] 与 notify_user_type=lark_user_id",
+    "- 测试人员从工作项团队 / 角色字段获取；找不到时在产物中说明并提醒用户手动通知",
     "- 产物写提测说明：MR 链接、变更摘要、测试建议与关注点",
     "- project_action_done 必须带 mr_url",
   ],
