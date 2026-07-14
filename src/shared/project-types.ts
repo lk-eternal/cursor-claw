@@ -34,6 +34,8 @@ export const DEFAULT_NODE_GROUPS: ProjectNodeGroupDef[] = [
       { id: "review", label: "审查" },
       { id: "deploy", label: "部署" },
       { id: "submit-test", label: "提测" },
+      { id: "analyze-bug", label: "分析缺陷" },
+      { id: "fix-bug", label: "修复缺陷" },
     ],
   },
   {

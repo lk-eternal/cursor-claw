@@ -45,6 +45,20 @@ const ACTION_GUIDES: Record<string, string[]> = {
     "- 产物写提测说明：MR 链接、变更摘要、测试建议与关注点",
     "- project_action_done 必须带 mr_url",
   ],
+  "analyze-bug": [
+    "分析缺陷（拉取指派给自己的待解决缺陷并输出分析报告）：",
+    "- 用 feishu-project-mcp 从当前项目关联的飞书项目空间拉取缺陷类工作项（search_by_mql / list_related_workitem），筛选：指派人为当前用户（search_user_info 可用 current_login_user()）、状态未完成",
+    "- 拉不到或为空时如实说明，禁止编造缺陷",
+    "- 逐个缺陷结合代码定位根因，评估影响面与修复思路",
+    "- 产物写缺陷分析报告：缺陷清单（标题/链接/级别）、根因分析、修复方案、风险与依赖",
+  ],
+  "fix-bug": [
+    "修复缺陷（以最近一次通过的缺陷分析报告为准）：",
+    "- 逐个缺陷在 worktree 内修复并本地验证（编译 / 测试 / 关键路径自测）",
+    "- 提交到 feature 分支，提交信息注明对应缺陷",
+    "- 在对应缺陷工作项下评论修复说明（关联 commit / 验证方式），并流转缺陷状态到待验证（无权限时说明）",
+    "- 产物写修复说明：每个缺陷的修复点、验证方式、遗留事项；提醒用户可再走提测节点发增量 MR",
+  ],
   "test-review": [
     "测试评审：",
     "- 分析飞书项目工作项、产品需求文档与技术方案",
@@ -59,7 +73,8 @@ const ACTION_GUIDES: Record<string, string[]> = {
   ],
   "test-deploy": [
     "部署（合并研发提测 MR）：",
-    "- 用 project_get 查最近一次提测（submit-test）action 的 mrUrl",
+    "- 用 feishu-project-mcp 的 list_workitem_comments 读当前项目关联工作项的评论，找研发最新提测评论中的 MR 链接（开发与测试是不同项目实例，本地 project_get 拿不到对方的 mrUrl）",
+    "- 找不到提测评论时向用户询问 MR 地址，禁止猜测",
     "- 确认 MR 内容与提测信息一致后合并该 MR（无权限时引导用户手动合并并回报结果）",
     "- 产物写部署说明：MR 链接、合并结果、测试环境生效确认方式",
   ],

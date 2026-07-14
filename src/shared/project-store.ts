@@ -53,21 +53,91 @@ function migrateLegacyNodes(legacy: ProjectNodeDef[]): ProjectNodeGroupDef[] {
   return groups
 }
 
+interface NodeGroupsFile {
+  version: 2
+  groups: ProjectNodeGroupDef[]
+  /** 已播种过的默认节点/组 id（`group:<id>` 表示组）：新版本新增默认节点只补种一次，用户删除后不复活 */
+  seeded: string[]
+}
+
+function cloneDefaultGroups(): ProjectNodeGroupDef[] {
+  return DEFAULT_NODE_GROUPS.map((g) => ({ ...g, nodes: g.nodes.map((n) => ({ ...n })) }))
+}
+
+/** 兼容 v1 裸数组格式：视文件中已有的组/节点为「已播种」 */
+function normalizeGroupsFile(raw: unknown): NodeGroupsFile | null {
+  if (Array.isArray(raw)) {
+    const groups = sanitizeGroups(raw as ProjectNodeGroupDef[])
+    if (!groups.length) return null
+    const seeded = groups.flatMap((g) => [`group:${g.id}`, ...g.nodes.map((n) => n.id)])
+    return { version: 2, groups, seeded }
+  }
+  if (raw && typeof raw === "object" && Array.isArray((raw as NodeGroupsFile).groups)) {
+    const f = raw as NodeGroupsFile
+    const groups = sanitizeGroups(f.groups)
+    if (!groups.length) return null
+    return { version: 2, groups, seeded: Array.isArray(f.seeded) ? f.seeded : [] }
+  }
+  return null
+}
+
+/** 把默认表中「从未播种过」的组/节点补进存量配置（默认节点随版本演进，老用户升级可见） */
+function seedMissingDefaults(file: NodeGroupsFile): boolean {
+  let changed = false
+  const seeded = new Set(file.seeded)
+  const mark = (id: string) => { if (!seeded.has(id)) { seeded.add(id); changed = true } }
+  for (const dg of DEFAULT_NODE_GROUPS) {
+    let group = file.groups.find((g) => g.id === dg.id)
+    if (!group && !seeded.has(`group:${dg.id}`)) {
+      group = { ...dg, nodes: dg.nodes.map((n) => ({ ...n })) }
+      file.groups.push(group)
+      changed = true
+    }
+    mark(`group:${dg.id}`)
+    if (!group) { for (const n of dg.nodes) mark(n.id); continue }
+    for (const n of dg.nodes) {
+      if (!group.nodes.some((x) => x.id === n.id) && !seeded.has(n.id)) {
+        group.nodes.push({ ...n })
+        changed = true
+      }
+      mark(n.id)
+    }
+  }
+  if (changed) file.seeded = [...seeded]
+  return changed
+}
+
 export function getNodeGroups(): ProjectNodeGroupDef[] {
-  if (!baseDir) return DEFAULT_NODE_GROUPS.map((g) => ({ ...g, nodes: g.nodes.map((n) => ({ ...n })) }))
-  const saved = sanitizeGroups(readJsonSafe<ProjectNodeGroupDef[] | null>(groupsPath(), null))
-  if (saved.length) return saved
+  if (!baseDir) return cloneDefaultGroups()
+  const file = normalizeGroupsFile(readJsonSafe<unknown>(groupsPath(), null))
+  if (file) {
+    if (seedMissingDefaults(file)) writeJson(groupsPath(), file)
+    return file.groups
+  }
   const legacy = readJsonSafe<ProjectNodeDef[] | null>(legacyNodesPath(), null)
   const migrated = legacy?.length
     ? migrateLegacyNodes(legacy.filter((n) => n?.id?.trim() && n?.label?.trim()))
-    : DEFAULT_NODE_GROUPS.map((g) => ({ ...g, nodes: g.nodes.map((n) => ({ ...n })) }))
-  writeJson(groupsPath(), migrated)
-  return migrated
+    : cloneDefaultGroups()
+  const fresh: NodeGroupsFile = {
+    version: 2,
+    groups: migrated,
+    seeded: migrated.flatMap((g) => [`group:${g.id}`, ...g.nodes.map((n) => n.id)]),
+  }
+  seedMissingDefaults(fresh)
+  writeJson(groupsPath(), fresh)
+  return fresh.groups
 }
 
 export function saveNodeGroups(groups: ProjectNodeGroupDef[]): void {
   if (!baseDir) throw new Error("project store not initialized")
-  writeJson(groupsPath(), sanitizeGroups(groups))
+  const prev = normalizeGroupsFile(readJsonSafe<unknown>(groupsPath(), null))
+  // 显式保存 = 用户对完整默认表做过取舍：默认组/节点全部视为已播种，删掉的不再复活
+  const defaultsSeeded = DEFAULT_NODE_GROUPS.flatMap((g) => [`group:${g.id}`, ...g.nodes.map((n) => n.id)])
+  writeJson(groupsPath(), {
+    version: 2,
+    groups: sanitizeGroups(groups),
+    seeded: [...new Set([...(prev?.seeded ?? []), ...defaultsSeeded])],
+  } satisfies NodeGroupsFile)
 }
 
 /** 按组 id 解析流程组；缺省/失配回落默认组（再回落第一组） */
