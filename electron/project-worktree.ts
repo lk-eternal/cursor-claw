@@ -74,6 +74,7 @@ export function addProjectWorktree(input: WorktreeAddInput): WorktreeResult {
       return { ok: false, error: `挂接已有分支失败: ${add.stderr || add.stdout}` }
     }
     ensureFeatureUpstream(worktreePath, featureBranch)
+    ensureClawExcluded(worktreePath)
     return { ok: true }
   }
 
@@ -86,6 +87,7 @@ export function addProjectWorktree(input: WorktreeAddInput): WorktreeResult {
     return { ok: false, error: `worktree add 失败: ${add.stderr || add.stdout}` }
   }
   ensureFeatureUpstream(worktreePath, featureBranch)
+  ensureClawExcluded(worktreePath)
   return { ok: true }
 }
 
@@ -148,17 +150,37 @@ export function removeProjectWorktree(repoPath: string, worktreePath: string): v
 export function ensureArtifactDir(worktreePath: string): string {
   const dir = path.join(worktreePath, ".cursor-claw", "artifacts")
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+  ensureClawExcluded(worktreePath)
   return dir
+}
+
+/** 把 .cursor-claw/ 写进仓库本地 exclude（不动用户 .gitignore）：产物不进 git status、不见于 IDE 未版本列表 */
+export function ensureClawExcluded(worktreePath: string): void {
+  try {
+    const gp = runGit(worktreePath, ["rev-parse", "--git-path", "info/exclude"])
+    if (!gp.ok || !gp.stdout) return
+    const excludePath = path.isAbsolute(gp.stdout) ? gp.stdout : path.join(worktreePath, gp.stdout)
+    const existing = fs.existsSync(excludePath) ? fs.readFileSync(excludePath, "utf-8") : ""
+    if (existing.split(/\r?\n/).some((l) => l.trim() === ".cursor-claw/")) return
+    fs.mkdirSync(path.dirname(excludePath), { recursive: true })
+    fs.appendFileSync(excludePath, `${existing.endsWith("\n") || !existing ? "" : "\n"}.cursor-claw/\n`, "utf-8")
+  } catch { /* best-effort */ }
 }
 
 // ── 分支借还：leave 释放 feature 给主仓，进入/节点任务前切回 ─────────
 
-/** 未提交改动条数（含未跟踪）；查询失败按 0 处理 */
-export function worktreeDirtyCount(worktreePath: string): number {
-  if (!fs.existsSync(worktreePath)) return 0
+/** porcelain 状态行（剔除 .cursor-claw 产物目录）；查询失败按空处理 */
+function dirtyLines(worktreePath: string): string[] {
+  if (!fs.existsSync(worktreePath)) return []
   const st = runGit(worktreePath, ["status", "--porcelain"])
-  if (!st.ok || !st.stdout) return 0
-  return st.stdout.split("\n").filter(Boolean).length
+  if (!st.ok || !st.stdout) return []
+  return st.stdout.split("\n").filter(Boolean)
+    .filter((l) => !l.slice(3).trim().replace(/^"|"$/g, "").startsWith(".cursor-claw"))
+}
+
+/** 未提交改动条数（含未跟踪；不含 .cursor-claw 产物） */
+export function worktreeDirtyCount(worktreePath: string): number {
+  return dirtyLines(worktreePath).length
 }
 
 /** 释放 feature：checkout --detach 停在原地（保留工作区改动）；已 detached 则跳过 */
@@ -191,12 +213,11 @@ export function checkoutFeature(worktreePath: string, featureBranch: string): Wo
   return { ok: false, error: co.stderr || co.stdout }
 }
 
-/** add -A + 自动信息提交全部改动；无改动时 files=0 直接成功 */
+/** add + 自动信息提交全部改动（排除 .cursor-claw 产物）；无改动时 files=0 直接成功 */
 export function commitAllInWorktree(worktreePath: string): { ok: boolean; error?: string; hash?: string; files: number } {
-  const st = runGit(worktreePath, ["status", "--porcelain"])
-  const lines = st.ok && st.stdout ? st.stdout.split("\n").filter(Boolean) : []
+  const lines = dirtyLines(worktreePath)
   if (lines.length === 0) return { ok: true, files: 0 }
-  const add = runGit(worktreePath, ["add", "-A"])
+  const add = runGit(worktreePath, ["add", "-A", "--", ".", ":(exclude).cursor-claw"])
   if (!add.ok) return { ok: false, error: add.stderr || add.stdout, files: lines.length }
   const names = lines.map((l) => l.slice(3).trim()).filter(Boolean).slice(0, 3)
   const msg = `wip: 退出项目暂存（${lines.length} 个文件：${names.join(", ")}${lines.length > 3 ? " 等" : ""}）`
