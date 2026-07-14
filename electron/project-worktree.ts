@@ -150,3 +150,58 @@ export function ensureArtifactDir(worktreePath: string): string {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
   return dir
 }
+
+// ── 分支借还：leave 释放 feature 给主仓，进入/节点任务前切回 ─────────
+
+/** 未提交改动条数（含未跟踪）；查询失败按 0 处理 */
+export function worktreeDirtyCount(worktreePath: string): number {
+  if (!fs.existsSync(worktreePath)) return 0
+  const st = runGit(worktreePath, ["status", "--porcelain"])
+  if (!st.ok || !st.stdout) return 0
+  return st.stdout.split("\n").filter(Boolean).length
+}
+
+/** 释放 feature：checkout --detach 停在原地（保留工作区改动）；已 detached 则跳过 */
+export function detachWorktree(worktreePath: string): WorktreeResult {
+  if (!fs.existsSync(worktreePath)) return { ok: true }
+  const head = runGit(worktreePath, ["symbolic-ref", "-q", "HEAD"])
+  if (!head.ok) return { ok: true }
+  const r = runGit(worktreePath, ["checkout", "--detach"])
+  return r.ok ? { ok: true } : { ok: false, error: r.stderr || r.stdout }
+}
+
+/** 项目全部 worktree 逐一切回 feature；任一失败即返回（错误带仓名前缀） */
+export function checkoutFeatureAll(worktrees: string[], featureBranch: string): WorktreeResult {
+  for (const wt of worktrees) {
+    const r = checkoutFeature(wt, featureBranch)
+    if (!r.ok) return { ok: false, error: `${path.basename(wt)}: ${r.error}` }
+  }
+  return { ok: true }
+}
+
+/** 确保 worktree 检出 feature；被其他工作树占用等失败时返回 git 原始错误（含占用路径） */
+export function checkoutFeature(worktreePath: string, featureBranch: string): WorktreeResult {
+  if (!fs.existsSync(worktreePath)) {
+    return { ok: false, error: `worktree 不存在: ${worktreePath}` }
+  }
+  const cur = runGit(worktreePath, ["rev-parse", "--abbrev-ref", "HEAD"])
+  if (cur.ok && cur.stdout === featureBranch) return { ok: true }
+  const co = runGit(worktreePath, ["checkout", featureBranch])
+  if (co.ok) return { ok: true }
+  return { ok: false, error: co.stderr || co.stdout }
+}
+
+/** add -A + 自动信息提交全部改动；无改动时 files=0 直接成功 */
+export function commitAllInWorktree(worktreePath: string): { ok: boolean; error?: string; hash?: string; files: number } {
+  const st = runGit(worktreePath, ["status", "--porcelain"])
+  const lines = st.ok && st.stdout ? st.stdout.split("\n").filter(Boolean) : []
+  if (lines.length === 0) return { ok: true, files: 0 }
+  const add = runGit(worktreePath, ["add", "-A"])
+  if (!add.ok) return { ok: false, error: add.stderr || add.stdout, files: lines.length }
+  const names = lines.map((l) => l.slice(3).trim()).filter(Boolean).slice(0, 3)
+  const msg = `wip: 退出项目暂存（${lines.length} 个文件：${names.join(", ")}${lines.length > 3 ? " 等" : ""}）`
+  const commit = runGit(worktreePath, ["commit", "-m", msg])
+  if (!commit.ok) return { ok: false, error: commit.stderr || commit.stdout, files: lines.length }
+  const hash = runGit(worktreePath, ["rev-parse", "--short", "HEAD"])
+  return { ok: true, hash: hash.ok ? hash.stdout : undefined, files: lines.length }
+}

@@ -122,6 +122,12 @@ export function projectSessionKey(chatKey: string, projectId: string): string {
   return `${chatKey}::project_${projectId}`
 }
 
+/** 项目全部 worktree 路径（多仓项目逐仓，单仓项目兜底主路径） */
+export function projectWorktrees(p: Project): string[] {
+  const list = p.repos?.length ? p.repos.map((r) => r.worktreePath) : [p.worktreePath]
+  return list.filter(Boolean)
+}
+
 export function projectIdFromSessionKey(sessionKey: string): string | undefined {
   const idx = sessionKey.indexOf("::")
   if (idx < 0) return undefined

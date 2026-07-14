@@ -26,17 +26,21 @@ import {
 } from "../src/shared/project-store.js"
 import { repoShortName,
   projectSessionKey,
+  projectWorktrees,
   PROJECT_RESERVED_SUBCOMMANDS,
   DEFAULT_NODE_GROUP_ID,
   type Project,
   type ProjectActionType,
 } from "../src/shared/project-types.js"
-import { addProjectWorktree, ensureArtifactDir, isGitRepoRoot, removeProjectWorktree } from "./project-worktree"
+import {
+  addProjectWorktree, ensureArtifactDir, isGitRepoRoot, removeProjectWorktree,
+  checkoutFeature, checkoutFeatureAll, detachWorktree, worktreeDirtyCount, commitAllInWorktree,
+} from "./project-worktree"
 import { buildProjectSessionPrompt, buildActionPrompt } from "./project-prompts"
 import { pushAndCreateMergeRequest } from "./project-gitlab"
 import { syncArtifactToFeishu } from "./project-feishu-sync"
 import { httpPost, syncActiveSession, enqueueToSession } from "./daemon-client"
-import { leaveProjectSession, formatCurrentSessionBlock } from "./session-dispatcher"
+import { leaveProjectSession, formatCurrentSessionBlock, isSessionAgentRunning, stopSessionAgent } from "./session-dispatcher"
 
 function projectHelpText(): string {
   const nodeIds = getProjectNodes(getCurrentProject()?.groupId).map((n) => n.id).join("|")
@@ -147,18 +151,31 @@ function withChatFooter(text: string, footer = "也可直接发消息，在项�
   return `${text}\n\n---\n${footer}`
 }
 
-/** 进入项目会话（懒加载）：只落元数据与消息路由，Agent 等首条消息/节点任务到队列时由调度器拉起并注入项目上下文 */
+/** 进入项目会话（懒加载）：先确保 worktree 切回 feature（可能被 leave 释放/被主仓占用），再落元数据与消息路由 */
 async function enterProjectSession(
   port: number,
   chatId: string,
   project: Project,
-): Promise<void> {
+): Promise<{ ok: boolean; error?: string }> {
+  const co = checkoutFeatureAll(projectWorktrees(project), project.featureBranch)
+  if (!co.ok) return { ok: false, error: co.error }
   const sessionKey = project.sessionKey || projectSessionKey(chatId, project.id)
   project.sessionKey = sessionKey
   project.notifyChatId = chatId
   const { saveProject } = await import("../src/shared/project-store.js")
   saveProject(project)
   await syncActiveSession(port, chatId, sessionKey)
+  return { ok: true }
+}
+
+/** feature 被其他工作树（如 IDEA 主仓）占用时的用户提示 */
+function featureOccupiedText(p: Project, detail: string): string {
+  return [
+    `❌ 无法进入项目「${p.name}」：feature 分支被其他工作树占用`,
+    detail,
+    "",
+    `请在占用方（如 IDEA）切到其他分支后重试；分支为 ${p.featureBranch}`,
+  ].join("\n")
 }
 
 interface NewProjectInput {
@@ -276,7 +293,8 @@ async function finalizeNewProject(
       { cardTitle: projectCardTitle(project) },
     )
     if (chatId) {
-      await enterProjectSession(port, chatId, project)
+      const r = await enterProjectSession(port, chatId, project)
+      if (!r.ok) await reportCommandResult(port, messageId, false, featureOccupiedText(project, r.error || ""), chatId)
     }
   } catch (e: any) {
     for (const c of created) removeProjectWorktree(c.repoPath, c.worktreePath)
@@ -878,6 +896,11 @@ async function runDeployDevelop(
   project: Project,
   developBranch: string,
 ): Promise<void> {
+  const coDeploy = checkoutFeature(project.worktreePath, project.featureBranch)
+  if (!coDeploy.ok) {
+    await reportCommandResult(port, messageId, false, featureOccupiedText(project, coDeploy.error || ""), chatId)
+    return
+  }
   const started = startAction(project.id, "deploy")
   if (!started.ok) {
     await reportCommandResult(port, messageId, false, `❌ ${started.error}`, chatId)
@@ -921,6 +944,11 @@ async function runSubmitTestMr(
   project: Project,
   testBranch: string,
 ): Promise<void> {
+  const coMr = checkoutFeature(project.worktreePath, project.featureBranch)
+  if (!coMr.ok) {
+    await reportCommandResult(port, messageId, false, featureOccupiedText(project, coMr.error || ""), chatId)
+    return
+  }
   const started = startAction(project.id, "submit-test")
   if (!started.ok) {
     await reportCommandResult(port, messageId, false, `❌ ${started.error}`, chatId)
@@ -971,6 +999,11 @@ async function runAction(
   }
   if (!chatId) {
     await reportCommandResult(port, messageId, false, "❌ 无法解析 chatId", chatId)
+    return
+  }
+  const co = checkoutFeatureAll(projectWorktrees(p), p.featureBranch)
+  if (!co.ok) {
+    await reportCommandResult(port, messageId, false, featureOccupiedText(p, co.error || ""), chatId)
     return
   }
   const started = startAction(p.id, type)
@@ -1193,6 +1226,13 @@ export async function handleFeishuProjectCommand(
       await reportCommandResult(port, messageId, false, "💡 用法：/p use <序号|id>", chatId)
       return
     }
+    if (chatId) {
+      const r = await enterProjectSession(port, chatId, target)
+      if (!r.ok) {
+        await reportCommandResult(port, messageId, false, featureOccupiedText(target, r.error || ""), chatId)
+        return
+      }
+    }
     setCurrentProjectId(target.id)
     await reportCommandResult(
       port,
@@ -1203,7 +1243,6 @@ export async function handleFeishuProjectCommand(
       projectButtons(target),
       { cardTitle: projectCardTitle(target) },
     )
-    if (chatId) await enterProjectSession(port, chatId, target)
     return
   }
 
@@ -1211,6 +1250,58 @@ export async function handleFeishuProjectCommand(
     if (!chatId) {
       await reportCommandResult(port, messageId, false, "❌ 无法解析会话", chatId)
       return
+    }
+    const mode = low(parts[2] || "")
+    const cur = getCurrentProject()
+    const notes: string[] = []
+    if (cur) {
+      const wts = projectWorktrees(cur)
+      const dirtyTotal = wts.reduce((n, wt) => n + worktreeDirtyCount(wt), 0)
+      if (dirtyTotal > 0 && mode !== "--commit" && mode !== "--force") {
+        await reportCommandResult(
+          port,
+          messageId,
+          true,
+          [
+            `⚠️ 项目「${cur.name}」有 ${dirtyTotal} 处未提交改动`,
+            "",
+            "提交后退出：自动 add + commit 到 feature，IDE 立即可见",
+            "直接退出：改动留在 worktree 工作区（IDE 检出 feature 看不到这部分）",
+          ].join("\n"),
+          chatId,
+          [
+            { label: "提交后退出", cmd: "/p leave --commit" },
+            { label: "直接退出", cmd: "/p leave --force" },
+            { label: "取消", cmd: "/p status" },
+          ],
+        )
+        return
+      }
+      if (mode === "--commit" && dirtyTotal > 0) {
+        for (const wt of wts) {
+          const c = commitAllInWorktree(wt)
+          if (!c.ok) {
+            await reportCommandResult(port, messageId, false, `❌ 提交失败，未退出项目: ${c.error}`, chatId)
+            return
+          }
+          if (c.files > 0) notes.push(`✅ 已提交 ${c.files} 个文件（${c.hash || "?"}）`)
+        }
+      } else if (dirtyTotal > 0) {
+        notes.push(`⚠️ ${dirtyTotal} 处未提交改动留在 worktree（IDE 不可见）`)
+      }
+      const sk = cur.sessionKey || projectSessionKey(chatId, cur.id)
+      if (isSessionAgentRunning(sk)) {
+        stopSessionAgent(sk)
+        notes.push("⏹ 已停止运行中的项目会话")
+      }
+      for (const wt of wts) {
+        const d = detachWorktree(wt)
+        if (!d.ok) {
+          await reportCommandResult(port, messageId, false, `❌ 释放分支失败，未退出项目: ${d.error}`, chatId)
+          return
+        }
+      }
+      notes.push(`🌿 已释放 ${cur.featureBranch}，可在 IDE 检出`)
     }
     const back = await leaveProjectSession(port, chatId)
     const block = back.sessionKey
@@ -1220,7 +1311,7 @@ export async function handleFeishuProjectCommand(
       port,
       messageId,
       true,
-      ["✅ 已退出项目，回到普通会话", "", block].filter(Boolean).join("\n"),
+      ["✅ 已退出项目，回到普通会话", ...notes, "", block].filter(Boolean).join("\n"),
       chatId,
       [{ label: "切换会话 /c", cmd: "/c" }],
       {

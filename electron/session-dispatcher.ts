@@ -29,7 +29,8 @@ import {
 import { injectWorkspaceToDir } from "./workspace-injector"
 import { buildSessionCardTitle, readGitBranch, dirBaseName } from "../src/shared/session-label.js"
 import { getProject, listProjects, setCurrentProjectId } from "../src/shared/project-store.js"
-import { projectIdFromSessionKey, projectSessionKey } from "../src/shared/project-types.js"
+import { projectIdFromSessionKey, projectSessionKey, projectWorktrees } from "../src/shared/project-types.js"
+import { checkoutFeatureAll } from "./project-worktree"
 import { buildProjectSessionPrompt } from "./project-prompts"
 import { getSessionOverride } from "../src/shared/session-model-store.js"
 import { resolveModelLabel } from "../src/shared/model-utils.js"
@@ -78,6 +79,9 @@ export function stopAllSessionAgents(): void {
 
 export const chatNameCache = new Map<string, string>()
 export const previousActiveSessionMap = new Map<string, string>()
+
+/** feature 被占用提醒节流：sessionKey → 上次提醒时间（调度器每轮都会撞到占用，避免刷屏） */
+const featureOccupiedNotifyAt = new Map<string, number>()
 const lastCrashAtMap = new Map<string, number>()
 const CRASH_LOOP_WINDOW_MS = 5 * 60 * 1000
 
@@ -1035,6 +1039,22 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
     const projId = projectIdFromSessionKey(sessionKey)
     const proj = projId ? getProject(projId) : undefined
     if (proj) {
+      // feature 可能被 /p leave 释放或被主仓（IDE）占用：拉起前切回；占用则拦下并节流提醒
+      const co = checkoutFeatureAll(projectWorktrees(proj), proj.featureBranch)
+      if (!co.ok) {
+        broadcastLog(`[Agent] 项目「${proj.name}」feature 分支不可用，暂缓拉起: ${co.error}`, "WARN")
+        const lastAt = featureOccupiedNotifyAt.get(sessionKey) ?? 0
+        if (Date.now() - lastAt > 10 * 60_000) {
+          featureOccupiedNotifyAt.set(sessionKey, Date.now())
+          await notifyChat(sessionKey, [
+            `⚠️ 项目「${proj.name}」的 feature 分支被其他工作树占用，消息暂无法处理：`,
+            co.error || "",
+            "",
+            `请在占用方（如 IDE）切到其他分支后重发消息（分支 ${proj.featureBranch}）`,
+          ].join("\n"))
+        }
+        continue
+      }
       const resumableP = hasResumableSdkSession(sessionKey)
       broadcastLog(`[Agent] 项目「${proj.name}」有新消息，正在启动Agent（${resumableP ? "Resume 恢复上下文" : "全新会话"}）`)
       if (!resumableP) await notifyChat(sessionKey, "正在启动Agent，请稍等...")
