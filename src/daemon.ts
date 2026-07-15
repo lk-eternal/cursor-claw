@@ -1499,11 +1499,12 @@ async function replyToMessage(
     return;
   }
   const sender = ch.rt.sender!;
-  // 优先当前活跃会话（含工作区），避免 messageSession 只记了裸 chatKey 导致配色/标题抖动
+  // 显式登记的出站会话（如项目通知）最优先——用户活跃在别的会话时，项目卡不能被染成活跃会话样式；
+  // 其次当前活跃会话（含工作区），避免 messageSession 只记了裸 chatKey 导致配色/标题抖动
   const mappedSk = messageId ? messageSessionMap.get(messageId) : undefined;
   const activeSk = lookupActiveSessionKey(chatId) || lookupActiveSessionKey(routeKey);
-  const titleSessionKey = preferWorkspaceSessionKey(activeSk, mappedSk, routeKey);
-  const colorSessionKey = preferWorkspaceSessionKey(activeSk, titleSessionKey, mappedSk);
+  const titleSessionKey = preferWorkspaceSessionKey(opts?.sessionKey, activeSk, mappedSk, routeKey);
+  const colorSessionKey = preferWorkspaceSessionKey(opts?.sessionKey, activeSk, titleSessionKey, mappedSk);
   const title = opts?.cardTitle || resolveReplyTitle(ch, titleSessionKey);
   const headerTemplate = template || sessionHeaderTemplate(colorSessionKey) || sessionHeaderTemplate(titleSessionKey) || (title ? "turquoise" : undefined);
   // 群聊指令卡保留 reply（多人并发指令要对得上号）；p2p 直发去引用条
