@@ -21,19 +21,30 @@ export function readLockFile(): LockInfo | null {
   }
 }
 
+/** fetch failed（TypeError）多为本地回环 keep-alive 死连接复用（daemon 端已按空闲超时关闭），
+ * 换新连接重试一次即可恢复；超时（DOMException）不重试。 */
+async function fetchRetryOnce(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  try {
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) })
+  } catch (e: unknown) {
+    if (!(e instanceof TypeError)) throw e
+    await new Promise((r) => setTimeout(r, 200))
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) })
+  }
+}
+
 export async function httpGet(url: string, timeoutMs = 3000): Promise<unknown> {
-  const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) })
+  const res = await fetchRetryOnce(url, {}, timeoutMs)
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
 }
 
 export async function httpPost(url: string, body: object, timeoutMs = 3000): Promise<unknown> {
-  const res = await fetch(url, {
+  const res = await fetchRetryOnce(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeoutMs),
-  })
+  }, timeoutMs)
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json().catch(() => null)
 }
