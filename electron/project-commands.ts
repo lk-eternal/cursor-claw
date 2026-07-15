@@ -43,6 +43,7 @@ import { buildProjectSessionPrompt, buildActionPrompt } from "./project-prompts"
 import { pushAndCreateMergeRequest } from "./project-gitlab"
 import { syncArtifactToFeishu } from "./project-feishu-sync"
 import { httpPost, syncActiveSession, enqueueToSession } from "./daemon-client"
+import { pushUiLog } from "./ui-logger"
 import { leaveProjectSession, formatCurrentSessionBlock, isSessionAgentRunning, stopSessionAgent } from "./session-dispatcher"
 
 function projectHelpText(): string {
@@ -1042,8 +1043,10 @@ async function runDeployDevelop(
   const prompt = buildActionPrompt(latest, action.id, "deploy")
   const notify = chatId || project.notifyChatId || ""
   if (notify) {
-    await enqueueToSession(port, projectSessionKey(notify, project.id),
-      prompt + `\n\n宿主已将 HEAD 推送到开发分支 ${developBranch}。请写 artifact 摘要登记完成。`)
+    const sk = projectSessionKey(notify, project.id)
+    const full = prompt + `\n\n宿主已将 HEAD 推送到开发分支 ${developBranch}。请写 artifact 摘要登记完成。`
+    pushUiLog("Project", "INFO", `[${sk}] 部署节点任务入队:\n${full}`)
+    await enqueueToSession(port, sk, full)
   }
   await reportCommandResult(port, messageId, true, `✅ 已部署到开发分支 ${developBranch}\n并启动部署节点会话做摘要`, chatId)
 }
@@ -1090,12 +1093,14 @@ async function runSubmitTestMr(
   const prompt = buildActionPrompt(latest, action.id, "submit-test")
   const notify = chatId || project.notifyChatId || ""
   if (notify) {
-    await enqueueToSession(port, projectSessionKey(notify, project.id),
-      prompt + [
-        "",
-        `宿主已创建提测 MR（source: ${latest.featureBranch} → target: ${testBranch}）: ${mr.mrUrl}`,
-        "请按节点要求完成飞书项目评论通知与提测说明产物，project_action_done 带 mr_url。",
-      ].join("\n"))
+    const sk = projectSessionKey(notify, project.id)
+    const full = prompt + [
+      "",
+      `宿主已创建提测 MR（source: ${latest.featureBranch} → target: ${testBranch}）: ${mr.mrUrl}`,
+      "请按节点要求完成飞书项目评论通知与提测说明产物，project_action_done 带 mr_url。",
+    ].join("\n")
+    pushUiLog("Project", "INFO", `[${sk}] 提测节点任务入队:\n${full}`)
+    await enqueueToSession(port, sk, full)
   }
   await reportCommandResult(port, messageId, true, `✅ 已开提测 MR → 测试分支 ${testBranch}\n${mr.mrUrl}\n并启动提测节点会话`, chatId)
 }
@@ -1141,6 +1146,7 @@ async function runAction(
   const prompt = buildActionPrompt(project, action.id, type)
 
   // 任务入队而非直塞启动提示词：Agent 崩溃时消息自动重投，节点不丢
+  pushUiLog("Project", "INFO", `[${sessionKey}] ${projectNodeLabel(type, project.groupId)}节点任务入队:\n${prompt}`)
   const enq = await enqueueToSession(port, sessionKey, prompt)
   if (!enq.ok) {
     updateAction(project.id, action.id, { status: "failed", error: enq.error })
