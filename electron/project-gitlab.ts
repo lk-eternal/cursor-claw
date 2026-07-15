@@ -117,6 +117,31 @@ export async function acceptMergeRequest(input: GitlabConfig & { mrUrl: string }
   }
 }
 
+/** 只读查询 source→target 的现存 MR（优先 opened，其次 merged），不创建 */
+export async function findMergeRequest(
+  input: GitlabConfig & { cwd: string; sourceBranch: string; targetBranch: string },
+): Promise<{ ok: boolean; mrUrl?: string; state?: string; error?: string }> {
+  if (!input.token?.trim()) return { ok: false, error: "未配置 GitLab token（设置 → 项目工作区）" }
+  const parsed = resolveGitlabProjectPath(input.cwd)
+  if (!parsed.ok) return parsed
+  const host = (input.host?.trim() || `https://${parsed.host}`).replace(/\/$/, "")
+  const projectEnc = encodeURIComponent(parsed.projectPath)
+  try {
+    for (const state of ["opened", "merged"]) {
+      const url = `${host}/api/v4/projects/${projectEnc}/merge_requests`
+        + `?source_branch=${encodeURIComponent(input.sourceBranch)}`
+        + `&target_branch=${encodeURIComponent(input.targetBranch)}`
+        + `&state=${state}&order_by=updated_at`
+      const res = await requestJson("GET", url, input.token.trim())
+      const mr = Array.isArray(res.json) ? res.json[0] : null
+      if (mr?.web_url) return { ok: true, mrUrl: String(mr.web_url), state }
+    }
+    return { ok: true }
+  } catch (e: any) {
+    return { ok: false, error: `GitLab API 异常: ${e?.message || e}` }
+  }
+}
+
 export async function pushAndCreateMergeRequest(input: CreateMrInput): Promise<CreateMrResult> {
   if (!input.token?.trim()) return { ok: false, error: "未配置 GitLab token（设置 → 项目工作区）" }
 

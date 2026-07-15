@@ -47,7 +47,7 @@ import { z } from "zod";
 import { registerAdminTools } from "./server-admin.js";
 import { registerProjectAgentTools } from "./server-project.js";
 import { initProjectStore, hasProjectNewDraft, getProject, getNodeGroups, listProjects } from "./shared/project-store.js";
-import { projectIdFromSessionKey, decodeRepoPair } from "./shared/project-types.js";
+import { projectIdFromSessionKey, decodeRepoPair, isRemoteRepoRef } from "./shared/project-types.js";
 import { buildSessionCardTitle, isSpecialSessionSuffix, resolveWorkspaceFromSessionKey, sessionHeaderTemplate } from "./shared/session-label.js";
 
 const _require = createRequire(import.meta.url);
@@ -63,6 +63,12 @@ let WORKSPACE_DIR = (() => {
 })();
 const MESSAGE_PREFIX = process.env.LARK_MESSAGE_PREFIX ?? "";
 const APP_DATA_DIR = process.env.APP_DATA_DIR || "";
+
+/** 主仓引用规范化：本地路径 normalize，远程地址原样保留 */
+function normalizeRepoRef(v: string): string {
+  const t = (v || "").trim();
+  return isRemoteRepoRef(t) ? t : path.normalize(t);
+}
 
 function parseChannelConfigs(): DaemonChannelConfig[] {
   try {
@@ -1326,7 +1332,7 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
 
     const decodePair = (raw: string) => {
       const r = decodeRepoPair(String(raw || ""));
-      return { ...r, path: path.normalize(r.path || "") };
+      return { ...r, path: normalizeRepoRef(r.path || "") };
     };
     const selectedRaw = f.repoPairs;
     const selectedList: string[] = Array.isArray(selectedRaw)
@@ -1349,7 +1355,7 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
     const customDev = (f.developBranchCustom || "").trim() || undefined;
     if (customPath) {
       if (!customBase) return { toast: { type: "error", content: "手填主仓时请填写生产基线分支" } };
-      const rp = path.normalize(customPath);
+      const rp = normalizeRepoRef(customPath);
       const key = rp.toLowerCase();
       if (!seen.has(key)) {
         seen.add(key);
@@ -1366,7 +1372,7 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
 
     if (!name) return { toast: { type: "error", content: "请填写项目名称" } };
     if (!repos.length) return { toast: { type: "error", content: "请多选或手填至少一个主仓·分支" } };
-    if (!worktreeRoot) return { toast: { type: "error", content: "请填写 worktree 根目录" } };
+    if (!worktreeRoot) return { toast: { type: "error", content: "请填写 AI 工作目录" } };
 
     const primary = repos[0];
     process.stdout.write(`__PROJECT_NEW_SUBMIT__:${JSON.stringify({
@@ -1392,11 +1398,11 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
     const baseBranch = (f.baseBranch || "").trim();
     const testBranch = (f.testBranch || "").trim() || undefined;
     const developBranch = (f.developBranch || "").trim() || undefined;
-    if (!repoPathRaw) return { toast: { type: "error", content: "请填写主仓绝对路径" } };
+    if (!repoPathRaw) return { toast: { type: "error", content: "请填写主仓本地路径或远程地址" } };
     if (!baseBranch) return { toast: { type: "error", content: "请填写生产基线分支" } };
-    const repoPath = path.normalize(repoPathRaw);
-    // 卡片保持可改：路径无效只 toast，不落库不更新卡片
-    if (!fs.existsSync(repoPath) || !fs.existsSync(path.join(repoPath, ".git"))) {
+    const repoPath = normalizeRepoRef(repoPathRaw);
+    // 卡片保持可改：路径无效只 toast，不落库不更新卡片（远程地址不做本地存在性校验）
+    if (!isRemoteRepoRef(repoPath) && (!fs.existsSync(repoPath) || !fs.existsSync(path.join(repoPath, ".git")))) {
       return { toast: { type: "error", content: `不是有效 git 根目录: ${repoPath}` } };
     }
     process.stdout.write(`__PROJECT_PROFILE_UPSERT__:${JSON.stringify({

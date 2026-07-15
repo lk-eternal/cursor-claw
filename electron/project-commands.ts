@@ -28,6 +28,7 @@ import {
 import { repoShortName,
   projectSessionKey,
   projectWorktrees,
+  projectRepoRefs,
   isPlainProject,
   PROJECT_RESERVED_SUBCOMMANDS,
   DEFAULT_NODE_GROUP_ID,
@@ -36,15 +37,15 @@ import { repoShortName,
   type ProjectWorkspaceType,
 } from "../src/shared/project-types.js"
 import {
-  addProjectWorktree, ensureArtifactDir, isGitRepoRoot, removeProjectWorktree,
-  checkoutFeature, checkoutFeatureAll, detachWorktree, worktreeDirtyCount, commitAllInWorktree,
+  addProjectClone, ensureArtifactDir, isUsableRepoRef, isRemoteRepoRef, removeProjectWorktree,
+  ensureCheckouts, syncCheckout, worktreeDirtyCount, unpushedCount,
 } from "./project-worktree"
 import { buildProjectSessionPrompt, buildActionPrompt } from "./project-prompts"
-import { pushAndCreateMergeRequest } from "./project-gitlab"
+import { pushAndCreateMergeRequest, findMergeRequest } from "./project-gitlab"
 import { syncArtifactToFeishu } from "./project-feishu-sync"
 import { httpPost, syncActiveSession, enqueueToSession } from "./daemon-client"
 import { pushUiLog } from "./ui-logger"
-import { leaveProjectSession, formatCurrentSessionBlock, isSessionAgentRunning, stopSessionAgent } from "./session-dispatcher"
+import { leaveProjectSession, formatCurrentSessionBlock } from "./session-dispatcher"
 
 function projectHelpText(): string {
   const nodeIds = getProjectNodes(getCurrentProject()?.groupId).map((n) => n.id).join("|")
@@ -55,11 +56,12 @@ function projectHelpText(): string {
     "🔹 /p new — 新建项目",
     "🔹 /p ls — 列出全部项目",
     "🔹 /p use <序号|id> — 进入指定项目",
-    "🔹 /p leave — 退出当前项目",
+    "🔹 /p leave — 退出当前项目，回到主会话",
+    "🔹 /c main — 快速切回主会话（不清项目选中态）",
     `🔹 /p ${nodeIds} — 推进项目节点`,
     "🔹 /p sync — 把最近通过的产出同步到飞书文档",
     "🔹 /p setup — 配置项目工作区与主仓",
-    "🔹 /p del <序号|id> — 删除项目（连带移除 worktree）",
+    "🔹 /p del <序号|id> — 删除项目（连带移除 AI 工作目录）",
   ].join("\n")
 }
 
@@ -147,6 +149,7 @@ function projectButtons(p?: Project): CommandButton[] {
     ...nodeBtns,
     { label: "同步文档 /p sync", cmd: "/p sync" },
     { label: "项目菜单 /p", cmd: "/p" },
+    { label: "回主会话 /c main", cmd: "/c main" },
     { label: "退出项目 /p leave", cmd: "/p leave" },
   ]
 }
@@ -160,15 +163,28 @@ function withChatFooter(text: string, footer = "也可直接发消息，在项�
   return `${text}\n\n---\n${footer}`
 }
 
-/** 进入项目会话（懒加载）：先确保 worktree 切回 feature（可能被 leave 释放/被主仓占用），再落元数据与消息路由 */
+/** 进入项目会话（懒加载）：确保 AI 工作目录就绪（缺失重建、检出 feature、同步远程新提交），再落元数据与消息路由 */
 async function enterProjectSession(
   port: number,
   chatId: string,
   project: Project,
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; error?: string; notes?: string[] }> {
+  const notes: string[] = []
   if (!isPlainProject(project)) {
-    const co = checkoutFeatureAll(projectWorktrees(project), project.featureBranch)
+    const refs = projectRepoRefs(project)
+    for (const r of refs) {
+      if (!fs.existsSync(r.worktreePath)) notes.push(`🔧 ${path.basename(r.worktreePath)}: 目录缺失，正在重建`)
+    }
+    // 懒修复：目录缺失自动重建，存在则确保检出 feature，再快进同步远程
+    const co = ensureCheckouts(refs, project.featureBranch)
     if (!co.ok) return { ok: false, error: co.error }
+    for (const r of refs) {
+      const s = syncCheckout(r.worktreePath, project.featureBranch)
+      if (s.note) notes.push(s.note)
+    }
+    for (const wt of projectWorktrees(project)) {
+      if (fs.existsSync(wt)) ensureArtifactDir(wt)
+    }
   }
   const sessionKey = project.sessionKey || projectSessionKey(chatId, project.id)
   project.sessionKey = sessionKey
@@ -178,16 +194,16 @@ async function enterProjectSession(
   const { saveProject } = await import("../src/shared/project-store.js")
   saveProject(project)
   await syncActiveSession(port, chatId, sessionKey)
-  return { ok: true }
+  return { ok: true, notes }
 }
 
-/** feature 被其他工作树（如 IDEA 主仓）占用时的用户提示 */
+/** AI 工作目录不可用（克隆失败/存量 worktree 分支被占用等）时的用户提示 */
 function featureOccupiedText(p: Project, detail: string): string {
   return [
-    `❌ 无法进入项目「${p.name}」：feature 分支被其他工作树占用`,
+    `❌ 无法进入项目「${p.name}」：AI 工作目录不可用`,
     detail,
     "",
-    `请在占用方（如 IDEA）切到其他分支后重试；分支为 ${p.featureBranch}`,
+    "排除故障（网络/权限/分支占用）后重试即可，缺失的目录会自动重建",
   ].join("\n")
 }
 
@@ -292,8 +308,8 @@ async function finalizeNewProject(
     return
   }
   for (const r of repos) {
-    if (!isGitRepoRoot(r.repoPath)) {
-      await reportCommandResult(port, messageId, false, `❌ 主仓无效: ${r.repoPath}`, chatId)
+    if (!isUsableRepoRef(r.repoPath)) {
+      await reportCommandResult(port, messageId, false, `❌ 主仓无效（须是本地 git 根目录或远程仓库地址）: ${r.repoPath}`, chatId)
       return
     }
   }
@@ -309,24 +325,20 @@ async function finalizeNewProject(
 
   const featureBranch = (draft.featureBranch || defaultFeatureBranch(draft.name)).trim()
   const projectSlug = uniqueProjectSlug(draft.name)
-  const created: { repoPath: string; worktreePath: string }[] = []
   const projectRepos: { repoPath: string; baseBranch: string; testBranch?: string; developBranch?: string; worktreePath: string }[] = []
+  // clone 失败不废项目：字段照常落盘，缺的 AI 工作目录在进入项目/推进节点时懒重建（用户不用重填表单）
+  const wtErrors: string[] = []
 
   for (const r of repos) {
     const short = repoShortName(r.repoPath)
     const worktreePath = path.join(worktreeRoot, projectSlug, short)
-    const wt = addProjectWorktree({
+    const wt = addProjectClone({
       repoPath: r.repoPath,
       worktreePath,
       featureBranch,
       baseBranch: r.baseBranch,
     })
-    if (!wt.ok) {
-      for (const c of created) removeProjectWorktree(c.repoPath, c.worktreePath)
-      await reportCommandResult(port, messageId, false, `❌ ${wt.error}`, chatId)
-      return
-    }
-    created.push({ repoPath: r.repoPath, worktreePath })
+    if (!wt.ok) wtErrors.push(`${short}: ${wt.error}`)
     projectRepos.push({
       repoPath: r.repoPath,
       baseBranch: r.baseBranch,
@@ -337,6 +349,7 @@ async function finalizeNewProject(
   }
 
   const primary = projectRepos[0]
+  let persisted = false
   try {
     const project = createProject({
       name: draft.name,
@@ -352,13 +365,38 @@ async function finalizeNewProject(
       groupId: resolveNodeGroup(draft.groupId).id,
       notifyChatId: chatId,
     })
+    persisted = true
     if (chatId) {
       project.sessionKey = projectSessionKey(chatId, project.id)
       const { saveProject } = await import("../src/shared/project-store.js")
       saveProject(project)
     }
-    for (const r of projectRepos) ensureArtifactDir(r.worktreePath)
+    // 仅对已建成的目录建产物目录：提前 mkdir 会让懒重建误判 AI 工作目录已存在
+    for (const r of projectRepos) {
+      if (fs.existsSync(r.worktreePath)) ensureArtifactDir(r.worktreePath)
+    }
     if (draft.chatKey) clearProjectNewDraft(draft.chatKey)
+    if (wtErrors.length) {
+      await reportCommandResult(
+        port,
+        messageId,
+        true,
+        withChatFooter([
+          `✅ 项目已创建（信息已保存，无需重填）`,
+          "",
+          formatProjectCard(project),
+          "",
+          "⚠️ AI 工作目录初始化未完成：",
+          ...wtErrors.map((e) => `· ${e}`),
+          "",
+          "排除故障（网络/权限/分支名）后点「进入项目」即自动重建，无需重新创建项目。",
+        ].join("\n")),
+        chatId,
+        [{ label: `进入项目 /p use ${project.id}`, cmd: `/p use ${project.id}` }, ...projectButtons(project)],
+        { cardTitle: projectCardTitle(project) },
+      )
+      return
+    }
     await reportCommandResult(
       port,
       messageId,
@@ -373,8 +411,13 @@ async function finalizeNewProject(
       if (!r.ok) await reportCommandResult(port, messageId, false, featureOccupiedText(project, r.error || ""), chatId)
     }
   } catch (e: any) {
-    for (const c of created) removeProjectWorktree(c.repoPath, c.worktreePath)
-    await reportCommandResult(port, messageId, false, `❌ 创建失败已回滚: ${e?.message || e}`, chatId)
+    if (!persisted) {
+      // 项目未落盘才回滚 worktree（防孤儿）；已落盘后的异常不动现场，缺啥走懒修复
+      for (const c of projectRepos) removeProjectWorktree(c.repoPath, c.worktreePath)
+      await reportCommandResult(port, messageId, false, `❌ 创建失败已回滚: ${e?.message || e}`, chatId)
+      return
+    }
+    await reportCommandResult(port, messageId, false, `⚠️ 项目已创建，但后续处理出错: ${e?.message || e}\n可 /p use 进入项目重试`, chatId)
   }
 }
 
@@ -672,15 +715,16 @@ export async function fillProjectNewFromText(
   }
 
   if (draft.step === "setup_add_path") {
-    if (!path.isAbsolute(value)) {
-      await reportCommandResult(port, messageId, false, "❌ 请回复绝对路径", chatId)
+    const remote = isRemoteRepoRef(value)
+    if (!remote && !path.isAbsolute(value)) {
+      await reportCommandResult(port, messageId, false, "❌ 请回复本地绝对路径或远程仓库地址（https:// 或 git@）", chatId)
       return true
     }
-    if (!isGitRepoRoot(value)) {
+    if (!isUsableRepoRef(value)) {
       await reportCommandResult(port, messageId, false, `❌ 不是有效 git 根目录: ${value}`, chatId)
       return true
     }
-    draft.repoPath = path.resolve(value)
+    draft.repoPath = remote ? value.trim() : path.resolve(value)
     draft.step = "setup_add_base"
     await promptNewStep(port, messageId, chatId, draft)
     return true
@@ -820,7 +864,7 @@ async function handleNewCommand(
     [
       "📦 创建项目 · 先选流程组",
       "",
-      ...groups.map((g) => `· ${g.name}（${g.workspace === "plain" ? "纯会话型：无需代码仓" : "代码开发型：主仓 + worktree"}）`),
+      ...groups.map((g) => `· ${g.name}（${g.workspace === "plain" ? "纯会话型：无需代码仓" : "代码开发型：主仓 + AI 工作目录"}）`),
     ].join("\n"),
     chatId,
     groups.slice(0, 10).map((g) => ({ label: g.name, cmd: `/p new --group ${g.id}` })),
@@ -1008,7 +1052,7 @@ async function runDeployDevelop(
     await reportCommandResult(port, messageId, false, "❌ 纯会话型项目无代码仓，无法执行部署（推送分支）", chatId)
     return
   }
-  const coDeploy = checkoutFeature(project.worktreePath, project.featureBranch)
+  const coDeploy = ensureCheckouts(projectRepoRefs(project).slice(0, 1), project.featureBranch)
   if (!coDeploy.ok) {
     await reportCommandResult(port, messageId, false, featureOccupiedText(project, coDeploy.error || ""), chatId)
     return
@@ -1062,7 +1106,7 @@ async function runSubmitTestMr(
     await reportCommandResult(port, messageId, false, "❌ 纯会话型项目无代码仓，无法开提测 MR", chatId)
     return
   }
-  const coMr = checkoutFeature(project.worktreePath, project.featureBranch)
+  const coMr = ensureCheckouts(projectRepoRefs(project).slice(0, 1), project.featureBranch)
   if (!coMr.ok) {
     await reportCommandResult(port, messageId, false, featureOccupiedText(project, coMr.error || ""), chatId)
     return
@@ -1105,6 +1149,25 @@ async function runSubmitTestMr(
   await reportCommandResult(port, messageId, true, `✅ 已开提测 MR → 测试分支 ${testBranch}\n${mr.mrUrl}\n并启动提测节点会话`, chatId)
 }
 
+/** 上线文档节点：宿主只读查询 feature→基线 的现存 MR，附给 Agent（Agent 无 GitLab token，且严禁自行创建/合并） */
+async function releaseMrHint(p: Project): Promise<string> {
+  const cfg = getConfig()
+  const mr = await findMergeRequest({
+    cwd: p.worktreePath,
+    token: cfg.gitlabToken || "",
+    host: cfg.gitlabHost || undefined,
+    sourceBranch: p.featureBranch,
+    targetBranch: p.baseBranch,
+  }).catch((e) => ({ ok: false as const, mrUrl: undefined, state: undefined, error: String(e) }))
+  if (mr.mrUrl) {
+    return `宿主已查到 ${p.featureBranch} → ${p.baseBranch} 的 MR（${mr.state === "merged" ? "已合并" : "开启中"}）: ${mr.mrUrl}`
+  }
+  return [
+    `宿主未查到 ${p.featureBranch} → ${p.baseBranch} 的现存 MR${mr.error ? `（查询失败: ${mr.error}）` : ""}。`,
+    "按节点要求从需求工作项评论或用户处获取；确实尚未创建时指导用户在 GitLab 手动创建（严禁你自行创建）。",
+  ].join("")
+}
+
 async function runAction(
   port: number,
   messageId: string,
@@ -1122,7 +1185,7 @@ async function runAction(
     return
   }
   if (!isPlainProject(p)) {
-    const co = checkoutFeatureAll(projectWorktrees(p), p.featureBranch)
+    const co = ensureCheckouts(projectRepoRefs(p), p.featureBranch)
     if (!co.ok) {
       await reportCommandResult(port, messageId, false, featureOccupiedText(p, co.error || ""), chatId)
       return
@@ -1143,7 +1206,10 @@ async function runAction(
   const { saveProject } = await import("../src/shared/project-store.js")
   saveProject(project)
 
-  const prompt = buildActionPrompt(project, action.id, type)
+  let prompt = buildActionPrompt(project, action.id, type)
+  if (type === "fill-release-doc" && !isPlainProject(project)) {
+    prompt += `\n\n${await releaseMrHint(project)}`
+  }
 
   // 任务入队而非直塞启动提示词：Agent 崩溃时消息自动重投，节点不丢
   pushUiLog("Project", "INFO", `[${sessionKey}] ${projectNodeLabel(type, project.groupId)}节点任务入队:\n${prompt}`)
@@ -1211,7 +1277,7 @@ async function handleDeleteProjectCommand(
         `feature：${target.featureBranch}`,
         ...repos.map((r) => `📁 ${r.worktreePath}`),
         "",
-        "将移除以上 worktree 目录（含未提交改动）；主仓与远程分支不受影响。",
+        "将移除以上 AI 工作目录（含未提交改动）；主仓与远程分支不受影响。",
       ].join("\n"),
       chatId,
       [
@@ -1231,7 +1297,7 @@ async function handleDeleteProjectCommand(
     port,
     messageId,
     true,
-    `🗑 已删除项目「${target.name}」并移除 worktree`,
+    `🗑 已删除项目「${target.name}」并移除 AI 工作目录`,
     chatId,
     [{ label: "项目菜单 /p", cmd: "/p" }],
     patchExtra,
@@ -1294,6 +1360,7 @@ async function replyProjectMenu(port: number, messageId: string, chatId?: string
   }))
   if (cur) {
     btns.push({ label: "项目详情 /p status", cmd: "/p status", section: "其他" })
+    btns.push({ label: "回主会话 /c main", cmd: "/c main", section: "其他" })
     btns.push({ label: "退出项目 /p leave", cmd: "/p leave", section: "其他" })
   }
   btns.push({ label: "新建项目 /p new", cmd: "/p new", section: "其他" })
@@ -1351,19 +1418,22 @@ export async function handleFeishuProjectCommand(
       await reportCommandResult(port, messageId, false, "💡 用法：/p use <序号|id>", chatId)
       return
     }
+    let enterNotes: string[] = []
     if (chatId) {
       const r = await enterProjectSession(port, chatId, target)
       if (!r.ok) {
         await reportCommandResult(port, messageId, false, featureOccupiedText(target, r.error || ""), chatId)
         return
       }
+      enterNotes = r.notes || []
     }
     setCurrentProjectId(target.id)
+    const head = ["✅ 已进入项目会话", ...enterNotes, "", formatProjectCard(target)].filter(Boolean).join("\n")
     await reportCommandResult(
       port,
       messageId,
       true,
-      withChatFooter(`✅ 已进入项目会话\n\n${formatProjectCard(target)}`),
+      withChatFooter(head),
       chatId,
       projectButtons(target),
       { cardTitle: projectCardTitle(target) },
@@ -1376,75 +1446,19 @@ export async function handleFeishuProjectCommand(
       await reportCommandResult(port, messageId, false, "❌ 无法解析会话", chatId)
       return
     }
-    const mode = low(parts[2] || "")
     const cur = getCurrentProject()
     const notes: string[] = []
-    if (cur && isPlainProject(cur)) {
-      // 纯会话型无 git：只停 Agent、挂起、切路由
-      const skPlain = cur.sessionKey || projectSessionKey(chatId, cur.id)
-      if (isSessionAgentRunning(skPlain)) {
-        stopSessionAgent(skPlain)
-        notes.push("⏹ 已停止运行中的项目会话")
+    if (cur && !isPlainProject(cur)) {
+      // 独立 checkout：AI 工作目录与主仓互不干扰，退出只切路由；未同步内容仅提示不拦截
+      for (const r of projectRepoRefs(cur)) {
+        const dirty = worktreeDirtyCount(r.worktreePath)
+        const ahead = unpushedCount(r.worktreePath, cur.featureBranch)
+        const segs: string[] = []
+        if (dirty > 0) segs.push(`${dirty} 处未提交改动`)
+        if (ahead > 0) segs.push(`${ahead} 个未推送提交`)
+        if (segs.length) notes.push(`💾 ${path.basename(r.worktreePath)}: ${segs.join("、")}（留在 AI 工作目录，下次进入继续）`)
       }
-      if (cur.status === "active") {
-        cur.status = "paused"
-        const { saveProject } = await import("../src/shared/project-store.js")
-        saveProject(cur)
-      }
-    } else if (cur) {
-      const wts = projectWorktrees(cur)
-      const dirtyTotal = wts.reduce((n, wt) => n + worktreeDirtyCount(wt), 0)
-      if (dirtyTotal > 0 && mode !== "--commit" && mode !== "--force") {
-        await reportCommandResult(
-          port,
-          messageId,
-          true,
-          [
-            `⚠️ 项目「${cur.name}」有 ${dirtyTotal} 处未提交改动`,
-            "",
-            "提交后退出：自动 add + commit 到 feature，IDE 立即可见",
-            "直接退出：改动留在 worktree 工作区（IDE 检出 feature 看不到这部分）",
-          ].join("\n"),
-          chatId,
-          [
-            { label: "提交后退出", cmd: "/p leave --commit" },
-            { label: "直接退出", cmd: "/p leave --force" },
-            { label: "取消", cmd: "/p status" },
-          ],
-        )
-        return
-      }
-      if (mode === "--commit" && dirtyTotal > 0) {
-        for (const wt of wts) {
-          const c = commitAllInWorktree(wt)
-          if (!c.ok) {
-            await reportCommandResult(port, messageId, false, `❌ 提交失败，未退出项目: ${c.error}`, chatId)
-            return
-          }
-          if (c.files > 0) notes.push(`✅ 已提交 ${c.files} 个文件（${c.hash || "?"}）`)
-        }
-      } else if (dirtyTotal > 0) {
-        notes.push(`⚠️ ${dirtyTotal} 处未提交改动留在 worktree（IDE 不可见）`)
-      }
-      const sk = cur.sessionKey || projectSessionKey(chatId, cur.id)
-      if (isSessionAgentRunning(sk)) {
-        stopSessionAgent(sk)
-        notes.push("⏹ 已停止运行中的项目会话")
-      }
-      for (const wt of wts) {
-        const d = detachWorktree(wt)
-        if (!d.ok) {
-          await reportCommandResult(port, messageId, false, `❌ 释放分支失败，未退出项目: ${d.error}`, chatId)
-          return
-        }
-      }
-      // 挂起项目：否则残留队列消息会让调度器立刻重拉 Agent、把刚释放的 feature 又占回去
-      if (cur.status === "active") {
-        cur.status = "paused"
-        const { saveProject } = await import("../src/shared/project-store.js")
-        saveProject(cur)
-      }
-      notes.push(`🌿 已释放 ${cur.featureBranch}，可在 IDE 检出`)
+      if (notes.length) notes.push(`🌿 需要在主仓看到 AI 改动时，让项目会话提交并推送 ${cur.featureBranch} 后在主仓 pull`)
     }
     const back = await leaveProjectSession(port, chatId)
     const block = back.sessionKey

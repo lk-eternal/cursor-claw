@@ -42,6 +42,7 @@ export const DEFAULT_NODE_GROUPS: ProjectNodeGroupDef[] = [
       { id: "submit-test", label: "提测" },
       { id: "analyze-bug", label: "分析缺陷" },
       { id: "fix-bug", label: "修复缺陷" },
+      { id: "fill-release-doc", label: "上线文档" },
     ],
   },
   {
@@ -139,9 +140,22 @@ export function projectWorktrees(p: Project): string[] {
   return list.filter(Boolean)
 }
 
+/** 项目全部仓库引用（repoPath/worktreePath/baseBranch），供 worktree 懒修复等 git 操作 */
+export function projectRepoRefs(p: Project): { repoPath: string; worktreePath: string; baseBranch: string }[] {
+  const list = p.repos?.length
+    ? p.repos.map((r) => ({ repoPath: r.repoPath, worktreePath: r.worktreePath, baseBranch: r.baseBranch }))
+    : [{ repoPath: p.repoPath, worktreePath: p.worktreePath, baseBranch: p.baseBranch }]
+  return list.filter((r) => r.repoPath && r.worktreePath)
+}
+
 /** 纯会话型项目（无 git 仓，跳过 worktree/分支借还等全部 git 行为） */
 export function isPlainProject(p: Project): boolean {
   return p.workspaceType === "plain"
+}
+
+/** 远程仓库地址（http(s)/ssh/git@…）而非本地路径 */
+export function isRemoteRepoRef(repoPath: string): boolean {
+  return /^(https?:\/\/|ssh:\/\/|git@)/i.test((repoPath || "").trim())
 }
 
 export function projectIdFromSessionKey(sessionKey: string): string | undefined {
@@ -184,7 +198,9 @@ export function decodeRepoPair(value: string): {
   developBranch?: string
 } {
   const parts = (value || "").trim().split(REPO_PAIR_SEP)
-  const pathPart = (parts[0] || "").replace(/\//g, "\\")
+  const rawPath = (parts[0] || "").trim()
+  // 远程地址原样保留（斜杠回填会毁掉 URL）；本地路径回填 Windows 分隔符
+  const pathPart = isRemoteRepoRef(rawPath) ? rawPath : rawPath.replace(/\//g, "\\")
   if (parts.length < 2) return { path: pathPart, baseBranch: "main" }
   const baseBranch = (parts[1] || "").trim() || "main"
   const testBranch = (parts[2] || "").trim() || undefined

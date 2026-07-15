@@ -1,9 +1,14 @@
 import { spawnSync } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
+import { isRemoteRepoRef } from "../src/shared/project-types.js"
 
-export interface WorktreeAddInput {
+export { isRemoteRepoRef }
+
+export interface CloneAddInput {
+  /** 本地主仓路径（读远程地址 + 加速克隆）或远程仓库地址 */
   repoPath: string
+  /** AI 工作目录（独立 clone，与用户主仓完全隔离） */
   worktreePath: string
   featureBranch: string
   baseBranch: string
@@ -15,12 +20,18 @@ export interface WorktreeResult {
   error?: string
 }
 
-function runGit(cwd: string, args: string[]): { ok: boolean; stdout: string; stderr: string; code: number } {
-  const r = spawnSync("git", args, { cwd, encoding: "utf-8", windowsHide: true })
+export interface WorktreeRepoRef {
+  repoPath: string
+  worktreePath: string
+  baseBranch: string
+}
+
+function runGit(cwd: string, args: string[], timeoutMs?: number): { ok: boolean; stdout: string; stderr: string; code: number } {
+  const r = spawnSync("git", args, { cwd, encoding: "utf-8", windowsHide: true, timeout: timeoutMs })
   return {
     ok: r.status === 0,
     stdout: (r.stdout || "").trim(),
-    stderr: (r.stderr || "").trim(),
+    stderr: ((r.stderr || "").trim()) || (r.error ? String(r.error.message || r.error) : ""),
     code: r.status ?? 1,
   }
 }
@@ -42,100 +53,139 @@ export function isGitRepoRoot(repoPath: string): boolean {
   return resolveReal(top.stdout) === resolveReal(repoPath)
 }
 
-export function addProjectWorktree(input: WorktreeAddInput): WorktreeResult {
+/** 主仓引用是否可用作克隆源（远程地址直接放行，本地路径须是 git 根） */
+export function isUsableRepoRef(repoPath: string): boolean {
+  return isRemoteRepoRef(repoPath) || isGitRepoRoot(repoPath)
+}
+
+/**
+ * 独立 clone 创建 AI 工作目录：与用户主仓无 worktree 关联，同一分支双方可同时检出。
+ * 本地主仓作克隆源加速（硬链接秒级），origin 指回真实远程；AI 提交 push 后用户主仓 pull 即可。
+ */
+export function addProjectClone(input: CloneAddInput): WorktreeResult {
   const { repoPath, worktreePath, featureBranch, baseBranch } = input
-  if (!isGitRepoRoot(repoPath)) {
-    return { ok: false, error: `主仓无效或不是 git 根目录: ${repoPath}` }
-  }
   if (!featureBranch.trim() || !baseBranch.trim()) {
     return { ok: false, error: "基线分支与 feature 分支不能为空" }
   }
+  const remote = isRemoteRepoRef(repoPath)
+  if (!remote && !isGitRepoRoot(repoPath)) {
+    return { ok: false, error: `主仓无效（须是 git 根目录或远程地址）: ${repoPath}` }
+  }
   if (fs.existsSync(worktreePath)) {
-    return { ok: false, error: `worktree 路径已存在: ${worktreePath}` }
+    return { ok: false, error: `AI 工作目录已存在: ${worktreePath}` }
   }
   const parent = path.dirname(worktreePath)
   if (!fs.existsSync(parent)) fs.mkdirSync(parent, { recursive: true })
 
-  if (input.fetch !== false) {
-    const fetch = runGit(repoPath, ["fetch", "--all", "--prune"])
-    if (!fetch.ok) {
-      return { ok: false, error: `git fetch 失败: ${fetch.stderr || fetch.stdout}` }
+  const fail = (msg: string): WorktreeResult => {
+    try { fs.rmSync(worktreePath, { recursive: true, force: true }) } catch { /* ignore */ }
+    return { ok: false, error: msg }
+  }
+
+  const clone = runGit(parent, ["clone", repoPath, worktreePath])
+  if (!clone.ok) return fail(`git clone 失败: ${clone.stderr || clone.stdout}`)
+
+  // 本地源：origin 指回真实远程（本地仓无 origin 则保持指向本地，纯本地仓也能正常协作）
+  let hasOrigin = true
+  if (!remote) {
+    const originUrl = runGit(repoPath, ["remote", "get-url", "origin"])
+    if (originUrl.ok && originUrl.stdout) {
+      const set = runGit(worktreePath, ["remote", "set-url", "origin", originUrl.stdout])
+      if (!set.ok) return fail(`设置 origin 失败: ${set.stderr || set.stdout}`)
+    } else {
+      hasOrigin = isGitRepoRoot(repoPath) // origin 指向本地主仓路径
     }
   }
 
-  const existing = resolveExistingBranch(repoPath, featureBranch)
-  if (existing.ok && existing.ref) {
-    // origin/xxx 用 --track -b 建本地分支（直接挂远程 ref 会 detached HEAD）；本地分支原样检出
-    const add = existing.ref.startsWith("origin/")
-      ? runGit(repoPath, ["worktree", "add", "--track", "-b", featureBranch, worktreePath, existing.ref])
-      : runGit(repoPath, ["worktree", "add", worktreePath, existing.ref])
-    if (!add.ok) {
-      removeProjectWorktree(repoPath, worktreePath)
-      return { ok: false, error: `挂接已有分支失败: ${add.stderr || add.stdout}` }
-    }
-    ensureFeatureUpstream(worktreePath, featureBranch)
-    ensureClawExcluded(worktreePath)
-    return { ok: true }
+  if (input.fetch !== false && hasOrigin) {
+    const fetch = runGit(worktreePath, ["fetch", "origin", "--prune"], 60_000)
+    if (!fetch.ok) return fail(`git fetch 失败: ${fetch.stderr || fetch.stdout}`)
   }
 
-  const startPoint = ensureLocalBase(repoPath, baseBranch)
-  if (!startPoint.ok) return startPoint
-
-  const add = runGit(repoPath, ["worktree", "add", "-b", featureBranch, worktreePath, startPoint.ref!])
-  if (!add.ok) {
-    removeProjectWorktree(repoPath, worktreePath)
-    return { ok: false, error: `worktree add 失败: ${add.stderr || add.stdout}` }
-  }
-  ensureFeatureUpstream(worktreePath, featureBranch)
+  const co = checkoutOrCreateFeature(worktreePath, featureBranch, baseBranch)
+  if (!co.ok) return fail(co.error || "检出 feature 失败")
   ensureClawExcluded(worktreePath)
   return { ok: true }
 }
 
+/** 检出 feature：远程有→track 检出；本地有→切过去；都没有→从基线新建（不 track 基线，防误推） */
+function checkoutOrCreateFeature(cloneDir: string, featureBranch: string, baseBranch: string): WorktreeResult {
+  const local = runGit(cloneDir, ["rev-parse", "--verify", featureBranch])
+  if (local.ok) {
+    const co = runGit(cloneDir, ["checkout", featureBranch])
+    if (!co.ok) return { ok: false, error: co.stderr || co.stdout }
+    ensureFeatureUpstream(cloneDir, featureBranch)
+    return { ok: true }
+  }
+  const remoteFeat = runGit(cloneDir, ["rev-parse", "--verify", `origin/${featureBranch}`])
+  if (remoteFeat.ok) {
+    const co = runGit(cloneDir, ["checkout", "--track", "-b", featureBranch, `origin/${featureBranch}`])
+    if (!co.ok) return { ok: false, error: co.stderr || co.stdout }
+    return { ok: true }
+  }
+  const baseRef = runGit(cloneDir, ["rev-parse", "--verify", `origin/${baseBranch}`]).ok
+    ? `origin/${baseBranch}`
+    : (runGit(cloneDir, ["rev-parse", "--verify", baseBranch]).ok ? baseBranch : "")
+  if (!baseRef) return { ok: false, error: `找不到基线分支: ${baseBranch}（本地与 origin 均无）` }
+  const co = runGit(cloneDir, ["checkout", "--no-track", "-b", featureBranch, baseRef])
+  if (!co.ok) return { ok: false, error: co.stderr || co.stdout }
+  return { ok: true }
+}
+
 /** feature 的 upstream 只允许指向 origin 同名分支：有则对齐，无则清掉（防止跟踪生产基线导致误推） */
-function ensureFeatureUpstream(worktreePath: string, featureBranch: string): void {
-  const remote = runGit(worktreePath, ["rev-parse", "--verify", `origin/${featureBranch}`])
+function ensureFeatureUpstream(cloneDir: string, featureBranch: string): void {
+  const remote = runGit(cloneDir, ["rev-parse", "--verify", `origin/${featureBranch}`])
   if (remote.ok) {
-    runGit(worktreePath, ["branch", `--set-upstream-to=origin/${featureBranch}`, featureBranch])
+    runGit(cloneDir, ["branch", `--set-upstream-to=origin/${featureBranch}`, featureBranch])
   } else {
-    runGit(worktreePath, ["branch", "--unset-upstream"])
+    runGit(cloneDir, ["branch", "--unset-upstream"])
   }
 }
 
-function ensureLocalBase(repoPath: string, baseBranch: string): WorktreeResult & { ref?: string } {
-  const name = baseBranch.trim()
-  if (!name) return { ok: false, error: "基线分支为空" }
-  const local = runGit(repoPath, ["rev-parse", "--verify", name])
-  if (local.ok) return { ok: true, ref: name }
-  const remote = runGit(repoPath, ["rev-parse", "--verify", `origin/${name}`])
-  if (!remote.ok) {
-    return { ok: false, error: `找不到基线分支: ${name}（本地与 origin 均无）` }
+/** 确保各 AI 工作目录存在且检出 feature：缺失时自动重建（建项失败/被手动删除的懒修复） */
+export function ensureCheckouts(repos: WorktreeRepoRef[], featureBranch: string): WorktreeResult {
+  for (const r of repos) {
+    const res = fs.existsSync(r.worktreePath)
+      ? checkoutFeature(r.worktreePath, featureBranch)
+      : addProjectClone({ repoPath: r.repoPath, worktreePath: r.worktreePath, featureBranch, baseBranch: r.baseBranch })
+    if (!res.ok) return { ok: false, error: `${path.basename(r.worktreePath)}: ${res.error}` }
   }
-  // 建本地同名分支指向 origin/base，不设置 upstream（避免绑生产远程）
-  const created = runGit(repoPath, ["branch", "--no-track", name, `origin/${name}`])
-  if (!created.ok) {
-    // 可能已存在竞争；再读一次
-    const again = runGit(repoPath, ["rev-parse", "--verify", name])
-    if (again.ok) return { ok: true, ref: name }
-    return { ok: false, error: `无法创建本地基线 ${name}: ${created.stderr || created.stdout}` }
-  }
-  return { ok: true, ref: name }
+  return { ok: true }
 }
 
-function resolveExistingBranch(repoPath: string, branch: string): WorktreeResult & { ref?: string } {
-  const name = branch.trim()
-  if (!name) return { ok: false, error: "分支名为空" }
-  const local = runGit(repoPath, ["rev-parse", "--verify", name])
-  if (local.ok) return { ok: true, ref: name }
-  const remote = runGit(repoPath, ["rev-parse", "--verify", `origin/${name}`])
-  if (remote.ok) return { ok: true, ref: `origin/${name}` }
-  return { ok: false, error: "分支不存在" }
+/** fetch + 快进同步远程 feature 新提交；失败不阻塞（离线可用本地代码），返回给用户的提示行 */
+export function syncCheckout(worktreePath: string, featureBranch: string): { note?: string } {
+  if (!fs.existsSync(worktreePath)) return {}
+  const name = path.basename(worktreePath)
+  const fetch = runGit(worktreePath, ["fetch", "origin", "--prune"], 30_000)
+  if (!fetch.ok) return { note: `⚠️ ${name}: 拉取远程失败（${(fetch.stderr || "超时").slice(0, 100)}），暂用本地代码` }
+  const remote = runGit(worktreePath, ["rev-parse", "--verify", `origin/${featureBranch}`])
+  if (!remote.ok) return {}
+  const behind = runGit(worktreePath, ["rev-list", "--count", `HEAD..origin/${featureBranch}`])
+  const n = parseInt(behind.stdout, 10)
+  if (!behind.ok || isNaN(n) || n === 0) return {}
+  const ff = runGit(worktreePath, ["merge", "--ff-only", `origin/${featureBranch}`])
+  if (ff.ok) return { note: `⬇️ ${name}: 已同步远程 ${n} 个新提交` }
+  return { note: `⚠️ ${name}: 远程有 ${n} 个新提交但与本地有分歧，未自动合并（可在项目会话让 AI 处理）` }
 }
 
+/** 确保工作目录检出 feature（独立 clone 无分支互斥；存量 worktree 项目被主仓占用时会失败并透出 git 原因） */
+export function checkoutFeature(worktreePath: string, featureBranch: string): WorktreeResult {
+  if (!fs.existsSync(worktreePath)) {
+    return { ok: false, error: `AI 工作目录不存在: ${worktreePath}` }
+  }
+  const cur = runGit(worktreePath, ["rev-parse", "--abbrev-ref", "HEAD"])
+  if (cur.ok && cur.stdout === featureBranch) return { ok: true }
+  const co = runGit(worktreePath, ["checkout", featureBranch])
+  if (co.ok) return { ok: true }
+  return { ok: false, error: co.stderr || co.stdout }
+}
+
+/** 删除 AI 工作目录：兼容存量 worktree 项目（先 worktree remove，兜底直接删目录，最后 prune 元数据） */
 export function removeProjectWorktree(repoPath: string, worktreePath: string): void {
+  const localRepo = !isRemoteRepoRef(repoPath) && fs.existsSync(repoPath)
   try {
-    if (fs.existsSync(repoPath)) {
-      runGit(repoPath, ["worktree", "remove", "--force", worktreePath])
-    }
+    if (localRepo) runGit(repoPath, ["worktree", "remove", "--force", worktreePath])
   } catch { /* ignore */ }
   try {
     if (fs.existsSync(worktreePath)) {
@@ -143,7 +193,7 @@ export function removeProjectWorktree(repoPath: string, worktreePath: string): v
     }
   } catch { /* ignore */ }
   try {
-    if (fs.existsSync(repoPath)) runGit(repoPath, ["worktree", "prune"])
+    if (localRepo) runGit(repoPath, ["worktree", "prune"])
   } catch { /* ignore */ }
 }
 
@@ -167,8 +217,6 @@ export function ensureClawExcluded(worktreePath: string): void {
   } catch { /* best-effort */ }
 }
 
-// ── 分支借还：leave 释放 feature 给主仓，进入/节点任务前切回 ─────────
-
 /** porcelain 状态行（剔除 .cursor-claw 产物目录）；查询失败按空处理 */
 function dirtyLines(worktreePath: string): string[] {
   if (!fs.existsSync(worktreePath)) return []
@@ -183,46 +231,11 @@ export function worktreeDirtyCount(worktreePath: string): number {
   return dirtyLines(worktreePath).length
 }
 
-/** 释放 feature：checkout --detach 停在原地（保留工作区改动）；已 detached 则跳过 */
-export function detachWorktree(worktreePath: string): WorktreeResult {
-  if (!fs.existsSync(worktreePath)) return { ok: true }
-  const head = runGit(worktreePath, ["symbolic-ref", "-q", "HEAD"])
-  if (!head.ok) return { ok: true }
-  const r = runGit(worktreePath, ["checkout", "--detach"])
-  return r.ok ? { ok: true } : { ok: false, error: r.stderr || r.stdout }
-}
-
-/** 项目全部 worktree 逐一切回 feature；任一失败即返回（错误带仓名前缀） */
-export function checkoutFeatureAll(worktrees: string[], featureBranch: string): WorktreeResult {
-  for (const wt of worktrees) {
-    const r = checkoutFeature(wt, featureBranch)
-    if (!r.ok) return { ok: false, error: `${path.basename(wt)}: ${r.error}` }
-  }
-  return { ok: true }
-}
-
-/** 确保 worktree 检出 feature；被其他工作树占用等失败时返回 git 原始错误（含占用路径） */
-export function checkoutFeature(worktreePath: string, featureBranch: string): WorktreeResult {
-  if (!fs.existsSync(worktreePath)) {
-    return { ok: false, error: `worktree 不存在: ${worktreePath}` }
-  }
-  const cur = runGit(worktreePath, ["rev-parse", "--abbrev-ref", "HEAD"])
-  if (cur.ok && cur.stdout === featureBranch) return { ok: true }
-  const co = runGit(worktreePath, ["checkout", featureBranch])
-  if (co.ok) return { ok: true }
-  return { ok: false, error: co.stderr || co.stdout }
-}
-
-/** add + 自动信息提交全部改动（排除 .cursor-claw 产物）；无改动时 files=0 直接成功 */
-export function commitAllInWorktree(worktreePath: string): { ok: boolean; error?: string; hash?: string; files: number } {
-  const lines = dirtyLines(worktreePath)
-  if (lines.length === 0) return { ok: true, files: 0 }
-  const add = runGit(worktreePath, ["add", "-A", "--", ".", ":(exclude).cursor-claw"])
-  if (!add.ok) return { ok: false, error: add.stderr || add.stdout, files: lines.length }
-  const names = lines.map((l) => l.slice(3).trim()).filter(Boolean).slice(0, 3)
-  const msg = `wip: 退出项目暂存（${lines.length} 个文件：${names.join(", ")}${lines.length > 3 ? " 等" : ""}）`
-  const commit = runGit(worktreePath, ["commit", "-m", msg])
-  if (!commit.ok) return { ok: false, error: commit.stderr || commit.stdout, files: lines.length }
-  const hash = runGit(worktreePath, ["rev-parse", "--short", "HEAD"])
-  return { ok: true, hash: hash.ok ? hash.stdout : undefined, files: lines.length }
+/** 未推送到 origin/feature 的提交数；无 upstream/查询失败返回 -1（未知） */
+export function unpushedCount(worktreePath: string, featureBranch: string): number {
+  if (!fs.existsSync(worktreePath)) return -1
+  const r = runGit(worktreePath, ["rev-list", "--count", `origin/${featureBranch}..HEAD`])
+  if (!r.ok) return -1
+  const n = parseInt(r.stdout, 10)
+  return isNaN(n) ? -1 : n
 }

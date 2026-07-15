@@ -421,11 +421,11 @@ export class LarkSender {
 
     formElements.push({ tag: "markdown", content: profiles.length ? "追加主仓·分支" : "主仓·分支" })
     formElements.push(
-      field("repoPathCustom", null, "主仓绝对路径，例如 D:/repos/foo", !profiles.length),
+      field("repoPathCustom", null, "主仓本地路径或远程地址（https/git@）", !profiles.length),
       field("baseBranchCustom", null, "生产基线分支，例如 main", !profiles.length),
       field("testBranchCustom", null, "测试分支，可空，例如 test"),
       field("developBranchCustom", null, "开发分支，可空，例如 develop"),
-      field("worktreeRoot", "worktree 根目录", "将在此下切出各主仓 feature；有历史会预填", true, opts.worktreeRoot || undefined),
+      field("worktreeRoot", "AI 工作目录", "各主仓将独立 checkout 到此目录下，与你的本地仓互不干扰", true, opts.worktreeRoot || undefined),
       field("featureBranch", "feature 分支", "可空，默认 feature/yyMMdd-名；已存在则复用"),
       field("storyUrl", "飞书项目链接", "可空"),
       field("productDocUrl", "产品文档", "可空"),
@@ -479,7 +479,7 @@ export class LarkSender {
         tag: "form",
         name: "repo_setup",
         elements: [
-          field("repoPath", "主仓绝对路径，例如 D:/repos/foo", true),
+          field("repoPath", "主仓本地路径或远程地址（https/git@）", true),
           field("baseBranch", "生产基线分支，例如 main", true),
           field("testBranch", "测试分支，可空"),
           field("developBranch", "开发分支，可空"),
@@ -549,7 +549,7 @@ export class LarkSender {
     const isWorktree = opts.form === "worktree"
     const formElements: any[] = isWorktree
       ? [
-        field("worktreeRoot", "worktree 根目录", "绝对路径，例如 D:/claw-projects", true, opts.worktreeRoot),
+        field("worktreeRoot", "AI 工作目录", "绝对路径，例如 D:/claw-projects", true, opts.worktreeRoot),
         {
           tag: "button", name: "submit", text: { tag: "plain_text", content: "保存" }, type: "primary",
           form_action_type: "submit",

@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process"
 import * as path from "node:path"
-import { chatIdFromSessionKey, normalizeSessionKey, workspaceDirFromSessionKey } from "./channel-types.js"
+import { chatIdFromSessionKey, normalizeSessionKey, parseChatKey, workspaceDirFromSessionKey } from "./channel-types.js"
 import { projectIdFromSessionKey, type Project } from "./project-types.js"
 
 export type SessionCardTitle = { title: string; subtitle?: string }
@@ -11,13 +11,14 @@ const SESSION_HEADER_TEMPLATES = [
   "carmine", "orange", "red", "green",
 ] as const
 
-/** 配色用规范 key：忽略路径转义/大小写差异；项目按 projectId；普通会话按 chat+工作目录 */
+/** 配色用规范 key：忽略路径转义/大小写/通道前缀差异；项目按 projectId；普通会话按 chat+工作目录 */
 export function sessionColorKey(sessionKey?: string): string {
   if (!sessionKey) return ""
   const sk = normalizeSessionKey(sessionKey) || sessionKey
   const pid = projectIdFromSessionKey(sk)
   if (pid) return `project:${pid}`
-  const chat = chatIdFromSessionKey(sk)
+  // 剥通道前缀（ch_xxx|oc_yyy → oc_yyy）：同一聊天在带/不带前缀两种 key 形态下必须同色
+  const chat = parseChatKey(chatIdFromSessionKey(sk)).chatId
   const ws = workspaceDirFromSessionKey(sk)
   if (ws) {
     const norm = path.normalize(ws).replace(/[\\/]+$/, "").toLowerCase()

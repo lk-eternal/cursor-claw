@@ -29,8 +29,8 @@ import {
 import { injectWorkspaceToDir } from "./workspace-injector"
 import { buildSessionCardTitle, readGitBranch, dirBaseName } from "../src/shared/session-label.js"
 import { getProject, listProjects, setCurrentProjectId, saveProject } from "../src/shared/project-store.js"
-import { projectIdFromSessionKey, projectSessionKey, projectWorktrees, isPlainProject } from "../src/shared/project-types.js"
-import { checkoutFeatureAll } from "./project-worktree"
+import { projectIdFromSessionKey, projectSessionKey, projectRepoRefs, isPlainProject } from "../src/shared/project-types.js"
+import { ensureCheckouts } from "./project-worktree"
 import { buildProjectSessionPrompt } from "./project-prompts"
 import { getSessionOverride } from "../src/shared/session-model-store.js"
 import { resolveModelLabel } from "../src/shared/model-utils.js"
@@ -789,12 +789,12 @@ export async function switchMainSession(sessionKey: string): Promise<{ ok: boole
   const pid = projectIdFromSessionKey(key)
   if (pid) {
     setCurrentProjectId(pid)
-    // 切回 leave 挂起的项目视作重新进入：恢复调度 + 尽力切回 feature（占用时由调度闸口提示）
+    // 存量挂起（旧版 leave）的项目切回视作重新进入：恢复调度 + 确保 AI 工作目录就绪
     const proj = getProject(pid)
     if (proj?.status === "paused") {
       proj.status = "active"
       saveProject(proj)
-      if (!isPlainProject(proj)) checkoutFeatureAll(projectWorktrees(proj), proj.featureBranch)
+      if (!isPlainProject(proj)) ensureCheckouts(projectRepoRefs(proj), proj.featureBranch)
     }
   }
   return { ok: true }
@@ -831,6 +831,10 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
       now,
     }))
     const chatBtns: { label: string; cmd: string }[] = [{ label: "🔄 刷新", cmd: "/c ls" }]
+    if (chatId) {
+      const mainKey = resolveMainSessionKey(chatId)
+      if (mainKey && mainKey !== chatId && mainKey !== active) chatBtns.push({ label: "🏠 主会话", cmd: "/c main" })
+    }
     sessions.slice(0, 10).forEach((_s2, i) => {
       chatBtns.push({ label: `#${i + 1}`, cmd: `/c ${i + 1}` })
     })
@@ -838,11 +842,34 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
     for (let i = 0; i < switchable.length && chatBtns.length < 18; i++) {
       chatBtns.push({ label: `#${sessions.length + i + 1}`, cmd: `/c ${sessions.length + i + 1}` })
     }
-    const usage = "💡 点序号切换 · /c stop <序号> 停止 · /c del <序号> 删除 · /c new <描述> 新临时会话"
+    const usage = "💡 点序号切换 · /c main 回主会话 · /c stop <序号> 停止 · /c del <序号> 删除 · /c new <描述> 新临时会话"
     const parts = [`📋 活跃会话 (${sessions.length})　★=当前`, "", blocks.join("\n\n")]
     if (swLines.length) parts.push("", `▶ 可切换（未运行，切过去后下一条消息自动拉起）`, swLines.join("\n"))
     parts.push("", usage)
     await reply(true, parts.filter((x, i, a) => !(x === "" && a[i - 1] === "")).join("\n"), chatBtns)
+    return
+  }
+
+  // 一键切回主会话：只改路由指针，项目/其他会话留在后台不动（区别于 /p leave 的清项目指针）
+  if (sub === "main" || sub === "home" || sub === "0") {
+    if (!chatId) { await reply(false, "❌ 无法定位会话来源"); return }
+    const mainKey = resolveMainSessionKey(chatId)
+    if (!mainKey || mainKey === chatId) { await reply(false, "❌ 未配置主工作目录，无法定位主会话"); return }
+    if (activeKey === mainKey) { await reply(true, "🏠 当前已在主会话"); return }
+    const fromProject = activeKey ? projectIdFromSessionKey(activeKey) : null
+    await syncActiveSession(port, chatId, mainKey)
+    const ws = workspaceDirFromSessionKey(mainKey)
+    const block = await formatCurrentSessionBlock(mainKey, ws)
+    const head = fromProject
+      ? "🏠 已切回主会话（项目留在后台，随时 /p use 或点项目按钮回去）"
+      : "🏠 已切回主会话"
+    const btns: { label: string; cmd: string }[] = [{ label: "切换会话 /c", cmd: "/c" }]
+    if (fromProject) btns.push({ label: "退出项目 /p leave", cmd: "/p leave" })
+    await reportCommandResult(port, messageId, true, [head, "", block].join("\n"), chatId, btns, {
+      cardTitle: buildSessionCardTitle({ workspaceDir: ws }),
+      sessionKey: mainKey,
+      ...(patchMessageId ? { patchMessageId } : {}),
+    })
     return
   }
 
@@ -955,7 +982,7 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
     return
   }
 
-  await reply(false, ["💡 /c 子命令（全称 /chat）","🔹 /c ls — 列出活跃与可切换会话","🔹 /c <序号> — 切换到指定会话","🔹 /c stop <序号> — 停止指定会话","🔹 /c del <序号> — 删除指定会话","🔹 /c new <描述> — 创建新临时会话"].join("\n"))
+  await reply(false, ["💡 /c 子命令（全称 /chat）","🔹 /c ls — 列出活跃与可切换会话","🔹 /c <序号> — 切换到指定会话","🔹 /c main — 一键切回主会话","🔹 /c stop <序号> — 停止指定会话","🔹 /c del <序号> — 删除指定会话","🔹 /c new <描述> — 创建新临时会话"].join("\n"))
 }
 
 // ── 僵尸 Agent 检测 ──────────────────────────────────────
@@ -1057,18 +1084,18 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
         }
         continue
       }
-      // feature 可能被 /p leave 释放或被主仓（IDE）占用：拉起前切回；占用则拦下并节流提醒（纯会话型无 git 直接放行）
-      const co = isPlainProject(proj) ? { ok: true as const, error: undefined } : checkoutFeatureAll(projectWorktrees(proj), proj.featureBranch)
+      // 拉起前确保 AI 工作目录就绪（缺失自动重建、切回 feature）；失败拦下并节流提醒（纯会话型无 git 直接放行）
+      const co = isPlainProject(proj) ? { ok: true as const, error: undefined } : ensureCheckouts(projectRepoRefs(proj), proj.featureBranch)
       if (!co.ok) {
-        broadcastLog(`[Agent] 项目「${proj.name}」feature 分支不可用，暂缓拉起: ${co.error}`, "WARN")
+        broadcastLog(`[Agent] 项目「${proj.name}」AI 工作目录不可用，暂缓拉起: ${co.error}`, "WARN")
         const lastAt = featureOccupiedNotifyAt.get(sessionKey) ?? 0
         if (Date.now() - lastAt > 10 * 60_000) {
           featureOccupiedNotifyAt.set(sessionKey, Date.now())
           await notifyChat(sessionKey, [
-            `⚠️ 项目「${proj.name}」的 feature 分支被其他工作树占用，消息暂无法处理：`,
+            `⚠️ 项目「${proj.name}」的 AI 工作目录不可用，消息暂无法处理：`,
             co.error || "",
             "",
-            `请在占用方（如 IDE）切到其他分支后重发消息（分支 ${proj.featureBranch}）`,
+            "处理故障后重发消息即可（缺失的目录会自动重建）",
           ].join("\n"))
         }
         continue

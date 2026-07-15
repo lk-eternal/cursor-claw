@@ -1112,7 +1112,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                   </div>
                 </div>
                 <div>
-                  <label className="mb-1 block text-xs text-gray-500">worktree 根目录</label>
+                  <label className="mb-1 block text-xs text-gray-500">AI 工作目录</label>
                   <div className="flex gap-2">
                     <input type="text" value={worktreeRoot} onChange={(e) => setWorktreeRoot(e.target.value)} placeholder="D:\claw-projects" className={inputCls} />
                     <button
