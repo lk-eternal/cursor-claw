@@ -149,7 +149,7 @@ declare global {
     applyWorkspaceSwitch(workspaceDir: string, stopOldSessions: boolean, notifyMain?: boolean): Promise<{ ok: boolean; error?: string }>
     respondWindowClose(payload: { action: "minimize" | "quit" | "cancel"; remember: boolean }): Promise<void>
     selectDirectory(): Promise<string | null>
-    getToolboxStatus(): Promise<{ larkCli: { installed: boolean; version?: string; loggedIn?: boolean; userName?: string }; meegle: { installed: boolean; version?: string } }>
+    getToolboxStatus(): Promise<{ larkCli: { installed: boolean; version?: string; loggedIn?: boolean; userName?: string }; meegle: { installed: boolean; version?: string }; nodeOk?: boolean; nodeVersion?: string }>
     installToolboxTool(key: "larkCli" | "meegle"): Promise<{ ok: boolean; error?: string }>
     loginLarkCli(): Promise<{ ok: boolean; error?: string }>
     injectWorkspace(): Promise<{ results: { file: string; action: "created" | "updated" | "skipped"; message: string }[] }>
@@ -169,7 +169,7 @@ declare global {
     onSessionAgents(cb: (list: { sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string; workspaceDir?: string; source?: "cli" | "sdk" }[]) => void): () => void
     getDaemonStatus(): Promise<DaemonStatus>
     getLogBuffer(): Promise<string[]>
-    getQueueMessages(): Promise<{ index: number; fileId: string; preview: string; status?: "pending" | "processing"; sessionKey?: string; chatType?: string; timestamp?: number; senderOpenId?: string }[]>
+    getQueueMessages(): Promise<{ index: number; fileId: string; preview: string; status?: "pending" | "processing"; sessionKey?: string; chatType?: string; timestamp?: number; senderOpenId?: string; sessionLabel?: string }[]>
     deleteQueueMessage(fileId: string): Promise<boolean>
     clearQueueMessages(): Promise<number>
     checkCli(): Promise<boolean>

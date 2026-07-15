@@ -4,7 +4,7 @@ import { Loader2, Download, CheckCircle2, LogIn, RefreshCw } from "lucide-react"
 interface ToolStatus { installed: boolean; version?: string; loggedIn?: boolean; userName?: string }
 
 export default function ToolboxPanel() {
-  const [status, setStatus] = useState<{ larkCli: ToolStatus; meegle: ToolStatus } | null>(null)
+  const [status, setStatus] = useState<{ larkCli: ToolStatus; meegle: ToolStatus; nodeOk?: boolean; nodeVersion?: string } | null>(null)
   const [busy, setBusy] = useState("")
   const [error, setError] = useState("")
 
@@ -70,6 +70,12 @@ export default function ToolboxPanel() {
       <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
         <h3 className="text-sm font-semibold text-gray-100">飞书集成</h3>
         <p className="mt-1 text-xs text-gray-500">内置官方 CLI、装完登录即可——AI 自动获得飞书 / 飞书项目全部能力</p>
+        <p className="mt-2 text-xs text-gray-500">
+          依赖 Node.js
+          {status?.nodeOk
+            ? <span className="text-green-400">（已检测到{status.nodeVersion ? ` v${status.nodeVersion}` : ""}）</span>
+            : <span className="text-amber-400">（未检测到——请先装 <a href="https://nodejs.org" target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">nodejs.org</a> 并勾选 Add to PATH，然后重启本应用）</span>}
+        </p>
         {anyInstalled && (
           <button onClick={() => void updateAll()} disabled={!!busy}
             className="mt-3 flex items-center gap-1 rounded-md border border-gray-700 px-2.5 py-1 text-xs text-gray-300 transition hover:border-blue-500 hover:text-blue-300 disabled:opacity-50">
@@ -81,7 +87,7 @@ export default function ToolboxPanel() {
           {toolRow("飞书（lark-cli）", status?.larkCli, "larkCli")}
           {toolRow("飞书项目（meegle）", status?.meegle, "meegle")}
         </div>
-        {error && <p className="mt-3 text-xs text-red-400">{error}</p>}
+        {error && <p className="mt-3 text-xs leading-relaxed text-red-400">{error}</p>}
       </div>
     </section>
   )

@@ -50,7 +50,7 @@ export default function Dashboard({ onSettings, active }: Props) {
   const [starting, setStarting] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [actionError, setActionError] = useState("")
-  const [queueMessages, setQueueMessages] = useState<{ index: number; fileId: string; preview: string; status?: "pending" | "processing"; sessionKey?: string; chatType?: string; timestamp?: number; senderOpenId?: string }[]>([])
+  const [queueMessages, setQueueMessages] = useState<{ index: number; fileId: string; preview: string; status?: "pending" | "processing"; sessionKey?: string; chatType?: string; timestamp?: number; senderOpenId?: string; sessionLabel?: string }[]>([])
   const [showQueue, setShowQueue] = useState(false)
   const [showChannels, setShowChannels] = useState(false)
   const [expandedSession, setExpandedSession] = useState<string | null>(null)
@@ -587,16 +587,29 @@ export default function Dashboard({ onSettings, active }: Props) {
     return d.toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
   }
 
-  const getSessionLabel = (msg: { sessionKey?: string; chatType?: string }) => {
+  const getSessionLabel = (msg: { sessionKey?: string; chatType?: string; sessionLabel?: string }) => {
+    if (msg.sessionLabel) return msg.sessionLabel
     if (!msg.sessionKey) return "未知会话"
+    const chatLabel = msg.chatType === "group" ? "群聊" : msg.chatType === "task" ? "定时" : "私聊"
+    const tab = sessionTabs.find((t) => t.sessionKey === msg.sessionKey)
+    if (tab?.label) {
+      const icon = tab.kind === "project" ? "📦" : tab.kind === "temp" ? "⏱" : "📁"
+      return `${chatLabel} ${icon}${tab.label}`
+    }
+    const running = sessionList.find((s) => s.sessionKey === msg.sessionKey)
+    if (running?.chatName) return `${chatLabel} ${running.chatName}`
     const parts = msg.sessionKey.split("::")
-    const wsDir = parts[1] || ""
+    const suffix = parts[1] || ""
+    if (suffix.startsWith("project_")) return `${chatLabel} 📦项目 ${suffix.slice(8, 20)}`
+    if (suffix.startsWith("temp_") || msg.sessionKey.startsWith("temp_")) return `${chatLabel} ⏱临时会话`
     const peers = [
       ...sessionList.map((s) => s.workspaceDir),
-      ...queueMessages.map((m) => m.sessionKey?.split("::")[1]),
+      ...queueMessages.map((m) => {
+        const s = m.sessionKey?.split("::")[1]
+        return s && /[\\/]/.test(s) ? s : undefined
+      }),
     ].filter((d): d is string => !!d)
-    const dir = wsDir ? disambiguatePathLabel(wsDir, peers.length ? peers : [wsDir]) : ""
-    const chatLabel = msg.chatType === "group" ? "群聊" : msg.chatType === "task" ? "定时" : "私聊"
+    const dir = suffix && /[\\/]/.test(suffix) ? disambiguatePathLabel(suffix, peers.length ? peers : [suffix]) : ""
     return `${chatLabel}${dir ? ` 📁${dir}` : ""}`
   }
 

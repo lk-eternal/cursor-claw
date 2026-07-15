@@ -265,6 +265,16 @@ export interface QueueMessageItem {
   chatType?: string
   timestamp?: number
   senderOpenId?: string
+  /** UI 展示用：私聊/群聊 + 项目名或目录名（避免裸 project_xxx） */
+  sessionLabel?: string
+}
+
+function queueSessionLabel(sessionKey: string, chatType?: string): string {
+  const chatLabel = chatType === "group" ? "群聊" : chatType === "task" ? "定时" : "私聊"
+  const name = tabLabelForSession(sessionKey)
+  const kind = sessionTabKind(sessionKey)
+  const icon = kind === "project" ? "📦" : kind === "temp" ? "⏱" : "📁"
+  return `${chatLabel} ${icon}${name}`
 }
 
 export async function getQueueMessages(): Promise<QueueMessageItem[]> {
@@ -272,7 +282,10 @@ export async function getQueueMessages(): Promise<QueueMessageItem[]> {
   if (!lock?.port) return []
   try {
     const res = await httpGet(`http://127.0.0.1:${lock.port}/queue`) as { messages?: QueueMessageItem[] }
-    return res.messages ?? []
+    return (res.messages ?? []).map((m) => ({
+      ...m,
+      sessionLabel: m.sessionKey ? queueSessionLabel(m.sessionKey, m.chatType) : undefined,
+    }))
   } catch {
     return []
   }

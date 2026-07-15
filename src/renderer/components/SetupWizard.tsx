@@ -45,8 +45,9 @@ export default function SetupWizard({ open, onClose }: Props) {
   const [binding, setBinding] = useState(false)
   const [bindDone, setBindDone] = useState(false)
   const [bindErr, setBindErr] = useState("")
-  const [toolStatus, setToolStatus] = useState<{ larkCli: { installed: boolean }; meegle: { installed: boolean } } | null>(null)
+  const [toolStatus, setToolStatus] = useState<{ larkCli: { installed: boolean }; meegle: { installed: boolean }; nodeOk?: boolean; nodeVersion?: string } | null>(null)
   const [toolBusy, setToolBusy] = useState("")
+  const [toolErr, setToolErr] = useState("")
 
   const advanceTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const goto = (s: number) => { setStep(s); setMaxStep((m) => Math.max(m, s)) }
@@ -183,9 +184,13 @@ export default function SetupWizard({ open, onClose }: Props) {
 
   const installTool = async (key: "larkCli" | "meegle") => {
     setToolBusy(key)
+    setToolErr("")
     try {
-      await window.electronAPI.installToolboxTool(key)
+      const r = await window.electronAPI.installToolboxTool(key)
+      if (!r.ok) setToolErr(r.error || "安装失败")
       setToolStatus(await window.electronAPI.getToolboxStatus())
+    } catch (e: any) {
+      setToolErr(e?.message || "安装失败")
     } finally {
       setToolBusy("")
     }
@@ -356,6 +361,13 @@ export default function SetupWizard({ open, onClose }: Props) {
               给 AI 装上飞书的手脚：装完并登录后，AI 能帮你读写飞书文档、查日历、管理飞书项目。
               也可以以后在 设置 → 工具箱 里随时安装。
             </p>
+            <p className="mt-2 rounded-lg border border-amber-800/40 bg-amber-950/30 px-3 py-2 text-xs leading-relaxed text-amber-200/90">
+              一键安装需要本机已装 <span className="font-medium text-amber-100">Node.js</span>
+              （<a href="https://nodejs.org" target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">nodejs.org</a>
+              ，安装时勾选 Add to PATH）。新电脑若未安装，点安装会失败并在下方提示原因。
+              {toolStatus && toolStatus.nodeOk === false && <span className="mt-1 block text-red-300">当前未检测到 Node.js。</span>}
+              {toolStatus?.nodeOk && toolStatus.nodeVersion && <span className="mt-1 block text-green-400/80">已检测到 Node v{toolStatus.nodeVersion}</span>}
+            </p>
             <div className="mt-6 space-y-3">
               {(["larkCli", "meegle"] as const).map((key) => {
                 const meta = key === "larkCli" ? { label: "飞书（lark-cli）", desc: "文档 / 日历 / 消息 / 表格" } : { label: "飞书项目（meegle）", desc: "飞书项目（Meegle）管理" }
@@ -379,6 +391,7 @@ export default function SetupWizard({ open, onClose }: Props) {
                 )
               })}
             </div>
+            {toolErr && <p className="mt-3 text-xs leading-relaxed text-red-400">{toolErr}</p>}
             <button onClick={() => void finish(true)} className="mt-8 flex items-center gap-2 rounded-lg bg-green-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-green-500">
               <CheckCircle2 size={15} />完成，开始使用
             </button>
