@@ -39,13 +39,15 @@ export async function reportCommandResult(
   extra?: CommandResultExtra,
 ): Promise<void> {
   try {
+    // daemon 端要等飞书 API 发送完成才应答，默认 3s 超时会把慢请求误判失败，
+    // 用户就永远停在「正在处理…」卡片上（如建项结果卡）
     await httpPost(`http://127.0.0.1:${port}/cmd/result`, {
       messageId, ok, message, chatId, buttons,
       cardTitle: extra?.cardTitle,
       sections: extra?.sections,
       sessionKey: extra?.sessionKey,
       patchMessageId: extra?.patchMessageId,
-    })
+    }, 20000)
   } catch (e: unknown) {
     broadcastLog(`指令结果回报失败: ${e instanceof Error ? e.message : e}`, "WARN")
   }
