@@ -1110,8 +1110,13 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
     const meta: import("./agent-launcher").LaunchMeta = { chatId, chatType: chatType as "p2p" | "group" }
     const result = await launchSessionAgent(sessionKey, chatType as "p2p" | "group", meta, mainUser, senderOpenId)
     if (result.ok && chatId !== sessionKey) {
+      // 被动拉起（处理残留消息）不得抢占用户已选路由：重启后主会话恢复曾把用户从项目会话踢回主会话。
+      // 仅在该 chat 尚无具体 active 路由（无记录/裸 chatKey 兜底态）时才登记
       const lock = cachedLock()
-      if (lock?.port) await syncActiveSession(lock.port, chatId, sessionKey)
+      if (lock?.port) {
+        const cur = await getCurrentActiveSession(lock.port, chatId)
+        if (!cur || cur === chatId) await syncActiveSession(lock.port, chatId, sessionKey)
+      }
     }
     if (!result.ok) {
       broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${result.error}`)
