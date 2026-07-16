@@ -10,7 +10,7 @@ import { listSdkModels, switchSdkSessionModel, getSdkSessionList, hasResumableSd
 import { listQuickModels, getSessionOverride, type ModelEntry } from "../src/shared/session-model-store.js"
 import { resolveModelLabel, rememberModelLabel } from "../src/shared/model-utils.js"
 import { McpServerEntry, getMcpServerList, getMcpEnabledMap, toggleMcpServer, deleteMcpServer, saveMcpServer } from "./mcp-manager"
-import { httpPost, getCurrentActiveSession } from "./daemon-client"
+import { httpPost, getCurrentActiveSession, enqueueToMainSession } from "./daemon-client"
 
 // ── 共享类型与工具 ─────────────────────────────────────────
 
@@ -455,10 +455,7 @@ export async function handleFeishuTaskCommand(
         await reportCommandResult(port, messageId, false, `❌ 独立启动失败: ${result.error}`, chatId)
       }
     } else {
-      const enqueue = taskEnqueueFn ?? (async (c) => {
-        await httpPost(`http://127.0.0.1:${port}/enqueue`, { content: c, chatId, chatType: chatId ? "p2p" : undefined })
-        return { ok: true }
-      })
+      const enqueue = taskEnqueueFn ?? ((c, preferredChatId) => enqueueToMainSession(port, c, preferredChatId ?? chatId))
       const result = await enqueue(content, chatId)
       if (result.ok) {
         await reportCommandResult(port, messageId, true, `🚀 已手动触发任务 #${idx} ${t.name}`, chatId)

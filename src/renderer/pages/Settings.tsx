@@ -59,6 +59,22 @@ interface TaskItem {
   id: string; name: string; cron: string; content: string; enabled: boolean; independent?: boolean
   channelId?: string; model?: string; modelParams?: string
 }
+interface ProjectListItem {
+  id: string
+  name: string
+  goal?: string
+  storyUrl?: string
+  productDocUrl?: string
+  techDocUrl?: string
+  featureBranch: string
+  status: string
+  groupId?: string
+  worktreePath?: string
+  repoPath?: string
+  workspaceType?: string
+}
+type ProjectsSubTab = "list" | "settings"
+const PROJECT_STATUS_LABEL: Record<string, string> = { active: "进行中", paused: "已暂停", done: "已完成" }
 
 const MCP_TEMPLATE = JSON.stringify({
   "my-mcp-server": { command: "npx", args: ["-y", "@some/mcp-server"] },
@@ -70,11 +86,11 @@ const TABS: { id: Tab; label: string; icon: typeof SettingsIcon }[] = [
   { id: "proxy", label: "网络", icon: Network },
   { id: "agent", label: "Agent", icon: Bot },
   { id: "channel", label: "消息通道", icon: MessageSquare },
+  { id: "projects", label: "项目", icon: FolderOpen },
   { id: "mcp", label: "MCP", icon: Blocks },
   { id: "rules", label: "Rules", icon: FileCode2 },
   { id: "skills", label: "Skills", icon: Sparkles },
   { id: "tasks", label: "定时任务", icon: Timer },
-  { id: "projects", label: "项目工作区", icon: FolderOpen },
   { id: "toolbox", label: "工具箱", icon: Wrench },
   { id: "setup", label: "帮助引导", icon: BookOpen },
   { id: "about", label: "关于", icon: Info },
@@ -112,6 +128,9 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
   const [nodeEditing, setNodeEditing] = useState<(ProjectNodeItem & { index: number }) | null>(null)
   const [groupEditing, setGroupEditing] = useState<{ id: string; name: string; index: number; workspace: "worktree" | "plain" } | null>(null)
   const [worktreeRoot, setWorktreeRoot] = useState("")
+  const [projectsSubTab, setProjectsSubTab] = useState<ProjectsSubTab>("list")
+  const [projectList, setProjectList] = useState<ProjectListItem[]>([])
+  const [projectEditing, setProjectEditing] = useState<ProjectListItem | null>(null)
   const [updateBusy, setUpdateBusy] = useState(false)
   const [updateCheck, setUpdateCheck] = useState<Awaited<ReturnType<typeof window.electronAPI.checkAppUpdate>> | null>(null)
   const [updateMsg, setUpdateMsg] = useState<string | null>(null)
@@ -197,6 +216,9 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
   }, [])
   const refreshTasks = useCallback(() => {
     window.electronAPI.getScheduledTasks().then(setTasks)
+  }, [])
+  const refreshProjectList = useCallback(() => {
+    void window.electronAPI.listProjects().then(setProjectList).catch(() => setProjectList([]))
   }, [])
 
   useEffect(() => {
@@ -305,6 +327,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
     }
     if (tab === "projects") {
       projectsLoaded.current = false
+      refreshProjectList()
       window.electronAPI.getConfig().then((config) => {
         setGitlabToken(config.gitlabToken ?? "")
         setGitlabHost(config.gitlabHost ?? "")
@@ -320,7 +343,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
         setActiveGroupId((prev) => gs.some((g) => g.id === prev) ? prev : (gs[0]?.id ?? ""))
       }).catch(() => {})
     }
-  }, [tab, refreshMcpServers, refreshRules, refreshSkills, refreshTasks])
+  }, [tab, refreshMcpServers, refreshRules, refreshSkills, refreshTasks, refreshProjectList])
 
   const autoSave = useCallback(() => {
     if (!loaded.current) return
@@ -734,6 +757,34 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
     setGroupEditing(null)
   }
 
+  const handleProjectSwitch = async (id: string) => {
+    const r = await window.electronAPI.switchProject(id)
+    if (!r.ok) void showAlert("错误", r.error ?? "切换失败")
+    refreshProjectList()
+  }
+  const handleProjectDelete = async (p: ProjectListItem) => {
+    if (!(await showConfirm("删除项目", `确定删除「${p.name}」？\n将移除 AI 工作目录（含未提交改动）；主仓与远程分支不受影响。`, "删除", "取消"))) return
+    const r = await window.electronAPI.deleteProject(p.id)
+    if (!r.ok) void showAlert("错误", r.error ?? "删除失败")
+    refreshProjectList()
+  }
+  const handleProjectSave = async () => {
+    if (!projectEditing || !projectEditing.name.trim()) return
+    const r = await window.electronAPI.updateProject({
+      id: projectEditing.id,
+      name: projectEditing.name.trim(),
+      goal: projectEditing.goal?.trim() || "",
+      storyUrl: projectEditing.storyUrl?.trim() || "",
+      productDocUrl: projectEditing.productDocUrl?.trim() || "",
+      techDocUrl: projectEditing.techDocUrl?.trim() || "",
+      status: projectEditing.status,
+      groupId: projectEditing.groupId?.trim() || "",
+    })
+    if (!r.ok) { void showAlert("错误", r.error ?? "保存失败"); return }
+    setProjectEditing(null)
+    refreshProjectList()
+  }
+
   const inputCls = "w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm outline-none transition focus:border-blue-500"
 
   return (
@@ -1071,8 +1122,61 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
 
             {/* ═══ Projects ═══ */}
             {tab === "projects" && (<>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button type="button"
+                  onClick={() => { setProjectsSubTab("list"); refreshProjectList() }}
+                  className={`rounded-md border px-3 py-1.5 text-xs transition ${projectsSubTab === "list" ? "border-blue-500 bg-blue-500/10 font-medium text-white" : "border-gray-700 text-gray-400 hover:bg-gray-800 hover:text-gray-200"}`}
+                >项目列表</button>
+                <button type="button"
+                  onClick={() => setProjectsSubTab("settings")}
+                  className={`rounded-md border px-3 py-1.5 text-xs transition ${projectsSubTab === "settings" ? "border-blue-500 bg-blue-500/10 font-medium text-white" : "border-gray-700 text-gray-400 hover:bg-gray-800 hover:text-gray-200"}`}
+                >项目设置</button>
+              </div>
+
+              {projectsSubTab === "list" && (
+                <section className="space-y-3">
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-sm font-medium text-gray-300">项目列表</h3>
+                    <button onClick={refreshProjectList} className="flex items-center gap-1 rounded px-2 py-0.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white"><RefreshCw size={12} />刷新</button>
+                  </div>
+                  <div className="space-y-2">
+                    {projectList.map((p) => (
+                      <div key={p.id} className="flex items-center justify-between rounded-lg border border-gray-700 px-4 py-3">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <p className="truncate text-sm font-medium text-gray-200">{p.name}</p>
+                            <span className="shrink-0 rounded bg-gray-800 px-1.5 py-0.5 font-mono text-[10px] text-gray-500">{p.featureBranch}</span>
+                            <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] ${p.status === "active" ? "bg-green-900/40 text-green-400" : p.status === "paused" ? "bg-yellow-900/40 text-yellow-400" : "bg-gray-800 text-gray-500"}`}>
+                              {PROJECT_STATUS_LABEL[p.status] ?? p.status}
+                            </span>
+                          </div>
+                          {p.storyUrl && <p className="truncate text-xs text-gray-500">{p.storyUrl}</p>}
+                        </div>
+                        <div className="ml-3 flex shrink-0 items-center gap-1.5">
+                          <button type="button" onClick={() => handleProjectSwitch(p.id)}
+                            className="rounded px-2 py-0.5 text-xs text-blue-400 transition hover:bg-blue-600/20">切换至</button>
+                          <button type="button" onClick={() => setProjectEditing({
+                            ...p,
+                            goal: p.goal ?? "",
+                            storyUrl: p.storyUrl ?? "",
+                            productDocUrl: p.productDocUrl ?? "",
+                            techDocUrl: p.techDocUrl ?? "",
+                            groupId: p.groupId ?? nodeGroups[0]?.id ?? "",
+                          })}
+                            className="rounded px-2 py-0.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white">修改</button>
+                          <button type="button" onClick={() => handleProjectDelete(p)}
+                            className="rounded px-2 py-0.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-red-400">删除</button>
+                        </div>
+                      </div>
+                    ))}
+                    {projectList.length === 0 && <p className="py-4 text-center text-xs text-gray-600">暂无项目</p>}
+                  </div>
+                </section>
+              )}
+
+              {projectsSubTab === "settings" && (<>
               <section className="space-y-4">
-                <h3 className="text-sm font-medium text-gray-300">项目工作区（/p）</h3>
+                <h3 className="text-sm font-medium text-gray-300">项目配置</h3>
                 <div>
                   <label className="mb-1 block text-xs text-gray-500">GitLab Token</label>
                   <input type="password" value={gitlabToken} onChange={(e) => setGitlabToken(e.target.value)} placeholder="glpat-..." className={inputCls} />
@@ -1179,6 +1283,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                   </div>
                 )}
               </section>
+              </>)}
             </>)}
 
             {/* ═══ Toolbox ═══ */}
@@ -1492,6 +1597,67 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                   className="rounded-md bg-blue-600 px-4 py-1.5 text-xs font-medium text-white transition hover:bg-blue-500 disabled:opacity-40"
                 >保存</button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═══ Project Edit Modal ═══ */}
+      {projectEditing && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="flex max-h-[85vh] w-full max-w-lg flex-col rounded-xl border border-gray-700 bg-gray-900 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-gray-800 px-6 py-4">
+              <h3 className="text-sm font-semibold text-gray-200">修改项目</h3>
+              <button onClick={() => setProjectEditing(null)} className="text-gray-500 hover:text-white"><X size={16} /></button>
+            </div>
+            <div className="space-y-3 overflow-y-auto px-6 py-4">
+              <div><label className="mb-1 block text-xs text-gray-500">名称</label>
+                <input type="text" value={projectEditing.name}
+                  onChange={(e) => setProjectEditing({ ...projectEditing, name: e.target.value })}
+                  className={inputCls} placeholder="项目名称" /></div>
+              <div><label className="mb-1 block text-xs text-gray-500">目标（可空）</label>
+                <textarea value={projectEditing.goal ?? ""}
+                  onChange={(e) => setProjectEditing({ ...projectEditing, goal: e.target.value })}
+                  rows={2} className={inputCls} placeholder="项目目标描述" /></div>
+              <div className="grid grid-cols-2 gap-3">
+                <div><label className="mb-1 block text-xs text-gray-500">状态</label>
+                  <select value={projectEditing.status}
+                    onChange={(e) => setProjectEditing({ ...projectEditing, status: e.target.value })}
+                    className={inputCls}>
+                    <option value="active">进行中</option>
+                    <option value="paused">已暂停</option>
+                    <option value="done">已完成</option>
+                  </select></div>
+                <div><label className="mb-1 block text-xs text-gray-500">流程组</label>
+                  <select value={projectEditing.groupId ?? ""}
+                    onChange={(e) => setProjectEditing({ ...projectEditing, groupId: e.target.value })}
+                    className={inputCls}>
+                    {nodeGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+                  </select></div>
+              </div>
+              <div><label className="mb-1 block text-xs text-gray-500">飞书项目 / 需求链接</label>
+                <input type="text" value={projectEditing.storyUrl ?? ""}
+                  onChange={(e) => setProjectEditing({ ...projectEditing, storyUrl: e.target.value })}
+                  className={inputCls} placeholder="https://project.feishu.cn/..." /></div>
+              <div><label className="mb-1 block text-xs text-gray-500">产品文档</label>
+                <input type="text" value={projectEditing.productDocUrl ?? ""}
+                  onChange={(e) => setProjectEditing({ ...projectEditing, productDocUrl: e.target.value })}
+                  className={inputCls} placeholder="https://..." /></div>
+              <div><label className="mb-1 block text-xs text-gray-500">技术文档</label>
+                <input type="text" value={projectEditing.techDocUrl ?? ""}
+                  onChange={(e) => setProjectEditing({ ...projectEditing, techDocUrl: e.target.value })}
+                  className={inputCls} placeholder="https://..." /></div>
+              <div className="rounded-lg border border-gray-800 bg-gray-950/50 px-3 py-2 text-[11px] text-gray-500">
+                <p className="mb-1 text-gray-400">只读（改这些请重建项目）</p>
+                <p className="truncate">🌿 {projectEditing.featureBranch || "—"}</p>
+                {projectEditing.repoPath && <p className="truncate">📦 {projectEditing.repoPath}</p>}
+                {projectEditing.worktreePath && <p className="truncate">📁 {projectEditing.worktreePath}</p>}
+                {projectEditing.workspaceType && <p>类型：{projectEditing.workspaceType === "plain" ? "纯会话" : "代码开发"}</p>}
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-gray-800 px-6 py-4">
+              <button onClick={() => setProjectEditing(null)} className="rounded-md px-4 py-1.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white">取消</button>
+              <button onClick={handleProjectSave} disabled={!projectEditing.name.trim()} className="rounded-md bg-blue-600 px-4 py-1.5 text-xs font-medium text-white transition hover:bg-blue-500 disabled:opacity-40">保存</button>
             </div>
           </div>
         </div>

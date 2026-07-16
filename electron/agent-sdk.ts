@@ -154,7 +154,7 @@ function buildWakePrompt(session: SdkSessionAgent, rulesUpdated = false, taskMes
 
 let sdkIdleHandler: ((sessionKey: string) => void) | null = null
 /** sessionKey → 连续失败次数与最近失败时间（冷却判定在调度器层，对所有叫醒源生效） */
-const sdkFailStreak = new Map<string, { count: number; lastFailAt: number }>()
+const sdkFailStreak = new Map<string, { count: number; lastFailAt: number; network?: boolean }>()
 
 /** run 收口释放后回调（调度器借此立即消费运行期间积压的消息，含异常结束） */
 export function setSdkIdleHandler(fn: (sessionKey: string) => void): void {
@@ -182,22 +182,31 @@ function recentGlobalErrorHint(withinMs: number): string {
   return ""
 }
 
-/** 失败冷却剩余毫秒：2s→60s 指数递增，超 8 次降频为 10 分钟一次（自愈不放弃） */
+/** 失败冷却：网络类短退避（1→8s），其它 2→30s；超 8 次网络 60s / 其它 3min（不再 10 分钟干等） */
 export function sdkFailCooldownRemaining(sessionKey: string): number {
   const st = sdkFailStreak.get(sessionKey)
   if (!st) return 0
-  const cool = st.count > 8 ? 10 * 60_000 : Math.min(60_000, 2_000 * Math.pow(2, Math.min(st.count - 1, 5)))
+  let cool: number
+  if (st.network) {
+    cool = st.count > 8 ? 60_000 : Math.min(8_000, 1_000 * Math.pow(2, Math.min(st.count - 1, 3)))
+  } else {
+    cool = st.count > 8 ? 3 * 60_000 : Math.min(30_000, 2_000 * Math.pow(2, Math.min(st.count - 1, 4)))
+  }
   return Math.max(0, st.lastFailAt + cool - Date.now())
 }
 
-function scheduleSdkIdle(sessionKey: string, errored: boolean): void {
+function scheduleSdkIdle(sessionKey: string, errored: boolean, opts?: { network?: boolean; silent?: boolean }): void {
   if (errored) {
-    const st = sdkFailStreak.get(sessionKey) ?? { count: 0, lastFailAt: 0 }
+    const st = sdkFailStreak.get(sessionKey) ?? { count: 0, lastFailAt: 0, network: false }
     st.count += 1
     st.lastFailAt = Date.now()
+    st.network = !!opts?.network
     sdkFailStreak.set(sessionKey, st)
-    pushUiLog("SDK", st.count > 8 ? "ERROR" : "WARN",
-      `[${sessionKey}] 异常结束（连续第 ${st.count} 次），冷却后由调度器重试；新消息随时放行`)
+    if (!opts?.silent) {
+      const remain = sdkFailCooldownRemaining(sessionKey)
+      pushUiLog("SDK", st.count > 8 ? "ERROR" : "WARN",
+        `[${sessionKey}] 异常结束×${st.count}，${Math.ceil(remain / 1000)}s 后重试`)
+    }
   } else {
     const prev = sdkFailStreak.get(sessionKey)
     clearSdkFailStreak(sessionKey)
@@ -464,9 +473,8 @@ function startRunLifecycle(session: SdkSessionAgent, run: Run): void {
 
   streamRunEvents(session, run).then(async () => {
     const sessionKey = session.sessionKey
-    const level = run.status === "error" ? "ERROR" : "INFO"
-
     let errorDetail: string | undefined
+    let networkFail = false
     if (run.status === "error") {
       // wait() 返回 RunResult 对象（出错时也不抛），真实原因藏在 RunResult.result / 终态状态事件里
       const wr = await run.wait().catch((e: unknown) => e)
@@ -485,8 +493,9 @@ function startRunLifecycle(session: SdkSessionAgent, run: Run): void {
       const last = session.lastStatus
       const lastStr = last ? `lastStatus=${last.status}${last.message ? ` msg=${last.message}` : ""} ` : ""
       const netHint = recentGlobalErrorHint(120_000)
-      errorDetail = `${lastStr}${detail}${netHint ? ` | 疑似底层网络/代理错误: ${netHint}` : ""}`.slice(0, 800)
-      pushUiLog("SDK", "ERROR", `[${sessionKey}] 运行错误详情: ${errorDetail}`)
+      errorDetail = `${lastStr}${detail}${netHint ? ` | net=${netHint}` : ""}`.slice(0, 500)
+      networkFail = /API key exchange|exchange_user_api_key|fetch failed|unauthenticated|ECONNRESET|socket hang up|GOAWAY|疑似底层网络/i.test(errorDetail)
+      // 不清 Resume：agentId 仍在，下次 Agent.resume 换新本地句柄，云端上下文保留
     }
 
     lastRunResults.set(sessionKey, {
@@ -496,18 +505,28 @@ function startRunLifecycle(session: SdkSessionAgent, run: Run): void {
       error: errorDetail,
     })
 
-    const summary = [
-      run.result && `result=${run.result}`,
-      run.durationMs != null && `duration=${run.durationMs}ms`,
-    ].filter(Boolean).join(", ")
-    pushUiLog("SDK", level, `[${sessionKey}] Agent 运行结束 (status=${run.status}${summary ? `, ${summary}` : ""})`)
-
     session.run = null
     const errored = run.status === "error"
     closeAndRemoveSession(session)
     broadcastSdkSessionStatus()
-    // 成功立即调度；失败指数退避，避免 4s 一轮硬重试风暴
-    scheduleSdkIdle(sessionKey, errored)
+
+    if (errored) {
+      // 先记账冷却，再打一行合并日志（避免「结束+详情+异常」刷屏）
+      scheduleSdkIdle(sessionKey, true, { network: networkFail, silent: true })
+      const st = sdkFailStreak.get(sessionKey)
+      const coolSec = Math.ceil(sdkFailCooldownRemaining(sessionKey) / 1000)
+      const dur = run.durationMs != null ? `${run.durationMs}ms` : "?"
+      const tip = networkFail ? "将Resume重建连接" : ""
+      pushUiLog("SDK", (st?.count ?? 0) > 8 ? "ERROR" : "WARN",
+        `[${sessionKey}] 运行失败×${st?.count ?? 1} ${dur}${tip ? ` ${tip}` : ""} → ${coolSec}s后重试 | ${errorDetail || "unknown"}`)
+    } else {
+      const summary = [
+        run.result && `result=${run.result}`,
+        run.durationMs != null && `duration=${run.durationMs}ms`,
+      ].filter(Boolean).join(", ")
+      pushUiLog("SDK", "INFO", `[${sessionKey}] Agent 运行结束 (status=${run.status}${summary ? `, ${summary}` : ""})`)
+      scheduleSdkIdle(sessionKey, false)
+    }
   })
 }
 

@@ -15,7 +15,7 @@ import {
 import { parseChatKey, channelIdFromSessionKey, type DaemonChannelConfig, type ChannelStatusInfo } from "../src/shared/channel-types"
 import { validateCron, readTasksFromFile, writeTasksToFile, previewCronNextRuns, getNextCronFireLabel } from "./cron-scheduler"
 import { pushLog, pushUiLog, broadcastLog, getLogBuffer, clearLogBuffer, escapeLogContentSingleLine } from "./ui-logger"
-import { applyProxyEnv } from "./agent-cli"
+import { applyProxyEnv, syncMainProcessProxyEnv } from "./agent-cli"
 import {
   stopAgent as _stopCliAgent,
   isAgentRunning as _isCliAgentRunning, getRunningSessionCount as _getCliRunningCount,
@@ -23,7 +23,7 @@ import {
   type ChatType,
 } from "./agent-launcher"
 import { stopAllSdkSessions, resetSdkSessionContext, getSdkSessionCount, getSdkSessionList, checkSdkApiKey, listSdkModels, getSdkSessionDiagnostics, getResumableSummary, switchSdkSessionModel } from "./agent-sdk"
-import { initSessionModelStore, listQuickModels, getSessionOverride } from "../src/shared/session-model-store.js"
+import { initSessionModelStore, listQuickModels, getSessionOverride, removeRecentModel } from "../src/shared/session-model-store.js"
 import { registerFeishuApp } from "./feishu-register"
 import {
   setDaemonPort,
@@ -41,8 +41,8 @@ import { FileCommand, reportCommandResult, handleFeishuModelCommand, handleFeish
 import { handleFeishuProjectCommand, handleProjectSyncSignal, fillProjectNewFromText, handleProjectNewSubmit, replySetupHub, executeProjectDelete } from "./project-commands"
 import { isGitRepoRoot } from "./project-worktree"
 import { getDefaultNodeGuide } from "./project-prompts"
-import { initProjectStore, getProject, listProjects, getNodeGroups, saveNodeGroups } from "../src/shared/project-store.js"
-import { projectIdFromSessionKey, DEFAULT_NODE_GROUP_ID } from "../src/shared/project-types.js"
+import { initProjectStore, getProject, getCurrentProject, listProjects, getNodeGroups, saveNodeGroups, saveProject } from "../src/shared/project-store.js"
+import { projectIdFromSessionKey, projectSessionKey, DEFAULT_NODE_GROUP_ID } from "../src/shared/project-types.js"
 import {
   readGitBranch,
   formatSessionLabel,
@@ -55,12 +55,12 @@ import {
   dispatchSessionAgents, launchSessionAgent, launchIndependentAgent,
   notifyChatFallback,
   getSessionAgentList, handleChatCommand, clearMessageQueue, getQueueMessages, formatSessionStatusBlock,
-  listMainSessionTabs, switchMainSession, deleteUserSession,
+  listMainSessionTabs, switchMainSession, deleteUserSession, leaveProjectSession,
   pullMergedMessagesFromQueue, isMainUser, extractChatId, chatNameCache,
   fetchChatNames, fetchUserNames, initSessionDispatcher, previousActiveSessionMap,
 } from "./session-dispatcher"
 
-export { applyProxyEnv, checkCliInstalled, installCli, execAgentSync, execAgentAsync, type ExecAgentOptions as ExecAgentSyncOptions } from "./agent-cli"
+export { applyProxyEnv, syncMainProcessProxyEnv, checkCliInstalled, installCli, execAgentSync, execAgentAsync, type ExecAgentOptions as ExecAgentSyncOptions } from "./agent-cli"
 export { checkAgentLoggedIn, loginCli } from "./agent-launcher"
 export { getLogBuffer } from "./ui-logger"
 export { checkSdkApiKey, listSdkModels, noteGlobalSdkError } from "./agent-sdk"
@@ -1558,6 +1558,10 @@ export async function saveAppConfigFromRenderer(partial: Partial<AppConfig>): Pr
   }
 
   saveConfig(partial)
+  if (partial.httpProxy !== undefined || partial.httpsProxy !== undefined || partial.noProxy !== undefined) {
+    syncMainProcessProxyEnv(getConfig())
+    void import("./updater").then((m) => m.applyAppNetworkProxy()).catch(() => {})
+  }
 
   if (channelsChanging) {
     // 连接类字段（凭据/启停/工作目录）变化：必须重启 Daemon 重建连接
@@ -1632,6 +1636,8 @@ async function autoStartDaemonOnLaunch(): Promise<void> {
 
 export function initDaemonManager(): void {
   process.env.APP_DATA_DIR = app.getPath("userData")
+  // SDK 跑在主进程：启动时就把代理灌进 process.env（仅 spawn CLI 不够）
+  syncMainProcessProxyEnv(getConfig())
   initSessionModelStore(app.getPath("userData"))
   initProjectStore(app.getPath("userData"))
   runLegacyConfigMigration()
@@ -1784,10 +1790,97 @@ export function initDaemonManager(): void {
   ipcMain.handle("session:list-tabs", () => listMainSessionTabs())
   ipcMain.handle("session:switch", (_e, sessionKey: string) => switchMainSession(sessionKey))
   ipcMain.handle("session:delete", async (_e, sessionKey: string) => deleteUserSession(sessionKey))
+  ipcMain.handle("project:list", () => {
+    initProjectStore(app.getPath("userData"))
+    return listProjects().map((p) => ({
+      id: p.id,
+      name: p.name,
+      goal: p.goal,
+      storyUrl: p.storyUrl,
+      productDocUrl: p.productDocUrl,
+      techDocUrl: p.techDocUrl,
+      featureBranch: p.featureBranch,
+      status: p.status,
+      groupId: p.groupId,
+      worktreePath: p.worktreePath,
+      repoPath: p.repoPath,
+      workspaceType: p.workspaceType,
+    }))
+  })
+  ipcMain.handle("project:delete", async (_e, projectId: string) => {
+    initProjectStore(app.getPath("userData"))
+    const id = String(projectId || "").trim()
+    const target = getProject(id)
+    if (!target) return { ok: false, error: "项目不存在" }
+    const lock = readLockFile()
+    const wasCurrent = getCurrentProject()?.id === id
+    const sk = target.sessionKey || (lock?.port
+      ? projectSessionKey(await resolveMainChatId(lock.port) || "", id)
+      : "")
+    if (sk) stopSessionAgent(sk)
+    executeProjectDelete(id)
+    if (wasCurrent && lock?.port) {
+      const chatId = await resolveMainChatId(lock.port)
+      if (chatId) await leaveProjectSession(lock.port, chatId)
+    }
+    return { ok: true, name: target.name }
+  })
+  ipcMain.handle("project:update", (_e, patch: {
+    id: string
+    name?: string
+    goal?: string
+    storyUrl?: string
+    productDocUrl?: string
+    techDocUrl?: string
+    status?: string
+    groupId?: string
+  }) => {
+    initProjectStore(app.getPath("userData"))
+    const p = getProject(String(patch?.id || "").trim())
+    if (!p) return { ok: false, error: "项目不存在" }
+    if (typeof patch.name === "string") {
+      const name = patch.name.trim()
+      if (!name) return { ok: false, error: "名称不能为空" }
+      p.name = name
+    }
+    if (typeof patch.goal === "string") p.goal = patch.goal.trim()
+    if (typeof patch.storyUrl === "string") p.storyUrl = patch.storyUrl.trim() || undefined
+    if (typeof patch.productDocUrl === "string") p.productDocUrl = patch.productDocUrl.trim() || undefined
+    if (typeof patch.techDocUrl === "string") p.techDocUrl = patch.techDocUrl.trim() || undefined
+    if (typeof patch.status === "string") {
+      const st = patch.status.trim()
+      if (st === "active" || st === "paused" || st === "done") p.status = st
+      else return { ok: false, error: "状态无效" }
+    }
+    if (typeof patch.groupId === "string") {
+      const gid = patch.groupId.trim()
+      const groups = getNodeGroups()
+      if (gid && !groups.some((g) => g.id === gid)) return { ok: false, error: "流程组不存在" }
+      p.groupId = gid || undefined
+    }
+    saveProject(p)
+    return { ok: true }
+  })
+  ipcMain.handle("project:switch", async (_e, projectId: string) => {
+    initProjectStore(app.getPath("userData"))
+    const id = String(projectId || "").trim()
+    const p = getProject(id)
+    if (!p) return { ok: false, error: "项目不存在" }
+    const lock = readLockFile()
+    if (!lock?.port) return { ok: false, error: "服务未运行" }
+    const chatId = await resolveMainChatId(lock.port)
+    if (!chatId) return { ok: false, error: "未绑定主用户" }
+    return switchMainSession(projectSessionKey(chatId, id))
+  })
   ipcMain.handle("session:list-quick-models", () => {
     initSessionModelStore(app.getPath("userData"))
   initProjectStore(app.getPath("userData"))
     return { ok: true as const, models: listQuickModels(getConfig().favoriteModels ?? [], 8) }
+  })
+  ipcMain.handle("session:forget-quick-model", (_e, model: string, modelParams?: string) => {
+    initSessionModelStore(app.getPath("userData"))
+    removeRecentModel({ model, modelParams })
+    return { ok: true as const }
   })
   ipcMain.handle("agent:stop-all-sessions", () => { stopAllSessionAgents(); return { ok: true } })
 

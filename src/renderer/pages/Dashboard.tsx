@@ -28,8 +28,10 @@ import {
 } from "lucide-react"
 import logoUrl from "../assets/logo.png"
 import TitleBar from "../components/TitleBar"
+import useInlineModal from "../components/useInlineModal"
 import { modelSlug } from "../model-utils"
 import { disambiguatePathLabel } from "../../shared/path-label"
+import { formatLogLineForUi, cardLabelFromSessionTab } from "../../shared/log-format"
 
 interface Props {
   /** 打开设置页，可指定初始 Tab */
@@ -70,6 +72,31 @@ export default function Dashboard({ onSettings, active }: Props) {
     () => new Set(sessionTabs.filter((t) => t.removable).map((t) => t.sessionKey)),
     [sessionTabs],
   )
+  const { showConfirm, ModalPortal } = useInlineModal()
+  const sessionLogLabelByKey = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const t of sessionTabs) {
+      m.set(t.sessionKey, cardLabelFromSessionTab(t))
+    }
+    return m
+  }, [sessionTabs])
+
+  const resolveLogSessionLabel = useCallback((sk: string) => {
+    const direct = sessionLogLabelByKey.get(sk)
+    if (direct) return direct
+    const norm = sk.replace(/\\/g, "/").toLowerCase()
+    for (const [k, v] of sessionLogLabelByKey) {
+      if (k.replace(/\\/g, "/").toLowerCase() === norm) return v
+    }
+    const pid = sk.match(/::project_([a-f0-9]+)/i)?.[1]
+    if (pid) {
+      for (const [k, v] of sessionLogLabelByKey) {
+        if (k.includes(`project_${pid}`)) return v
+      }
+    }
+    return undefined
+  }, [sessionLogLabelByKey])
+
   const [activeSessionKey, setActiveSessionKey] = useState("")
   const [sessionSwitching, setSessionSwitching] = useState("")
   const [modelTabs, setModelTabs] = useState<{ model: string; modelParams?: string; label?: string }[]>([])
@@ -170,11 +197,35 @@ export default function Dashboard({ onSettings, active }: Props) {
     await refreshSessionTabs()
   }
 
-  const deleteSessionTab = async (sessionKey: string) => {
-    const r = await window.electronAPI.deleteSession(sessionKey)
-    if (!r.ok) {
-      setActionError(r.error ?? "删除会话失败")
-      return
+  const deleteSessionTab = async (sessionKey: string, kind?: string, label?: string) => {
+    const tab = sessionTabs.find((t) => t.sessionKey === sessionKey)
+    const k = kind || tab?.kind
+    const name = label || tab?.label || sessionKey
+    if (k === "project") {
+      const short = name.split(" · ")[0]?.trim() || name
+      if (!(await showConfirm(
+        "删除项目",
+        `确定删除「${short}」？\n将移除 AI 工作目录（含未提交改动）；主仓与远程分支不受影响。`,
+        "删除",
+        "取消",
+      ))) return
+      const pid = sessionKey.match(/::project_([a-f0-9]+)/i)?.[1]
+      if (!pid) {
+        setActionError("无法解析项目 id")
+        return
+      }
+      const r = await window.electronAPI.deleteProject(pid)
+      if (!r.ok) {
+        setActionError(r.error ?? "删除项目失败")
+        return
+      }
+    } else {
+      if (!(await showConfirm("删除会话", `确定删除「${name}」？`, "删除", "取消"))) return
+      const r = await window.electronAPI.deleteSession(sessionKey)
+      if (!r.ok) {
+        setActionError(r.error ?? "删除会话失败")
+        return
+      }
     }
     await refreshSessionTabs()
   }
@@ -301,10 +352,13 @@ export default function Dashboard({ onSettings, active }: Props) {
 
   const removeFavoriteModel = async (m: { model: string; modelParams?: string }) => {
     const cfg = await window.electronAPI.getConfig()
+    const key = `${m.model}\0${m.modelParams ?? ""}`
     const favs = (cfg.favoriteModels ?? []).filter(
-      (f) => !(f.model === m.model && (f.modelParams ?? "") === (m.modelParams ?? "")),
+      (f) => `${f.model}\0${f.modelParams ?? ""}` !== key,
     )
     await window.electronAPI.saveConfig({ favoriteModels: favs })
+    // 快捷栏 = 收藏 ∪ 最近；只删收藏会从「最近」补回来，看起来像 ❌ 无效
+    await window.electronAPI.forgetQuickModel(m.model, m.modelParams)
     await refreshModelTabs()
   }
 
@@ -412,30 +466,43 @@ export default function Dashboard({ onSettings, active }: Props) {
     : logLines
 
   useEffect(() => {
+    if (!logStickRef.current) return
     const el = logRef.current
-    if (el && logStickRef.current && el.scrollHeight - el.scrollTop - el.clientHeight > 1) {
+    if (!el) return
+    // rAF 合并同帧多次日志更新，减少与用户滚动的竞态
+    const raf = requestAnimationFrame(() => {
+      if (!logStickRef.current || !logRef.current) return
       programmaticScrollRef.current = true
-      el.scrollTop = el.scrollHeight
-    }
+      logRef.current.scrollTop = logRef.current.scrollHeight
+    })
+    return () => cancelAnimationFrame(raf)
   }, [logLines, logFilter])
 
   const handleLogScroll = () => {
     const el = logRef.current
     if (!el) return
-    // 程序化吸底滚动自身触发的 scroll 事件不参与吸底判定，
-    // 否则高频日志下渲染与滚动竞态会把 stick 误判为 false（自动滚动偶发失效）
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+    // 离开底部：无条件取消吸底（覆盖程序化标记）。
+    // 旧逻辑在 programmatic 期间吞掉一切 scroll，高频日志时用户上翻会被立刻拽回底部。
+    if (!atBottom) {
+      programmaticScrollRef.current = false
+      if (logStickRef.current) logStickRef.current = false
+      setLogAtBottom(false)
+      return
+    }
+    // 仍在底部：程序化吸底触发的 scroll 只清标记，不改 stick
     if (programmaticScrollRef.current) {
       programmaticScrollRef.current = false
       return
     }
-    const stick = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-    logStickRef.current = stick
-    setLogAtBottom(stick)
+    logStickRef.current = true
+    setLogAtBottom(true)
   }
 
   const scrollLogToBottom = () => {
     logStickRef.current = true
     setLogAtBottom(true)
+    programmaticScrollRef.current = true
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
   }
 
@@ -814,8 +881,8 @@ export default function Dashboard({ onSettings, active }: Props) {
               {t.running && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400" title="运行中" />}
               {short}
               {t.removable && (
-                <button onClick={(e) => { e.stopPropagation(); void deleteSessionTab(t.sessionKey) }}
-                  className="hidden text-gray-600 hover:text-red-400 group-hover:inline-flex" title="删除会话">
+                <button onClick={(e) => { e.stopPropagation(); void deleteSessionTab(t.sessionKey, t.kind, t.label) }}
+                  className="hidden text-gray-600 hover:text-red-400 group-hover:inline-flex" title={t.kind === "project" ? "删除项目" : "删除会话"}>
                   <X size={11} />
                 </button>
               )}
@@ -1102,7 +1169,11 @@ export default function Dashboard({ onSettings, active }: Props) {
                       <Square size={10} />
                     </button>
                     {deletableSessionKeys.has(s.sessionKey) && (
-                      <button onClick={(e) => { e.stopPropagation(); void deleteSessionTab(s.sessionKey) }} className="rounded px-1.5 py-0.5 text-xs text-gray-500 hover:bg-red-600/20 hover:text-red-400" title="删除会话">
+                      <button onClick={(e) => {
+                        e.stopPropagation()
+                        const tab = sessionTabs.find((t) => t.sessionKey === s.sessionKey)
+                        void deleteSessionTab(s.sessionKey, tab?.kind, tab?.label || s.chatName)
+                      }} className="rounded px-1.5 py-0.5 text-xs text-gray-500 hover:bg-red-600/20 hover:text-red-400" title="删除">
                         <Trash2 size={10} />
                       </button>
                     )}
@@ -1290,7 +1361,7 @@ export default function Dashboard({ onSettings, active }: Props) {
             className="h-full overflow-auto rounded-lg border border-gray-800 bg-gray-900/50 p-3 font-mono text-xs leading-5"
           >
             {filteredLogLines.length > 0
-              ? filteredLogLines.map((line, i) => <LogLine key={i} line={line} highlight={logFilter.trim()} />)
+              ? filteredLogLines.map((line, i) => <LogLine key={i} line={line} highlight={logFilter.trim()} resolveLabel={resolveLogSessionLabel} />)
               : <span className="text-gray-600">{logFilter.trim() ? "无匹配日志" : "暂无日志"}</span>}
           </div>
           {!logAtBottom && (
@@ -1305,6 +1376,7 @@ export default function Dashboard({ onSettings, active }: Props) {
           )}
         </div>
       </div>
+      {ModalPortal}
     </div>
   )
 }
@@ -1357,15 +1429,17 @@ function renderHighlighted(text: string, query: string): React.ReactNode {
   return parts
 }
 
-const LogLine = memo(function LogLine({ line, highlight = "" }: { line: string; highlight?: string }) {
-  const m = LOG_RE.exec(line)
+const LogLine = memo(function LogLine({ line, highlight = "", resolveLabel }: { line: string; highlight?: string; resolveLabel?: (sk: string) => string | undefined }) {
+  // 存储仍是全文；仅展示缩短 sessionKey，复制/过滤仍用原始 line
+  const view = formatLogLineForUi(line, resolveLabel)
+  const m = LOG_RE.exec(view)
   if (!m) {
-    return <div className="whitespace-pre-wrap break-all text-gray-400">{renderHighlighted(displayLogMessageBody(line), highlight)}</div>
+    return <div className="whitespace-pre-wrap break-all text-gray-400">{renderHighlighted(displayLogMessageBody(view), highlight)}</div>
   }
   const [, ts, proc, level, msg] = m
   const body = displayLogMessageBody(msg)
   return (
-    <div className="whitespace-pre-wrap break-all">
+    <div className="whitespace-pre-wrap break-all" title={line.length > 120 ? line : undefined}>
       <span className="text-gray-600">{renderHighlighted(ts, highlight)}</span>
       {" "}
       <span className={PROCESS_COLORS[proc] ?? "text-gray-400"}>{renderHighlighted(`[${proc}]`, highlight)}</span>

@@ -162,6 +162,16 @@ export function pushRecentModel(ref: ModelRef, cap = DEFAULT_RECENT_CAP): void {
   save()
 }
 
+/** 从「最近使用」去掉一条（常用栏移除时需同步，否则仍会被 listQuickModels 补回来） */
+export function removeRecentModel(ref: ModelRef): void {
+  const s = load()
+  const key = modelEntryKey({ model: ref.model, modelParams: ref.modelParams ?? "" })
+  const next = s.recent.filter((r) => modelEntryKey(r) !== key)
+  if (next.length === s.recent.length) return
+  s.recent = next
+  save()
+}
+
 /** 收藏置顶 + 最近补充，去重，最多 limit 个 */
 export function listQuickModels(favorites: ModelEntry[], limit = 6): ModelEntry[] {
   const out: ModelEntry[] = []

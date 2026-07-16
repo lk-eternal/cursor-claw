@@ -27,7 +27,9 @@ export interface WorktreeRepoRef {
 }
 
 function runGit(cwd: string, args: string[], timeoutMs?: number): { ok: boolean; stdout: string; stderr: string; code: number } {
-  const r = spawnSync("git", args, { cwd, encoding: "utf-8", windowsHide: true, timeout: timeoutMs })
+  // 本地仓可能因不同 Windows 用户 SID 触发 dubious ownership；单次 -c 放行，不污染全局配置
+  const withSafe = ["-c", "safe.directory=*", ...args]
+  const r = spawnSync("git", withSafe, { cwd, encoding: "utf-8", windowsHide: true, timeout: timeoutMs })
   return {
     ok: r.status === 0,
     stdout: (r.stdout || "").trim(),
@@ -82,15 +84,34 @@ export function addProjectClone(input: CloneAddInput): WorktreeResult {
     return { ok: false, error: msg }
   }
 
-  const clone = runGit(parent, ["clone", repoPath, worktreePath])
-  if (!clone.ok) return fail(`git clone 失败: ${clone.stderr || clone.stdout}`)
+  // 本地仓作源：先取 origin URL（可能因 ownership 失败，失败则仍尝试本地 clone）
+  let originUrl = ""
+  if (!remote) {
+    const ou = runGit(repoPath, ["remote", "get-url", "origin"])
+    if (ou.ok && ou.stdout) originUrl = ou.stdout.trim()
+  }
+
+  // 本地 clone 加速（硬链接）；源仓 dubious ownership 时本地 clone 会失败，回退到 origin 远程
+  let clone = runGit(parent, ["clone", repoPath, worktreePath])
+  if (!clone.ok && !remote && originUrl) {
+    try { fs.rmSync(worktreePath, { recursive: true, force: true }) } catch { /* ignore */ }
+    clone = runGit(parent, ["clone", originUrl, worktreePath])
+  }
+  if (!clone.ok) {
+    const detail = clone.stderr || clone.stdout
+    const ownership = /dubious ownership/i.test(detail)
+    return fail(
+      ownership
+        ? `git clone 失败（主仓所有者与当前用户不一致，且无法从远程拉取）: ${detail}`
+        : `git clone 失败: ${detail}`,
+    )
+  }
 
   // 本地源：origin 指回真实远程（本地仓无 origin 则保持指向本地，纯本地仓也能正常协作）
   let hasOrigin = true
   if (!remote) {
-    const originUrl = runGit(repoPath, ["remote", "get-url", "origin"])
-    if (originUrl.ok && originUrl.stdout) {
-      const set = runGit(worktreePath, ["remote", "set-url", "origin", originUrl.stdout])
+    if (originUrl) {
+      const set = runGit(worktreePath, ["remote", "set-url", "origin", originUrl])
       if (!set.ok) return fail(`设置 origin 失败: ${set.stderr || set.stdout}`)
     } else {
       hasOrigin = isGitRepoRoot(repoPath) // origin 指向本地主仓路径

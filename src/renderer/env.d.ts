@@ -164,7 +164,18 @@ declare global {
     listSessionTabs(): Promise<{ ok: boolean; chatId?: string; activeKey?: string; tabs: { sessionKey: string; label: string; kind: "main" | "project" | "dir" | "temp" | "other"; running: boolean; current: boolean; removable?: boolean }[]; error?: string }>
     switchSession(sessionKey: string): Promise<{ ok: boolean; error?: string }>
     deleteSession(sessionKey: string): Promise<{ ok: boolean; error?: string; label?: string }>
+    listProjects(): Promise<{
+      id: string; name: string; goal?: string; storyUrl?: string; productDocUrl?: string; techDocUrl?: string
+      featureBranch: string; status: string; groupId?: string; worktreePath?: string; repoPath?: string; workspaceType?: string
+    }[]>
+    deleteProject(projectId: string): Promise<{ ok: boolean; name?: string; error?: string }>
+    updateProject(patch: {
+      id: string; name?: string; goal?: string; storyUrl?: string; productDocUrl?: string; techDocUrl?: string
+      status?: string; groupId?: string
+    }): Promise<{ ok: boolean; error?: string }>
+    switchProject(projectId: string): Promise<{ ok: boolean; error?: string }>
     listQuickModels(): Promise<{ ok: boolean; models: { model: string; modelParams?: string; label?: string }[] }>
+    forgetQuickModel(model: string, modelParams?: string): Promise<{ ok: boolean }>
     stopAllSessionAgents(): Promise<{ ok: boolean }>
     onSessionAgents(cb: (list: { sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string; workspaceDir?: string; source?: "cli" | "sdk" }[]) => void): () => void
     getDaemonStatus(): Promise<DaemonStatus>

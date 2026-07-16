@@ -191,8 +191,24 @@ const api = {
     ipcRenderer.invoke("session:switch", sessionKey),
   deleteSession: (sessionKey: string): Promise<{ ok: boolean; error?: string; label?: string }> =>
     ipcRenderer.invoke("session:delete", sessionKey),
+  listProjects: (): Promise<{
+    id: string; name: string; goal?: string; storyUrl?: string; productDocUrl?: string; techDocUrl?: string
+    featureBranch: string; status: string; groupId?: string; worktreePath?: string; repoPath?: string; workspaceType?: string
+  }[]> =>
+    ipcRenderer.invoke("project:list"),
+  deleteProject: (projectId: string): Promise<{ ok: boolean; name?: string; error?: string }> =>
+    ipcRenderer.invoke("project:delete", projectId),
+  updateProject: (patch: {
+    id: string; name?: string; goal?: string; storyUrl?: string; productDocUrl?: string; techDocUrl?: string
+    status?: string; groupId?: string
+  }): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("project:update", patch),
+  switchProject: (projectId: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("project:switch", projectId),
   listQuickModels: (): Promise<{ ok: boolean; models: { model: string; modelParams?: string; label?: string }[] }> =>
     ipcRenderer.invoke("session:list-quick-models"),
+  forgetQuickModel: (model: string, modelParams?: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke("session:forget-quick-model", model, modelParams),
   stopAllSessionAgents: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("agent:stop-all-sessions"),
   onSessionAgents: (cb: (list: { sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string; workspaceDir?: string; source?: "cli" | "sdk"; model?: string; modelParams?: string }[]) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, list: Parameters<typeof cb>[0]) => cb(list)

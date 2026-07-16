@@ -1,13 +1,14 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron"
+import { app, BrowserWindow, dialog, ipcMain, shell, net, session } from "electron"
 import electronUpdater from "electron-updater"
 import type { AppUpdater } from "electron-updater"
 import { randomUUID } from "node:crypto"
-import * as https from "node:https"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import semver from "semver"
+import { getConfig } from "./config-store"
+import { syncMainProcessProxyEnv } from "./agent-cli"
 
 const execFileAsync = promisify(execFile)
 
@@ -246,64 +247,97 @@ function normalizeReleaseVersion(tagName: string): string {
   return tagName.replace(/^v/i, "").trim()
 }
 
-export function fetchLatestRelease(): Promise<LatestRelease | null> {
-  const path = `/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`
-  return new Promise((resolve) => {
-    const req = https.request(
-      {
-        hostname: "api.github.com",
-        path,
-        method: "GET",
-        headers: {
-          Accept: "application/vnd.github+json",
-          "User-Agent": "cursor-claw-desktop-updater",
-        },
+/** 把设置里的代理同步到主进程 env + Chromium session（更新检查/下载走这条路径） */
+export async function applyAppNetworkProxy(): Promise<void> {
+  const config = getConfig()
+  syncMainProcessProxyEnv(config)
+  const proxy = (config.httpsProxy || config.httpProxy || "").trim()
+  const bypass = (config.noProxy || "localhost,127.0.0.1,<local>").trim()
+  try {
+    if (proxy) {
+      await session.defaultSession.setProxy({ proxyRules: proxy, proxyBypassRules: bypass })
+    } else {
+      await session.defaultSession.setProxy({ mode: "system" })
+    }
+  } catch {
+    /* best-effort */
+  }
+}
+
+async function httpGetText(
+  url: string,
+  headers?: Record<string, string>,
+): Promise<{ status: number; text: string } | null> {
+  await applyAppNetworkProxy()
+  try {
+    const res = await net.fetch(url, {
+      headers: {
+        "User-Agent": "cursor-claw-desktop-updater",
+        ...(headers || {}),
       },
-      (res) => {
-        if (res.statusCode === 301 || res.statusCode === 302) {
-          res.resume()
-          resolve(null)
-          return
-        }
-        const chunks: Buffer[] = []
-        res.on("data", (c: Buffer) => chunks.push(c))
-        res.on("end", () => {
-          try {
-            if (res.statusCode !== 200) {
-              resolve(null)
-              return
-            }
-            const json = JSON.parse(Buffer.concat(chunks).toString("utf-8")) as {
-              tag_name?: string
-              html_url?: string
-              body?: string | null
-            }
-            const tag = json.tag_name
-            const htmlUrl = json.html_url
-            if (typeof tag !== "string" || typeof htmlUrl !== "string") {
-              resolve(null)
-              return
-            }
-            const version = normalizeReleaseVersion(tag)
-            if (!semver.valid(version)) {
-              resolve(null)
-              return
-            }
-            const releaseBody = typeof json.body === "string" ? json.body.trim() : undefined
-            resolve({ version, htmlUrl, releaseBody: releaseBody || undefined })
-          } catch {
-            resolve(null)
-          }
-        })
-      },
-    )
-    req.on("error", () => resolve(null))
-    req.setTimeout(20_000, () => {
-      req.destroy()
-      resolve(null)
     })
-    req.end()
+    return { status: res.status, text: await res.text() }
+  } catch {
+    return null
+  }
+}
+
+function parseGithubReleaseJson(text: string): LatestRelease | null {
+  try {
+    const json = JSON.parse(text) as {
+      tag_name?: string
+      html_url?: string
+      body?: string | null
+    }
+    const tag = json.tag_name
+    const htmlUrl = json.html_url
+    if (typeof tag !== "string" || typeof htmlUrl !== "string") return null
+    const version = normalizeReleaseVersion(tag)
+    if (!semver.valid(version)) return null
+    const releaseBody = typeof json.body === "string" ? json.body.trim() : undefined
+    return { version, htmlUrl, releaseBody: releaseBody || undefined }
+  } catch {
+    return null
+  }
+}
+
+function parsePackageJsonVersion(text: string): LatestRelease | null {
+  try {
+    const json = JSON.parse(text) as { version?: string }
+    const version = normalizeReleaseVersion(json.version || "")
+    if (!semver.valid(version)) return null
+    return {
+      version,
+      htmlUrl: `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/tag/v${version}`,
+    }
+  } catch {
+    return null
+  }
+}
+
+export async function fetchLatestRelease(): Promise<LatestRelease | null> {
+  const apiPath = `/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`
+  const api = await httpGetText(`https://api.github.com${apiPath}`, {
+    Accept: "application/vnd.github+json",
   })
+  if (api?.status === 200) {
+    const rel = parseGithubReleaseJson(api.text)
+    if (rel) return rel
+  }
+
+  // GitHub API 不可达时：用 CDN 读 package.json 版本，至少能完成「检查更新」
+  const mirrors = [
+    `https://cdn.jsdelivr.net/gh/${GITHUB_OWNER}/${GITHUB_REPO}@main/package.json`,
+    `https://cdn.jsdelivr.net/gh/${GITHUB_OWNER}/${GITHUB_REPO}@master/package.json`,
+  ]
+  for (const url of mirrors) {
+    const r = await httpGetText(url)
+    if (r?.status === 200) {
+      const rel = parsePackageJsonVersion(r.text)
+      if (rel) return rel
+    }
+  }
+  return null
 }
 
 function parseChangelogJson(text: string): ChangelogEntry[] {
@@ -339,81 +373,38 @@ function readBundledChangelog(): ChangelogEntry[] {
 }
 
 function fetchChangelogFromRawGitHub(): Promise<ChangelogEntry[]> {
-  const rawUrl = `/${GITHUB_OWNER}/${GITHUB_REPO}/main/changelog.json`
-  return new Promise((resolve) => {
-    const req = https.request(
-      {
-        hostname: "raw.githubusercontent.com",
-        path: rawUrl,
-        method: "GET",
-        headers: { "User-Agent": "cursor-claw-desktop-updater" },
-      },
-      (res) => {
-        const chunks: Buffer[] = []
-        res.on("data", (c: Buffer) => chunks.push(c))
-        res.on("end", () => {
-          if (res.statusCode !== 200) {
-            resolve([])
-            return
-          }
-          resolve(parseChangelogJson(Buffer.concat(chunks).toString("utf-8")))
-        })
-      },
-    )
-    req.on("error", () => resolve([]))
-    req.setTimeout(15_000, () => {
-      req.destroy()
-      resolve([])
-    })
-    req.end()
-  })
+  const urls = [
+    `https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}/main/changelog.json`,
+    `https://cdn.jsdelivr.net/gh/${GITHUB_OWNER}/${GITHUB_REPO}@main/changelog.json`,
+  ]
+  return (async () => {
+    for (const url of urls) {
+      const r = await httpGetText(url)
+      if (r?.status === 200) {
+        const entries = parseChangelogJson(r.text)
+        if (entries.length > 0) return entries
+      }
+    }
+    return []
+  })()
 }
 
 function fetchChangelogViaGitHubApi(): Promise<ChangelogEntry[]> {
   const apiPath = `/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/changelog.json?ref=main`
-  return new Promise((resolve) => {
-    const req = https.request(
-      {
-        hostname: "api.github.com",
-        path: apiPath,
-        method: "GET",
-        headers: {
-          Accept: "application/vnd.github+json",
-          "User-Agent": "cursor-claw-desktop-updater",
-        },
-      },
-      (res) => {
-        const chunks: Buffer[] = []
-        res.on("data", (c: Buffer) => chunks.push(c))
-        res.on("end", () => {
-          try {
-            if (res.statusCode !== 200) {
-              resolve([])
-              return
-            }
-            const json = JSON.parse(Buffer.concat(chunks).toString("utf-8")) as {
-              content?: string
-              encoding?: string
-            }
-            if (json.encoding !== "base64" || typeof json.content !== "string") {
-              resolve([])
-              return
-            }
-            const text = Buffer.from(json.content.replace(/\n/g, ""), "base64").toString("utf-8")
-            resolve(parseChangelogJson(text))
-          } catch {
-            resolve([])
-          }
-        })
-      },
-    )
-    req.on("error", () => resolve([]))
-    req.setTimeout(15_000, () => {
-      req.destroy()
-      resolve([])
+  return (async () => {
+    const r = await httpGetText(`https://api.github.com${apiPath}`, {
+      Accept: "application/vnd.github+json",
     })
-    req.end()
-  })
+    if (!r || r.status !== 200) return []
+    try {
+      const json = JSON.parse(r.text) as { content?: string; encoding?: string }
+      if (json.encoding !== "base64" || typeof json.content !== "string") return []
+      const text = Buffer.from(json.content.replace(/\n/g, ""), "base64").toString("utf-8")
+      return parseChangelogJson(text)
+    } catch {
+      return []
+    }
+  })()
 }
 
 async function fetchChangelogEntries(): Promise<ChangelogEntry[]> {
@@ -762,7 +753,7 @@ export function registerUpdaterIpc(): void {
       return {
         status: "error",
         currentVersion,
-        message: "检查失败（可能原因: GitHub 访问受限），请检查网络后重试。",
+        message: "检查失败：无法访问版本源。请到「设置 → 网络」配置代理后重试；若已开系统代理/TUN，确认对本应用生效。",
       }
     }
     lastKnownRemote = rel
@@ -794,7 +785,7 @@ export function registerUpdaterIpc(): void {
     if (!rel) {
       return {
         ok: false,
-        error: "无法获取远程版本信息（可能原因: GitHub 访问受限）。\n请检查网络后重试。",
+        error: "无法获取远程版本信息。\n请到「设置 → 网络」配置代理后重试。",
       }
     }
     if (!semver.gt(rel.version, currentVersion)) {
@@ -843,6 +834,7 @@ export function initAppUpdater(getMainWindow: () => BrowserWindow | null): void 
   mainWindowGetter = getMainWindow
   registerUpdaterIpc()
   wireAutoUpdater()
+  void applyAppNetworkProxy()
   if (app.isPackaged || isDevSimulateUpdate()) {
     setTimeout(() => {
       void runStartupUpdateCheck()

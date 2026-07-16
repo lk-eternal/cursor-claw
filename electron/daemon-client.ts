@@ -2,8 +2,8 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { app } from "electron"
 import { LOCK_FILE_NAME } from "../src/shared/constants"
-import { getEnabledChannels } from "./config-store"
-import { makeChatKey } from "../src/shared/channel-types"
+import { getChannel, getEnabledChannels, effectiveWorkspaceDir } from "./config-store"
+import { makeChatKey, parseChatKey, normalizeSessionKey } from "../src/shared/channel-types"
 
 export interface LockInfo { pid: number; port: number; version: string }
 
@@ -101,6 +101,7 @@ export async function enqueueToSession(
   }
 }
 
+/** 非独立定时任务 / 主会话通知：直投主工作区 sessionKey，不跟随当前 active 项目会话 */
 export async function enqueueToMainSession(
   port: number, content: string, preferredChatId?: string, channelId?: string,
 ): Promise<{ ok: boolean; error?: string }> {
@@ -108,10 +109,10 @@ export async function enqueueToMainSession(
   if (!chatId) {
     return { ok: false, error: "未绑定主用户且无活跃会话，无法入队" }
   }
-  try {
-    await httpPost(`http://127.0.0.1:${port}/enqueue`, { content, chatId, chatType: "p2p" })
-    return { ok: true }
-  } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) }
-  }
+  const parsed = parseChatKey(chatId)
+  const channel = (channelId ? getChannel(channelId) : undefined)
+    ?? (parsed.channelId ? getChannel(parsed.channelId) : undefined)
+  const wsDir = effectiveWorkspaceDir(channel)
+  const mainSessionKey = normalizeSessionKey(`${chatId}::${wsDir}`) || `${chatId}::${wsDir}`
+  return enqueueToSession(port, mainSessionKey, content, "p2p")
 }

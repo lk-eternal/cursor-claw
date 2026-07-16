@@ -762,7 +762,7 @@ export async function listMainSessionTabs(): Promise<{
       kind: sessionTabKind(s.sessionKey),
       running: true,
       current: !!activeKey && s.sessionKey === activeKey,
-      removable: isDeletableSession(s.sessionKey, chatId),
+      removable: isDeletableSession(s.sessionKey, chatId) || sessionTabKind(s.sessionKey) === "project",
     })
   }
   if (activeKey && !seen.has(activeKey)) {
@@ -772,7 +772,7 @@ export async function listMainSessionTabs(): Promise<{
       kind: sessionTabKind(activeKey),
       running: false,
       current: true,
-      removable: isDeletableSession(activeKey, chatId),
+      removable: isDeletableSession(activeKey, chatId) || sessionTabKind(activeKey) === "project",
     })
     seen.add(activeKey)
   }
@@ -784,7 +784,7 @@ export async function listMainSessionTabs(): Promise<{
       kind: sessionTabKind(sw.sessionKey),
       running: false,
       current: !!activeKey && sw.sessionKey === activeKey,
-      removable: isDeletableSession(sw.sessionKey, chatId),
+      removable: isDeletableSession(sw.sessionKey, chatId) || sessionTabKind(sw.sessionKey) === "project",
     })
   }
   return { ok: true, chatId, activeKey: activeKey ?? undefined, tabs }

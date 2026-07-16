@@ -392,8 +392,8 @@ async function finalizeNewProject(
           "排除故障（网络/权限/分支名）后点「进入项目」即自动重建，无需重新创建项目。",
         ].join("\n")),
         chatId,
-        [{ label: `进入项目 /p use ${project.id}`, cmd: `/p use ${project.id}` }, ...projectButtons(project)],
-        { cardTitle: projectCardTitle(project) },
+        [{ label: `进入 ${project.name}`, cmd: `/p use ${project.id}` }, ...projectButtons(project)],
+        { cardTitle: projectCardTitle(project), sessionKey: project.sessionKey },
       )
       return
     }
@@ -404,11 +404,16 @@ async function finalizeNewProject(
       withChatFooter(`✅ 项目已创建并进入项目会话\n\n${formatProjectCard(project)}`),
       chatId,
       projectButtons(project),
-      { cardTitle: projectCardTitle(project) },
+      { cardTitle: projectCardTitle(project), sessionKey: project.sessionKey },
     )
     if (chatId) {
       const r = await enterProjectSession(port, chatId, project)
-      if (!r.ok) await reportCommandResult(port, messageId, false, featureOccupiedText(project, r.error || ""), chatId)
+      if (!r.ok) {
+        await reportCommandResult(port, messageId, false, featureOccupiedText(project, r.error || ""), chatId, undefined, {
+          cardTitle: projectCardTitle(project),
+          sessionKey: project.sessionKey,
+        })
+      }
     }
   } catch (e: any) {
     if (!persisted) {
@@ -1422,7 +1427,12 @@ export async function handleFeishuProjectCommand(
     if (chatId) {
       const r = await enterProjectSession(port, chatId, target)
       if (!r.ok) {
-        await reportCommandResult(port, messageId, false, featureOccupiedText(target, r.error || ""), chatId)
+        await reportCommandResult(port, messageId, false, featureOccupiedText(target, r.error || ""), chatId, [
+          { label: `重试进入 ${target.name}`, cmd: `/p use ${target.id}` },
+        ], {
+          cardTitle: projectCardTitle(target),
+          sessionKey: target.sessionKey || (chatId ? projectSessionKey(chatId, target.id) : undefined),
+        })
         return
       }
       enterNotes = r.notes || []
@@ -1436,7 +1446,10 @@ export async function handleFeishuProjectCommand(
       withChatFooter(head),
       chatId,
       projectButtons(target),
-      { cardTitle: projectCardTitle(target) },
+      {
+        cardTitle: projectCardTitle(target),
+        sessionKey: target.sessionKey || (chatId ? projectSessionKey(chatId, target.id) : undefined),
+      },
     )
     return
   }

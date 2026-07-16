@@ -112,6 +112,18 @@ export function applyProxyEnv(env: Record<string, string>, config: { httpProxy?:
   }
 }
 
+/**
+ * 把代理同步到 Electron 主进程 process.env。
+ * @cursor/sdk 在主进程内联跑 fetch，不会走 CLI spawn 的 env；不设的话 IDE 能通、Claw 却频繁 key-exchange fetch failed。
+ */
+export function syncMainProcessProxyEnv(config: { httpProxy?: string; httpsProxy?: string; noProxy?: string }): void {
+  const env = process.env as Record<string, string>
+  applyProxyEnv(env, config)
+  const hasProxy = !!(config.httpProxy?.trim() || config.httpsProxy?.trim())
+  if (hasProxy) env.NODE_USE_ENV_PROXY = "1"
+  else delete env.NODE_USE_ENV_PROXY
+}
+
 export function createAgentEnv(extras?: Record<string, string>): Record<string, string> {
   const config = getConfig()
   const env: Record<string, string> = {

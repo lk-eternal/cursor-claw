@@ -382,13 +382,10 @@ const NETWORK_NOISE_RE = /WRONG_VERSION_NUMBER|SSL routines|ECONNRESET|ECONNREFU
 function logGlobalError(kind: string, raw: unknown): void {
   const msg = raw instanceof Error ? raw.message : String(raw)
   try {
-    // 记入近期错误环形缓冲：run 报错时把真实网络原因附到错误详情
+    // 网络噪声只入缓冲：真正 run 失败时合并到「运行失败」那一行，UI 不再单独刷
     noteGlobalSdkError(msg)
-    if (NETWORK_NOISE_RE.test(msg)) {
-      broadcastLog(`[Main] SDK 后台连接抖动（已由会话恢复机制兜底）: ${msg}`, "WARN")
-    } else {
-      broadcastLog(`[Main] ${kind}: ${msg}`, "ERROR")
-    }
+    if (NETWORK_NOISE_RE.test(msg)) return
+    broadcastLog(`[Main] ${kind}: ${msg}`, "ERROR")
   } catch { console.error(`[Main] ${kind}:`, raw) }
 }
 

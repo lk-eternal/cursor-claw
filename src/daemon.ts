@@ -2890,7 +2890,16 @@ export async function daemonMain(): Promise<void> {
       const rt = pickChannel(task.channelId);
       const target = rt ? channelDefaultChatId(rt) : null;
       if (rt && target) {
-        pushMessage(content, `internal_${task.id}_${Date.now()}`, makeChatKey(rt.cfg.id, target), "p2p");
+        // 直投主工作区会话，绕过 activeSessionMap（当前若在项目会话，pushMessage 会跟进去）
+        const chatKey = makeChatKey(rt.cfg.id, target);
+        const wsDir = channelWorkspaceDir(rt);
+        const mainSessionKey = normalizeSessionKey(`${chatKey}::${wsDir}`) || `${chatKey}::${wsDir}`;
+        const internalMsgId = `internal_${task.id}_${Date.now()}`;
+        pushToFileQueue(content, internalMsgId, `daemon-${process.pid}`, mainSessionKey, false, { chatType: "p2p" });
+        trackMessageSession(internalMsgId, mainSessionKey);
+        rememberSessionKey(mainSessionKey);
+        broadcastQueueEvent(chatKey);
+        log("INFO", `定时任务已直投主会话: ${task.name} → ${mainSessionKey}`);
       } else {
         log("WARN", `定时任务「${task.name}」消息无法入队: 通道无主用户且无私聊记录`);
       }
