@@ -387,16 +387,13 @@ export function startAction(projectId: string, type: ProjectActionType): { ok: t
   const project = getProject(projectId)
   if (!project) return { ok: false, error: "项目不存在" }
   if (project.status === "done") return { ok: false, error: "项目已结束" }
-  const busy = findBusyAction(project)
-  if (busy) {
-    // agent 崩溃等原因遗留的陈旧 running：超时自动失效放行，避免项目被永久卡死
-    if (Date.now() - (busy.startedAt ?? 0) > STALE_RUNNING_MS) {
-      busy.status = "failed"
-      busy.error = "长时间未完成，已自动失效"
-      busy.completedAt = Date.now()
-      saveProject(project)
-    } else {
-      return { ok: false, error: `已有进行中的 action: ${busy.type} (${busy.status})` }
+  // 节点任务入会话队列顺序执行，允许多个 running 并存（不再因已有 running 拦截）
+  // 顺带清理崩溃遗留的超期 running，避免列表长期脏数据
+  for (const a of project.actions) {
+    if (a.status === "running" && Date.now() - (a.startedAt ?? 0) > STALE_RUNNING_MS) {
+      a.status = "failed"
+      a.error = "长时间未完成，已自动失效"
+      a.completedAt = Date.now()
     }
   }
   const action: ProjectAction = {

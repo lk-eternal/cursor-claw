@@ -66,18 +66,14 @@ describe("project-store", () => {
     })
     const r1 = startAction(p.id, "plan")
     expect(r1.ok).toBe(true)
+    // 节点入队顺序执行，允许并存多个 running
     const r2 = startAction(p.id, "build")
-    expect(r2.ok).toBe(false)
+    expect(r2.ok).toBe(true)
     if (r1.ok) {
-      // 产出即完成：awaiting_ack（旧数据）不再算忙，可直接推进下一节点
-      updateAction(p.id, r1.action.id, { status: "awaiting_ack" })
-      expect(findBusyAction(getProject(p.id)!)).toBeUndefined()
-      const r3 = startAction(p.id, "build")
-      expect(r3.ok).toBe(true)
-      if (r3.ok) {
-        updateAction(p.id, r3.action.id, { status: "accepted", artifactPath: "x.md" })
-        expect(startAction(p.id, "review").ok).toBe(true)
-      }
+      expect(findBusyAction(getProject(p.id)!)?.id).toBe(r1.action.id)
+      updateAction(p.id, r1.action.id, { status: "accepted", artifactPath: "x.md" })
+      expect(findBusyAction(getProject(p.id)!)?.type).toBe("build")
+      expect(startAction(p.id, "review").ok).toBe(true)
     }
   })
 
