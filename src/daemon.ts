@@ -524,11 +524,22 @@ function terminateSessionsByChat(chatId: string): void {
 
 function setActiveSession(chatId: string, sessionKey: string): boolean {
   const normalized = normalizeSessionKey(sessionKey) || sessionKey;
+  const chatNorm = normalizeSessionKey(chatId) || chatId;
   const chatChannel = parseChatKey(chatId).channelId;
   const sessionChannel = parseChatKey(chatIdFromSessionKey(normalized)).channelId;
   if (chatChannel && sessionChannel && chatChannel !== sessionChannel) {
     log("WARN", `[Routing] 拒绝跨通道 active 绑定: chat=${chatId} session=${normalized}`);
     return false;
+  }
+  // 带 chat 前缀的会话（chatKey::…）必须属于该 chat，禁止 A 群绑到 B 群项目会话
+  if (normalized.includes("::")) {
+    const sessionChat = chatIdFromSessionKey(normalized);
+    const sameKey = normalized === chatNorm || normalized.startsWith(`${chatNorm}::`);
+    const sameRaw = !!sessionChat && parseChatKey(sessionChat).chatId === parseChatKey(chatId).chatId;
+    if (!sameKey && !sameRaw) {
+      log("WARN", `[Routing] 拒绝跨会话 active 绑定: chat=${chatId} session=${normalized}`);
+      return false;
+    }
   }
   activeSessionMap.set(chatId, normalized);
   sessionToChatMap.set(normalized, chatId);

@@ -1457,8 +1457,10 @@ export async function executeProjectDelete(projectId: string): Promise<{ ok: boo
 /** 项目二级菜单：列表 + 快速进入，不自动进当前项目；patchMessageId 用于域内「返回菜单」原卡跳转 */
 async function replyProjectMenu(port: number, messageId: string, chatId?: string, patchMessageId?: string): Promise<void> {
   const bound = resolveBoundGroupProject(chatId)
-  // 专属群：只展示本群项目协作，禁止列/切其它项目
+  // 专属群：只展示本群项目协作，禁止列/切其它项目；并纠正被串台的 active 路由
   if (bound) {
+    const sk = bound.sessionKey || projectSessionKey(bound.groupChatId || chatId!, bound.id)
+    if (chatId) await syncActiveSession(port, chatId, sk)
     const head = [
       `📦 项目专属群 · ${bound.name}`,
       "",
@@ -1473,7 +1475,7 @@ async function replyProjectMenu(port: number, messageId: string, chatId?: string
       head,
       chatId,
       [...projectButtons(bound), { label: "帮助", cmd: "/p help", section: "其他" }],
-      { cardTitle: projectCardTitle(bound), patchMessageId, sessionKey: bound.sessionKey },
+      { cardTitle: projectCardTitle(bound), patchMessageId, sessionKey: sk },
     )
     return
   }
