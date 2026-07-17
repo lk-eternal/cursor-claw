@@ -49,10 +49,13 @@ export async function httpPost(url: string, body: object, timeoutMs = 3000): Pro
   return res.json().catch(() => null)
 }
 
-export async function syncActiveSession(port: number, chatId: string, sessionKey: string): Promise<void> {
+export async function syncActiveSession(port: number, chatId: string, sessionKey: string): Promise<boolean> {
   try {
-    await httpPost(`http://127.0.0.1:${port}/api/active-session`, { chatId, sessionKey })
-  } catch {}
+    const res = (await httpPost(`http://127.0.0.1:${port}/api/active-session`, { chatId, sessionKey })) as { ok?: boolean }
+    return res?.ok !== false
+  } catch {
+    return false
+  }
 }
 
 export async function getCurrentActiveSession(port: number, chatId: string): Promise<string | undefined> {

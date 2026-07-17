@@ -1,3 +1,5 @@
+import { parseChatKey } from "./channel-types.js"
+
 export type ProjectStatus = "active" | "paused" | "done"
 /** 节点 id：内置 plan/build/review/ship，或用户自定义 slug */
 export type ProjectActionType = string
@@ -19,12 +21,12 @@ export interface ProjectNodeDef {
 /** 项目工作区类型：worktree=代码开发（主仓+隔离 worktree+分支借还）；plain=纯会话目录（测试/文档协作，无 git） */
 export type ProjectWorkspaceType = "worktree" | "plain"
 
-/** 流程组：项目创建时选定一组，推进按钮/命令只展示该组节点 */
+/** 流程组：建项可多选；推进按钮/命令按所选组分组展示节点 */
 export interface ProjectNodeGroupDef {
   id: string
   name: string
   nodes: ProjectNodeDef[]
-  /** 组的工作区类型（决定建项表单与 git 行为）；缺省 worktree 兼容存量 */
+  /** 存量字段；建项已统一走开发流程（worktree），不再按组切换表单 */
   workspace?: ProjectWorkspaceType
 }
 
@@ -105,14 +107,18 @@ export interface Project {
   worktreePath: string
   /** multi-repo worktrees */
   repos?: ProjectRepo[]
-  /** 流程组 id；旧项目缺省视为默认组 */
+  /** 流程组 id；旧项目缺省视为默认组；多组时为首组 id（兼容） */
   groupId?: string
-  /** 工作区类型（建项时从流程组快照）；缺省 worktree 兼容存量 */
+  /** 绑定的流程组 id 列表（多选）；缺省回落 groupId 或默认组 */
+  groupIds?: string[]
+  /** 工作区类型；新建默认 worktree，缺省按 worktree 兼容存量 */
   workspaceType?: ProjectWorkspaceType
   status: ProjectStatus
   actions: ProjectAction[]
   sessionKey?: string
   notifyChatId?: string
+  /** 独立群模式：项目专属群 chatKey（ch_xxx|oc_yyy）；命中该群的消息强制路由到本项目 */
+  groupChatId?: string
   createdAt: number
   updatedAt: number
 }
@@ -151,6 +157,23 @@ export function projectRepoRefs(p: Project): { repoPath: string; worktreePath: s
 /** 纯会话型项目（无 git 仓，跳过 worktree/分支借还等全部 git 行为） */
 export function isPlainProject(p: Project): boolean {
   return p.workspaceType === "plain"
+}
+
+/** 当前 chat 是否命中项目的独立群（两边 chatKey / 裸 chatId 皆可） */
+export function projectGroupChatMatches(project: Pick<Project, "groupChatId">, chatKey?: string): boolean {
+  if (!project.groupChatId || !chatKey) return false
+  const raw = parseChatKey(chatKey).chatId
+  return project.groupChatId === chatKey || parseChatKey(project.groupChatId).chatId === raw
+}
+
+/**
+ * 是否允许从该 chat 进入/推进项目：
+ * - 无独立群：任意会话可进
+ * - 有独立群：仅专属群内可进（私聊禁止，防串台）
+ */
+export function canEnterProjectFromChat(project: Pick<Project, "groupChatId">, chatKey?: string): boolean {
+  if (!project.groupChatId) return true
+  return projectGroupChatMatches(project, chatKey)
 }
 
 /** 远程仓库地址（http(s)/ssh/git@…）而非本地路径 */

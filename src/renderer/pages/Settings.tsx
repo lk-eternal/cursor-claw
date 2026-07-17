@@ -69,6 +69,7 @@ interface ProjectListItem {
   featureBranch: string
   status: string
   groupId?: string
+  groupIds?: string[]
   worktreePath?: string
   repoPath?: string
   workspaceType?: string
@@ -126,7 +127,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
   const [nodeGroups, setNodeGroups] = useState<ProjectNodeGroup[]>([])
   const [activeGroupId, setActiveGroupId] = useState("")
   const [nodeEditing, setNodeEditing] = useState<(ProjectNodeItem & { index: number }) | null>(null)
-  const [groupEditing, setGroupEditing] = useState<{ id: string; name: string; index: number; workspace: "worktree" | "plain" } | null>(null)
+  const [groupEditing, setGroupEditing] = useState<{ id: string; name: string; index: number } | null>(null)
   const [worktreeRoot, setWorktreeRoot] = useState("")
   const [projectsSubTab, setProjectsSubTab] = useState<ProjectsSubTab>("list")
   const [projectList, setProjectList] = useState<ProjectListItem[]>([])
@@ -723,6 +724,25 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
     ;[nodes[i], nodes[j]] = [nodes[j], nodes[i]]
     await saveActiveGroupNodes(nodes)
   }
+  const handleGroupExport = async () => {
+    if (!activeGroup) return
+    const r = await window.electronAPI.exportProjectNodeGroup(activeGroup.id)
+    if (r.ok && r.path) void showAlert("导出成功", r.path)
+    else if (!r.ok && r.error !== "已取消") void showAlert("导出失败", r.error ?? "未知错误")
+  }
+  const handleGroupImport = async () => {
+    const r = await window.electronAPI.importProjectNodeGroup()
+    if (!r.ok) {
+      if (r.error !== "已取消") void showAlert("导入失败", r.error ?? "未知错误")
+      return
+    }
+    const fresh = await window.electronAPI.getProjectNodeGroups()
+    setNodeGroups(fresh)
+    if (r.group) {
+      setActiveGroupId(r.group.id)
+      void showAlert("导入成功", `已导入为新组「${r.group.name}」(${r.group.id})`)
+    }
+  }
   const handleGroupDelete = async () => {
     if (!activeGroup) return
     if (nodeGroups.length <= 1) { void showAlert("无法删除", "至少保留 1 个流程组"); return }
@@ -738,7 +758,6 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
     if (!groupEditing) return
     const id = groupEditing.id.trim()
     const name = groupEditing.name.trim()
-    const workspace = groupEditing.workspace
     if (!name) return
     if (groupEditing.index < 0) {
       if (!/^[a-z][a-z0-9-]*$/.test(id)) {
@@ -749,10 +768,10 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
         void showAlert("无法保存", "组 id 与已有组重复")
         return
       }
-      await persistNodeGroups([...nodeGroups, { id, name, workspace, nodes: [] }])
+      await persistNodeGroups([...nodeGroups, { id, name, workspace: "worktree", nodes: [] }])
       setActiveGroupId(id)
     } else {
-      await persistNodeGroups(nodeGroups.map((g) => g.id === groupEditing.id ? { ...g, name, workspace } : g))
+      await persistNodeGroups(nodeGroups.map((g) => g.id === groupEditing.id ? { ...g, name } : g))
     }
     setGroupEditing(null)
   }
@@ -778,7 +797,8 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
       productDocUrl: projectEditing.productDocUrl?.trim() || "",
       techDocUrl: projectEditing.techDocUrl?.trim() || "",
       status: projectEditing.status,
-      groupId: projectEditing.groupId?.trim() || "",
+      // 全不勾传空数组：后端回落默认组（undefined 会静默保留旧值）
+      groupIds: projectEditing.groupIds ?? [],
     })
     if (!r.ok) { void showAlert("错误", r.error ?? "保存失败"); return }
     setProjectEditing(null)
@@ -1161,7 +1181,9 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                             storyUrl: p.storyUrl ?? "",
                             productDocUrl: p.productDocUrl ?? "",
                             techDocUrl: p.techDocUrl ?? "",
-                            groupId: p.groupId ?? nodeGroups[0]?.id ?? "",
+                            groupIds: p.groupIds?.length
+                              ? p.groupIds
+                              : (p.groupId ? [p.groupId] : nodeGroups[0]?.id ? [nodeGroups[0].id] : []),
                           })}
                             className="rounded px-2 py-0.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white">修改</button>
                           <button type="button" onClick={() => handleProjectDelete(p)}
@@ -1233,7 +1255,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
 
               <section className="space-y-4 border-t border-gray-800 pt-4">
                 <h3 className="text-sm font-medium text-gray-300">流程组</h3>
-                <p className="text-xs text-gray-500">项目创建时选择流程组；推进按钮与节点提示词以组内节点为准，点击节点编辑。</p>
+                <p className="text-xs text-gray-500">建项可多选（不选默认「开发」）；推进节点按所选组分组展示；点击节点编辑提示词。</p>
                 <div className="flex flex-wrap items-center gap-1.5">
                   {nodeGroups.map((g) => (
                     <button key={g.id} type="button"
@@ -1243,17 +1265,23 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                   ))}
                   <button
                     type="button"
-                    onClick={() => setGroupEditing({ id: "", name: "", index: -1, workspace: "worktree" })}
+                    onClick={() => setGroupEditing({ id: "", name: "", index: -1 })}
                     className="rounded-md border border-dashed border-gray-700 px-3 py-1.5 text-xs text-gray-400 hover:bg-gray-800"
                   >+ 新增组</button>
                 </div>
                 {activeGroup && (
                   <div className="space-y-1.5">
                     <div className="flex items-center gap-3 text-xs text-gray-500">
-                      <span>当前组 <span className="font-mono">{activeGroup.id}</span> · {activeGroup.nodes.length} 个节点 · {activeGroup.workspace === "plain" ? "纯会话型" : "代码开发型"}</span>
+                      <span>当前组 <span className="font-mono">{activeGroup.id}</span> · {activeGroup.nodes.length} 个节点</span>
                       <button type="button" className="text-blue-400 hover:text-blue-300"
-                        onClick={() => setGroupEditing({ id: activeGroup.id, name: activeGroup.name, index: nodeGroups.findIndex((g) => g.id === activeGroup.id), workspace: activeGroup.workspace === "plain" ? "plain" : "worktree" })}
+                        onClick={() => setGroupEditing({ id: activeGroup.id, name: activeGroup.name, index: nodeGroups.findIndex((g) => g.id === activeGroup.id) })}
                       >编辑</button>
+                      <button type="button" className="inline-flex items-center gap-1 text-blue-400 hover:text-blue-300" onClick={() => void handleGroupExport()}>
+                        <Download className="h-3 w-3" />导出
+                      </button>
+                      <button type="button" className="inline-flex items-center gap-1 text-blue-400 hover:text-blue-300" onClick={() => void handleGroupImport()}>
+                        <FilePlus className="h-3 w-3" />导入
+                      </button>
                       {nodeGroups.length > 1 && (
                         <button type="button" className="text-red-400 hover:text-red-300" onClick={handleGroupDelete}>删除组</button>
                       )}
@@ -1628,12 +1656,26 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                     <option value="paused">已暂停</option>
                     <option value="done">已完成</option>
                   </select></div>
-                <div><label className="mb-1 block text-xs text-gray-500">流程组</label>
-                  <select value={projectEditing.groupId ?? ""}
-                    onChange={(e) => setProjectEditing({ ...projectEditing, groupId: e.target.value })}
-                    className={inputCls}>
-                    {nodeGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
-                  </select></div>
+                <div className="col-span-2"><label className="mb-1 block text-xs text-gray-500">流程组（可多选）</label>
+                  <div className="flex flex-wrap gap-2 rounded-lg border border-gray-700 bg-gray-900 px-3 py-2">
+                    {nodeGroups.map((g) => {
+                      const selected = (projectEditing.groupIds ?? []).includes(g.id)
+                      return (
+                        <label key={g.id} className="flex cursor-pointer items-center gap-1.5 text-xs text-gray-300">
+                          <input type="checkbox" checked={selected}
+                            onChange={(e) => {
+                              const cur = projectEditing.groupIds ?? []
+                              const next = e.target.checked
+                                ? [...cur, g.id]
+                                : cur.filter((id) => id !== g.id)
+                              setProjectEditing({ ...projectEditing, groupIds: next, groupId: next[0] })
+                            }}
+                            className="rounded border-gray-600" />
+                          {g.name}
+                        </label>
+                      )
+                    })}
+                  </div></div>
               </div>
               <div><label className="mb-1 block text-xs text-gray-500">飞书项目 / 需求链接</label>
                 <input type="text" value={projectEditing.storyUrl ?? ""}
@@ -1680,20 +1722,6 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                 <input type="text" value={groupEditing.name}
                   onChange={(e) => setGroupEditing({ ...groupEditing, name: e.target.value })}
                   className={inputCls} placeholder="如 设计" /></div>
-              <div>
-                <label className="mb-1 block text-xs text-gray-500">工作区类型（决定建项表单与 git 行为）</label>
-                <div className="flex gap-2">
-                  {([
-                    { v: "worktree" as const, label: "代码开发型", tip: "主仓 + 隔离 worktree + 分支借还" },
-                    { v: "plain" as const, label: "纯会话型", tip: "无代码仓，自动创建会话目录" },
-                  ]).map((o) => (
-                    <button key={o.v} type="button" title={o.tip}
-                      onClick={() => setGroupEditing({ ...groupEditing, workspace: o.v })}
-                      className={`flex-1 rounded-md border px-3 py-1.5 text-xs transition ${groupEditing.workspace === o.v ? "border-blue-500 bg-blue-500/10 font-medium text-white" : "border-gray-700 text-gray-400 hover:bg-gray-800"}`}
-                    >{o.label}</button>
-                  ))}
-                </div>
-              </div>
             </div>
             <div className="flex justify-end gap-2 border-t border-gray-800 px-6 py-4">
               <button onClick={() => setGroupEditing(null)} className="rounded-md px-4 py-1.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white">取消</button>

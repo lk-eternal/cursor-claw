@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process"
+import { spawn } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { isRemoteRepoRef } from "../src/shared/project-types.js"
@@ -26,16 +26,35 @@ export interface WorktreeRepoRef {
   baseBranch: string
 }
 
-function runGit(cwd: string, args: string[], timeoutMs?: number): { ok: boolean; stdout: string; stderr: string; code: number } {
-  // 本地仓可能因不同 Windows 用户 SID 触发 dubious ownership；单次 -c 放行，不污染全局配置
+function runGit(cwd: string, args: string[], timeoutMs?: number): Promise<{ ok: boolean; stdout: string; stderr: string; code: number }> {
   const withSafe = ["-c", "safe.directory=*", ...args]
-  const r = spawnSync("git", withSafe, { cwd, encoding: "utf-8", windowsHide: true, timeout: timeoutMs })
-  return {
-    ok: r.status === 0,
-    stdout: (r.stdout || "").trim(),
-    stderr: ((r.stderr || "").trim()) || (r.error ? String(r.error.message || r.error) : ""),
-    code: r.status ?? 1,
-  }
+  return new Promise((resolve) => {
+    const child = spawn("git", withSafe, { cwd, windowsHide: true })
+    let stdout = ""
+    let stderr = ""
+    let settled = false
+    const finish = (result: { ok: boolean; stdout: string; stderr: string; code: number }) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      resolve(result)
+    }
+    child.stdout?.setEncoding("utf-8").on("data", (c) => { stdout += c })
+    child.stderr?.setEncoding("utf-8").on("data", (c) => { stderr += c })
+    let timer: ReturnType<typeof setTimeout> | undefined
+    if (timeoutMs != null) {
+      timer = setTimeout(() => {
+        child.kill()
+        finish({ ok: false, stdout: stdout.trim(), stderr: stderr.trim() || "timeout", code: 1 })
+      }, timeoutMs)
+    }
+    child.on("error", (err) => {
+      finish({ ok: false, stdout: stdout.trim(), stderr: String(err.message || err), code: 1 })
+    })
+    child.on("close", (code) => {
+      finish({ ok: code === 0, stdout: stdout.trim(), stderr: stderr.trim(), code: code ?? 1 })
+    })
+  })
 }
 
 function resolveReal(p: string): string {
@@ -46,31 +65,31 @@ function resolveReal(p: string): string {
   }
 }
 
-export function isGitRepoRoot(repoPath: string): boolean {
+export async function isGitRepoRoot(repoPath: string): Promise<boolean> {
   if (!repoPath || !fs.existsSync(repoPath)) return false
-  const r = runGit(repoPath, ["rev-parse", "--is-inside-work-tree"])
+  const r = await runGit(repoPath, ["rev-parse", "--is-inside-work-tree"])
   if (!r.ok || r.stdout !== "true") return false
-  const top = runGit(repoPath, ["rev-parse", "--show-toplevel"])
+  const top = await runGit(repoPath, ["rev-parse", "--show-toplevel"])
   if (!top.ok) return false
   return resolveReal(top.stdout) === resolveReal(repoPath)
 }
 
 /** 主仓引用是否可用作克隆源（远程地址直接放行，本地路径须是 git 根） */
-export function isUsableRepoRef(repoPath: string): boolean {
-  return isRemoteRepoRef(repoPath) || isGitRepoRoot(repoPath)
+export async function isUsableRepoRef(repoPath: string): Promise<boolean> {
+  return isRemoteRepoRef(repoPath) || (await isGitRepoRoot(repoPath))
 }
 
 /**
  * 独立 clone 创建 AI 工作目录：与用户主仓无 worktree 关联，同一分支双方可同时检出。
  * 本地主仓作克隆源加速（硬链接秒级），origin 指回真实远程；AI 提交 push 后用户主仓 pull 即可。
  */
-export function addProjectClone(input: CloneAddInput): WorktreeResult {
+export async function addProjectClone(input: CloneAddInput): Promise<WorktreeResult> {
   const { repoPath, worktreePath, featureBranch, baseBranch } = input
   if (!featureBranch.trim() || !baseBranch.trim()) {
     return { ok: false, error: "基线分支与 feature 分支不能为空" }
   }
   const remote = isRemoteRepoRef(repoPath)
-  if (!remote && !isGitRepoRoot(repoPath)) {
+  if (!remote && !await isGitRepoRoot(repoPath)) {
     return { ok: false, error: `主仓无效（须是 git 根目录或远程地址）: ${repoPath}` }
   }
   if (fs.existsSync(worktreePath)) {
@@ -79,7 +98,7 @@ export function addProjectClone(input: CloneAddInput): WorktreeResult {
   const parent = path.dirname(worktreePath)
   if (!fs.existsSync(parent)) fs.mkdirSync(parent, { recursive: true })
 
-  const fail = (msg: string): WorktreeResult => {
+  const fail = async (msg: string): Promise<WorktreeResult> => {
     try { fs.rmSync(worktreePath, { recursive: true, force: true }) } catch { /* ignore */ }
     return { ok: false, error: msg }
   }
@@ -87,15 +106,15 @@ export function addProjectClone(input: CloneAddInput): WorktreeResult {
   // 本地仓作源：先取 origin URL（可能因 ownership 失败，失败则仍尝试本地 clone）
   let originUrl = ""
   if (!remote) {
-    const ou = runGit(repoPath, ["remote", "get-url", "origin"])
+    const ou = await runGit(repoPath, ["remote", "get-url", "origin"])
     if (ou.ok && ou.stdout) originUrl = ou.stdout.trim()
   }
 
   // 本地 clone 加速（硬链接）；源仓 dubious ownership 时本地 clone 会失败，回退到 origin 远程
-  let clone = runGit(parent, ["clone", repoPath, worktreePath])
+  let clone = await runGit(parent, ["clone", repoPath, worktreePath])
   if (!clone.ok && !remote && originUrl) {
     try { fs.rmSync(worktreePath, { recursive: true, force: true }) } catch { /* ignore */ }
-    clone = runGit(parent, ["clone", originUrl, worktreePath])
+    clone = await runGit(parent, ["clone", originUrl, worktreePath])
   }
   if (!clone.ok) {
     const detail = clone.stderr || clone.stdout
@@ -111,102 +130,102 @@ export function addProjectClone(input: CloneAddInput): WorktreeResult {
   let hasOrigin = true
   if (!remote) {
     if (originUrl) {
-      const set = runGit(worktreePath, ["remote", "set-url", "origin", originUrl])
+      const set = await runGit(worktreePath, ["remote", "set-url", "origin", originUrl])
       if (!set.ok) return fail(`设置 origin 失败: ${set.stderr || set.stdout}`)
     } else {
-      hasOrigin = isGitRepoRoot(repoPath) // origin 指向本地主仓路径
+      hasOrigin = await isGitRepoRoot(repoPath) // origin 指向本地主仓路径
     }
   }
 
   if (input.fetch !== false && hasOrigin) {
-    const fetch = runGit(worktreePath, ["fetch", "origin", "--prune"], 60_000)
+    const fetch = await runGit(worktreePath, ["fetch", "origin", "--prune"], 60_000)
     if (!fetch.ok) return fail(`git fetch 失败: ${fetch.stderr || fetch.stdout}`)
   }
 
-  const co = checkoutOrCreateFeature(worktreePath, featureBranch, baseBranch)
+  const co = await checkoutOrCreateFeature(worktreePath, featureBranch, baseBranch)
   if (!co.ok) return fail(co.error || "检出 feature 失败")
-  ensureClawExcluded(worktreePath)
+  await ensureClawExcluded(worktreePath)
   return { ok: true }
 }
 
 /** 检出 feature：远程有→track 检出；本地有→切过去；都没有→从基线新建（不 track 基线，防误推） */
-function checkoutOrCreateFeature(cloneDir: string, featureBranch: string, baseBranch: string): WorktreeResult {
-  const local = runGit(cloneDir, ["rev-parse", "--verify", featureBranch])
+async function checkoutOrCreateFeature(cloneDir: string, featureBranch: string, baseBranch: string): Promise<WorktreeResult> {
+  const local = await runGit(cloneDir, ["rev-parse", "--verify", featureBranch])
   if (local.ok) {
-    const co = runGit(cloneDir, ["checkout", featureBranch])
+    const co = await runGit(cloneDir, ["checkout", featureBranch])
     if (!co.ok) return { ok: false, error: co.stderr || co.stdout }
-    ensureFeatureUpstream(cloneDir, featureBranch)
+    await ensureFeatureUpstream(cloneDir, featureBranch)
     return { ok: true }
   }
-  const remoteFeat = runGit(cloneDir, ["rev-parse", "--verify", `origin/${featureBranch}`])
+  const remoteFeat = await runGit(cloneDir, ["rev-parse", "--verify", `origin/${featureBranch}`])
   if (remoteFeat.ok) {
-    const co = runGit(cloneDir, ["checkout", "--track", "-b", featureBranch, `origin/${featureBranch}`])
+    const co = await runGit(cloneDir, ["checkout", "--track", "-b", featureBranch, `origin/${featureBranch}`])
     if (!co.ok) return { ok: false, error: co.stderr || co.stdout }
     return { ok: true }
   }
-  const baseRef = runGit(cloneDir, ["rev-parse", "--verify", `origin/${baseBranch}`]).ok
-    ? `origin/${baseBranch}`
-    : (runGit(cloneDir, ["rev-parse", "--verify", baseBranch]).ok ? baseBranch : "")
+  const baseOrigin = await runGit(cloneDir, ["rev-parse", "--verify", `origin/${baseBranch}`])
+  const baseLocal = await runGit(cloneDir, ["rev-parse", "--verify", baseBranch])
+  const baseRef = baseOrigin.ok ? `origin/${baseBranch}` : (baseLocal.ok ? baseBranch : "")
   if (!baseRef) return { ok: false, error: `找不到基线分支: ${baseBranch}（本地与 origin 均无）` }
-  const co = runGit(cloneDir, ["checkout", "--no-track", "-b", featureBranch, baseRef])
+  const co = await runGit(cloneDir, ["checkout", "--no-track", "-b", featureBranch, baseRef])
   if (!co.ok) return { ok: false, error: co.stderr || co.stdout }
   return { ok: true }
 }
 
 /** feature 的 upstream 只允许指向 origin 同名分支：有则对齐，无则清掉（防止跟踪生产基线导致误推） */
-function ensureFeatureUpstream(cloneDir: string, featureBranch: string): void {
-  const remote = runGit(cloneDir, ["rev-parse", "--verify", `origin/${featureBranch}`])
+async function ensureFeatureUpstream(cloneDir: string, featureBranch: string): Promise<void> {
+  const remote = await runGit(cloneDir, ["rev-parse", "--verify", `origin/${featureBranch}`])
   if (remote.ok) {
-    runGit(cloneDir, ["branch", `--set-upstream-to=origin/${featureBranch}`, featureBranch])
+    await runGit(cloneDir, ["branch", `--set-upstream-to=origin/${featureBranch}`, featureBranch])
   } else {
-    runGit(cloneDir, ["branch", "--unset-upstream"])
+    await runGit(cloneDir, ["branch", "--unset-upstream"])
   }
 }
 
 /** 确保各 AI 工作目录存在且检出 feature：缺失时自动重建（建项失败/被手动删除的懒修复） */
-export function ensureCheckouts(repos: WorktreeRepoRef[], featureBranch: string): WorktreeResult {
+export async function ensureCheckouts(repos: WorktreeRepoRef[], featureBranch: string): Promise<WorktreeResult> {
   for (const r of repos) {
     const res = fs.existsSync(r.worktreePath)
-      ? checkoutFeature(r.worktreePath, featureBranch)
-      : addProjectClone({ repoPath: r.repoPath, worktreePath: r.worktreePath, featureBranch, baseBranch: r.baseBranch })
+      ? await checkoutFeature(r.worktreePath, featureBranch)
+      : await addProjectClone({ repoPath: r.repoPath, worktreePath: r.worktreePath, featureBranch, baseBranch: r.baseBranch })
     if (!res.ok) return { ok: false, error: `${path.basename(r.worktreePath)}: ${res.error}` }
   }
   return { ok: true }
 }
 
 /** fetch + 快进同步远程 feature 新提交；失败不阻塞（离线可用本地代码），返回给用户的提示行 */
-export function syncCheckout(worktreePath: string, featureBranch: string): { note?: string } {
+export async function syncCheckout(worktreePath: string, featureBranch: string): Promise<{ note?: string }> {
   if (!fs.existsSync(worktreePath)) return {}
   const name = path.basename(worktreePath)
-  const fetch = runGit(worktreePath, ["fetch", "origin", "--prune"], 30_000)
+  const fetch = await runGit(worktreePath, ["fetch", "origin", "--prune"], 30_000)
   if (!fetch.ok) return { note: `⚠️ ${name}: 拉取远程失败（${(fetch.stderr || "超时").slice(0, 100)}），暂用本地代码` }
-  const remote = runGit(worktreePath, ["rev-parse", "--verify", `origin/${featureBranch}`])
+  const remote = await runGit(worktreePath, ["rev-parse", "--verify", `origin/${featureBranch}`])
   if (!remote.ok) return {}
-  const behind = runGit(worktreePath, ["rev-list", "--count", `HEAD..origin/${featureBranch}`])
+  const behind = await runGit(worktreePath, ["rev-list", "--count", `HEAD..origin/${featureBranch}`])
   const n = parseInt(behind.stdout, 10)
   if (!behind.ok || isNaN(n) || n === 0) return {}
-  const ff = runGit(worktreePath, ["merge", "--ff-only", `origin/${featureBranch}`])
+  const ff = await runGit(worktreePath, ["merge", "--ff-only", `origin/${featureBranch}`])
   if (ff.ok) return { note: `⬇️ ${name}: 已同步远程 ${n} 个新提交` }
   return { note: `⚠️ ${name}: 远程有 ${n} 个新提交但与本地有分歧，未自动合并（可在项目会话让 AI 处理）` }
 }
 
 /** 确保工作目录检出 feature（独立 clone 无分支互斥；存量 worktree 项目被主仓占用时会失败并透出 git 原因） */
-export function checkoutFeature(worktreePath: string, featureBranch: string): WorktreeResult {
+export async function checkoutFeature(worktreePath: string, featureBranch: string): Promise<WorktreeResult> {
   if (!fs.existsSync(worktreePath)) {
     return { ok: false, error: `AI 工作目录不存在: ${worktreePath}` }
   }
-  const cur = runGit(worktreePath, ["rev-parse", "--abbrev-ref", "HEAD"])
+  const cur = await runGit(worktreePath, ["rev-parse", "--abbrev-ref", "HEAD"])
   if (cur.ok && cur.stdout === featureBranch) return { ok: true }
-  const co = runGit(worktreePath, ["checkout", featureBranch])
+  const co = await runGit(worktreePath, ["checkout", featureBranch])
   if (co.ok) return { ok: true }
   return { ok: false, error: co.stderr || co.stdout }
 }
 
 /** 删除 AI 工作目录：兼容存量 worktree 项目（先 worktree remove，兜底直接删目录，最后 prune 元数据） */
-export function removeProjectWorktree(repoPath: string, worktreePath: string): void {
+export async function removeProjectWorktree(repoPath: string, worktreePath: string): Promise<void> {
   const localRepo = !isRemoteRepoRef(repoPath) && fs.existsSync(repoPath)
   try {
-    if (localRepo) runGit(repoPath, ["worktree", "remove", "--force", worktreePath])
+    if (localRepo) await runGit(repoPath, ["worktree", "remove", "--force", worktreePath])
   } catch { /* ignore */ }
   try {
     if (fs.existsSync(worktreePath)) {
@@ -214,21 +233,21 @@ export function removeProjectWorktree(repoPath: string, worktreePath: string): v
     }
   } catch { /* ignore */ }
   try {
-    if (localRepo) runGit(repoPath, ["worktree", "prune"])
+    if (localRepo) await runGit(repoPath, ["worktree", "prune"])
   } catch { /* ignore */ }
 }
 
-export function ensureArtifactDir(worktreePath: string): string {
+export async function ensureArtifactDir(worktreePath: string): Promise<string> {
   const dir = path.join(worktreePath, ".cursor-claw", "artifacts")
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-  ensureClawExcluded(worktreePath)
+  await ensureClawExcluded(worktreePath)
   return dir
 }
 
 /** 把 .cursor-claw/ 写进仓库本地 exclude（不动用户 .gitignore）：产物不进 git status、不见于 IDE 未版本列表 */
-export function ensureClawExcluded(worktreePath: string): void {
+export async function ensureClawExcluded(worktreePath: string): Promise<void> {
   try {
-    const gp = runGit(worktreePath, ["rev-parse", "--git-path", "info/exclude"])
+    const gp = await runGit(worktreePath, ["rev-parse", "--git-path", "info/exclude"])
     if (!gp.ok || !gp.stdout) return
     const excludePath = path.isAbsolute(gp.stdout) ? gp.stdout : path.join(worktreePath, gp.stdout)
     const existing = fs.existsSync(excludePath) ? fs.readFileSync(excludePath, "utf-8") : ""
@@ -239,24 +258,25 @@ export function ensureClawExcluded(worktreePath: string): void {
 }
 
 /** porcelain 状态行（剔除 .cursor-claw 产物目录）；查询失败按空处理 */
-function dirtyLines(worktreePath: string): string[] {
+async function dirtyLines(worktreePath: string): Promise<string[]> {
   if (!fs.existsSync(worktreePath)) return []
-  const st = runGit(worktreePath, ["status", "--porcelain"])
+  const st = await runGit(worktreePath, ["status", "--porcelain"])
   if (!st.ok || !st.stdout) return []
   return st.stdout.split("\n").filter(Boolean)
     .filter((l) => !l.slice(3).trim().replace(/^"|"$/g, "").startsWith(".cursor-claw"))
 }
 
 /** 未提交改动条数（含未跟踪；不含 .cursor-claw 产物） */
-export function worktreeDirtyCount(worktreePath: string): number {
-  return dirtyLines(worktreePath).length
+export async function worktreeDirtyCount(worktreePath: string): Promise<number> {
+  return (await dirtyLines(worktreePath)).length
 }
 
 /** 未推送到 origin/feature 的提交数；无 upstream/查询失败返回 -1（未知） */
-export function unpushedCount(worktreePath: string, featureBranch: string): number {
+export async function unpushedCount(worktreePath: string, featureBranch: string): Promise<number> {
   if (!fs.existsSync(worktreePath)) return -1
-  const r = runGit(worktreePath, ["rev-list", "--count", `origin/${featureBranch}..HEAD`])
+  const r = await runGit(worktreePath, ["rev-list", "--count", `origin/${featureBranch}..HEAD`])
   if (!r.ok) return -1
   const n = parseInt(r.stdout, 10)
   return isNaN(n) ? -1 : n
 }
+

@@ -8,17 +8,26 @@ import {
   getCurrentProject,
   getNodeGroups,
   getProject,
+  saveProject,
   getProjectNodes,
   initProjectStore,
   listProjects,
+  resolveProjectRef,
   projectNodeLabel,
   resolveNodeGroup,
+  parseNodeGroupExport,
+  resolveUniqueNodeGroupId,
   saveNodeGroups,
   setCurrentProjectId,
   startAction,
   updateAction,
+  projectGroupIds,
 } from "../src/shared/project-store.js"
-import { DEFAULT_NODE_GROUP_ID } from "../src/shared/project-types.js"
+import {
+  canEnterProjectFromChat,
+  DEFAULT_NODE_GROUP_ID,
+  projectGroupChatMatches,
+} from "../src/shared/project-types.js"
 
 describe("project-store", () => {
   let dir: string
@@ -132,11 +141,105 @@ describe("project-store", () => {
     expect(projectNodeLabel("check", "qa")).toBe("检查")
   })
 
+  it("parses node group export envelope and loose format", () => {
+    const envelope = parseNodeGroupExport({
+      kind: "cursor-claw-node-group",
+      version: 1,
+      group: {
+        id: "custom",
+        name: "自定义",
+        workspace: "plain",
+        nodes: [{ id: "step", label: "步骤", prompt: "做某事" }],
+      },
+    })
+    expect(envelope).toEqual({
+      id: "custom",
+      name: "自定义",
+      workspace: "plain",
+      nodes: [{ id: "step", label: "步骤", prompt: "做某事" }],
+    })
+    const loose = parseNodeGroupExport({
+      id: "loose",
+      name: "Loose",
+      nodes: [{ id: "a", label: "A" }],
+    })
+    expect(loose?.id).toBe("loose")
+    expect(loose?.workspace).toBe("worktree")
+    expect(parseNodeGroupExport({ kind: "other" })).toBeNull()
+    expect(parseNodeGroupExport({ id: "x", name: "X" })).toBeNull()
+  })
+
+  it("resolves unique node group id without overwriting existing", () => {
+    expect(resolveUniqueNodeGroupId("develop", "开发", ["develop", "test"])).toBe("develop-2")
+    expect(resolveUniqueNodeGroupId("develop", "开发", ["develop", "develop-2"])).toBe("develop-3")
+    expect(resolveUniqueNodeGroupId("BAD", "My Group", ["develop"])).toBe("my-group")
+    expect(resolveUniqueNodeGroupId(undefined, "开发", ["develop"])).toMatch(/^import-[a-f0-9]+$/)
+  })
+
   it("stores groupId on created project", () => {
     const p = createProject({
       name: "g", goal: "g", repoPath: "/r", baseBranch: "main",
       featureBranch: "fg", worktreePath: "/wg", groupId: "test",
     })
     expect(getProject(p.id)?.groupId).toBe("test")
+    expect(getProject(p.id)?.groupIds).toEqual(["test"])
   })
+
+  it("projectGroupIds supports multi-group and fallback", () => {
+    expect(projectGroupIds({ groupIds: ["develop", "test", "develop"] })).toEqual(["develop", "test"])
+    expect(projectGroupIds({ groupId: "test" })).toEqual(["test"])
+    expect(projectGroupIds({ groupIds: ["bad-id"] })).toEqual([DEFAULT_NODE_GROUP_ID])
+    expect(projectGroupIds({})).toEqual([DEFAULT_NODE_GROUP_ID])
+  })
+
+  it("createProject writes groupIds from multi input", () => {
+    const p = createProject({
+      name: "multi", goal: "g", repoPath: "/r", baseBranch: "main",
+      featureBranch: "f", worktreePath: "/w", groupIds: ["develop", "test"],
+    })
+    expect(p.groupIds).toEqual(["develop", "test"])
+    expect(p.groupId).toBe("develop")
+  })
+
+  it("projectGroupChatMatches and canEnterProjectFromChat enforce independent group isolation", () => {
+    const groupKey = "ch_feishu|oc_group123"
+    const otherKey = "ch_feishu|oc_other456"
+    const withGroup = { groupChatId: groupKey }
+
+    expect(projectGroupChatMatches(withGroup, groupKey)).toBe(true)
+    expect(projectGroupChatMatches(withGroup, "oc_group123")).toBe(true)
+    expect(projectGroupChatMatches(withGroup, otherKey)).toBe(false)
+    expect(projectGroupChatMatches(withGroup, undefined)).toBe(false)
+    expect(projectGroupChatMatches({}, groupKey)).toBe(false)
+
+    expect(canEnterProjectFromChat({}, groupKey)).toBe(true)
+    expect(canEnterProjectFromChat({}, undefined)).toBe(true)
+    expect(canEnterProjectFromChat(withGroup, groupKey)).toBe(true)
+    expect(canEnterProjectFromChat(withGroup, otherKey)).toBe(false)
+    expect(canEnterProjectFromChat(withGroup, undefined)).toBe(false)
+  })
+
+  it("resolveProjectRef matches hex id when id starts with digits, not list index", () => {
+    const first = createProject({
+      name: "first", goal: "g", repoPath: "/r", baseBranch: "main",
+      featureBranch: "f1", worktreePath: "/w1",
+    })
+    expect(resolveProjectRef("1")?.id).toBe(first.id)
+    const hexId = "1abc000000000001"
+    const secondPath = path.join(dir, "projects", `${hexId}.json`)
+    const second = {
+      ...first,
+      id: hexId,
+      name: "digit-prefix-id",
+      featureBranch: "f2",
+      worktreePath: "/w2",
+      updatedAt: first.updatedAt - 60_000,
+    }
+    fs.writeFileSync(secondPath, JSON.stringify(second), "utf-8")
+    saveProject(getProject(first.id)!)
+    expect(resolveProjectRef(hexId)?.id).toBe(hexId)
+    expect(resolveProjectRef(hexId)?.name).toBe("digit-prefix-id")
+    expect(resolveProjectRef("1")?.id).toBe(first.id)
+  })
+
 })

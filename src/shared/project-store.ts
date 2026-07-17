@@ -1,6 +1,6 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { randomUUID } from "node:crypto"
+import { randomBytes, randomUUID } from "node:crypto"
 import { DEFAULT_NODE_GROUPS, DEFAULT_NODE_GROUP_ID, type Project, type ProjectAction, type ProjectActionStatus, type ProjectActionType, type ProjectNodeDef, type ProjectNodeGroupDef } from "./project-types.js"
 
 let baseDir = ""
@@ -25,6 +25,8 @@ function legacyNodesPath(): string {
   return path.join(baseDir, "project-nodes.json")
 }
 
+const NODE_GROUP_ID_RE = /^[a-z][a-z0-9-]*$/
+
 function sanitizeGroups(groups: ProjectNodeGroupDef[] | null | undefined): ProjectNodeGroupDef[] {
   return (groups ?? [])
     .filter((g) => g?.id?.trim() && g?.name?.trim())
@@ -35,6 +37,80 @@ function sanitizeGroups(groups: ProjectNodeGroupDef[] | null | undefined): Proje
       nodes: (g.nodes ?? []).filter((n) => n?.id?.trim() && n?.label?.trim())
         .map((n) => ({ id: n.id.trim(), label: n.label.trim(), ...(n.prompt?.trim() ? { prompt: n.prompt } : {}) })),
     }))
+}
+
+function slugFromGroupName(name: string): string {
+  let slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+  if (!slug || !/^[a-z]/.test(slug)) {
+    slug = slug ? `g-${slug.replace(/^[^a-z0-9]*/i, "")}` : ""
+  }
+  slug = slug.replace(/[^a-z0-9-]/g, "").replace(/^-+|-+$/g, "")
+  return NODE_GROUP_ID_RE.test(slug) ? slug.slice(0, 40) : ""
+}
+
+/** 解析单组导出 JSON；兼容 envelope 与裸 group 对象 */
+export function parseNodeGroupExport(raw: unknown): ProjectNodeGroupDef | null {
+  if (!raw || typeof raw !== "object") return null
+  const obj = raw as Record<string, unknown>
+  let candidate: unknown
+  if (obj.kind === "cursor-claw-node-group" && obj.group && typeof obj.group === "object") {
+    candidate = obj.group
+  } else if (typeof obj.id === "string" && typeof obj.name === "string" && Array.isArray(obj.nodes)) {
+    candidate = obj
+  } else {
+    return null
+  }
+  const c = candidate as ProjectNodeGroupDef
+  if (!c.name?.trim() || !Array.isArray(c.nodes)) return null
+  const [group] = sanitizeGroups([{
+    id: (c.id ?? "").trim() || "import",
+    name: c.name,
+    workspace: c.workspace === "plain" || c.workspace === "worktree" ? c.workspace : "worktree",
+    nodes: c.nodes,
+  }])
+  if (!group) return null
+  return {
+    ...group,
+    workspace: group.workspace === "plain" ? "plain" : "worktree",
+  }
+}
+
+/** 生成不与已有组冲突的新 id（优先文件 id，冲突加 -2/-3…） */
+export function resolveUniqueNodeGroupId(
+  preferredId: string | undefined,
+  name: string,
+  existingIds: Iterable<string>,
+): string {
+  const used = new Set(existingIds)
+  const pick = (base: string): string | null => {
+    if (!NODE_GROUP_ID_RE.test(base)) return null
+    if (!used.has(base)) return base
+    for (let i = 2; i < 1000; i++) {
+      const cand = `${base}-${i}`
+      if (NODE_GROUP_ID_RE.test(cand) && !used.has(cand)) return cand
+    }
+    return null
+  }
+  const pref = preferredId?.trim()
+  if (pref) {
+    const hit = pick(pref)
+    if (hit) return hit
+  }
+  const fromName = slugFromGroupName(name)
+  if (fromName) {
+    const hit = pick(fromName)
+    if (hit) return hit
+  }
+  for (let i = 0; i < 100; i++) {
+    const cand = `import-${randomBytes(4).toString("hex")}`
+    if (!used.has(cand)) return cand
+  }
+  return `import-${randomUUID().replace(/-/g, "").slice(0, 8)}`
 }
 
 /** 旧扁平表 → 默认组结构：plan/build/review 的自定义覆盖到开发组，ship 丢弃，其余节点并入开发组 */
@@ -173,6 +249,15 @@ export function projectNodeLabel(id: string, groupId?: string): string {
   return getProjectNode(id, groupId)?.label || id
 }
 
+/** 项目绑定的流程组 id（去重、过滤无效 id，至少回落默认组） */
+export function projectGroupIds(p: Pick<Project, "groupIds" | "groupId">): string[] {
+  const raw = p.groupIds?.length
+    ? [...new Set(p.groupIds.map((id) => id?.trim()).filter(Boolean) as string[])]
+    : (p.groupId?.trim() ? [p.groupId.trim()] : [])
+  const valid = raw.filter((id) => getNodeGroups().some((g) => g.id === id))
+  return valid.length ? valid : [DEFAULT_NODE_GROUP_ID]
+}
+
 function ensureDir(dir: string): void {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
 }
@@ -222,7 +307,16 @@ export function saveProject(project: Project): void {
 export function deleteProject(id: string): boolean {
   const fp = projectPath(id)
   if (!fs.existsSync(fp)) return false
-  fs.unlinkSync(fp)
+  // 软删除：移入 trash，避免误删后无法恢复元数据
+  const trashDir = path.join(baseDir, "trash")
+  ensureDir(trashDir)
+  const trashFp = path.join(trashDir, `${id}.${Date.now()}.json`)
+  try {
+    fs.renameSync(fp, trashFp)
+  } catch {
+    fs.copyFileSync(fp, trashFp)
+    fs.unlinkSync(fp)
+  }
   const cur = getCurrentProjectId()
   if (cur === id) setCurrentProjectId(null)
   return true
@@ -253,6 +347,7 @@ export function createProject(input: Omit<Project, "id" | "actions" | "status" |
   actions?: ProjectAction[]
 }): Project {
   const now = Date.now()
+  const groupIds = projectGroupIds(input)
   const project: Project = {
     id: input.id ?? randomUUID().replace(/-/g, "").slice(0, 12),
     name: input.name,
@@ -265,12 +360,14 @@ export function createProject(input: Omit<Project, "id" | "actions" | "status" |
     featureBranch: input.featureBranch,
     worktreePath: input.worktreePath,
     repos: input.repos,
-    groupId: input.groupId,
+    groupIds,
+    groupId: groupIds[0],
     workspaceType: input.workspaceType,
     status: input.status ?? "active",
     actions: input.actions ?? [],
     sessionKey: input.sessionKey,
     notifyChatId: input.notifyChatId,
+    groupChatId: input.groupChatId,
     createdAt: now,
     updatedAt: now,
   }
@@ -337,9 +434,15 @@ export function lastAcceptedAction(project: Project): ProjectAction | undefined 
 export function resolveProjectRef(token: string | undefined, projects?: Project[]): Project | undefined {
   const list = projects ?? listProjects()
   if (!token) return getCurrentProject()
-  const idx = Number.parseInt(token, 10)
-  if (Number.isInteger(idx) && idx >= 1 && idx <= list.length) return list[idx - 1]
-  return list.find((p) => p.id === token || p.name === token)
+  // 仅纯数字才当序号；hex id（如 3d2abd629656）绝不能 parseInt——否则会变成 3 误删第 3 项
+  if (/^\d+$/.test(token)) {
+    const idx = Number.parseInt(token, 10)
+    if (idx >= 1 && idx <= list.length) return list[idx - 1]
+  }
+  const byId = list.find((p) => p.id === token)
+  if (byId) return byId
+  const byName = list.filter((p) => p.name === token)
+  return byName.length === 1 ? byName[0] : undefined
 }
 
 /** /p new 交互向导草稿（按 chatKey） */

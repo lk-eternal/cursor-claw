@@ -37,17 +37,17 @@ describe("project-worktree (independent checkout)", () => {
     fs.rmSync(root, { recursive: true, force: true })
   })
 
-  it("detects git root and remote refs", () => {
-    expect(isGitRepoRoot(repo)).toBe(true)
-    expect(isGitRepoRoot(wtRoot)).toBe(false)
+  it("detects git root and remote refs", async () => {
+    expect(await isGitRepoRoot(repo)).toBe(true)
+    expect(await isGitRepoRoot(wtRoot)).toBe(false)
     expect(isRemoteRepoRef("https://github.com/foo/bar.git")).toBe(true)
     expect(isRemoteRepoRef("git@github.com:foo/bar.git")).toBe(true)
     expect(isRemoteRepoRef(repo)).toBe(false)
   })
 
-  it("clones independently and creates feature from base", () => {
+  it("clones independently and creates feature from base", async () => {
     const wt = path.join(wtRoot, "feat-a")
-    const r = addProjectClone({
+    const r = await addProjectClone({
       repoPath: repo,
       worktreePath: wt,
       featureBranch: "feature/a",
@@ -59,21 +59,21 @@ describe("project-worktree (independent checkout)", () => {
     // 独立 .git，非 worktree 挂接
     expect(fs.statSync(path.join(wt, ".git")).isDirectory()).toBe(true)
 
-    const r2 = addProjectClone({
+    const r2 = await addProjectClone({
       repoPath: repo,
       worktreePath: wt,
       featureBranch: "feature/b",
       baseBranch: "main",
     })
     expect(r2.ok).toBe(false)
-    removeProjectWorktree(repo, wt)
+    await removeProjectWorktree(repo, wt)
     expect(fs.existsSync(wt)).toBe(false)
   })
 
-  it("succeeds even when the branch is checked out in the source repo", () => {
+  it("succeeds even when the branch is checked out in the source repo", async () => {
     git(repo, ["checkout", "-b", "feature/busy"])
     const wt = path.join(wtRoot, "busy")
-    const r = addProjectClone({
+    const r = await addProjectClone({
       repoPath: repo,
       worktreePath: wt,
       featureBranch: "feature/busy",
@@ -85,35 +85,36 @@ describe("project-worktree (independent checkout)", () => {
     expect(git(repo, ["rev-parse", "--abbrev-ref", "HEAD"])).toBe("feature/busy")
   })
 
-  it("ensureCheckouts rebuilds a missing directory", () => {
+  it("ensureCheckouts rebuilds a missing directory", async () => {
     const wt = path.join(wtRoot, "rebuild")
     const refs = [{ repoPath: repo, worktreePath: wt, baseBranch: "main" }]
-    expect(ensureCheckouts(refs, "feature/r").ok).toBe(true)
+    expect((await ensureCheckouts(refs, "feature/r")).ok).toBe(true)
     fs.rmSync(wt, { recursive: true, force: true })
-    const again = ensureCheckouts(refs, "feature/r")
+    const again = await ensureCheckouts(refs, "feature/r")
     expect(again.ok).toBe(true)
     expect(git(wt, ["rev-parse", "--abbrev-ref", "HEAD"])).toBe("feature/r")
   })
 
-  it("syncCheckout fast-forwards when remote feature advances", () => {
+  it("syncCheckout fast-forwards when remote feature advances", async () => {
     git(repo, ["checkout", "-b", "feature/sync"])
     fs.writeFileSync(path.join(repo, "a.txt"), "1\n")
     git(repo, ["add", "."])
     git(repo, ["commit", "-m", "sync1"])
     const wt = path.join(wtRoot, "sync")
-    expect(addProjectClone({
+    expect((await addProjectClone({
       repoPath: repo,
       worktreePath: wt,
       featureBranch: "feature/sync",
       baseBranch: "main",
-    }).ok).toBe(true)
+    })).ok).toBe(true)
     fs.writeFileSync(path.join(repo, "a.txt"), "2\n")
     git(repo, ["add", "."])
     git(repo, ["commit", "-m", "sync2"])
     const before = git(wt, ["rev-parse", "HEAD"])
-    const note = syncCheckout(wt, "feature/sync")
+    const note = await syncCheckout(wt, "feature/sync")
     expect(note.note).toMatch(/已同步远程/)
     expect(git(wt, ["rev-parse", "HEAD"])).not.toBe(before)
     expect(fs.readFileSync(path.join(wt, "a.txt"), "utf-8").replace(/\r\n/g, "\n")).toBe("2\n")
   })
 })
+

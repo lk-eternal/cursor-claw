@@ -144,6 +144,8 @@ declare global {
     getProjectNodeGroups(): Promise<{ id: string; name: string; workspace?: "worktree" | "plain"; nodes: { id: string; label: string; prompt?: string; defaultPrompt?: string }[] }[]>
     saveProjectNodeGroups(groups: { id: string; name: string; workspace?: "worktree" | "plain"; nodes: { id: string; label: string; prompt?: string }[] }[]): Promise<{ ok: boolean }>
     getProjectNodeGroupUsage(): Promise<Record<string, number>>
+    exportProjectNodeGroup(groupId: string): Promise<{ ok: boolean; path?: string; error?: string }>
+    importProjectNodeGroup(): Promise<{ ok: boolean; group?: { id: string; name: string; workspace?: "worktree" | "plain"; nodes: { id: string; label: string; prompt?: string }[] }; error?: string }>
     saveConfig(config: Partial<AppConfig>): Promise<ConfigSaveResult>
     setAutoStart(enabled: boolean): Promise<{ ok: boolean }>
     applyWorkspaceSwitch(workspaceDir: string, stopOldSessions: boolean, notifyMain?: boolean): Promise<{ ok: boolean; error?: string }>
@@ -166,12 +168,12 @@ declare global {
     deleteSession(sessionKey: string): Promise<{ ok: boolean; error?: string; label?: string }>
     listProjects(): Promise<{
       id: string; name: string; goal?: string; storyUrl?: string; productDocUrl?: string; techDocUrl?: string
-      featureBranch: string; status: string; groupId?: string; worktreePath?: string; repoPath?: string; workspaceType?: string
+      featureBranch: string; status: string; groupId?: string; groupIds?: string[]; worktreePath?: string; repoPath?: string; workspaceType?: string
     }[]>
     deleteProject(projectId: string): Promise<{ ok: boolean; name?: string; error?: string }>
     updateProject(patch: {
       id: string; name?: string; goal?: string; storyUrl?: string; productDocUrl?: string; techDocUrl?: string
-      status?: string; groupId?: string
+      status?: string; groupId?: string; groupIds?: string[]
     }): Promise<{ ok: boolean; error?: string }>
     switchProject(projectId: string): Promise<{ ok: boolean; error?: string }>
     listQuickModels(): Promise<{ ok: boolean; models: { model: string; modelParams?: string; label?: string }[] }>

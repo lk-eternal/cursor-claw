@@ -47,7 +47,7 @@ import { z } from "zod";
 import { registerAdminTools } from "./server-admin.js";
 import { registerProjectAgentTools } from "./server-project.js";
 import { initProjectStore, hasProjectNewDraft, getProject, getNodeGroups, listProjects } from "./shared/project-store.js";
-import { projectIdFromSessionKey, decodeRepoPair, isRemoteRepoRef } from "./shared/project-types.js";
+import { projectIdFromSessionKey, decodeRepoPair, isRemoteRepoRef, DEFAULT_NODE_GROUP_ID } from "./shared/project-types.js";
 import { buildSessionCardTitle, isSpecialSessionSuffix, resolveWorkspaceFromSessionKey, sessionHeaderTemplate } from "./shared/session-label.js";
 
 const _require = createRequire(import.meta.url);
@@ -393,6 +393,29 @@ let routingSaveTimer: NodeJS.Timeout | null = null;
 
 
 /** 清掉误写入的展示标签后缀（无路径分隔符且非 wf_/project_），回写为真实 WORKSPACE_DIR；并压平双重反斜杠 */
+
+/** 删除 activeSession / sessionToChat 中 chat 与 session 通道不一致的脏数据 */
+function scrubCrossChannelRouting(): void {
+  let n = 0;
+  for (const [sessionKey, chatKey] of [...sessionToChatMap.entries()]) {
+    const chatChannel = parseChatKey(chatKey).channelId;
+    const sessionChannel = parseChatKey(chatIdFromSessionKey(sessionKey)).channelId;
+    if (chatChannel && sessionChannel && chatChannel !== sessionChannel) {
+      sessionToChatMap.delete(sessionKey);
+      n++;
+    }
+  }
+  for (const [chatKey, sessionKey] of [...activeSessionMap.entries()]) {
+    const chatChannel = parseChatKey(chatKey).channelId;
+    const sessionChannel = parseChatKey(chatIdFromSessionKey(sessionKey)).channelId;
+    if (chatChannel && sessionChannel && chatChannel !== sessionChannel) {
+      activeSessionMap.delete(chatKey);
+      n++;
+    }
+  }
+  if (n > 0) scheduleRoutingSave();
+}
+
 function scrubInvalidActiveSessions(): void {
   if (!WORKSPACE_DIR || !/[\\/]/.test(WORKSPACE_DIR)) return;
   let n = 0;
@@ -433,6 +456,7 @@ function loadRoutingMaps(): void {
       if (v === "p2p" || v === "group") chatTypeByChatKey.set(k, v);
     }
     scrubInvalidActiveSessions();
+    scrubCrossChannelRouting();
     log("INFO", `[Routing] 路由映射已恢复: msg=${messageSessionMap.size}, active=${activeSessionMap.size}, chat=${sessionToChatMap.size}, chatType=${chatTypeByChatKey.size}`);
   } catch (e: any) { log("WARN", `[Routing] 路由映射恢复失败: ${e?.message ?? e}`); }
 }
@@ -498,17 +522,33 @@ function terminateSessionsByChat(chatId: string): void {
   }
 }
 
-function setActiveSession(chatId: string, sessionKey: string): void {
+function setActiveSession(chatId: string, sessionKey: string): boolean {
   const normalized = normalizeSessionKey(sessionKey) || sessionKey;
+  const chatChannel = parseChatKey(chatId).channelId;
+  const sessionChannel = parseChatKey(chatIdFromSessionKey(normalized)).channelId;
+  if (chatChannel && sessionChannel && chatChannel !== sessionChannel) {
+    log("WARN", `[Routing] 拒绝跨通道 active 绑定: chat=${chatId} session=${normalized}`);
+    return false;
+  }
   activeSessionMap.set(chatId, normalized);
   sessionToChatMap.set(normalized, chatId);
   scheduleRoutingSave();
   log("INFO", `会话路由更新: ${chatId} → ${normalized}`);
+  return true;
 }
 
 function resolveRawChatId(sessionKey?: string): string | undefined {
   if (!sessionKey) return undefined;
-  return sessionToChatMap.get(sessionKey) ?? chatIdFromSessionKey(sessionKey);
+  const mapped = sessionToChatMap.get(sessionKey);
+  if (mapped) {
+    const mapChannel = parseChatKey(mapped).channelId;
+    const selfChannel = parseChatKey(chatIdFromSessionKey(sessionKey)).channelId;
+    if (mapChannel && selfChannel && mapChannel !== selfChannel) {
+      return chatIdFromSessionKey(sessionKey);
+    }
+    return mapped;
+  }
+  return chatIdFromSessionKey(sessionKey);
 }
 
 function extractWorkspaceDir(sessionKey?: string): string | undefined {
@@ -877,9 +917,26 @@ function pushMessage(content: string, messageId?: string, chatId?: string, chatT
       }
     }
   }
+  // 项目专属群：命中 groupChatId 的消息强制路由到该项目会话（无视 active 指针，永不串台）
+  if (!resolved.viaReply && chatId && chatType === "group") {
+    const rawChat = parseChatKey(chatId).chatId;
+    const grp = listProjects().find((p) => {
+      if (p.status === "done" || !p.groupChatId || !p.sessionKey) return false;
+      return p.groupChatId === chatId || parseChatKey(p.groupChatId).chatId === rawChat;
+    });
+    if (grp?.sessionKey && routedId !== grp.sessionKey) {
+      setActiveSession(chatId, grp.sessionKey);
+      routedId = grp.sessionKey;
+    }
+  }
   // 群聊无活跃会话映射（如 daemon 重启后路由丢失）：唯一活跃项目兜底，防消息落入裸 chatKey 幽灵会话
   if (!resolved.viaReply && chatId && chatType === "group" && routedId === chatId) {
-    const owned = listProjects().filter((p) => p.status === "active" && p.notifyChatId === chatId && p.sessionKey);
+    const rawChat = parseChatKey(chatId).chatId;
+    const owned = listProjects().filter((p) => {
+      if (p.status !== "active" || !p.sessionKey) return false;
+      const n = p.notifyChatId || "";
+      return n === chatId || parseChatKey(n).chatId === rawChat;
+    });
     if (owned.length === 1) {
       setActiveSession(chatId, owned[0].sessionKey!);
       routedId = owned[0].sessionKey!;
@@ -1289,37 +1346,52 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
     const cmd = String(value.cmd ?? "").trim();
     if (!cmd || !isCommand(cmd)) return { toast: { type: "error", content: "无效指令" } };
     log("INFO", `[${rt.cfg.name}] 卡片指令点击: ${cmd}`);
-    // 主用户私聊内点击按钮等价于主用户发指令（缺 chatType 会被 isMainUser 误判非管理员）
-    const chatType = rt.cfg.mainUserEnabled && rt.cfg.mainUserChatId === evt.chatId ? "p2p" : undefined;
+    // 主用户私聊点按钮 → p2p（供 isMainUser）；群内点按钮 → group（供独立群放行 /p）
+    const chatType = rt.cfg.mainUserEnabled && rt.cfg.mainUserChatId === evt.chatId
+      ? "p2p"
+      : (evt.chatId?.startsWith("oc_") || evt.chatId?.startsWith("on_") ? "group" : "p2p");
     handleCommand(cmd, evt.messageId, chatKey, chatType, true).catch((e: any) => log("ERROR", `卡片指令失败: ${e?.message ?? e}`));
     return { toast: { type: "info", content: `已执行 ${cmd}` } };
   }
 
   if (value?.kind === "project_new_form") {
     const f = evt.formValue || {};
-    const cbv = value as { worktreeRoot?: string; groupId?: string; workspaceType?: string } | undefined;
+    const cbv = value as { worktreeRoot?: string; groupId?: string; groupIds?: string[]; workspaceType?: string } | undefined;
     const name = (f.name || "").trim();
     const goal = (f.goal || "").trim();
     const worktreeRaw = (f.worktreeRoot || String(cbv?.worktreeRoot || "")).trim();
     const worktreeRoot = worktreeRaw ? path.normalize(worktreeRaw) : "";
     const featureBranch = (f.featureBranch || "").trim();
     const storyUrl = (f.storyUrl || "").trim();
-    const groupId = String(f.group_id || cbv?.groupId || "").trim();
-    const workspaceType = cbv?.workspaceType === "plain" ? "plain" : "worktree";
     const productDocUrl = (f.productDocUrl || "").trim();
     const techDocUrl = (f.techDocUrl || "").trim();
+    const chatMode = String(f.chatMode || "").trim() === "inline" ? "inline" : "group";
+    const workspaceType = cbv?.workspaceType === "plain" ? "plain" : "worktree";
 
-    // 纯会话型：无 git 字段，storyUrl 必填（测试流程的信息枢纽），目录由 electron 侧自动创建
+    const groupIdsRaw = f.group_ids;
+    const groupIdsList: string[] = Array.isArray(groupIdsRaw)
+      ? groupIdsRaw.map(String).map((s) => s.trim()).filter(Boolean)
+      : (groupIdsRaw ? [String(groupIdsRaw).trim()] : []);
+    const groupIds = groupIdsList.length
+      ? groupIdsList
+      : (String(f.group_id || cbv?.groupId || "").trim()
+        ? [String(f.group_id || cbv?.groupId || "").trim()]
+        : [DEFAULT_NODE_GROUP_ID]);
+    const groupId = groupIds[0] || DEFAULT_NODE_GROUP_ID;
+
+    if (!name) return { toast: { type: "error", content: "请填写项目名称" } };
+
+    // 纯会话型（存量/显式 workspaceType）：无 git 字段；storyUrl 与新表单一致可空
     if (workspaceType === "plain") {
-      if (!name) return { toast: { type: "error", content: "请填写项目名称" } };
-      if (!storyUrl) return { toast: { type: "error", content: "请填写飞书项目链接" } };
       process.stdout.write(`__PROJECT_NEW_SUBMIT__:${JSON.stringify({
         chatId: chatKey,
         messageId: evt.messageId,
         name, goal, worktreeRoot, featureBranch: "",
         storyUrl, productDocUrl, techDocUrl,
-        groupId,
+        groupId, groupIds,
         workspaceType,
+        chatMode,
+        operatorOpenId: evt.operatorOpenId || "",
         repos: [],
         repoPath: "",
         baseBranch: "",
@@ -1370,21 +1442,19 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
       }
     }
 
-    if (!name) return { toast: { type: "error", content: "请填写项目名称" } };
-    if (!repos.length) return { toast: { type: "error", content: "请多选或手填至少一个主仓·分支" } };
-    if (!worktreeRoot) return { toast: { type: "error", content: "请填写 AI 工作目录" } };
-
     const primary = repos[0];
     process.stdout.write(`__PROJECT_NEW_SUBMIT__:${JSON.stringify({
       chatId: chatKey,
       messageId: evt.messageId,
       name, goal, worktreeRoot, featureBranch,
       storyUrl, productDocUrl, techDocUrl,
-      groupId,
+      groupId, groupIds,
       workspaceType,
+      chatMode,
+      operatorOpenId: evt.operatorOpenId || "",
       repos,
-      repoPath: primary.repoPath,
-      baseBranch: primary.baseBranch,
+      repoPath: primary?.repoPath || "",
+      baseBranch: primary?.baseBranch || "",
     })}\n`);
     return {
       toast: { type: "info", content: "正在创建项目…" },
@@ -1964,6 +2034,67 @@ function startHttpServer(): Promise<number> {
           return;
         }
 
+        if (method === "POST" && pathname === "/create-project-group") {
+          const body = JSON.parse(await readBody(req)) as {
+            name?: string; description?: string; channelId?: string; ownerOpenId?: string;
+          };
+          const name = (body.name || "").trim();
+          if (!name) { json(res, { ok: false, error: "name is required" }, 400); return; }
+          const rt = pickChannel(body.channelId);
+          if (!rt || rt.cfg.type !== "feishu" || !rt.client) {
+            log("WARN", "[Project] 独立群创建失败: 无可用飞书通道");
+            json(res, { ok: false, error: "无可用飞书通道" });
+            return;
+          }
+          const owner = (body.ownerOpenId || "").trim();
+          try {
+            const r: any = await rt.client.im.chat.create({
+              params: { user_id_type: "open_id", set_bot_manager: true } as any,
+              data: {
+                name: name.slice(0, 60),
+                description: (body.description || "").slice(0, 100),
+                chat_mode: "group",
+                chat_type: "private",
+                ...(owner ? { owner_id: owner, user_id_list: [owner] } : {}),
+              } as any,
+            });
+            const chatId: string | undefined = r?.data?.chat_id;
+            if (!chatId) {
+              const err = `建群失败: ${r?.msg || "响应无 chat_id"}`;
+              log("WARN", `[Project] 独立群创建失败: ${err}`);
+              json(res, { ok: false, error: err });
+              return;
+            }
+            const chatKey = makeChatKey(rt.cfg.id, chatId);
+            rememberChatType(chatKey, "group");
+            log("INFO", `[Project] 项目群已创建: ${name} → ${chatKey}`);
+            json(res, { ok: true, chatId, chatKey });
+          } catch (e: any) {
+            const err = e?.response?.data?.msg || e?.message || String(e);
+            log("WARN", `[Project] 独立群创建失败: ${err}`);
+            json(res, { ok: false, error: err });
+          }
+          return;
+        }
+
+        if (method === "POST" && pathname === "/archive-project-group") {
+          const body = JSON.parse(await readBody(req)) as { chatKey?: string; name?: string };
+          const chatKey = (body.chatKey || "").trim();
+          const newName = (body.name || "").trim();
+          if (!chatKey || !newName) { json(res, { ok: false, error: "chatKey/name is required" }, 400); return; }
+          const { channelId, chatId } = parseChatKey(chatKey);
+          const rt = channelId ? channels.get(channelId) : pickChannel();
+          if (!rt || rt.cfg.type !== "feishu" || !rt.client) { json(res, { ok: false, error: "无可用飞书通道" }); return; }
+          try {
+            await rt.client.im.chat.update({ path: { chat_id: chatId }, data: { name: newName.slice(0, 60) } as any });
+            log("INFO", `[Project] 项目群已归档改名: ${chatKey} → ${newName}`);
+            json(res, { ok: true });
+          } catch (e: any) {
+            json(res, { ok: false, error: e?.response?.data?.msg || e?.message || String(e) });
+          }
+          return;
+        }
+
         if (method === "POST" && pathname === "/cmd/result") {
           const body = JSON.parse(await readBody(req)) as {
             messageId: string; ok: boolean; message: string; chatId?: string;
@@ -2416,9 +2547,9 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
 
   if (method === "POST" && pathname === "/api/project-new-form") {
     const body = JSON.parse(await readBody(req));
-    const { message_id, session_key, repo_roots, repo_profiles, worktree_root, group_id } = body as {
+    const { message_id, session_key, repo_roots, repo_profiles, worktree_root } = body as {
       message_id?: string; session_key?: string; repo_roots?: string[];
-      repo_profiles?: { path: string; baseBranch: string }[]; worktree_root?: string; group_id?: string
+      repo_profiles?: { path: string; baseBranch: string }[]; worktree_root?: string
     };
     if (rejectUnroutedSend(res, "project-new-form", session_key, message_id)) return true;
     const ch = resolveChannel(routeTargetKey(session_key, message_id), { allowDefault: false });
@@ -2436,13 +2567,11 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       return true;
     }
     const sender = ch.rt.sender!;
-    const pickedGroup = group_id ? getNodeGroups().find((g) => g.id === group_id) : undefined;
     const card = LarkSender.buildProjectNewFormCard({
       repoProfiles: repo_profiles || [],
       repoRoots: repo_roots || [],
       worktreeRoot: worktree_root,
       nodeGroups: getNodeGroups().map((g) => ({ id: g.id, name: g.name })),
-      group: pickedGroup ? { id: pickedGroup.id, name: pickedGroup.name, workspace: pickedGroup.workspace } : undefined,
     });
     let sent = message_id && !message_id.startsWith("internal_")
       ? await sender.sendInteractiveCard(card, message_id, undefined)
@@ -2616,8 +2745,8 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const body = await readBody(req);
     const { chatId, sessionKey } = JSON.parse(body);
     if (chatId && sessionKey) {
-      setActiveSession(chatId, sessionKey);
-      json(res, { ok: true });
+      const ok = setActiveSession(chatId, sessionKey);
+      json(res, ok ? { ok: true } : { ok: false, error: "cross-channel active binding rejected" }, ok ? 200 : 409);
     } else {
       json(res, { ok: false, error: "chatId and sessionKey required" }, 400);
     }
@@ -2781,10 +2910,16 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
           path: { user_id: oid },
           params: { user_id_type: "open_id" },
         });
-        const name = r?.data?.user?.name;
+        const user = r?.data?.user ?? r?.user;
+        const name = user?.name || user?.nickname || user?.en_name;
         if (name) { names[oid] = name; continue; }
-        // SDK 对业务错误码（code!=0）不一定抛异常，这里把真实 code/msg 显式暴露出来
-        log("WARN", `用户名解析失败 ${oid}@${owner.cfg.name}: code=${r?.code ?? "?"} ${r?.msg ?? "返回为空"}`
+        // code=0 仅表示接口通了，不等于拿到姓名（可见范围外常返回空 user）
+        const code = r?.code ?? "?";
+        const msg = r?.msg ?? "返回为空";
+        const detail = user
+          ? `code=${code} ${msg}，user 无 name/nickname/en_name`
+          : `code=${code} ${msg}，data.user 为空（多半不在通讯录可见范围）`;
+        log("WARN", `用户名解析失败 ${oid}@${owner.cfg.name}: ${detail}`
           + "（需 contact:contact.base:readonly 且用户在应用通讯录可见范围内；外部用户无法解析，将以“通道名·访客”展示）");
       } catch (e: any) {
         const msg = e?.response?.data?.msg ?? e?.message ?? String(e);

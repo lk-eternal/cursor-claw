@@ -29,7 +29,7 @@ import {
 import { injectWorkspaceToDir } from "./workspace-injector"
 import { buildSessionCardTitle, readGitBranch, dirBaseName } from "../src/shared/session-label.js"
 import { getProject, listProjects, setCurrentProjectId, saveProject } from "../src/shared/project-store.js"
-import { projectIdFromSessionKey, projectSessionKey, projectRepoRefs, isPlainProject } from "../src/shared/project-types.js"
+import { projectIdFromSessionKey, projectSessionKey, projectRepoRefs, isPlainProject, canEnterProjectFromChat, projectGroupChatMatches } from "../src/shared/project-types.js"
 import { ensureCheckouts } from "./project-worktree"
 import { buildProjectSessionPrompt } from "./project-prompts"
 import { getSessionOverride } from "../src/shared/session-model-store.js"
@@ -183,6 +183,8 @@ const NAME_FETCH_RETRY_MS = 10 * 60_000
 
 export async function fetchUserNames(openIds: string[], channelId?: string): Promise<void> {
   const now = Date.now()
+  // 无 channelId 时不查、不进冷却（否则权限已开也要干等 10 分钟）
+  if (!channelId) return
   const missing = openIds.filter((id) =>
     id && !chatNameCache.has(id) && now - (nameFetchFailedAt.get(id) ?? 0) > NAME_FETCH_RETRY_MS)
   if (missing.length === 0) return
@@ -192,8 +194,12 @@ export async function fetchUserNames(openIds: string[], channelId?: string): Pro
     const res = (await httpPost(`http://127.0.0.1:${lock.port}/api/user-names`, { openIds: missing, channelId }, 15_000)) as { names?: Record<string, string> }
     for (const id of missing) {
       const name = res?.names?.[id]
-      if (name) chatNameCache.set(id, name)
-      else nameFetchFailedAt.set(id, now)
+      if (name) {
+        chatNameCache.set(id, name)
+        nameFetchFailedAt.delete(id)
+      } else {
+        nameFetchFailedAt.set(id, now)
+      }
     }
   } catch { /* ignore */ }
 }
@@ -396,16 +402,34 @@ interface LaunchAgentParams {
   workingDirectory?: string
 }
 
+/** 解析项目绑定：sessionKey 带 project_，或 chatId 命中独立群 groupChatId */
+function findBoundProject(sessionKey: string, chatId?: string) {
+  const projId = projectIdFromSessionKey(sessionKey)
+  if (projId) {
+    const p = getProject(projId)
+    if (p && p.status !== "done") return p
+  }
+  const key = chatId || extractChatId(sessionKey)
+  if (!key) return undefined
+  const raw = parseChatKey(key).chatId
+  return listProjects().find((p) => {
+    if (p.status === "done" || !p.groupChatId) return false
+    return p.groupChatId === key || parseChatKey(p.groupChatId).chatId === raw
+  })
+}
+
 async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?: string }> {
   const { sessionKey, chatType, meta, senderOpenId, chatName, taskMessage } = p
   const useMain = p.useMainWorkspace ?? (chatType === "p2p")
+  const boundProject = findBoundProject(sessionKey, meta?.chatId)
+  // 项目会话 / 独立群：不算「其他人使用」，不注入数字身份，用主模型
+  const projectOwned = chatType === "project" || !!boundProject
 
   // 通道与 Agent 资源解析
   const channel: MessageChannel | undefined = getChannel(p.channelId) ?? resolveChannelForSession(sessionKey)
   const resource = getAgentResource(channel?.agentResourceId)
 
-  // 其他人会话需要通道显式开启
-  const isOwnTask = chatType === "task" || chatType === "temp" || chatType === "project"
+  const isOwnTask = chatType === "task" || chatType === "temp" || chatType === "project" || projectOwned
   if (!useMain && !isOwnTask && !channel?.allowOthers) {
     return { ok: false, error: `通道「${channel?.name ?? "未知"}」未启用其他人使用` }
   }
@@ -413,6 +437,9 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
   let workDir: string
   if (p.workingDirectory) {
     workDir = p.workingDirectory
+    if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true })
+  } else if (boundProject?.worktreePath) {
+    workDir = boundProject.worktreePath
     if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true })
   } else if (useMain || isOwnTask) {
     // sessionKey 自带工作目录后缀时优先（如切换 workspace 后旧会话被重新拉起，
@@ -427,8 +454,8 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
   }
   if (!workDir) return { ok: false, error: "工作目录未配置" }
 
-  const skipIdentity = chatType === "project"
-  await injectWorkspaceToDir(workDir, useMain || skipIdentity, channel?.digitalIdentity)
+  // 项目/独立群：删除 digital-identity.mdc，禁止拟人人设
+  await injectWorkspaceToDir(workDir, useMain || projectOwned, channel?.digitalIdentity)
 
   // 模型解析：显式覆盖 > 会话 override/pending > 通道场景模型
   let model: string
@@ -453,19 +480,24 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
   // 会话模式：保留会话（run 结束持久化 agentId，新消息 Resume 续上下文）+ 长连接（无限 poll）
   const keepSession = channel?.keepSession ?? true
   const persistentPoll = keepSession && (channel?.persistentPoll ?? true)
+  // 独立群即使入站 chatType=group，出站/提示词也按 project 语义（禁数字身份）
+  const launchChatType: ChatType = projectOwned ? "project" : chatType
+  const launchMeta = { ...meta, chatType: launchChatType }
 
   if (resource.type === "sdk") {
     return launchSdkAgent({
-      sessionKey, chatType, meta, workspaceDir: workDir, useMainWorkspace: useMain,
+      sessionKey, chatType: launchChatType, meta: launchMeta, workspaceDir: workDir,
+      useMainWorkspace: useMain || projectOwned,
       senderOpenId, chatName, taskMessage,
       apiKey: resource.apiKey ?? "", model, modelParams,
       keepSession, persistentPoll,
     })
   }
 
-  const needResume = chatType === "p2p" || chatType === "group"
+  const needResume = launchChatType === "p2p" || launchChatType === "group"
   return _launchCliAgent({
-    sessionKey, chatType, meta, useMainWorkspace: useMain,
+    sessionKey, chatType: launchChatType, meta: launchMeta,
+    useMainWorkspace: useMain || projectOwned,
     senderOpenId, chatName, taskMessage,
     workspaceDir: workDir, model,
     resumeScope: needResume && channel ? mainChatScopeKey(channel.id, workDir) : undefined,
@@ -555,12 +587,24 @@ function buildSwitchableSessions(
     const branch = readGitBranch(dir)
     return `📂 ${name}${branch ? ` · 🌿 ${branch}` : ""}`
   }
+  const bound = listProjects().find((p) => p.status !== "done" && projectGroupChatMatches(p, chatId))
+  // 专属群：只协作本群项目，目录会话/其它项目一律不列（切了也会被强制路由拉回）
+  if (bound) {
+    const key = bound.sessionKey || projectSessionKey(bound.groupChatId || chatId, bound.id)
+    push(key, `📦 ${bound.name} · 🌿 ${bound.featureBranch || "—"}`)
+    return out.slice(0, 8)
+  }
   if (mainDir) {
     const key = normalizeSessionKey(`${chatId}::${mainDir}`) || `${chatId}::${mainDir}`
     push(key, `${dirLabel(mainDir)}（主会话）`)
   }
   for (const p of listProjects()) {
-    push(projectSessionKey(chatId, p.id), `📦 ${p.name} · 🌿 ${p.featureBranch}`)
+    // 私聊/普通群：独立群项目不可切，不列
+    if (!canEnterProjectFromChat(p, chatId)) continue
+    const key = p.groupChatId
+      ? (p.sessionKey || projectSessionKey(p.groupChatId, p.id))
+      : projectSessionKey(chatId, p.id)
+    push(key, `📦 ${p.name} · 🌿 ${p.featureBranch || "—"}`)
   }
   for (const { dir, main } of dirs) {
     if (main) continue
@@ -798,16 +842,31 @@ export async function switchMainSession(sessionKey: string): Promise<{ ok: boole
   if (!lock?.port) return { ok: false, error: "服务未运行" }
   const chatId = await resolveMainChatId(lock.port)
   if (!chatId) return { ok: false, error: "未绑定主用户" }
-  await syncActiveSession(lock.port, chatId, key)
   const pid = projectIdFromSessionKey(key)
   if (pid) {
-    setCurrentProjectId(pid)
-    // 存量挂起（旧版 leave）的项目切回视作重新进入：恢复调度 + 确保 AI 工作目录就绪
     const proj = getProject(pid)
+    const bound = listProjects().find((p) => p.status !== "done" && projectGroupChatMatches(p, chatId))
+    if (bound && bound.id !== pid) {
+      return { ok: false, error: "当前为项目专属群，不能切换其它项目" }
+    }
+    if (proj && !canEnterProjectFromChat(proj, chatId)) {
+      return { ok: false, error: "该项目为独立群协作，请到专属群内操作（私聊不可进入）" }
+    }
+  }
+  await syncActiveSession(lock.port, chatId, key)
+  if (pid) {
+    const proj = getProject(pid)
+    if (proj?.groupChatId) {
+      // 独立群不抢占主会话 current 指针
+      setCurrentProjectId(null)
+    } else {
+      setCurrentProjectId(pid)
+    }
+    // 存量挂起（旧版 leave）的项目切回视作重新进入：恢复调度 + 确保 AI 工作目录就绪
     if (proj?.status === "paused") {
       proj.status = "active"
       saveProject(proj)
-      if (!isPlainProject(proj)) ensureCheckouts(projectRepoRefs(proj), proj.featureBranch)
+      if (!isPlainProject(proj)) await ensureCheckouts(projectRepoRefs(proj), proj.featureBranch)
     }
   }
   return { ok: true }
@@ -1098,7 +1157,7 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
         continue
       }
       // 拉起前确保 AI 工作目录就绪（缺失自动重建、切回 feature）；失败拦下并节流提醒（纯会话型无 git 直接放行）
-      const co = isPlainProject(proj) ? { ok: true as const, error: undefined } : ensureCheckouts(projectRepoRefs(proj), proj.featureBranch)
+      const co = isPlainProject(proj) ? { ok: true as const, error: undefined } : await ensureCheckouts(projectRepoRefs(proj), proj.featureBranch)
       if (!co.ok) {
         broadcastLog(`[Agent] 项目「${proj.name}」AI 工作目录不可用，暂缓拉起: ${co.error}`, "WARN")
         const lastAt = featureOccupiedNotifyAt.get(sessionKey) ?? 0
@@ -1183,3 +1242,4 @@ export function initSessionDispatcher(): void {
   // run 收口释放后立即调度：队列有未处理消息时自动拉起（含异常结束——.claimed 仍在队列中）
   setSdkIdleHandler(() => { void dispatchSessionAgents().catch(() => {}) })
 }
+

@@ -8,6 +8,7 @@ import {
   getCurrentProject,
   resolveNodeGroup,
   projectNodeLabel,
+  projectGroupIds,
 } from "./shared/project-store.js"
 import { projectIdFromSessionKey } from "./shared/project-types.js"
 
@@ -59,12 +60,14 @@ export function registerProjectAgentTools(mcpServer: McpServer): void {
       if (!r.ok) return txt(`❌ ${r.error}`)
       const p = r.project
       const typeName = projectNodeLabel(r.action.type, p.groupId)
-      const group = resolveNodeGroup(p.groupId)
-      const advanceBtns = group.nodes.map((n) => ({
-        label: `${n.label} /p ${n.id}`,
-        cmd: `/p ${n.id}`,
-        section: group.name,
-      }))
+      const advanceBtns = projectGroupIds(p).flatMap((gid) => {
+        const group = resolveNodeGroup(gid)
+        return group.nodes.map((n) => ({
+          label: n.label,
+          cmd: `/p ${n.id}`,
+          section: group.name,
+        }))
+      })
       const footer = "点按钮推进下一步；要改产物直接发消息说"
       if (status === "accepted") {
         const artifactAbs = args.artifact_path

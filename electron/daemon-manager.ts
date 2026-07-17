@@ -38,11 +38,11 @@ import {
   McpServerEntry,
 } from "./mcp-manager"
 import { FileCommand, reportCommandResult, handleFeishuModelCommand, handleFeishuMcpCommand, handleFeishuTaskCommand, parseListModelsStdout, type TaskRunFn } from "./command-handler"
-import { handleFeishuProjectCommand, handleProjectSyncSignal, fillProjectNewFromText, handleProjectNewSubmit, replySetupHub, executeProjectDelete } from "./project-commands"
+import { handleFeishuProjectCommand, handleProjectSyncSignal, fillProjectNewFromText, handleProjectNewSubmit, replySetupHub, executeProjectDelete, archiveProjectGroup } from "./project-commands"
 import { isGitRepoRoot } from "./project-worktree"
 import { getDefaultNodeGuide } from "./project-prompts"
-import { initProjectStore, getProject, getCurrentProject, listProjects, getNodeGroups, saveNodeGroups, saveProject } from "../src/shared/project-store.js"
-import { projectIdFromSessionKey, projectSessionKey, DEFAULT_NODE_GROUP_ID } from "../src/shared/project-types.js"
+import { initProjectStore, getProject, getCurrentProject, listProjects, getNodeGroups, saveNodeGroups, saveProject, projectGroupIds } from "../src/shared/project-store.js"
+import { projectIdFromSessionKey, projectSessionKey, DEFAULT_NODE_GROUP_ID, canEnterProjectFromChat } from "../src/shared/project-types.js"
 import {
   readGitBranch,
   formatSessionLabel,
@@ -648,33 +648,40 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
         if (line.startsWith("__PROJECT_DELETE__:")) {
           try {
             const { projectId } = JSON.parse(line.slice("__PROJECT_DELETE__:".length)) as { projectId: string }
-            if (projectId) executeProjectDelete(projectId)
+            if (projectId) {
+              const target = getProject(projectId)
+              void (async () => {
+                await executeProjectDelete(projectId)
+                const port = cachedPort ?? readLockFile()?.port
+                if (target && port) await archiveProjectGroup(port, target)
+              })()
+            }
           } catch { /* ignore */ }
           continue
         }
         if (line.startsWith("__PROJECT_PROFILE_UPSERT__:")) {
-          try {
+          void (async () => { try {
             const payload = JSON.parse(line.slice("__PROJECT_PROFILE_UPSERT__:".length)) as {
               path: string; baseBranch: string; testBranch?: string; developBranch?: string
               chatId?: string; messageId?: string
             }
             const port = cachedPort ?? readLockFile()?.port
             // setup 表单提交（带 chatId）：路径必须是 git 根目录，否则拒绝并回错误（原卡置为错误视图）
-            if (payload.chatId && !isGitRepoRoot(payload.path)) {
+            if (payload.chatId && !(await isGitRepoRoot(payload.path))) {
               if (port) {
                 void reportCommandResult(port, payload.messageId || "", false,
                   `❌ 不是有效 git 根目录，未保存：${payload.path}`, payload.chatId,
                   [{ label: "重新添加", cmd: "/p setup add" }, { label: "返回 setup", cmd: "/p setup" }],
                   payload.messageId ? { patchMessageId: payload.messageId } : undefined)
               }
-              continue
+              return
             }
             upsertRepoProfiles([payload])
             // 单卡多视图：保存后原表单卡直接回到 setup 总览
             if (port && payload.chatId) {
               void replySetupHub(port, payload.messageId || "", payload.chatId, payload.messageId, `✅ 已保存主仓 ${path.basename(payload.path)}`)
             }
-          } catch { /* ignore */ }
+          } catch { /* ignore */ } })()
           continue
         }
         if (line.startsWith("__PROJECT_SETUP_FIELD__:")) {
@@ -711,6 +718,7 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
               baseBranch: string; featureBranch?: string
               storyUrl?: string; productDocUrl?: string; techDocUrl?: string
               groupId?: string
+              groupIds?: string[]
               workspaceType?: string
               repos?: { repoPath: string; baseBranch: string; testBranch?: string; developBranch?: string }[]
             }
@@ -1076,7 +1084,14 @@ async function checkAndExecutePendingCommands(): Promise<void> {
     const cmdTokens = rawCmd.split(/\s+/).filter((t) => t.length > 0)
     const head = (cmdTokens[0] ?? "").toLowerCase()
     const isAdmin = isMainUser(claimed.chatId, claimed.chatType)
-    const reply = (ok: boolean, msg: string, buttons?: { label: string; cmd: string; section?: string }[]) => reportCommandResult(lock.port, claimed!.messageId, ok, msg, claimed!.chatId, buttons)
+    // 独立群：群本身已绑定项目，群内点 /p 节点不应再要求「主用户私聊管理员」
+    const isProjectGroup = !!claimed.chatId && listProjects().some((p) => {
+      if (p.status === "done" || !p.groupChatId) return false
+      const raw = parseChatKey(claimed.chatId!).chatId
+      return p.groupChatId === claimed.chatId || parseChatKey(p.groupChatId).chatId === raw
+    })
+    const reply = (ok: boolean, msg: string, buttons?: { label: string; cmd: string; section?: string }[]) =>
+      reportCommandResult(lock.port, claimed!.messageId, ok, msg, claimed!.chatId, buttons, patchTarget ? { patchMessageId: patchTarget } : undefined)
     const denyNonAdmin = () => reply(false, "🔒 该指令仅管理员可用")
     // 原卡更新目标：仅按钮点击来源才 patch（手输指令的 messageId 是用户消息，不可 patch）
     const patchTarget = claimed.fromCard ? claimed.messageId : undefined
@@ -1246,7 +1261,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
 
         case "/project":
         case "/p": {
-          if (!isAdmin) { await denyNonAdmin(); break }
+          if (!isAdmin && !isProjectGroup) { await denyNonAdmin(); break }
           await handleFeishuProjectCommand(lock.port, claimed.messageId, rawCmd, claimed.chatId, patchTarget)
           break
         }
@@ -1356,30 +1371,33 @@ async function checkAndExecutePendingCommands(): Promise<void> {
         case "/help": {
           // 帮助分组：当前对话 / 排队 / 协作 / 系统
           const ctx = [
-            { label: "📊 状态 /s", cmd: "/s", section: "▶ 当前对话" },
-            { label: "⏹ 停止 /x", cmd: "/x", section: "▶ 当前对话" },
-            { label: "🔄 清空上下文 /r", cmd: "/r", section: "▶ 当前对话" },
-            { label: "🧠 切换模型 /m", cmd: "/m", section: "▶ 当前对话" },
-            { label: "📁 工作目录 /w", cmd: "/w", section: "▶ 当前对话" },
+            { label: "📊 状态", cmd: "/s", section: "▶ 当前对话" },
+            { label: "⏹ 停止", cmd: "/x", section: "▶ 当前对话" },
+            { label: "🔄 清空上下文", cmd: "/r", section: "▶ 当前对话" },
+            { label: "🧠 切换模型", cmd: "/m", section: "▶ 当前对话" },
+            { label: "📁 工作目录", cmd: "/w", section: "▶ 当前对话" },
           ]
           const queue = [
-            { label: "📋 查看排队 /ls", cmd: "/ls", section: "▶ 排队中" },
-            { label: "🧹 清空排队 /cl", cmd: "/cl", section: "▶ 排队中" },
+            { label: "📋 查看排队", cmd: "/ls", section: "▶ 排队中" },
+            { label: "🧹 清空排队", cmd: "/cl", section: "▶ 排队中" },
           ]
           const orch = [
-            { label: "💬 会话 /c", cmd: "/c", section: "▶ 协作" },
-            { label: "⏰ 任务 /t", cmd: "/t", section: "▶ 协作" },
-            { label: "📦 项目 /p", cmd: "/p", section: "▶ 协作" },
+            { label: "💬 会话", cmd: "/c", section: "▶ 协作" },
+            { label: "⏰ 任务", cmd: "/t", section: "▶ 协作" },
+            { label: "📦 项目", cmd: "/p", section: "▶ 协作" },
           ]
           const infra = [
-            { label: "🧩 MCP /mc", cmd: "/mc", section: "▶ 系统" },
-            { label: "♻️ 重启应用 /rr", cmd: "/rr", section: "▶ 系统" },
+            { label: "🧩 MCP", cmd: "/mc", section: "▶ 系统" },
+            { label: "♻️ 重启应用", cmd: "/rr", section: "▶ 系统" },
           ]
           const helpBtns = isAdmin
             ? [...ctx, ...queue, ...orch, ...infra]
             : ctx.filter((b) => ["/s", "/x", "/r"].includes(b.cmd))
           const body = "💡 点下面按钮或直接发送指令；有下级选项的会先说明用法"
-          await reportCommandResult(lock.port, claimed!.messageId, true, body, claimed!.chatId, helpBtns, { cardTitle: { title: "帮助", subtitle: "指令" } })
+          await reportCommandResult(lock.port, claimed!.messageId, true, body, claimed!.chatId, helpBtns, {
+            cardTitle: { title: "帮助", subtitle: "指令" },
+            patchMessageId: patchTarget,
+          })
           break
         }
 
@@ -1802,6 +1820,7 @@ export function initDaemonManager(): void {
       featureBranch: p.featureBranch,
       status: p.status,
       groupId: p.groupId,
+      groupIds: p.groupIds,
       worktreePath: p.worktreePath,
       repoPath: p.repoPath,
       workspaceType: p.workspaceType,
@@ -1818,7 +1837,8 @@ export function initDaemonManager(): void {
       ? projectSessionKey(await resolveMainChatId(lock.port) || "", id)
       : "")
     if (sk) stopSessionAgent(sk)
-    executeProjectDelete(id)
+    await executeProjectDelete(id)
+    if (lock?.port) await archiveProjectGroup(lock.port, target)
     if (wasCurrent && lock?.port) {
       const chatId = await resolveMainChatId(lock.port)
       if (chatId) await leaveProjectSession(lock.port, chatId)
@@ -1834,6 +1854,7 @@ export function initDaemonManager(): void {
     techDocUrl?: string
     status?: string
     groupId?: string
+    groupIds?: string[]
   }) => {
     initProjectStore(app.getPath("userData"))
     const p = getProject(String(patch?.id || "").trim())
@@ -1852,11 +1873,27 @@ export function initDaemonManager(): void {
       if (st === "active" || st === "paused" || st === "done") p.status = st
       else return { ok: false, error: "状态无效" }
     }
-    if (typeof patch.groupId === "string") {
+    if (Array.isArray(patch.groupIds)) {
+      const groups = getNodeGroups()
+      const ids = [...new Set(patch.groupIds.map((id) => String(id).trim()).filter(Boolean))]
+      for (const gid of ids) {
+        if (!groups.some((g) => g.id === gid)) return { ok: false, error: `流程组不存在：${gid}` }
+      }
+      const resolved = projectGroupIds({ groupIds: ids })
+      p.groupIds = resolved
+      p.groupId = resolved[0]
+    } else if (typeof patch.groupId === "string") {
       const gid = patch.groupId.trim()
       const groups = getNodeGroups()
       if (gid && !groups.some((g) => g.id === gid)) return { ok: false, error: "流程组不存在" }
-      p.groupId = gid || undefined
+      if (gid) {
+        const resolved = projectGroupIds({ groupId: gid })
+        p.groupIds = resolved
+        p.groupId = resolved[0]
+      } else {
+        p.groupId = undefined
+        p.groupIds = undefined
+      }
     }
     saveProject(p)
     return { ok: true }
@@ -1866,10 +1903,16 @@ export function initDaemonManager(): void {
     const id = String(projectId || "").trim()
     const p = getProject(id)
     if (!p) return { ok: false, error: "项目不存在" }
+    if (p.groupChatId) {
+      return { ok: false, error: "该项目为独立群协作，请到飞书专属群内操作（设置页不可切入）" }
+    }
     const lock = readLockFile()
     if (!lock?.port) return { ok: false, error: "服务未运行" }
     const chatId = await resolveMainChatId(lock.port)
     if (!chatId) return { ok: false, error: "未绑定主用户" }
+    if (!canEnterProjectFromChat(p, chatId)) {
+      return { ok: false, error: "该项目为独立群协作，请到专属群内操作" }
+    }
     return switchMainSession(projectSessionKey(chatId, id))
   })
   ipcMain.handle("session:list-quick-models", () => {

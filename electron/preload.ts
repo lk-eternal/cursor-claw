@@ -193,14 +193,14 @@ const api = {
     ipcRenderer.invoke("session:delete", sessionKey),
   listProjects: (): Promise<{
     id: string; name: string; goal?: string; storyUrl?: string; productDocUrl?: string; techDocUrl?: string
-    featureBranch: string; status: string; groupId?: string; worktreePath?: string; repoPath?: string; workspaceType?: string
+    featureBranch: string; status: string; groupId?: string; groupIds?: string[]; worktreePath?: string; repoPath?: string; workspaceType?: string
   }[]> =>
     ipcRenderer.invoke("project:list"),
   deleteProject: (projectId: string): Promise<{ ok: boolean; name?: string; error?: string }> =>
     ipcRenderer.invoke("project:delete", projectId),
   updateProject: (patch: {
     id: string; name?: string; goal?: string; storyUrl?: string; productDocUrl?: string; techDocUrl?: string
-    status?: string; groupId?: string
+    status?: string; groupId?: string; groupIds?: string[]
   }): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke("project:update", patch),
   switchProject: (projectId: string): Promise<{ ok: boolean; error?: string }> =>
@@ -245,6 +245,10 @@ const api = {
     ipcRenderer.invoke("project-node-groups:save", groups),
   getProjectNodeGroupUsage: (): Promise<Record<string, number>> =>
     ipcRenderer.invoke("project-node-groups:usage"),
+  exportProjectNodeGroup: (groupId: string): Promise<{ ok: boolean; path?: string; error?: string }> =>
+    ipcRenderer.invoke("project-node-groups:export", groupId),
+  importProjectNodeGroup: (): Promise<{ ok: boolean; group?: { id: string; name: string; workspace?: "worktree" | "plain"; nodes: { id: string; label: string; prompt?: string }[] }; error?: string }> =>
+    ipcRenderer.invoke("project-node-groups:import"),
   onScheduledTaskStatus: (cb: (statuses: Record<string, { running: boolean; pid?: number; startedAt?: number }>) => void) => {
     const handler = (_: unknown, statuses: Record<string, { running: boolean; pid?: number; startedAt?: number }>) => cb(statuses)
     ipcRenderer.on("scheduled-tasks:status", handler)

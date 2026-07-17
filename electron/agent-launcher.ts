@@ -146,8 +146,9 @@ export interface LaunchMeta { messageIds?: string[]; chatId?: string; chatType?:
 
 export function buildPrompt(meta?: LaunchMeta, taskMessage?: string, sessionKey?: string, useMainWorkspace?: boolean): string {
   const prompts: string[] = []
-  // 数字身份（拟人人设）只用于聊天类会话；工作流/项目等干活会话不注入
-  if (useMainWorkspace || meta?.chatType === "project") {
+  // 数字身份（拟人人设）只用于普通群聊/非主用户私聊；主工作区、项目会话（含独立群）不注入
+  const isProjectSession = meta?.chatType === "project" || !!sessionKey?.includes("::project_")
+  if (useMainWorkspace || isProjectSession) {
     prompts.push("请绝对严格遵守工作流规则cursor-claw开始工作")
   } else {
     prompts.push("请按照digital-identity数字身份定义并绝对严格遵守工作流规则cursor-claw开始工作")

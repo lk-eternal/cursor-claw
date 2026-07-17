@@ -1,6 +1,6 @@
 import * as path from "node:path"
 import { artifactRelPath, isPlainProject, type Project, type ProjectActionType, type ProjectRepo } from "../src/shared/project-types.js"
-import { lastAcceptedAction, getProjectNode, getProjectNodes, projectNodeLabel } from "../src/shared/project-store.js"
+import { lastAcceptedAction, getProjectNode, getProjectNodes, projectNodeLabel, projectGroupIds } from "../src/shared/project-store.js"
 
 // ════════════════════════════════════════════════════════════
 // 项目工作流提示词模板（集中在此文件，改文案只动这里）
@@ -30,12 +30,16 @@ const ACTION_GUIDES: Record<string, string[]> = {
     "- 产物写审查报告：结论（通过 / 有条件通过 / 不通过）+ 按严重度分级的问题清单",
   ],
   deploy: [
-    "部署到开发分支（宿主已执行推送，见任务附带信息）：",
-    "- 核对全部改动已提交 feature 分支、推送目标为配置的开发分支",
+    "部署到开发分支：",
+    "- 核对全部改动已提交 feature 分支，推送 feature 到 origin 同名分支",
+    "- 在 AI 工作目录执行 git push origin HEAD:<开发分支全名> 推送到配置的开发分支；被拒（non-fast-forward）时先 fetch 并把远端开发分支合入当前分支再推，禁止 force push",
     "- 产物写部署摘要：推送分支、关键 commit、部署后验证方式",
   ],
   "submit-test": [
-    "提测（宿主已创建指向测试分支的 MR，信息见任务附带内容）。目标：让测试同学在飞书项目里看到完整提测信息：",
+    "提测：推送代码、创建指向测试分支的 MR，并让测试同学在飞书项目里看到完整提测信息：",
+    "- 推送 feature 到 origin 同名分支",
+    "- 创建 feature → 测试分支的 MR：在 AI 工作目录执行 git push origin HEAD -o merge_request.create -o merge_request.target=<测试分支全名> -o merge_request.title=\"Draft: <项目名>\"，命令输出中会返回 MR 链接",
+    "- push option 建不出 MR 时改用 glab CLI；仍不行则给出 GitLab 新建 MR 页面链接引导用户手动创建，拿到 MR 链接后继续",
     "- 将 MR 信息（链接 / 源分支 / 目标分支 / 变更摘要）评论到本项目的需求工作项",
     "- 评论 @ 测试人员必须真正生效，缺一步都会变成纯文本、对方收不到通知：",
     "  1. 逐个查测试人员拿 lark_user_id（meegle user search / search_user_info）",
@@ -67,7 +71,7 @@ const ACTION_GUIDES: Record<string, string[]> = {
     "- 当前用户 = 本项目负责人；不确定其姓名时先问用户「上线文档里你负责的是哪一行/你的名字」再动笔",
     "- 用 lark-cli 读文档全文与表格结构，定位属于当前用户/本项目的行：按负责人名、项目名、功能名匹配；无法唯一确定时列出候选行问用户；尚无对应行时问用户新增还是填某现有行",
     "- 填写规则（只动自己负责的行/单元格）：",
-    "  · 分支/MR 栏：贴 feature → 生产基线 的 MR 地址（宿主查询结果见任务附带信息；没有时从需求工作项评论找，再没有问用户），严禁自行合并该 MR",
+    "  · 分支/MR 栏：贴 feature → 生产基线 的 MR 地址（任务附带信息中可能已含；没有时从需求工作项评论找，再没有问用户），严禁自行合并该 MR",
     "  · 功能/需求栏：贴本项目需求工作项（飞书项目）链接",
     "  · 开发栏 @ 当前用户；测试栏 @ 测试人员（从需求工作项团队/角色字段查，查不到问用户）",
     "  · 文档中 @ 人必须用文档 mention 元素（lark-cli 查真实 open_id 后插入），纯文本 @名字 无效",
@@ -214,7 +218,7 @@ function contextBlock(p: Project): string[] {
 
 /** 首次进入项目会话的提示词：角色 + 工作方式，一次讲清 */
 export function buildProjectSessionPrompt(p: Project): string {
-  const nodeLabels = getProjectNodes(p.groupId).map((n) => n.label).join("/")
+  const nodeLabels = projectGroupIds(p).flatMap((gid) => getProjectNodes(gid).map((n) => n.label)).join("/")
   const plain = isPlainProject(p)
   return [
     `[PROJECT_SESSION] 项目「${p.name}」专属会话`,

@@ -5,6 +5,7 @@ export const REQUIRED_FEISHU_SCOPES: { scope: string; desc: string }[] = [
   { scope: "im:message.group_at_msg.include_bot:readonly", desc: "接收其他机器人 @本机器人的群消息（AI 间协作）" },
   { scope: "im:resource", desc: "上传/下载图片与文件" },
   { scope: "im:chat:read", desc: "获取群聊名称" },
+  { scope: "im:chat:create", desc: "创建项目独立群" },
   { scope: "contact:contact.base:readonly", desc: "获取用户名（私聊会话显示）" },
 ]
 

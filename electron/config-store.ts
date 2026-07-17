@@ -427,35 +427,71 @@ export type RepoProfileCfg = {
   developBranch?: string
 }
 
+function isRemoteRepoPath(p: string): boolean {
+  return /^(https?:\/\/|ssh:\/\/|git@)/i.test((p || "").trim())
+}
+
+/** 历史 bug 修复：远程地址曾被 path.resolve 拼成本地形态（D:\ws\https:\gitlab...\repo.git），读取时还原 */
+function restoreMangledRemote(p: string): string {
+  const m = p.match(/(https?|ssh):[\\/]+(.+)$/i)
+  if (m) return `${m[1].toLowerCase()}://${m[2].replace(/\\/g, "/")}`
+  const gitAt = p.toLowerCase().indexOf("git@")
+  if (gitAt >= 0 && /git@[^\\/]+[:\\/].+$/i.test(p.slice(gitAt))) {
+    return p.slice(gitAt).replace(/\\/g, "/")
+  }
+  return p
+}
+
+/** 远程地址保持原文（不做本地 resolve）；本地路径 resolve 规范化 */
+function normalizeRepoPath(raw: string): string {
+  const t = (raw || "").trim()
+  if (!t) return t
+  const restored = restoreMangledRemote(t)
+  if (isRemoteRepoPath(restored)) return restored
+  return path.resolve(restored)
+}
+
+/** 去重 key：远程去尾 .git / 斜杠，本地统一小写路径 */
+function repoProfileKey(p: string): string {
+  const n = normalizeRepoPath(p).toLowerCase()
+  if (isRemoteRepoPath(n)) return n.replace(/\.git$/i, "").replace(/[\\/]+$/, "")
+  return n
+}
+
 export function getRepoProfiles(cfg: AppConfig = getConfig()): RepoProfileCfg[] {
   const profiles = cfg.repoProfiles || []
   if (profiles.length) {
-    return profiles.map((p) => ({
-      path: path.resolve(p.path),
-      baseBranch: (p.baseBranch || "main").trim() || "main",
-      testBranch: p.testBranch?.trim() || undefined,
-      developBranch: p.developBranch?.trim() || undefined,
-    }))
+    // 同仓的本地坏形态与还原后的远程地址会得到相同 key：后者优先保留
+    const byKey = new Map<string, RepoProfileCfg>()
+    for (const p of profiles) {
+      if (!p?.path?.trim()) continue
+      byKey.set(repoProfileKey(p.path), {
+        path: normalizeRepoPath(p.path),
+        baseBranch: (p.baseBranch || "main").trim() || "main",
+        testBranch: p.testBranch?.trim() || undefined,
+        developBranch: p.developBranch?.trim() || undefined,
+      })
+    }
+    return [...byKey.values()]
   }
   return (cfg.repoRoots || []).map((r) => ({
-    path: path.resolve(r),
+    path: normalizeRepoPath(r),
     baseBranch: "main",
   }))
 }
 
 export function upsertRepoProfiles(pairs: RepoProfileCfg[]): void {
-  const byPath = new Map<string, RepoProfileCfg>()
+  const byKey = new Map<string, RepoProfileCfg>()
   for (const p of [...getRepoProfiles(), ...pairs]) {
     if (!p?.path?.trim()) continue
-    const resolved = path.resolve(p.path.trim())
-    byPath.set(resolved.toLowerCase(), {
-      path: resolved,
+    byKey.set(repoProfileKey(p.path), {
+      path: normalizeRepoPath(p.path),
       baseBranch: (p.baseBranch || "main").trim() || "main",
       testBranch: p.testBranch?.trim() || undefined,
       developBranch: p.developBranch?.trim() || undefined,
     })
   }
-  const next = [...byPath.values()]
+  const next = [...byKey.values()]
   saveConfig({ repoProfiles: next, repoRoots: next.map((p) => p.path) })
 }
 

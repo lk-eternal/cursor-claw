@@ -392,6 +392,7 @@ Daemon 进程独立于 Cursor 运行，即使 Agent 会话中断，系统也能�
 | `im:message.group_at_msg:readonly` | 接收群聊 @消息 |
 | `im:resource` | 上传/下载图片与文件 |
 | `im:chat:read` | 获取群聊名称 |
+| `im:chat:create` | 创建项目独立群 |
 | `contact:contact.base:readonly` | 获取用户名（私聊会话显示） |
 
 <details>
@@ -406,6 +407,7 @@ Daemon 进程独立于 Cursor 运行，即使 Agent 会话中断，系统也能�
       "im:message.group_at_msg:readonly",
       "im:resource",
       "im:chat:read",
+      "im:chat:create",
       "contact:contact.base:readonly"
     ],
     "user": []
@@ -465,7 +467,7 @@ Daemon 进程独立于 Cursor 运行，即使 Agent 会话中断，系统也能�
 1. 确认添加了 `im.message.receive_v1` 事件订阅，且选择「长连接」模式
 2. 确认已开通「读取用户发给机器人的单聊消息」和「获取群组中用户@机器人消息」
 3. 确认应用已发布（未发布的应用无法接收消息）
-4. 确认所有 6 个权限已添加并发布
+4. 确认所有权限已添加并发布
 5. 确认 Daemon 已启动且飞书 WebSocket 连接成功
 6. 确认是在机器人私聊窗口或群聊 @机器人 发送消息
 
