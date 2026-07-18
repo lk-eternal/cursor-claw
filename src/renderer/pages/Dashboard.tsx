@@ -73,6 +73,24 @@ export default function Dashboard({ onSettings, active }: Props) {
     [sessionTabs],
   )
   const { showConfirm, ModalPortal } = useInlineModal()
+  const [projectNameById, setProjectNameById] = useState<Map<string, string>>(() => new Map())
+
+  const refreshProjectNames = useCallback(() => {
+    void window.electronAPI.listProjects().then((list) => {
+      const m = new Map<string, string>()
+      for (const p of list) {
+        if (p.id && p.name) m.set(p.id, p.name)
+      }
+      setProjectNameById(m)
+    }).catch(() => { /* ignore */ })
+  }, [])
+
+  useEffect(() => {
+    refreshProjectNames()
+    const t = setInterval(refreshProjectNames, 30_000)
+    return () => clearInterval(t)
+  }, [refreshProjectNames, active])
+
   const sessionLogLabelByKey = useMemo(() => {
     const m = new Map<string, string>()
     for (const t of sessionTabs) {
@@ -93,9 +111,12 @@ export default function Dashboard({ onSettings, active }: Props) {
       for (const [k, v] of sessionLogLabelByKey) {
         if (k.includes(`project_${pid}`)) return v
       }
+      // 独立群项目可能不在当前 chat 的页签里，用项目表兜底，避免日志只显示 id 前缀
+      const name = projectNameById.get(pid)
+      if (name) return `📦 ${name}`
     }
     return undefined
-  }, [sessionLogLabelByKey])
+  }, [sessionLogLabelByKey, projectNameById])
 
   const [activeSessionKey, setActiveSessionKey] = useState("")
   const [sessionSwitching, setSessionSwitching] = useState("")
@@ -667,7 +688,11 @@ export default function Dashboard({ onSettings, active }: Props) {
     if (running?.chatName) return `${chatLabel} ${running.chatName}`
     const parts = msg.sessionKey.split("::")
     const suffix = parts[1] || ""
-    if (suffix.startsWith("project_")) return `${chatLabel} 📦项目 ${suffix.slice(8, 20)}`
+    if (suffix.startsWith("project_")) {
+      const pid = suffix.slice("project_".length)
+      const name = projectNameById.get(pid)
+      return name ? `${chatLabel} 📦${name}` : `${chatLabel} 📦项目 ${pid.slice(0, 12)}`
+    }
     if (suffix.startsWith("temp_") || msg.sessionKey.startsWith("temp_")) return `${chatLabel} ⏱临时会话`
     const peers = [
       ...sessionList.map((s) => s.workspaceDir),
