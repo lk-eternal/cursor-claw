@@ -239,8 +239,12 @@ function hasNewMessages(dir: string): boolean {
  *
  * 消息在 Agent 下一次挂阻塞 poll 时隐式确认删除（Agent 干完手头活才会挂 poll）；
  * 未确认则下次领取重新投递，因此幽灵连接领走也不会丢——这是"至少一次"投递的核心。
+ *
+ * freshOnly：只返回本次新领取的 .qmsg（历史 .claimed 留存不重投）。
+ * 用于 Resume 唤醒——上下文完整时 Agent 记得处理中的活，重投反而造成重复处理；
+ * 留存的 .claimed 仍由下一次阻塞 poll 统一确认删除，接续保障不变。
  */
-export function claimSessionMessages(filterSessionKey?: string): QueueMessage[] {
+export function claimSessionMessages(filterSessionKey?: string, opts?: { freshOnly?: boolean }): QueueMessage[] {
   if (!queueDir) return [];
   const dir = getSessionDir(filterSessionKey);
 
@@ -251,11 +255,14 @@ export function claimSessionMessages(filterSessionKey?: string): QueueMessage[] 
     return [];
   }
 
+  const freshClaimed = new Set<string>();
   for (const f of files) {
     if (!f.endsWith(".qmsg")) continue;
     const src = path.join(dir, f);
+    const claimedName = f.replace(/\.qmsg$/, ".claimed");
     try {
-      fs.renameSync(src, src.replace(/\.qmsg$/, ".claimed"));
+      fs.renameSync(src, path.join(dir, claimedName));
+      freshClaimed.add(claimedName);
     } catch { /* 并发已被领取，忽略 */ }
   }
 
@@ -265,6 +272,7 @@ export function claimSessionMessages(filterSessionKey?: string): QueueMessage[] 
   } catch {
     return [];
   }
+  if (opts?.freshOnly) claimed = claimed.filter((f) => freshClaimed.has(f));
 
   const items: QueueMessage[] = [];
   for (const f of claimed) {

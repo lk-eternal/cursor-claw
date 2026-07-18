@@ -1,6 +1,6 @@
 {
   "name": "cursor-claw",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Cursor Claw - 飞书 & 微信 × Cursor AI 协作桌面应用",
   "keywords": [
     "mcp",
@@ -42,7 +42,7 @@
     "pack:local:fg": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/pack-local.ps1"
   },
   "dependencies": {
-    "@cursor/sdk": "^1.0.12",
+    "@cursor/sdk": "^1.0.23",
     "@larksuiteoapi/node-sdk": "^1.66.1",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "cron-parser": "^5.5.0",

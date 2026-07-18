@@ -32,7 +32,11 @@ type StreamSegment =
   | { type: "reply"; text: string }
 
 
-/** 飞书 CardKit 时间线聚合（按执行顺序交错；MCP send_* 不进卡） */
+/**
+ * 飞书流式卡：事件队列。
+ * 同类合并、异类新开；SDK assistant 正文当思考；空段丢弃。
+ * 切卡仅在新用户消息 / 点选项（见 rotate）；阻塞 poll 开始只收口不换卡。
+ */
 interface StreamAgg {
   segments: StreamSegment[]
   dirty: boolean
@@ -75,8 +79,6 @@ interface SdkSessionAgent {
   logAgg: { kind: "thinking" | "text" | null; buf: string }
   /** 飞书流式进度卡；非飞书通道为 null */
   streamAgg: StreamAgg | null
-  /** poll 已见用户消息 id：区分新一批与处理中重投 */
-  seenPollMessageIds: Set<string>
   /** 最近一次终态状态事件（ERROR/EXPIRED/CANCELLED），用于结束时还原真实错误原因 */
   lastStatus?: { status: string; message?: string }
 }
@@ -350,6 +352,18 @@ function sealAllThinking(agg: StreamAgg): void {
   }
 }
 
+/** 收口时 running 工具改完成态：终态事件已无处投递（换卡/run 结束），不留假 running */
+function sealRunningTools(agg: StreamAgg): void {
+  for (const seg of agg.segments) {
+    if (seg.type !== "tools") continue
+    for (const t of seg.tools) {
+      if (t.status !== "running") continue
+      t.status = "completed"
+      if (t.startedAt != null) t.ms = Date.now() - t.startedAt
+    }
+  }
+}
+
 
 /** 可 Resume 的异常终态：不把流式卡标成已完成，便于重连续写 */
 function shouldSuspendStreamCard(session: SdkSessionAgent, status: string): boolean {
@@ -375,6 +389,82 @@ function isShowThinkingEnabled(sessionKey: string): boolean {
   return ch?.showThinking !== false
 }
 
+
+/** 丢掉末尾空块（空思考/空正文/空工具） */
+function dropEmptyTail(stream: StreamAgg): void {
+  while (stream.segments.length) {
+    const last = stream.segments[stream.segments.length - 1]
+    if (last.type === "thinking" && !last.text.trim()) { stream.segments.pop(); continue }
+    if (last.type === "reply" && !last.text.trim()) { stream.segments.pop(); continue }
+    if (last.type === "tools" && !last.tools.length) { stream.segments.pop(); continue }
+    break
+  }
+}
+
+function sealLastThinking(stream: StreamAgg): void {
+  const last = stream.segments[stream.segments.length - 1]
+  if (last?.type === "thinking" && last.startedAt != null && last.ms == null) {
+    last.ms = Date.now() - last.startedAt
+  }
+}
+
+/** 入队思考：与上一块同类则合并，否则新开；空文本丢弃 */
+function enqueueThinking(stream: StreamAgg, text: string): void {
+  if (!text) return
+  dropEmptyTail(stream)
+  const last = stream.segments[stream.segments.length - 1]
+  if (last?.type === "thinking" && last.ms == null) {
+    last.text += text
+    return
+  }
+  if (last?.type === "thinking") {
+    // 已封存 → 新开一块
+    stream.segments.push({ type: "thinking", text, startedAt: Date.now() })
+    return
+  }
+  sealLastThinking(stream)
+  stream.segments.push({ type: "thinking", text, startedAt: Date.now() })
+}
+
+/** 入队工具：callId 已存在则更新；running 新开步；孤儿终态事件（上一回合遗留）丢弃 */
+function enqueueTool(
+  stream: StreamAgg,
+  event: { call_id: string; name: string; args?: unknown; status: StreamToolEntry["status"] },
+  summary: string,
+): void {
+  for (const seg of stream.segments) {
+    if (seg.type !== "tools") continue
+    const hit = seg.tools.find((x) => x.callId === event.call_id)
+    if (!hit) continue
+    hit.status = event.status
+    if (summary) hit.summary = summary
+    if (event.status === "running") {
+      hit.startedAt = Date.now()
+      hit.ms = undefined
+    } else if (hit.startedAt != null && (event.status === "completed" || event.status === "error")) {
+      hit.ms = Date.now() - hit.startedAt
+    }
+    return
+  }
+  // 终态事件但队列里没有对应步：running 落在换卡前的旧队列，别在新卡凭空造一个孤儿步
+  if (event.status !== "running") return
+  dropEmptyTail(stream)
+  sealLastThinking(stream)
+  let toolsSeg = stream.segments[stream.segments.length - 1]
+  if (toolsSeg?.type !== "tools") {
+    toolsSeg = { type: "tools", tools: [] }
+    stream.segments.push(toolsSeg)
+  }
+  toolsSeg.tools.push({
+    callId: event.call_id,
+    name: resolveToolDisplayName(event.name, event.args),
+    status: event.status,
+    summary,
+    startedAt: event.status === "running" ? Date.now() : undefined,
+  })
+}
+
+/** 出站 payload：只按队列顺序输出，空段丢弃；SDK reply 残段并入思考 */
 function buildStreamPayload(agg: StreamAgg, sessionKey: string): StreamCardPayload {
   const showThinking = isShowThinkingEnabled(sessionKey)
   sealClosedThinking(agg)
@@ -383,45 +473,48 @@ function buildStreamPayload(agg: StreamAgg, sessionKey: string): StreamCardPaylo
   for (let i = 0; i < agg.segments.length; i++) {
     const seg = agg.segments[i]
     if (seg.type === "thinking") {
-      if (!showThinking) continue
-      let thinking = seg.text
+      const text = seg.text.trim()
+      if (!text || !showThinking) continue
+      let thinking = text
       if (thinking.length > STREAM_THINKING_TAIL) {
         thinking = "…" + thinking.slice(-STREAM_THINKING_TAIL)
       }
-      // 仅当前仍在写的最后一段 live 计时；已封存用固定 ms
       const ms = seg.ms ?? (i === lastIdx && seg.startedAt != null ? Date.now() - seg.startedAt : undefined)
+      // 不合并相邻思考：每块独立面板独立计时，避免旧思考被新思考顶出截断窗口
       segments.push({ type: "thinking", text: thinking, ms })
     } else if (seg.type === "tools") {
       if (!seg.tools.length) continue
       const tools = seg.tools.length > MAX_STREAM_TOOL_STEPS
         ? seg.tools.slice(-MAX_STREAM_TOOL_STEPS)
         : seg.tools
-      segments.push({
-        type: "tools",
-        tools: tools.map((t) => ({
+      const prev = segments[segments.length - 1]
+      if (prev?.type === "tools") {
+        prev.tools.push(...tools.map((t) => ({
           name: t.name,
           status: t.status,
           summary: t.summary || undefined,
           ms: t.ms,
-        })),
-      })
-    } else if (seg.type === "reply" && seg.text) {
-      if (!showThinking) continue
-      const replyText = seg.text
-      const lastOut = segments[segments.length - 1]
-      if (lastOut?.type === "thinking") {
-        let combined = lastOut.text?.trim() ? `${lastOut.text}\n\n${replyText}` : replyText
-        if (combined.length > STREAM_THINKING_TAIL) {
-          combined = "…" + combined.slice(-STREAM_THINKING_TAIL)
-        }
-        lastOut.text = combined
+        })))
       } else {
-        let thinking = replyText
-        if (thinking.length > STREAM_THINKING_TAIL) {
-          thinking = "…" + thinking.slice(-STREAM_THINKING_TAIL)
-        }
-        segments.push({ type: "thinking", text: thinking })
+        segments.push({
+          type: "tools",
+          tools: tools.map((t) => ({
+            name: t.name,
+            status: t.status,
+            summary: t.summary || undefined,
+            ms: t.ms,
+          })),
+        })
       }
+    } else if (seg.type === "reply") {
+      // 兼容残段：SDK 正文视作思考（独立块，不并入上一块）
+      const text = seg.text.trim()
+      if (!text || !showThinking) continue
+      let thinking = text
+      if (thinking.length > STREAM_THINKING_TAIL) {
+        thinking = "…" + thinking.slice(-STREAM_THINKING_TAIL)
+      }
+      segments.push({ type: "thinking", text: thinking })
     }
   }
   return { segments }
@@ -453,10 +546,18 @@ async function postStreamCard(
   }
 }
 
-function scheduleFlushStreamCard(session: SdkSessionAgent): void {
+function scheduleFlushStreamCard(session: SdkSessionAgent, immediate = false): void {
   const agg = session.streamAgg
   if (!agg || agg.finished) return
   agg.dirty = true
+  if (immediate) {
+    if (agg.timer) {
+      clearTimeout(agg.timer)
+      agg.timer = null
+    }
+    void flushStreamCard(session, false)
+    return
+  }
   if (agg.timer) return
   const elapsed = Date.now() - agg.lastFlushAt
   const delay = Math.max(STREAM_FLUSH_MS, STREAM_MIN_INTERVAL_MS - elapsed)
@@ -572,87 +673,54 @@ function extractToolResultText(result: unknown): string {
   try { return JSON.stringify(rec) } catch { return "" }
 }
 
-function parsePollResponse(result: unknown): { messages: Array<{ messageId?: string; text?: string }>; freshIds?: string[] } {
-  const raw = extractToolResultText(result)
-  const tryObj = (s: string): Record<string, unknown> | null => {
-    try { return JSON.parse(s) as Record<string, unknown> } catch { return null }
-  }
-  let obj = tryObj(raw.trim())
-  if (!obj) {
-    const start = raw.indexOf("{\"messages\"")
-    const alt = raw.indexOf("{ \"messages\"")
-    const i = start >= 0 ? start : alt
-    if (i >= 0) {
-      const slice = raw.slice(i)
-      // 从后往前找最后一个平衡 JSON
-      for (let end = slice.length; end > 20; end--) {
-        obj = tryObj(slice.slice(0, end))
-        if (obj && Array.isArray(obj.messages)) break
-        obj = null
-      }
-    }
-  }
-  if (!obj) return { messages: [] }
-  const messages = Array.isArray(obj.messages) ? obj.messages as Array<{ messageId?: string; text?: string }> : []
-  const freshIds = Array.isArray(obj.freshIds) ? obj.freshIds.map(String) : undefined
-  return { messages, freshIds }
-}
-
-function isSystemPollText(text?: string): boolean {
-  if (!text) return true
-  return /\[SYSTEM\b/i.test(text) || /\[SESSION_RESUME\b/i.test(text)
-}
-
-/** 返回本批「新用户消息」id；处理中重投 / 系统指令不计 */
-function takeFreshUserPollIds(session: SdkSessionAgent, result: unknown): string[] {
-  const { messages, freshIds } = parsePollResponse(result)
-  if (freshIds) {
-    const out: string[] = []
-    for (const id of freshIds) {
-      if (!id || id.startsWith("internal_")) continue
-      session.seenPollMessageIds.add(id)
-      out.push(id)
-    }
-    // freshIds 为空但 messages 里有用户消息 = 纯处理中重投
-    return out
-  }
-  const out: string[] = []
-  for (const m of messages) {
-    const id = typeof m.messageId === "string" ? m.messageId : ""
-    const text = typeof m.text === "string" ? m.text : ""
-    if (!id || id.startsWith("internal_")) continue
-    if (isSystemPollText(text)) continue
-    if (session.seenPollMessageIds.has(id)) continue
-    session.seenPollMessageIds.add(id)
-    out.push(id)
-  }
-  return out
+/** poll 结果里 freshIds 非空 = 拉到新用户消息（重投属于当前回合，不算回合边界） */
+function pollResultHasFreshMessages(result: unknown): boolean {
+  return /"freshIds"\s*:\s*\[\s*"/.test(extractToolResultText(result))
 }
 
 /**
- * 长连接：收口当前流式卡，并换新 agg。
- * 下一轮思考/工具再 ensure 一张新卡，避免一直改上一张。
+ * 拉起后通知 daemon：resumed=true 上下文完整（首次非阻塞 poll 只投新消息）；
+ * resumed=false 全新会话（收口上一 run 残留流式卡）。失败静默＝降级默认行为。
  */
-async function rotateStreamCard(session: SdkSessionAgent): Promise<void> {
+async function notifySessionLaunched(sessionKey: string, resumed: boolean): Promise<void> {
+  const lock = readLockFile()
+  if (!lock?.port) return
+  try {
+    await httpPost(
+      `http://127.0.0.1:${lock.port}/api/session-launched`,
+      { session_key: sessionKey, resumed },
+      5_000,
+    )
+  } catch { /* best-effort */ }
+}
+
+/**
+ * 回合结束（阻塞 poll 挂起 / 干活途中拉到新消息）：
+ * 同步换新队列，旧卡异步 finish 收口——后续事件自动落新卡。
+ */
+function endStreamRound(session: SdkSessionAgent): void {
   const agg = session.streamAgg
   if (!agg) {
-    session.streamAgg = isFeishuStreamEnabled(session.sessionKey) ? newStreamAgg() : null
+    session.streamAgg = isFeishuStreamEnabled(session.sessionKey) ? newStreamAgg(true) : null
     return
   }
   if (agg.timer) {
     clearTimeout(agg.timer)
     agg.timer = null
   }
-  const shouldFinish = !agg.finished && agg.ensured
+  // gateOpen 也算：MCP send_* 可能已在 Daemon 建卡，即使 SDK 从未 ensure 也要收口
+  const shouldPost = !agg.finished && (agg.ensured || agg.gateOpen)
   agg.finished = true
-  session.streamAgg = isFeishuStreamEnabled(session.sessionKey) ? newStreamAgg() : null
-  if (!shouldFinish) return
+  sealAllThinking(agg)
+  sealRunningTools(agg)
+  // 回合边界已过 bootstrap，新队列直接开门
+  session.streamAgg = isFeishuStreamEnabled(session.sessionKey) ? newStreamAgg(true) : null
+  if (!shouldPost) return
   const payload = buildStreamPayload(agg, session.sessionKey)
   agg.inflight = agg.inflight.then(
-    () => postStreamCard(session.sessionKey, "finish", payload),
-    () => postStreamCard(session.sessionKey, "finish", payload),
+    async () => { await postStreamCard(session.sessionKey, "finish", payload) },
+    async () => { await postStreamCard(session.sessionKey, "finish", payload) },
   )
-  await agg.inflight
 }
 
 function flushSdkLog(session: SdkSessionAgent): void {
@@ -700,6 +768,7 @@ async function streamRunEvents(session: SdkSessionAgent, run: Run): Promise<void
       const agg = session.streamAgg
       if (agg && (agg.ensured || agg.dirty || agg.segments.length)) {
         sealAllThinking(agg)
+        sealRunningTools(agg)
         if (agg.suspended || (session.lastStatus && shouldSuspendStreamCard(session, session.lastStatus.status))) {
           agg.suspended = true
           await flushStreamCard(session, false)
@@ -740,16 +809,9 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
       for (const block of event.message.content) {
         if (block.type === "text" && block.text) {
           appendSdkLog(session, "text", block.text)
-          if (stream && !stream.finished) {
-            const last = stream.segments[stream.segments.length - 1]
-            if (last?.type === "reply") {
-              last.text += block.text
-            } else {
-              if (last?.type === "thinking" && last.startedAt != null && last.ms == null) {
-                last.ms = Date.now() - last.startedAt
-              }
-              stream.segments.push({ type: "reply", text: block.text })
-            }
+          // SDK 正文视作思考，不进用户可见正文区
+          if (stream && !stream.finished && isShowThinkingEnabled(session.sessionKey)) {
+            enqueueThinking(stream, block.text)
             scheduleFlushStreamCard(session)
           }
         }
@@ -759,91 +821,56 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
       if (event.text) {
         appendSdkLog(session, "thinking", event.text)
         if (stream && !stream.finished && isShowThinkingEnabled(session.sessionKey)) {
-          const last = stream.segments[stream.segments.length - 1]
-          // 仅未封存的思考段可续写；已封存则新开一段计时
-          if (last?.type === "thinking" && last.ms == null) {
-            last.text += event.text
-          } else {
-            stream.segments.push({ type: "thinking", text: event.text, startedAt: Date.now() })
-          }
+          enqueueThinking(stream, event.text)
           scheduleFlushStreamCard(session)
         }
       }
       break
     case "tool_call": {
       flushSdkLog(session)
-      // 摘要只随发起（running）打一次，完成/失败行保持简短避免刷屏
       const summary = event.status === "running" ? summarizeToolArgs(event.args) : ""
       const detectSummary = summary || summarizeToolArgs(event.args) || ""
       pushUiLog("SDK", "INFO", `[${session.sessionKey}] [tool] ${event.name}: ${event.status}${summary ? ` · ${summary}` : ""}`)
       if (stream && !stream.finished) {
-        // 任意工具（含出站 MCP/poll）都先封存上一思考，避免 live 计时把工具墙钟算进去
-        {
-          const prevThink = stream.segments[stream.segments.length - 1]
-          if (prevThink?.type === "thinking" && prevThink.startedAt != null && prevThink.ms == null) {
-            prevThink.ms = Date.now() - prevThink.startedAt
-          }
-        }
-                if (isPollMessageInvocation(event.name, detectSummary, event.args)) {
+        if (isPollMessageInvocation(event.name, detectSummary, event.args)) {
           const blocking = isBlockingPollMessage(event.name, detectSummary, event.args)
           if (event.status === "running") {
-            // 阻塞 poll 开始：只收口当前卡（进入空闲），新一批切卡等 poll 返回再定
-            if (blocking && stream.gateOpen && stream.ensured) {
-              void rotateStreamCard(session)
-            } else if (!blocking) {
+            if (blocking) {
+              // 挂阻塞 poll = 本回合结束：收口当前卡换新队列
+              endStreamRound(session)
+            } else {
               stream.pendingNonBlockingPoll = true
             }
             break
           }
-          // poll 结束：有新用户消息才切卡；系统指令/处理中重投不切
-          const freshIds = takeFreshUserPollIds(session, event.result)
-          if (freshIds.length > 0) {
-            void rotateStreamCard(session)
-            const next = session.streamAgg
-            if (next) {
-              next.gateOpen = true
-              next.pendingNonBlockingPoll = false
-            }
+          // poll 返回
+          const wasNonBlocking = stream.pendingNonBlockingPoll
+          stream.pendingNonBlockingPoll = false
+          if (wasNonBlocking && stream.gateOpen && pollResultHasFreshMessages(event.result)) {
+            // 干活途中拉到新消息：回合边界（重投是当前回合的活，不换卡）
+            endStreamRound(session)
             break
           }
-          if (stream.pendingNonBlockingPoll || !blocking || !stream.ensured) {
+          if (wasNonBlocking && !stream.gateOpen) {
+            // 冷启动预热：丢弃 poll 前的推理噪音，保留已入队工具
             stream.segments = stream.segments.filter((s) => s.type === "tools" && s.tools.length > 0)
             stream.dirty = stream.segments.length > 0
-            stream.pendingNonBlockingPoll = false
           }
           stream.gateOpen = true
           break
         }
+        // 非 poll 工具 = 真实工作开始：开门
+        stream.gateOpen = true
         if (shouldOmitFromStreamCard(event.name, detectSummary, event.args)) {
+          if (event.status === "running") {
+            // send_* 是正文边界：封存当前思考块（后续思考开新块），再刷时间线保证正文落点
+            sealLastThinking(stream)
+            scheduleFlushStreamCard(session, true)
+          }
           break
         }
-        const prev = stream.segments[stream.segments.length - 1]
-        let toolsSeg = prev?.type === "tools" ? prev : null
-        if (!toolsSeg) {
-          toolsSeg = { type: "tools", tools: [] }
-          stream.segments.push(toolsSeg)
-        }
-        const existing = toolsSeg.tools.find((t) => t.callId === event.call_id)
-        if (existing) {
-          existing.status = event.status
-          if (summary) existing.summary = summary
-          if (event.status === "running") {
-            existing.startedAt = Date.now()
-            existing.ms = undefined
-          } else if (existing.startedAt != null && (event.status === "completed" || event.status === "error")) {
-            existing.ms = Date.now() - existing.startedAt
-          }
-        } else {
-          const startedAt = event.status === "running" ? Date.now() : undefined
-          toolsSeg.tools.push({
-            callId: event.call_id,
-            name: resolveToolDisplayName(event.name, event.args),
-            status: event.status,
-            summary,
-            startedAt,
-          })
-        }
-        scheduleFlushStreamCard(session)
+        enqueueTool(stream, event, summary)
+        scheduleFlushStreamCard(session, event.status === "running")
       }
       break
     }
@@ -858,6 +885,7 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
       // FINISHED / 终态：尽快收口流式卡（finally 还会再 finish 一次，daemon 侧幂等）
       if (stream && (event.status === "FINISHED" || event.status === "ERROR" || event.status === "CANCELLED" || event.status === "EXPIRED")) {
         sealAllThinking(stream)
+        sealRunningTools(stream)
         if (event.status === "FINISHED") {
           void flushStreamCard(session, true)
         } else if (shouldSuspendStreamCard(session, event.status)) {
@@ -1131,7 +1159,6 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       modelParams,
       logAgg: { kind: null, buf: "" },
       streamAgg: isFeishuStreamEnabled(sessionKey) ? newStreamAgg() : null,
-      seenPollMessageIds: new Set(),
     }
 
     sdkSessions.set(sessionKey, session)
@@ -1147,6 +1174,8 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       ? buildWakePrompt(session, rulesUpdated, taskMessage)
       : buildPrompt(meta, taskMessage, sessionKey, opts.useMainWorkspace)
     pushUiLog("SDK", "INFO", `[${sessionKey}] ${resumed ? "恢复" : "启动"} Prompt:\n${prompt}`)
+    // 发 prompt 前通知 daemon 拉起形态：Resume 打 fresh-only 标；全新会话收残留旧卡
+    await notifySessionLaunched(sessionKey, resumed)
     let run: Run
     try {
       run = await agent.send(prompt)

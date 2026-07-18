@@ -776,6 +776,7 @@ export class LarkSender {
     for (const seg of segments) {
       if (seg.type === "tools") {
         let steps = [...(seg.steps || [])];
+        const realCount = steps.length;
         if (stripDetails) {
           steps = steps.map((s) => ({ ...s, detail: undefined }));
         }
@@ -786,7 +787,7 @@ export class LarkSender {
             ...steps.slice(-maxToolSteps),
           ];
         }
-        out.push({ ...seg, steps, title: `🛠️ 工具执行 · ${steps.length} 步` } as T);
+        out.push({ ...seg, steps, title: `🛠️ 工具执行 · ${realCount} 步` } as T);
       } else if (seg.type === "thinking") {
         let text = seg.text || "";
         if (text.length > maxThinkChars) {
@@ -873,87 +874,77 @@ export class LarkSender {
     }
 
 
-    // 飞书 300305：单卡组件/元素合计 ≤200；超限前收敛工具步与思考
-    let segs = segments ?? [];
+    const buildBodyElements = (segs: NonNullable<typeof segments>): Record<string, unknown>[] => {
+      const els: Record<string, unknown>[] = [];
+      if (opts?.sessionTitle) {
+        els.push(LarkSender.buildSessionBannerElement(opts.sessionTitle));
+      }
+      let thinkIdx = 0;
+      let toolIdx = 0;
+      let replyIdx = 0;
+      const replyCount = segs.filter((s) => s.type === "reply" && s.text.trim()).length;
+      for (const seg of segs) {
+        if (seg.type === "thinking") {
+          if (!showThinking) continue;
+          const el = LarkSender.buildThinkPanelElement(seg.text || "_（暂无）_", {
+            title: seg.title || (status === "streaming" ? "💭 思考中…" : "💭 思考完成"),
+            expanded: seg.expanded ?? (status === "streaming"),
+          });
+          el.element_id = `think_${thinkIdx++}`;
+          els.push(el);
+        } else if (seg.type === "tools") {
+          const el = LarkSender.buildToolPanelElement(seg.steps || [], {
+            title: seg.title || `🛠️ 工具执行 · ${(seg.steps || []).length} 步`,
+            expanded: seg.expanded ?? true,
+          });
+          el.element_id = `tool_${toolIdx++}`;
+          els.push(el);
+        } else if (seg.text.trim()) {
+          const isLastReply = replyIdx === replyCount - 1;
+          els.push({
+            tag: "markdown",
+            content: seg.text,
+            element_id: isLastReply ? LarkSender.STREAM_REPLY_ID : `reply_${replyIdx}`,
+          });
+          replyIdx++;
+        }
+      }
+      const buttons = opts?.buttons ?? [];
+      const input = opts?.input;
+      const foot = opts?.footer?.replace(/^\s+|\s+$/gu, "");
+      if (foot || (input && buttons.length > 0)) els.push({ tag: "hr" });
+      if (foot) els.push({ tag: "markdown", content: foot });
+      if (buttons.length > 0) LarkSender.appendButtonRows(els, buttons, { singleCol: !!input });
+      if (input) {
+        els.push({
+          tag: "input",
+          name: "custom_input",
+          input_type: "multiline_text",
+          width: "fill",
+          rows: 1,
+          auto_resize: true,
+          max_rows: 8,
+          placeholder: { tag: "plain_text", content: input.placeholder.slice(0, 100) },
+          label_position: "top",
+          behaviors: [{ type: "callback", value: input.value }],
+        });
+      }
+      return els;
+    };
+
+    // 飞书 300305：单卡组件/元素合计 ≤200；按真实元素计数逐级收敛，不超不降级（保住工具详情）
+    let elements = buildBodyElements(segments);
     for (const level of [
       { maxToolSteps: 28, maxThinkChars: 1200, stripDetails: false },
       { maxToolSteps: 16, maxThinkChars: 800, stripDetails: true },
       { maxToolSteps: 8, maxThinkChars: 500, stripDetails: true },
       { maxToolSteps: 4, maxThinkChars: 300, stripDetails: true },
     ] as const) {
-      const trial = LarkSender.compactStreamingSegments(segs, level);
-      let est = opts?.sessionTitle ? 8 : 0;
-      for (const seg of trial) {
-        if (seg.type === "thinking") est += 8;
-        else if (seg.type === "tools") est += 8 + 2 * ((seg.steps || []).length);
-        else if (seg.type === "reply" && seg.text.trim()) est += 2;
-      }
-      if (opts?.footer) est += 3;
-      if (opts?.buttons?.length) est += 2 + opts.buttons.length;
-      if (opts?.input) est += 4;
-      segs = trial;
-      if (est <= LarkSender.STREAM_ELEMENT_BUDGET) break;
-    }
-    segments = segs;
-
-    const elements: Record<string, unknown>[] = [];
-    if (opts?.sessionTitle) {
-      elements.push(LarkSender.buildSessionBannerElement(opts.sessionTitle));
+      if (LarkSender.countCardElements(elements) <= LarkSender.STREAM_ELEMENT_BUDGET) break;
+      elements = buildBodyElements(LarkSender.compactStreamingSegments(segments, level));
     }
 
-    let thinkIdx = 0;
-    let toolIdx = 0;
-    let replyIdx = 0;
-    const replyCount = segments.filter((s) => s.type === "reply" && s.text.trim()).length;
-    for (const seg of segments) {
-      if (seg.type === "thinking") {
-        if (!showThinking) continue;
-        const el = LarkSender.buildThinkPanelElement(seg.text || "_（暂无）_", {
-          title: seg.title || (status === "streaming" ? "💭 思考中…" : "💭 思考完成"),
-          expanded: seg.expanded ?? (status === "streaming"),
-        });
-        el.element_id = `think_${thinkIdx++}`;
-        elements.push(el);
-      } else if (seg.type === "tools") {
-        const el = LarkSender.buildToolPanelElement(seg.steps || [], {
-          title: seg.title || `🛠️ 工具执行 · ${(seg.steps || []).length} 步`,
-          expanded: seg.expanded ?? true,
-        });
-        el.element_id = `tool_${toolIdx++}`;
-        elements.push(el);
-      } else if (seg.text.trim()) {
-        const isLastReply = replyIdx === replyCount - 1;
-        elements.push({
-          tag: "markdown",
-          content: seg.text,
-          element_id: isLastReply ? LarkSender.STREAM_REPLY_ID : `reply_${replyIdx}`,
-        });
-        replyIdx++;
-      }
-    }
-
-    const buttons = opts?.buttons ?? [];
-    const input = opts?.input;
-    const foot = opts?.footer?.replace(/^\s+|\s+$/gu, "");
-    if (foot || (input && buttons.length > 0)) elements.push({ tag: "hr" });
-    if (foot) elements.push({ tag: "markdown", content: foot });
-    if (buttons.length > 0) LarkSender.appendButtonRows(elements, buttons, { singleCol: !!input });
-    if (input) {
-      elements.push({
-        tag: "input",
-        name: "custom_input",
-        input_type: "multiline_text",
-        width: "fill",
-        rows: 1,
-        auto_resize: true,
-        max_rows: 8,
-        placeholder: { tag: "plain_text", content: input.placeholder.slice(0, 100) },
-        label_position: "top",
-        behaviors: [{ type: "callback", value: input.value }],
-      });
-    }
-
-    const interactive = buttons.length > 0 || !!input;
+    const interactive = (opts?.buttons?.length ?? 0) > 0 || !!opts?.input;
     return {
       schema: "2.0",
       config: {
