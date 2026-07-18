@@ -245,7 +245,7 @@ export function buildProjectSessionPrompt(p: Project): string {
     "工作方式:",
     "1. 用户直接发消息 → 正常对话：答疑、讨论方案、小修小改",
     `2. 用户点击 ${nodeLabels || "流程节点"} 按钮 → 会收到带明确要求的节点任务，直接执行`,
-    "3. 节点产物写入 .cursor-claw/artifacts/，用 project_action_done 登记即完成——宿主会把产物发给用户并附推进按钮，无需你再确认",
+    "3. 节点产物写入 .cursor-claw/artifacts/，用 project_action_done 登记即完成——宿主会把产物发给用户并附推进按钮；登记后立刻静默，禁止再 send_text / send_question / 复述摘要（菜单须留在会话最底部）",
     "4. 查项目字段用 project_get，补分支等配置用 project_update",
     "",
     "边界:",
@@ -282,7 +282,8 @@ export function buildActionPrompt(p: Project, actionId: string, type: ProjectAct
     "完成动作:",
     `1. 完整产出写入: ${abs}`,
     `2. 调用 project_action_done(project_id=${p.id}, action_id=${actionId}, status=accepted, artifact_path, summary)`,
-    "3. 产出即完成：宿主会把产物文件发给用户并附推进按钮，禁止用 send_question 问\"通过/驳回\"",
+    "3. 产出即完成：宿主会把产物文件发给用户并附推进按钮；调用 project_action_done 成功后本轮立刻结束",
+    "4. 登记后严禁再发任何消息（含 send_text 复述/总结/追问）——再说话会把推进菜单顶上去",
     "",
     "边界: 内部字段不向用户复述。",
   ]
