@@ -182,17 +182,9 @@ function recentGlobalErrorHint(withinMs: number): string {
   return ""
 }
 
-/** 失败冷却：网络类短退避（1→8s），其它 2→30s；超 8 次网络 60s / 其它 3min（不再 10 分钟干等） */
-export function sdkFailCooldownRemaining(sessionKey: string): number {
-  const st = sdkFailStreak.get(sessionKey)
-  if (!st) return 0
-  let cool: number
-  if (st.network) {
-    cool = st.count > 8 ? 60_000 : Math.min(8_000, 1_000 * Math.pow(2, Math.min(st.count - 1, 3)))
-  } else {
-    cool = st.count > 8 ? 3 * 60_000 : Math.min(30_000, 2_000 * Math.pow(2, Math.min(st.count - 1, 4)))
-  }
-  return Math.max(0, st.lastFailAt + cool - Date.now())
+/** 失败不再退避：始终 0，调度器可立即重试（无限） */
+export function sdkFailCooldownRemaining(_sessionKey: string): number {
+  return 0
 }
 
 function scheduleSdkIdle(sessionKey: string, errored: boolean, opts?: { network?: boolean; silent?: boolean }): void {
@@ -203,9 +195,8 @@ function scheduleSdkIdle(sessionKey: string, errored: boolean, opts?: { network?
     st.network = !!opts?.network
     sdkFailStreak.set(sessionKey, st)
     if (!opts?.silent) {
-      const remain = sdkFailCooldownRemaining(sessionKey)
       pushUiLog("SDK", st.count > 8 ? "ERROR" : "WARN",
-        `[${sessionKey}] 异常结束×${st.count}，${Math.ceil(remain / 1000)}s 后重试`)
+        `[${sessionKey}] 异常结束×${st.count}，立即重试`)
     }
   } else {
     const prev = sdkFailStreak.get(sessionKey)
@@ -214,7 +205,7 @@ function scheduleSdkIdle(sessionKey: string, errored: boolean, opts?: { network?
       pushUiLog("SDK", "INFO", `[${sessionKey}] 已恢复（曾连续失败 ${prev.count} 次）`)
     }
   }
-  // 成功失败都立即叫醒调度器：是否真正拉起由调度器按队列与冷却决定
+  // 成功失败都立即叫醒调度器；失败无冷却，可立刻再拉起
   sdkIdleHandler?.(sessionKey)
 }
 
@@ -511,14 +502,13 @@ function startRunLifecycle(session: SdkSessionAgent, run: Run): void {
     broadcastSdkSessionStatus()
 
     if (errored) {
-      // 先记账冷却，再打一行合并日志（避免「结束+详情+异常」刷屏）
+      // 记账失败次数后立即叫醒调度器重试（无退避）
       scheduleSdkIdle(sessionKey, true, { network: networkFail, silent: true })
       const st = sdkFailStreak.get(sessionKey)
-      const coolSec = Math.ceil(sdkFailCooldownRemaining(sessionKey) / 1000)
       const dur = run.durationMs != null ? `${run.durationMs}ms` : "?"
       const tip = networkFail ? "将Resume重建连接" : ""
       pushUiLog("SDK", (st?.count ?? 0) > 8 ? "ERROR" : "WARN",
-        `[${sessionKey}] 运行失败×${st?.count ?? 1} ${dur}${tip ? ` ${tip}` : ""} → ${coolSec}s后重试 | ${errorDetail || "unknown"}`)
+        `[${sessionKey}] 运行失败×${st?.count ?? 1} ${dur}${tip ? ` ${tip}` : ""} → 立即重试 | ${errorDetail || "unknown"}`)
     } else {
       const summary = [
         run.result && `result=${run.result}`,
@@ -655,8 +645,8 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       run = await agent.send(prompt, { local: { force: true } })
     }
     startRunLifecycle(session, run)
-    // 失败计数不在拉起时清零（断网时 Resume 总能成功、run 中途才死，清了会导致退避永不生效）：
-    // run 成功跑完由 scheduleSdkIdle 清零；新消息经 hasPending 无视冷却立即放行
+    // 失败计数不在拉起时清零（断网时 Resume 总能成功、run 中途才死）：
+    // run 成功跑完由 scheduleSdkIdle 清零；失败无冷却，调度器立即再拉
     // 持久化最新 agentId：run 结束释放进程后靠它 Resume，应用重启后依然有效
     // send 期间被 /reset 则不回写（否则旧上下文的 agentId 会覆盖掉刚删的映射）
     if ((sessionResetGen.get(sessionKey) ?? 0) === resetGenAtStart) {

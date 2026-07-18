@@ -1105,11 +1105,8 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
   if (groupKeys.length > 0 && feishuOn) await fetchChatNames(groupKeys)
 
   for (const { sessionKey, chatType, senderOpenId, hasPending } of sessions) {
-    // 失败冷却（对所有叫醒源生效）：残留消息按冷却节奏重试；有新消息则无视冷却立即拉起
-    if (!hasPending) {
-      const cooldown = sdkFailCooldownRemaining(sessionKey)
-      if (cooldown > 0) continue
-    }
+    // 失败无退避（sdkFailCooldownRemaining 恒为 0）；保留调用以便日后若恢复冷却仍生效
+    if (!hasPending && sdkFailCooldownRemaining(sessionKey) > 0) continue
     if (isSessionAgentRunning(sessionKey)) {
       if (await isZombieAgent(sessionKey)) {
         broadcastLog(`[Agent] ${sessionKey} 疑似僵尸(队列有消息且 ${ZOMBIE_REPLY_SILENCE_MS / 60_000}min 无回复消息)，强制终止并重启`, "WARN")
