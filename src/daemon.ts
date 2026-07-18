@@ -1553,7 +1553,14 @@ async function replyToMessage(
     return;
   }
   if (ch.type === "wechat") {
-    // 微信无交互卡片：把按钮降级为可直接发送的指令列表（按 section 分段）
+    // 微信无交互卡片：降级为「标签 + 可复制指令」（飞书仍走按钮卡，此处不动飞书）
+    const fmtBtn = (b: { label: string; cmd: string }, n: number) => {
+      const label = (b.label || b.cmd).trim();
+      const cmd = (b.cmd || "").trim();
+      if (!cmd) return `${n}. ${label}`;
+      if (label === cmd) return `${n}. ${cmd}`;
+      return `${n}. ${label}\n   发送：${cmd}`;
+    };
     let body = text;
     const secs = opts?.sections;
     if (secs?.length) {
@@ -1561,24 +1568,24 @@ async function replyToMessage(
       for (const sec of secs) {
         let part = sec.text;
         if (sec.buttons?.length) {
-          const lines: string[] = [];
+          const lines: string[] = ["（微信无按钮，复制下方「发送：」后的指令发出即可）"];
           let n = 1;
-          for (const b of sec.buttons.slice(0, 20)) lines.push(`${n++}. ${b.label || b.cmd}`);
+          for (const b of sec.buttons.slice(0, 20)) lines.push(fmtBtn(b, n++));
           part = `${part}\n${lines.join("\n")}`;
         }
         chunks.push(part);
       }
       body = chunks.join("\n\n");
     } else if (buttons && buttons.length > 0) {
-      const lines: string[] = [];
+      const lines: string[] = ["（微信无按钮，复制下方「发送：」后的指令发出即可）"];
       let n = 1;
       let lastSec: string | undefined;
       for (const b of buttons.slice(0, 20)) {
         if (b.section && b.section !== lastSec) {
-          lines.push(b.section);
+          lines.push(`【${b.section}】`);
           lastSec = b.section;
         }
-        lines.push(`${n++}. ${b.label || b.cmd}`);
+        lines.push(fmtBtn(b, n++));
       }
       body = `${text}\n\n${lines.join("\n")}`;
     }
