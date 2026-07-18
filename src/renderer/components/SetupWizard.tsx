@@ -130,7 +130,7 @@ export default function SetupWizard({ open, onClose }: Props) {
           id: newId("ch"), name: info.name || "飞书机器人", enabled: true, type: "feishu" as const,
           model: "auto", modelParams: "", othersModel: "", othersModelParams: "",
           mainUserEnabled: false, mainUserChatId: "", allowOthers: false, digitalIdentity: "",
-          workspaceDir: "", keepSession: true, persistentPoll: true,
+          workspaceDir: "", keepSession: true, persistentPoll: true, showThinking: true,
         }),
         larkAppId: id.trim(), larkAppSecret: secret.trim(), larkBotName: info.name,
         larkAppQuickCreated: quickCreated, enabled: true,

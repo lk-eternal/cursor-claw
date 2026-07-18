@@ -7,6 +7,7 @@ import { createRequire } from "node:module"
 import { pushUiLog, broadcastLog, broadcastSessionStatus } from "./ui-logger"
 import { type ChatType, type LaunchMeta, buildPrompt, resolveSessionChatName } from "./agent-launcher"
 import { getAgentResource, resolveChannelForSession } from "./config-store"
+import { readLockFile, httpPost } from "./daemon-client"
 import {
   initSessionModelStore,
   resolveModelForSession,
@@ -15,6 +16,39 @@ import {
 } from "../src/shared/session-model-store.js"
 import { modelSlugFromParams, rememberModelLabel } from "../src/shared/model-utils.js"
 import { projectIdFromSessionKey } from "../src/shared/project-types.js"
+
+interface StreamToolEntry {
+  callId: string
+  name: string
+  status: "running" | "completed" | "error"
+  summary: string
+  startedAt?: number
+  ms?: number
+}
+
+type StreamSegment =
+  | { type: "thinking"; text: string; startedAt?: number; ms?: number }
+  | { type: "tools"; tools: StreamToolEntry[] }
+  | { type: "reply"; text: string }
+
+
+/** 飞书 CardKit 时间线聚合（按执行顺序交错；MCP send_* 不进卡） */
+interface StreamAgg {
+  segments: StreamSegment[]
+  dirty: boolean
+  timer: ReturnType<typeof setTimeout> | null
+  ensured: boolean
+  lastFlushAt: number
+  /** 串行化 ensure/update/finish，避免乱序 */
+  inflight: Promise<void>
+  finished: boolean
+  /** false：未过首轮 poll 前不发流式卡（避免非阻塞预热单独建卡） */
+  gateOpen: boolean
+  /** 正在跑 wait=false，结束后清空预热片段 */
+  pendingNonBlockingPoll: boolean
+  /** 断线挂起：不 finish 收口，Resume 后继续同一张卡 */
+  suspended: boolean
+}
 
 interface SdkSessionAgent {
   sessionKey: string
@@ -39,6 +73,10 @@ interface SdkSessionAgent {
   modelParams?: string
   /** 流式日志聚合缓冲：连续同类型(thinking/text)增量合并成一条打印 */
   logAgg: { kind: "thinking" | "text" | null; buf: string }
+  /** 飞书流式进度卡；非飞书通道为 null */
+  streamAgg: StreamAgg | null
+  /** poll 已见用户消息 id：区分新一批与处理中重投 */
+  seenPollMessageIds: Set<string>
   /** 最近一次终态状态事件（ERROR/EXPIRED/CANCELLED），用于结束时还原真实错误原因 */
   lastStatus?: { status: string; message?: string }
 }
@@ -270,6 +308,353 @@ function broadcastSdkSessionStatus(): void {
 // 这里按类型聚合，切换类型 / 超过阈值 / 遇到 tool·status·结束时才落一条日志
 const LOG_FLUSH_LEN = 400
 
+/** CardKit 流式更新节流：~400ms 调度，且不低于 ~5/s（200ms） */
+const STREAM_FLUSH_MS = 400
+const STREAM_MIN_INTERVAL_MS = 200
+const STREAM_THINKING_TAIL = 1500
+/** 流式卡工具步上限（飞书单卡 ≤200 元素；每步约 1~2 元素） */
+const MAX_STREAM_TOOL_STEPS = 40
+
+function newStreamAgg(gateOpen = false): StreamAgg {
+  return {
+    segments: [],
+    dirty: false,
+    timer: null,
+    ensured: false,
+    lastFlushAt: 0,
+    inflight: Promise.resolve(),
+    finished: false,
+    gateOpen,
+    pendingNonBlockingPoll: false,
+    suspended: false,
+  }
+}
+
+/** 已结束的 thinking 段写入固定 ms，避免后续 flush 继续涨表 */
+function sealClosedThinking(agg: StreamAgg): void {
+  const last = agg.segments.length - 1
+  for (let i = 0; i < agg.segments.length; i++) {
+    const seg = agg.segments[i]
+    if (seg.type !== "thinking") continue
+    if (seg.ms != null || seg.startedAt == null) continue
+    if (i === last) continue
+    seg.ms = Date.now() - seg.startedAt
+  }
+}
+
+function sealAllThinking(agg: StreamAgg): void {
+  for (const seg of agg.segments) {
+    if (seg.type !== "thinking") continue
+    if (seg.ms != null || seg.startedAt == null) continue
+    seg.ms = Date.now() - seg.startedAt
+  }
+}
+
+
+/** 可 Resume 的异常终态：不把流式卡标成已完成，便于重连续写 */
+function shouldSuspendStreamCard(session: SdkSessionAgent, status: string): boolean {
+  if (!session.keepSession) return false
+  return status === "ERROR" || status === "EXPIRED" || status === "CANCELLED"
+}
+
+function isFeishuStreamEnabled(sessionKey: string): boolean {
+  const ch = resolveChannelForSession(sessionKey)
+  return !!ch && ch.type === "feishu"
+}
+
+interface StreamCardPayload {
+  segments: Array<
+    | { type: "thinking"; text: string; ms?: number }
+    | { type: "tools"; tools: { name: string; status: string; summary?: string; ms?: number }[] }
+    | { type: "reply"; text: string }
+  >
+}
+
+function isShowThinkingEnabled(sessionKey: string): boolean {
+  const ch = resolveChannelForSession(sessionKey)
+  return ch?.showThinking !== false
+}
+
+function buildStreamPayload(agg: StreamAgg, sessionKey: string): StreamCardPayload {
+  const showThinking = isShowThinkingEnabled(sessionKey)
+  sealClosedThinking(agg)
+  const segments: StreamCardPayload["segments"] = []
+  const lastIdx = agg.segments.length - 1
+  for (let i = 0; i < agg.segments.length; i++) {
+    const seg = agg.segments[i]
+    if (seg.type === "thinking") {
+      if (!showThinking) continue
+      let thinking = seg.text
+      if (thinking.length > STREAM_THINKING_TAIL) {
+        thinking = "…" + thinking.slice(-STREAM_THINKING_TAIL)
+      }
+      // 仅当前仍在写的最后一段 live 计时；已封存用固定 ms
+      const ms = seg.ms ?? (i === lastIdx && seg.startedAt != null ? Date.now() - seg.startedAt : undefined)
+      segments.push({ type: "thinking", text: thinking, ms })
+    } else if (seg.type === "tools") {
+      if (!seg.tools.length) continue
+      const tools = seg.tools.length > MAX_STREAM_TOOL_STEPS
+        ? seg.tools.slice(-MAX_STREAM_TOOL_STEPS)
+        : seg.tools
+      segments.push({
+        type: "tools",
+        tools: tools.map((t) => ({
+          name: t.name,
+          status: t.status,
+          summary: t.summary || undefined,
+          ms: t.ms,
+        })),
+      })
+    } else if (seg.type === "reply" && seg.text) {
+      if (!showThinking) continue
+      const replyText = seg.text
+      const lastOut = segments[segments.length - 1]
+      if (lastOut?.type === "thinking") {
+        let combined = lastOut.text?.trim() ? `${lastOut.text}\n\n${replyText}` : replyText
+        if (combined.length > STREAM_THINKING_TAIL) {
+          combined = "…" + combined.slice(-STREAM_THINKING_TAIL)
+        }
+        lastOut.text = combined
+      } else {
+        let thinking = replyText
+        if (thinking.length > STREAM_THINKING_TAIL) {
+          thinking = "…" + thinking.slice(-STREAM_THINKING_TAIL)
+        }
+        segments.push({ type: "thinking", text: thinking })
+      }
+    }
+  }
+  return { segments }
+}
+
+
+async function postStreamCard(
+  sessionKey: string,
+  action: "ensure" | "update" | "finish",
+  payload: StreamCardPayload,
+): Promise<void> {
+  const lock = readLockFile()
+  if (!lock?.port) return
+  try {
+    const r = await httpPost(
+      `http://127.0.0.1:${lock.port}/api/agent-stream-card`,
+      {
+        session_key: sessionKey,
+        action,
+        segments: payload.segments,
+      },
+      15_000,
+    ) as { ok?: boolean; skipped?: boolean; error?: string } | null
+    if (r && r.ok === false && !r.skipped) {
+      pushUiLog("SDK", "DEBUG", `[${sessionKey}] 流式卡片 ${action} 失败: ${r.error || "unknown"}`)
+    }
+  } catch (e: unknown) {
+    pushUiLog("SDK", "DEBUG", `[${sessionKey}] 流式卡片 ${action} 异常: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
+function scheduleFlushStreamCard(session: SdkSessionAgent): void {
+  const agg = session.streamAgg
+  if (!agg || agg.finished) return
+  agg.dirty = true
+  if (agg.timer) return
+  const elapsed = Date.now() - agg.lastFlushAt
+  const delay = Math.max(STREAM_FLUSH_MS, STREAM_MIN_INTERVAL_MS - elapsed)
+  agg.timer = setTimeout(() => {
+    agg.timer = null
+    void flushStreamCard(session, false)
+  }, Math.max(0, delay))
+}
+
+async function flushStreamCard(session: SdkSessionAgent, finish: boolean): Promise<void> {
+  const agg = session.streamAgg
+  if (!agg || agg.finished) return
+  if (agg.timer) {
+    clearTimeout(agg.timer)
+    agg.timer = null
+  }
+  if (!finish && !agg.dirty) return
+  // 非阻塞 poll 完成前不发卡；仍保留 dirty，开门后再刷
+  if (!finish && !agg.gateOpen) return
+
+  const payload = buildStreamPayload(agg, session.sessionKey)
+  agg.dirty = false
+  agg.lastFlushAt = Date.now()
+  // 同步标记，防止 status FINISHED 与 stream finally 双重 finish
+  if (finish) agg.finished = true
+
+  const run = async (): Promise<void> => {
+    if (finish) {
+      // 门未开且从未建卡：丢弃预热，不发空完成卡
+      if (!agg.ensured && !agg.gateOpen) return
+      await postStreamCard(session.sessionKey, "finish", payload)
+      return
+    }
+    // finish 已抢占：丢弃排队中的 update
+    if (agg.finished) return
+    if (!agg.ensured) {
+      await postStreamCard(session.sessionKey, "ensure", payload)
+      agg.ensured = true
+      // Resume 复用 Daemon 已有卡时，ensure 本身不写内容，再补一帧 update
+      await postStreamCard(session.sessionKey, "update", payload)
+      return
+    }
+    await postStreamCard(session.sessionKey, "update", payload)
+  }
+
+  agg.inflight = agg.inflight.then(run, run)
+  await agg.inflight
+}
+
+function toolArgsCommandText(args: unknown): string {
+  if (!args || typeof args !== "object") return ""
+  const rec = args as Record<string, unknown>
+  for (const key of ["command", "cmd", "script", "code", "input"]) {
+    const v = rec[key]
+    if (typeof v === "string" && v.trim()) return v
+  }
+  try { return JSON.stringify(rec) } catch { return "" }
+}
+
+function isPollMessageInvocation(name: string, summary: string, args?: unknown): boolean {
+  const full = `${name}\n${summary}\n${args != null ? toolArgsCommandText(args) : ""}`
+  return /poll-message/i.test(full)
+}
+
+/** 仅阻塞 poll 才换卡。必须看完整 command（摘要 120 字会裁掉 wait=false） */
+function isBlockingPollMessage(name: string, summary: string, args?: unknown): boolean {
+  const full = `${name}\n${summary}\n${args != null ? toolArgsCommandText(args) : ""}`
+  if (!/poll-message/i.test(full)) return false
+  if (/wait\s*=\s*false/i.test(full)) return false
+  if (/["']wait["']\s*:\s*false/i.test(full)) return false
+  if (/wait%3[Dd]false/i.test(full)) return false
+  return true
+}
+
+/** 仅隐藏本通道出站 MCP（send_text 等）与 poll；其它 MCP/工具都进流式工具区 */
+function shouldOmitFromStreamCard(name: string, summary: string, args?: unknown): boolean {
+  const full = `${name}\n${summary}\n${args != null ? toolArgsCommandText(args) : ""}`
+  // cursor-claw 出站：已有独立飞书消息，不重复进工具区
+  if (/(?:^|[\s:.])send_(?:text|question|image|file)\b/i.test(full)) return true
+  if (/(?:^|[\s:.])project_(?:action|update|get|list|delete|register)/i.test(full)) return true
+  if (/toolName["']?\s*[:=]\s*["']send_/i.test(full)) return true
+  if (/toolName["']?\s*[:=]\s*["']project_/i.test(full)) return true
+  if (isPollMessageInvocation(name, summary, args)) return true
+  return false
+}
+
+/** MCP 工具展示名：优先 args.toolName / tool_name */
+function resolveToolDisplayName(name: string, args: unknown): string {
+  if (args && typeof args === "object") {
+    const rec = args as Record<string, unknown>
+    for (const key of ["toolName", "tool_name", "name"]) {
+      const v = rec[key]
+      if (typeof v === "string" && v.trim()) {
+        const server = typeof rec.serverName === "string" ? rec.serverName
+          : typeof rec.server === "string" ? rec.server : ""
+        return server ? `${server}/${v.trim()}` : v.trim()
+      }
+    }
+  }
+  return name
+}
+
+
+function extractToolResultText(result: unknown): string {
+  if (result == null) return ""
+  if (typeof result === "string") return result
+  if (typeof result !== "object") return String(result)
+  const rec = result as Record<string, unknown>
+  for (const key of ["output", "stdout", "content", "text", "result", "message"]) {
+    const v = rec[key]
+    if (typeof v === "string" && v.trim()) return v
+  }
+  try { return JSON.stringify(rec) } catch { return "" }
+}
+
+function parsePollResponse(result: unknown): { messages: Array<{ messageId?: string; text?: string }>; freshIds?: string[] } {
+  const raw = extractToolResultText(result)
+  const tryObj = (s: string): Record<string, unknown> | null => {
+    try { return JSON.parse(s) as Record<string, unknown> } catch { return null }
+  }
+  let obj = tryObj(raw.trim())
+  if (!obj) {
+    const start = raw.indexOf("{\"messages\"")
+    const alt = raw.indexOf("{ \"messages\"")
+    const i = start >= 0 ? start : alt
+    if (i >= 0) {
+      const slice = raw.slice(i)
+      // 从后往前找最后一个平衡 JSON
+      for (let end = slice.length; end > 20; end--) {
+        obj = tryObj(slice.slice(0, end))
+        if (obj && Array.isArray(obj.messages)) break
+        obj = null
+      }
+    }
+  }
+  if (!obj) return { messages: [] }
+  const messages = Array.isArray(obj.messages) ? obj.messages as Array<{ messageId?: string; text?: string }> : []
+  const freshIds = Array.isArray(obj.freshIds) ? obj.freshIds.map(String) : undefined
+  return { messages, freshIds }
+}
+
+function isSystemPollText(text?: string): boolean {
+  if (!text) return true
+  return /\[SYSTEM\b/i.test(text) || /\[SESSION_RESUME\b/i.test(text)
+}
+
+/** 返回本批「新用户消息」id；处理中重投 / 系统指令不计 */
+function takeFreshUserPollIds(session: SdkSessionAgent, result: unknown): string[] {
+  const { messages, freshIds } = parsePollResponse(result)
+  if (freshIds) {
+    const out: string[] = []
+    for (const id of freshIds) {
+      if (!id || id.startsWith("internal_")) continue
+      session.seenPollMessageIds.add(id)
+      out.push(id)
+    }
+    // freshIds 为空但 messages 里有用户消息 = 纯处理中重投
+    return out
+  }
+  const out: string[] = []
+  for (const m of messages) {
+    const id = typeof m.messageId === "string" ? m.messageId : ""
+    const text = typeof m.text === "string" ? m.text : ""
+    if (!id || id.startsWith("internal_")) continue
+    if (isSystemPollText(text)) continue
+    if (session.seenPollMessageIds.has(id)) continue
+    session.seenPollMessageIds.add(id)
+    out.push(id)
+  }
+  return out
+}
+
+/**
+ * 长连接：收口当前流式卡，并换新 agg。
+ * 下一轮思考/工具再 ensure 一张新卡，避免一直改上一张。
+ */
+async function rotateStreamCard(session: SdkSessionAgent): Promise<void> {
+  const agg = session.streamAgg
+  if (!agg) {
+    session.streamAgg = isFeishuStreamEnabled(session.sessionKey) ? newStreamAgg() : null
+    return
+  }
+  if (agg.timer) {
+    clearTimeout(agg.timer)
+    agg.timer = null
+  }
+  const shouldFinish = !agg.finished && agg.ensured
+  agg.finished = true
+  session.streamAgg = isFeishuStreamEnabled(session.sessionKey) ? newStreamAgg() : null
+  if (!shouldFinish) return
+  const payload = buildStreamPayload(agg, session.sessionKey)
+  agg.inflight = agg.inflight.then(
+    () => postStreamCard(session.sessionKey, "finish", payload),
+    () => postStreamCard(session.sessionKey, "finish", payload),
+  )
+  await agg.inflight
+}
+
 function flushSdkLog(session: SdkSessionAgent): void {
   const agg = session.logAgg
   const text = agg.buf.trim()
@@ -308,11 +693,28 @@ async function streamRunEvents(session: SdkSessionAgent, run: Run): Promise<void
       const cause = e instanceof Error && "cause" in e && e.cause ? JSON.stringify(e.cause) : ""
       pushUiLog("SDK", "ERROR", `[${session.sessionKey}] 流处理异常: ${msg}${stack ? ` stack=${stack}` : ""}${cause ? ` cause=${cause}` : ""}`)
     }
+  } finally {
+    // run 结束：落最终内容并关闭 streaming_mode（飞书 CardKit）
+    // 全程无 thinking/tool/text 则不建空卡
+    try {
+      const agg = session.streamAgg
+      if (agg && (agg.ensured || agg.dirty || agg.segments.length)) {
+        sealAllThinking(agg)
+        if (agg.suspended || (session.lastStatus && shouldSuspendStreamCard(session, session.lastStatus.status))) {
+          agg.suspended = true
+          await flushStreamCard(session, false)
+        } else {
+          await flushStreamCard(session, true)
+        }
+      } else if (agg) {
+        agg.finished = true
+      }
+    } catch { /* best-effort */ }
   }
 }
 
 // 工具入参摘要：按优先级挑最有信息量的字符串字段（Shell→command、Read→path、Grep→pattern…）
-const TOOL_ARG_SUMMARY_KEYS = ["command", "path", "target_notebook", "pattern", "glob_pattern", "file_path", "image_path", "url", "query", "question", "text", "description", "name"]
+const TOOL_ARG_SUMMARY_KEYS = ["command", "path", "target_notebook", "pattern", "glob_pattern", "file_path", "image_path", "url", "query", "question", "text", "description", "name", "toolName", "tool_name", "serverName", "server"]
 const TOOL_SUMMARY_MAX = 120
 
 function summarizeToolArgs(args: unknown): string {
@@ -332,20 +734,117 @@ function summarizeToolArgs(args: unknown): string {
 }
 
 function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
+  const stream = session.streamAgg
   switch (event.type) {
     case "assistant":
       for (const block of event.message.content) {
-        if (block.type === "text" && block.text) appendSdkLog(session, "text", block.text)
+        if (block.type === "text" && block.text) {
+          appendSdkLog(session, "text", block.text)
+          if (stream && !stream.finished) {
+            const last = stream.segments[stream.segments.length - 1]
+            if (last?.type === "reply") {
+              last.text += block.text
+            } else {
+              if (last?.type === "thinking" && last.startedAt != null && last.ms == null) {
+                last.ms = Date.now() - last.startedAt
+              }
+              stream.segments.push({ type: "reply", text: block.text })
+            }
+            scheduleFlushStreamCard(session)
+          }
+        }
       }
       break
     case "thinking":
-      if (event.text) appendSdkLog(session, "thinking", event.text)
+      if (event.text) {
+        appendSdkLog(session, "thinking", event.text)
+        if (stream && !stream.finished && isShowThinkingEnabled(session.sessionKey)) {
+          const last = stream.segments[stream.segments.length - 1]
+          // 仅未封存的思考段可续写；已封存则新开一段计时
+          if (last?.type === "thinking" && last.ms == null) {
+            last.text += event.text
+          } else {
+            stream.segments.push({ type: "thinking", text: event.text, startedAt: Date.now() })
+          }
+          scheduleFlushStreamCard(session)
+        }
+      }
       break
     case "tool_call": {
       flushSdkLog(session)
       // 摘要只随发起（running）打一次，完成/失败行保持简短避免刷屏
       const summary = event.status === "running" ? summarizeToolArgs(event.args) : ""
+      const detectSummary = summary || summarizeToolArgs(event.args) || ""
       pushUiLog("SDK", "INFO", `[${session.sessionKey}] [tool] ${event.name}: ${event.status}${summary ? ` · ${summary}` : ""}`)
+      if (stream && !stream.finished) {
+        // 任意工具（含出站 MCP/poll）都先封存上一思考，避免 live 计时把工具墙钟算进去
+        {
+          const prevThink = stream.segments[stream.segments.length - 1]
+          if (prevThink?.type === "thinking" && prevThink.startedAt != null && prevThink.ms == null) {
+            prevThink.ms = Date.now() - prevThink.startedAt
+          }
+        }
+                if (isPollMessageInvocation(event.name, detectSummary, event.args)) {
+          const blocking = isBlockingPollMessage(event.name, detectSummary, event.args)
+          if (event.status === "running") {
+            // 阻塞 poll 开始：只收口当前卡（进入空闲），新一批切卡等 poll 返回再定
+            if (blocking && stream.gateOpen && stream.ensured) {
+              void rotateStreamCard(session)
+            } else if (!blocking) {
+              stream.pendingNonBlockingPoll = true
+            }
+            break
+          }
+          // poll 结束：有新用户消息才切卡；系统指令/处理中重投不切
+          const freshIds = takeFreshUserPollIds(session, event.result)
+          if (freshIds.length > 0) {
+            void rotateStreamCard(session)
+            const next = session.streamAgg
+            if (next) {
+              next.gateOpen = true
+              next.pendingNonBlockingPoll = false
+            }
+            break
+          }
+          if (stream.pendingNonBlockingPoll || !blocking || !stream.ensured) {
+            stream.segments = stream.segments.filter((s) => s.type === "tools" && s.tools.length > 0)
+            stream.dirty = stream.segments.length > 0
+            stream.pendingNonBlockingPoll = false
+          }
+          stream.gateOpen = true
+          break
+        }
+        if (shouldOmitFromStreamCard(event.name, detectSummary, event.args)) {
+          break
+        }
+        const prev = stream.segments[stream.segments.length - 1]
+        let toolsSeg = prev?.type === "tools" ? prev : null
+        if (!toolsSeg) {
+          toolsSeg = { type: "tools", tools: [] }
+          stream.segments.push(toolsSeg)
+        }
+        const existing = toolsSeg.tools.find((t) => t.callId === event.call_id)
+        if (existing) {
+          existing.status = event.status
+          if (summary) existing.summary = summary
+          if (event.status === "running") {
+            existing.startedAt = Date.now()
+            existing.ms = undefined
+          } else if (existing.startedAt != null && (event.status === "completed" || event.status === "error")) {
+            existing.ms = Date.now() - existing.startedAt
+          }
+        } else {
+          const startedAt = event.status === "running" ? Date.now() : undefined
+          toolsSeg.tools.push({
+            callId: event.call_id,
+            name: resolveToolDisplayName(event.name, event.args),
+            status: event.status,
+            summary,
+            startedAt,
+          })
+        }
+        scheduleFlushStreamCard(session)
+      }
       break
     }
     case "status": {
@@ -356,8 +855,21 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
       }
       const lvl = isErr ? "ERROR" as const : "INFO" as const
       pushUiLog("SDK", lvl, `[${session.sessionKey}] [status] ${event.status}${event.message ? ` - ${event.message}` : ""}`)
-    }
+      // FINISHED / 终态：尽快收口流式卡（finally 还会再 finish 一次，daemon 侧幂等）
+      if (stream && (event.status === "FINISHED" || event.status === "ERROR" || event.status === "CANCELLED" || event.status === "EXPIRED")) {
+        sealAllThinking(stream)
+        if (event.status === "FINISHED") {
+          void flushStreamCard(session, true)
+        } else if (shouldSuspendStreamCard(session, event.status)) {
+          // 断线/取消：刷最后一帧但不 finish，Daemon 侧保留 card 供 Resume 接续
+          stream.suspended = true
+          void flushStreamCard(session, false)
+        } else {
+          void flushStreamCard(session, true)
+        }
+      }
       break
+    }
   }
 }
 
@@ -618,6 +1130,8 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       model: modelId,
       modelParams,
       logAgg: { kind: null, buf: "" },
+      streamAgg: isFeishuStreamEnabled(sessionKey) ? newStreamAgg() : null,
+      seenPollMessageIds: new Set(),
     }
 
     sdkSessions.set(sessionKey, session)
@@ -670,6 +1184,10 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
 /** 停止并释放会话：先等 cancel 把 run 落为终态再关进程（直接 close 会残留 active run，拖垮下次 Resume） */
 function releaseSession(s: SdkSessionAgent): Promise<void> {
   s.abortController.abort()
+  if (s.streamAgg?.timer) {
+    clearTimeout(s.streamAgg.timer)
+    s.streamAgg.timer = null
+  }
   const { agent, run } = s
   sdkSessions.delete(s.sessionKey)
   if (!run) {

@@ -32,6 +32,7 @@ function emptyChannel(type: "feishu" | "wechat", defaultName: string): ChannelCo
     workspaceDir: "",
     keepSession: true,
     persistentPoll: true,
+    showThinking: true,
   }
 }
 
@@ -612,6 +613,18 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
                 <button onClick={() => set({ persistentPoll: !(draft.persistentPoll ?? true) })}
                   className={`relative h-5 w-9 shrink-0 rounded-full transition ${(draft.persistentPoll ?? true) ? "bg-blue-600" : "bg-gray-600"}`}>
                   <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition ${(draft.persistentPoll ?? true) ? "left-[18px]" : "left-0.5"}`} />
+                </button>
+              </div>
+            )}
+            {draft.type === "feishu" && (
+              <div className="flex items-center justify-between border-t border-gray-800 pt-3">
+                <div>
+                  <p className="text-xs text-gray-400">展示思考过程</p>
+                  <p className="text-xs text-gray-600">流式进度卡中显示 Thought 折叠面板；关闭后只展示工具步骤与回复</p>
+                </div>
+                <button onClick={() => set({ showThinking: !(draft.showThinking ?? true) })}
+                  className={`relative h-5 w-9 shrink-0 rounded-full transition ${(draft.showThinking ?? true) ? "bg-blue-600" : "bg-gray-600"}`}>
+                  <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition ${(draft.showThinking ?? true) ? "left-[18px]" : "left-0.5"}`} />
                 </button>
               </div>
             )}

@@ -4,7 +4,6 @@ import * as path from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import {
   createProject,
-  findBusyAction,
   getCurrentProject,
   getNodeGroups,
   getProject,
@@ -19,8 +18,7 @@ import {
   resolveUniqueNodeGroupId,
   saveNodeGroups,
   setCurrentProjectId,
-  startAction,
-  updateAction,
+  registerArtifact,
   projectGroupIds,
 } from "../src/shared/project-store.js"
 import {
@@ -55,7 +53,7 @@ describe("project-store", () => {
     expect(listProjects()).toHaveLength(1)
   })
 
-  it("enforces action mutex", () => {
+  it("registerArtifact writes lastArtifact* and migrates away actions", () => {
     const p = createProject({
       name: "a",
       goal: "g",
@@ -64,17 +62,43 @@ describe("project-store", () => {
       featureBranch: "f",
       worktreePath: "/w",
     })
-    const r1 = startAction(p.id, "plan")
-    expect(r1.ok).toBe(true)
-    // 节点入队顺序执行，允许并存多个 running
-    const r2 = startAction(p.id, "build")
-    expect(r2.ok).toBe(true)
-    if (r1.ok) {
-      expect(findBusyAction(getProject(p.id)!)?.id).toBe(r1.action.id)
-      updateAction(p.id, r1.action.id, { status: "accepted", artifactPath: "x.md" })
-      expect(findBusyAction(getProject(p.id)!)?.type).toBe("build")
-      expect(startAction(p.id, "review").ok).toBe(true)
-    }
+    const r = registerArtifact(p.id, {
+      artifactPath: ".cursor-claw/artifacts/plan.md",
+      summary: "规划完成",
+      mrUrl: "https://gitlab.example/mr/1",
+      feishuDocUrl: "https://feishu.example/doc/1",
+    })
+    expect(r.ok).toBe(true)
+    const got = getProject(p.id)!
+    expect(got.lastArtifactPath).toBe(".cursor-claw/artifacts/plan.md")
+    expect(got.lastArtifactSummary).toBe("规划完成")
+    expect(got.lastMrUrl).toBe("https://gitlab.example/mr/1")
+    expect(got.lastFeishuDocUrl).toBe("https://feishu.example/doc/1")
+    expect(got.lastArtifactAt).toBeTruthy()
+    expect(got.actions).toBeUndefined()
+
+    // 存量 actions[] 读入时迁移到 lastArtifact*
+    const legacyPath = path.join(dir, "projects", `${p.id}.json`)
+    const raw = JSON.parse(fs.readFileSync(legacyPath, "utf-8"))
+    raw.actions = [{
+      id: "old1",
+      type: "build",
+      status: "accepted",
+      artifactPath: "legacy.md",
+      summary: "旧产物",
+      startedAt: 1,
+      completedAt: 2,
+    }]
+    delete raw.lastArtifactPath
+    delete raw.lastArtifactSummary
+    delete raw.lastMrUrl
+    delete raw.lastFeishuDocUrl
+    delete raw.lastArtifactAt
+    fs.writeFileSync(legacyPath, JSON.stringify(raw), "utf-8")
+    const migrated = getProject(p.id)!
+    expect(migrated.lastArtifactPath).toBe("legacy.md")
+    expect(migrated.lastArtifactSummary).toBe("旧产物")
+    expect(migrated.actions).toBeUndefined()
   })
 
   it("switches current project", () => {

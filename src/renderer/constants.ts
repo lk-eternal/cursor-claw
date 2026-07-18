@@ -6,7 +6,9 @@ export const REQUIRED_FEISHU_SCOPES: { scope: string; desc: string }[] = [
   { scope: "im:resource", desc: "上传/下载图片与文件" },
   { scope: "im:chat:read", desc: "获取群聊名称" },
   { scope: "im:chat:create", desc: "创建项目独立群" },
-  { scope: "contact:contact.base:readonly", desc: "获取用户名（私聊会话显示）" },
+  { scope: "contact:contact.base:readonly", desc: "获取通讯录基本信息（需同时配置通讯录数据范围）" },
+  { scope: "contact:user.base:readonly", desc: "获取用户基本信息（姓名/昵称，私聊会话显示）" },
+  { scope: "cardkit:card:write", desc: "创建与更新 CardKit 流式卡片（Agent SDK 进度卡）" },
 ]
 
 export const FEISHU_SCOPES_JSON = JSON.stringify(

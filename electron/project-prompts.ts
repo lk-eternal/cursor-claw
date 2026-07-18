@@ -1,6 +1,5 @@
-import * as path from "node:path"
-import { artifactRelPath, isPlainProject, type Project, type ProjectActionType, type ProjectRepo } from "../src/shared/project-types.js"
-import { lastAcceptedAction, getProjectNode, getProjectNodes, projectNodeLabel, projectGroupIds } from "../src/shared/project-store.js"
+import { isPlainProject, type Project, type ProjectActionType, type ProjectRepo } from "../src/shared/project-types.js"
+import { getProjectNode, getProjectNodes, projectNodeLabel, projectGroupIds } from "../src/shared/project-store.js"
 
 // ════════════════════════════════════════════════════════════
 // 项目工作流提示词模板（集中在此文件，改文案只动这里）
@@ -48,7 +47,7 @@ const ACTION_GUIDES: Record<string, string[]> = {
     "- 测试人员从工作项团队 / 角色字段获取；找不到时在产物中说明并提醒用户手动通知",
     "- 注意：API 评论的 @ 只在页面高亮、不触发飞书推送提醒——完成后必须在给用户的回复中提醒其手动转发提测信息给测试人员",
     "- 产物写提测说明：MR 链接、变更摘要、测试建议与关注点",
-    "- project_action_done 必须带 mr_url",
+    "- 需要时可用 project_register_artifact 登记产物并附带 mr_url，供后续节点注入",
   ],
   "analyze-bug": [
     "分析缺陷。用户点击时测试已提了缺陷、指派给了自己，缺陷内容在飞书项目里不在本会话中：",
@@ -63,7 +62,7 @@ const ACTION_GUIDES: Record<string, string[]> = {
     "",
     "【MR——只认「合并到测试分支」这一条】",
     "- 评论/产物里允许出现的 MR 有且仅有：源分支=本项目 feature、目标=配置的测试分支、且状态为 open（未合并）",
-    "- 获取方式：project_get 查最近 submit-test 的 mrUrl → 用 glab/API 核对 target 与 state；对不上或已 merged 一律作废",
+    "- 获取方式：project_get 查 lastMrUrl → 用 glab/API 核对 target 与 state；对不上或已 merged 一律作废",
     "- 没有合格 open MR 时必须新建：git push origin HEAD -o merge_request.create -o merge_request.target=<测试分支全名> …（与提测节点相同）；建不出再用 glab；禁止开往生产基线/release",
     "- 严禁：贴已 merged 的旧 MR、贴合到 release/基线的 MR、贴其它需求/其它分支的 MR、把「曾经合过」的 MR 当本次修复凭证",
     "",
@@ -182,7 +181,7 @@ function submitTestConstraints(p: Project): string[] {
     `- 禁止向生产基线 ${p.baseBranch} 推送或开 MR`,
     `- MR 目标只能是配置的测试分支${testB ? `(${testB})` : "(未配置)"}，分支名必须原样使用，禁止猜测或纠正拼写`,
     "- 缺分支时 project_get 查字段，再用 project_update 补齐 testBranch",
-    "- project_action_done 必须带上 mr_url",
+    "- 需要时可用 project_register_artifact 登记产物并附带 mr_url，供后续节点注入",
   ]
 }
 
@@ -245,7 +244,7 @@ export function buildProjectSessionPrompt(p: Project): string {
     "工作方式:",
     "1. 用户直接发消息 → 正常对话：答疑、讨论方案、小修小改",
     `2. 用户点击 ${nodeLabels || "流程节点"} 按钮 → 会收到带明确要求的节点任务，直接执行`,
-    "3. 节点产物写入 .cursor-claw/artifacts/，用 project_action_done 登记即完成——宿主会把产物发给用户并附推进按钮；登记后立刻静默，禁止再 send_text / send_question / 复述摘要（菜单须留在会话最底部）",
+    "3. 轻量化节点：节点按钮注入任务提示词后直接执行；产物可写入 .cursor-claw/artifacts/，需要时用 project_register_artifact 登记最近产物供后续节点注入；用 send_text / send_file 正常交付用户——宿主不再自动发产物菜单",
     "4. 查项目字段用 project_get，补分支等配置用 project_update",
     "",
     "边界:",
@@ -258,10 +257,7 @@ export function buildProjectSessionPrompt(p: Project): string {
 }
 
 /** 节点任务提示词（节点表驱动：自定义节点用配置提示词，默认节点缺省用上方模板） */
-export function buildActionPrompt(p: Project, actionId: string, type: ProjectActionType): string {
-  const rel = artifactRelPath(actionId, type)
-  const abs = path.join(p.worktreePath, rel.replace(/\//g, path.sep))
-  const prev = lastAcceptedAction(p)
+export function buildActionPrompt(p: Project, type: ProjectActionType): string {
   const node = getProjectNode(type, p.groupId)
   const label = projectNodeLabel(type, p.groupId)
   const guide = node?.prompt?.trim()
@@ -272,18 +268,20 @@ export function buildActionPrompt(p: Project, actionId: string, type: ProjectAct
     "本任务由用户点击按钮主动发起：直接开始执行，禁止向用户二次确认。",
     "",
     ...contextBlock(p),
-    prev?.artifactPath ? `上一份产物: ${prev.artifactPath}` : "",
+    p.lastArtifactPath ? `最近产物: ${p.lastArtifactPath}` : "",
+    p.lastArtifactSummary ? `最近产物摘要: ${p.lastArtifactSummary}` : "",
+    p.lastMrUrl ? `最近 MR: ${p.lastMrUrl}` : "",
+    p.lastFeishuDocUrl ? `最近飞书文档: ${p.lastFeishuDocUrl}` : "",
     "",
     `本节点要求:`,
     ...guide,
     "",
     ...MEEGLE_RULES,
     "",
-    "完成动作:",
-    `1. 完整产出写入: ${abs}`,
-    `2. 调用 project_action_done(project_id=${p.id}, action_id=${actionId}, status=accepted, artifact_path, summary)`,
-    "3. 产出即完成：宿主会把产物文件发给用户并附推进按钮；调用 project_action_done 成功后本轮立刻结束",
-    "4. 登记后严禁再发任何消息（含 send_text 复述/总结/追问）——再说话会把推进菜单顶上去",
+    "交付方式:",
+    "- 按节点要求完成工作；产物可写入 .cursor-claw/artifacts/",
+    `- 需要跨节点保留产物上下文时，调用 project_register_artifact(project_id=${p.id}, artifact_path, summary?, mr_url?, feishu_doc_url?)`,
+    "- 用 send_text / send_file 向用户交付结果与文件；宿主不会自动发产物菜单",
     "",
     "边界: 内部字段不向用户复述。",
   ]

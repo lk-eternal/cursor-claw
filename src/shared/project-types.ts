@@ -1,8 +1,9 @@
 import { parseChatKey } from "./channel-types.js"
 
 export type ProjectStatus = "active" | "paused" | "done"
-/** 节点 id：内置 plan/build/review/ship，或用户自定义 slug */
+/** 节点 id：流程组节点 slug，或用户自定义 */
 export type ProjectActionType = string
+/** @deprecated 轻量化后不再使用运行态；仅兼容读存量 JSON */
 export type ProjectActionStatus =
   | "running"
   | "awaiting_ack"
@@ -81,6 +82,7 @@ export interface ProjectRepo {
   worktreePath: string
 }
 
+/** @deprecated 轻量化后不再写入；仅兼容读存量 JSON */
 export interface ProjectAction {
   id: string
   type: ProjectActionType
@@ -114,7 +116,14 @@ export interface Project {
   /** 工作区类型；新建默认 worktree，缺省按 worktree 兼容存量 */
   workspaceType?: ProjectWorkspaceType
   status: ProjectStatus
-  actions: ProjectAction[]
+  /** 可选：最近一次登记的产物路径（供下次节点注入） */
+  lastArtifactPath?: string
+  lastArtifactSummary?: string
+  lastMrUrl?: string
+  lastFeishuDocUrl?: string
+  lastArtifactAt?: number
+  /** @deprecated 存量字段，读取时迁移到 lastArtifact* 后不再依赖 */
+  actions?: ProjectAction[]
   sessionKey?: string
   notifyChatId?: string
   /** 独立群模式：项目专属群 chatKey（ch_xxx|oc_yyy）；命中该群的消息强制路由到本项目 */
@@ -189,13 +198,6 @@ export function projectIdFromSessionKey(sessionKey: string): string | undefined 
   return suffix.slice("project_".length) || undefined
 }
 
-export function artifactRelPath(actionId: string, type: ProjectActionType): string {
-  return pathJoin(".cursor-claw", "artifacts", `${actionId}-${type}.md`)
-}
-
-function pathJoin(...parts: string[]): string {
-  return parts.join("/")
-}
 
 export const REPO_PAIR_SEP = "||"
 

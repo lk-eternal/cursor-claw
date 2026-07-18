@@ -126,7 +126,7 @@ Agent 收到 Prompt 后，识别会话类型(chat_type)
 #### 项目会话(project):
 项目专属会话（一个需求一个 git worktree），与私聊流程一致：先非阻塞检查 poll-message，再按消息/节点任务执行。
 - 节点任务（规划/实现/审查/交付等）由用户点按钮发起，任务内容在 Prompt 或唤醒消息中，直接执行。
-- 产物写入 `.cursor-claw/artifacts/`，用 `project_action_done` 登记即完成（宿主自动把产物发给用户并附推进按钮）。
+- 产物可写入 `.cursor-claw/artifacts/`；需要跨节点保留时用 `project_register_artifact` 登记（可选）；用 `send_text` / `send_file` 交付用户——宿主不再自动发产物菜单。
 - 项目字段用 `project_get` 查、`project_update` 改。
 
 ### 1. 响应阶段 (ACK)

@@ -504,6 +504,7 @@ function buildDaemonChannelConfigs(): DaemonChannelConfig[] {
     mainUserChatId: c.mainUserEnabled ? (c.mainUserChatId?.trim() ?? "") : "",
     workspaceDir: c.workspaceDir?.trim() ?? "",
     keepAlive: (c.keepSession ?? true) && (c.persistentPoll ?? true),
+    showThinking: c.showThinking ?? true,
   }))
 }
 
@@ -1512,6 +1513,7 @@ function channelRuntimeFlags(channels: MessageChannel[]) {
   return channels.filter(channelReady).map((c) => ({
     id: c.id,
     keepAlive: (c.keepSession ?? true) && (c.persistentPoll ?? true),
+    showThinking: c.showThinking ?? true,
     name: c.name,
     mainUserEnabled: !!c.mainUserEnabled,
     mainUserChatId: c.mainUserEnabled ? (c.mainUserChatId?.trim() ?? "") : "",

@@ -2,6 +2,7 @@ import * as http from "node:http";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import {
   startDaemonScheduledTasks,
@@ -1196,6 +1197,363 @@ function isCommand(text: string): boolean {
   return Object.keys(COMMANDS).some((cmd) => trimmed === cmd || trimmed.startsWith(cmd + " "));
 }
 
+/** Agent SDK → 飞书 CardKit：按执行时间线交错 think/tool/reply；finish 后下一轮新建 */
+interface AgentStreamToolItem {
+  name: string;
+  status: string;
+  summary?: string;
+  ms?: number;
+}
+
+type AgentStreamSegment =
+  | { type: "thinking"; text: string; ms?: number }
+  | { type: "tools"; tools: AgentStreamToolItem[] }
+  | { type: "reply"; text: string };
+
+interface AgentStreamCardPayload {
+  segments: AgentStreamSegment[];
+  /** 兼容旧字段 */
+  thinking?: string;
+  thinkingMs?: number;
+  tools?: AgentStreamToolItem[];
+  reply?: string;
+}
+
+interface AgentStreamCardState {
+  cardId: string;
+  messageId?: string;
+  sequence: number;
+  channelId: string;
+  showThinking: boolean;
+  sessionTitle?: CardTitle;
+  sessionTemplate?: string;
+  lastHash: string;
+  lastSegments: AgentStreamSegment[];
+  mcpReplies: Array<{ text: string; insertAt: number }>;
+  pendingQuestion?: {
+    text: string;
+    options: string[];
+    footer?: string;
+  };
+}
+
+const agentStreamCards = new Map<string, AgentStreamCardState>();
+
+function resolveStreamCardChrome(ch: Extract<ResolvedChannel, { type: "feishu" }>, sessionKey: string): {
+  sessionTitle?: CardTitle; sessionTemplate?: string;
+} {
+  const sessionTitle = resolveReplyTitle(ch, sessionKey);
+  const sessionTemplate = sessionHeaderTemplate(sessionKey) || (sessionTitle ? "turquoise" : undefined);
+  return { sessionTitle, sessionTemplate };
+}
+
+function hashStreamPart(s: string): string {
+  return createHash("sha1").update(s).digest("hex").slice(0, 16);
+}
+
+function formatThinkingDuration(ms?: number, finished?: boolean): string {
+  if (ms == null || ms < 0) return finished ? "💭 思考完成" : "💭 思考中…";
+  const sec = (ms / 1000).toFixed(1);
+  return `💭 思考了 ${sec}s`;
+}
+
+function resolveToolIcon(name: string): string {
+  const n = name.trim().toLowerCase().replace(/-/g, "_");
+  const table: Array<{ aliases: string[]; icon: string }> = [
+    { aliases: ["skill"], icon: "app-default_outlined" },
+    { aliases: ["read", "open"], icon: "file-link-text_outlined" },
+    { aliases: ["write", "edit", "strreplace", "search_replace"], icon: "edit_outlined" },
+    { aliases: ["web_search", "websearch", "search"], icon: "search_outlined" },
+    { aliases: ["web_fetch", "webfetch", "fetch"], icon: "language_outlined" },
+    { aliases: ["grep"], icon: "doc-search_outlined" },
+    { aliases: ["glob"], icon: "folder_outlined" },
+    { aliases: ["shell", "bash", "exec", "command", "run", "terminal"], icon: "setting_outlined" },
+    { aliases: ["browser", "playwright", "navigate"], icon: "browser-mac_outlined" },
+    { aliases: ["agent", "task", "spawn"], icon: "robot_outlined" },
+    { aliases: ["check", "determine", "verify"], icon: "list-check_outlined" },
+  ];
+  for (const row of table) {
+    if (row.aliases.some((a) => n === a || n.includes(a))) return row.icon;
+  }
+  return "setting-inter_outlined";
+}
+
+function mapToolStepStatus(status: string): "running" | "success" | "error" {
+  if (status === "running") return "running";
+  if (status === "error") return "error";
+  return "success";
+}
+
+function buildToolSteps(tools: AgentStreamToolItem[]): Array<{
+  title: string; status: string; detail?: string; icon?: string;
+}> {
+  return tools.map((t) => ({
+    title: t.name,
+    status: mapToolStepStatus(t.status),
+    detail: t.summary?.trim() || undefined,
+    icon: resolveToolIcon(t.name),
+  }));
+}
+
+function buildToolsPanelTitle(tools: AgentStreamToolItem[]): string {
+  return `🛠️ 工具执行 · ${tools.length} 步`;
+}
+
+function normalizeAgentStreamPayload(body: {
+  segments?: AgentStreamSegment[];
+  thinking?: string;
+  thinkingMs?: number;
+  tools?: AgentStreamToolItem[];
+  reply?: string;
+  markdown?: string;
+}): AgentStreamCardPayload {
+  if (Array.isArray(body.segments) && body.segments.length) {
+    return { segments: body.segments };
+  }
+  // 旧客户端：扁平字段 → 单段时间线
+  const thinking = typeof body.thinking === "string" ? body.thinking : "";
+  const tools = Array.isArray(body.tools) ? body.tools : [];
+  const reply = typeof body.reply === "string" ? body.reply
+    : (typeof body.markdown === "string" ? body.markdown : "");
+  const segments: AgentStreamSegment[] = [];
+  if (thinking.trim()) segments.push({ type: "thinking", text: thinking, ms: body.thinkingMs });
+  if (tools.length) segments.push({ type: "tools", tools });
+  if (reply.trim()) segments.push({ type: "reply", text: reply });
+  return { segments, thinking, thinkingMs: body.thinkingMs, tools, reply };
+}
+
+function buildCardSegmentsFromPayload(
+  payload: AgentStreamCardPayload,
+  opts: { finish: boolean; showThinking: boolean },
+) {
+  const out: Array<
+    | { type: "thinking"; text: string; title?: string; expanded?: boolean }
+    | { type: "tools"; title?: string; expanded?: boolean; steps: Array<{ title: string; status: string; detail?: string; icon?: string }> }
+    | { type: "reply"; text: string }
+  > = [];
+  for (const seg of payload.segments) {
+    if (seg.type === "thinking") {
+      if (!opts.showThinking) continue;
+      out.push({
+        type: "thinking",
+        text: seg.text || (opts.finish ? "_（暂无）_" : "_（生成中…）_"),
+        title: formatThinkingDuration(seg.ms, opts.finish || seg.ms != null),
+        expanded: false,
+      });
+    } else if (seg.type === "tools") {
+      const steps = buildToolSteps(seg.tools || []);
+      out.push({
+        type: "tools",
+        title: buildToolsPanelTitle(seg.tools || []),
+        expanded: false,
+        steps,
+      });
+    } else if (seg.text.trim()) {
+      out.push({ type: "reply", text: seg.text });
+    }
+  }
+  // 展开最后 2 个折叠块（思考+工具并排可见）；收口后全部折叠
+  if (!opts.finish) {
+    let n = 0;
+    for (let i = out.length - 1; i >= 0 && n < 2; i--) {
+      const s = out[i];
+      if (s.type === "thinking" || s.type === "tools") {
+        s.expanded = true;
+        n++;
+      }
+    }
+  }
+  return out;
+}
+
+function payloadFingerprint(payload: AgentStreamCardPayload, finish: boolean): string {
+  return hashStreamPart(JSON.stringify({ segments: payload.segments, finish }));
+}
+
+function foldSdkRepliesIntoThinking(segments: AgentStreamSegment[]): AgentStreamSegment[] {
+  const out: AgentStreamSegment[] = [];
+  for (const seg of segments) {
+    if (seg.type === "reply") {
+      const text = seg.text?.trim();
+      if (!text) continue;
+      const last = out[out.length - 1];
+      if (last?.type === "thinking") {
+        last.text = last.text?.trim() ? `${last.text}\n\n${text}` : text;
+      } else {
+        out.push({ type: "thinking", text });
+      }
+      continue;
+    }
+    out.push(seg.type === "tools" ? { ...seg, tools: [...(seg.tools || [])] }
+      : seg.type === "thinking" ? { ...seg } : seg);
+  }
+  return out;
+}
+
+function overlayMcpOnPayload(state: AgentStreamCardState, sdkSegments: AgentStreamSegment[]): AgentStreamSegment[] {
+  const segs = foldSdkRepliesIntoThinking(sdkSegments);
+  const injections = [...state.mcpReplies].sort((a, b) => a.insertAt - b.insertAt);
+  let offset = 0;
+  for (const item of injections) {
+    if (!item.text.trim()) continue;
+    const idx = Math.min(Math.max(item.insertAt, 0) + offset, segs.length);
+    segs.splice(idx, 0, { type: "reply", text: item.text });
+    offset++;
+  }
+  if (state.pendingQuestion?.text.trim()) {
+    segs.push({ type: "reply", text: state.pendingQuestion.text });
+  }
+  return segs;
+}
+
+async function refreshAgentStreamCard(
+  sessionKey: string,
+  state: AgentStreamCardState,
+  ch: Extract<ResolvedChannel, { type: "feishu" }>,
+  opts: { finish: boolean; sdkSegments?: AgentStreamSegment[] },
+): Promise<boolean> {
+  if (opts.sdkSegments) state.lastSegments = opts.sdkSegments;
+  const merged: AgentStreamCardPayload = { segments: overlayMcpOnPayload(state, state.lastSegments) };
+  const cardSegs = buildCardSegmentsFromPayload(merged, { finish: opts.finish, showThinking: state.showThinking });
+  const q = state.pendingQuestion;
+  const buttons = q ? q.options.map((o, i) => ({
+    label: `${i + 1}. ${o}`,
+    value: { kind: "question", opt: o, sk: sessionKey },
+    type: "default" as const,
+  })) : undefined;
+  const input = q ? { placeholder: "其他答复：输入后点发送", value: { kind: "question", sk: sessionKey } } : undefined;
+  const status = (opts.finish || q) ? "completed" as const : "streaming" as const;
+  const cardJson = LarkSender.buildStreamingCardJson({
+    status,
+    showThinking: state.showThinking,
+    sessionTitle: state.sessionTitle,
+    sessionTemplate: state.sessionTemplate,
+    segments: cardSegs,
+    buttons,
+    input,
+    footer: q?.footer,
+  });
+  const sender = ch.rt.sender!;
+  if (status !== "streaming") {
+    state.sequence += 1;
+    await sender.closeStreamingCard(state.cardId, state.sequence);
+  }
+  state.sequence += 1;
+  const ok = await sender.updateStreamingCard(state.cardId, cardJson, state.sequence);
+  if (ok) state.lastHash = payloadFingerprint(merged, opts.finish);
+  return ok;
+}
+
+
+/** 无活跃流式卡时先建卡，供 send_text/send_question 抢先合并（ACK 早于思考/工具） */
+async function ensureStreamCardForMcpMerge(
+  sessionKey: string,
+  ch: Extract<ResolvedChannel, { type: "feishu" }>,
+): Promise<AgentStreamCardState | undefined> {
+  const existing = agentStreamCards.get(sessionKey);
+  if (existing) return existing;
+  const ensured = await ensureAgentStreamCard(sessionKey, { segments: [] }, ch);
+  if (!ensured.ok) {
+    log("WARN", `[StreamCard] MCP 合并建卡失败: ${ensured.error ?? "unknown"}`);
+    return undefined;
+  }
+  return agentStreamCards.get(sessionKey);
+}
+
+async function ensureAgentStreamCard(
+  sessionKey: string,
+  payload: AgentStreamCardPayload,
+  ch: Extract<ResolvedChannel, { type: "feishu" }>,
+): Promise<{ ok: boolean; cardId?: string; messageId?: string; error?: string }> {
+  const existing = agentStreamCards.get(sessionKey);
+  if (existing) {
+    return { ok: true, cardId: existing.cardId, messageId: existing.messageId };
+  }
+  const sender = ch.rt.sender!;
+  const showThinking = ch.rt.cfg.showThinking !== false;
+  const chrome = resolveStreamCardChrome(ch, sessionKey);
+  if (!ch.chatId) return { ok: false, error: "无法解析发送目标 chatId" };
+  const folded: AgentStreamCardPayload = { segments: foldSdkRepliesIntoThinking(payload.segments) };
+  let segments = buildCardSegmentsFromPayload(folded, { finish: false, showThinking });
+  // 空卡也能创建（仅会话条）；无 chrome 时放极短占位，避免飞书拒空 body
+  if (!segments.length && !chrome.sessionTitle) {
+    segments = [{ type: "reply", text: "…" }];
+  }
+  const cardId = await sender.createStreamingCardEntity({
+    showThinking,
+    segments,
+    sessionTitle: chrome.sessionTitle,
+    sessionTemplate: chrome.sessionTemplate,
+  });
+  if (!cardId) return { ok: false, error: "创建流式卡片失败（检查 cardkit:card:write 权限）" };
+  const sentMsgId = await sender.sendCardEntity(cardId, undefined, ch.chatId);
+  if (sentMsgId === undefined) {
+    return { ok: false, error: "发送流式卡片失败" };
+  }
+  const messageId = typeof sentMsgId === "string" ? sentMsgId : undefined;
+  agentStreamCards.set(sessionKey, {
+    cardId,
+    messageId,
+    sequence: 0,
+    channelId: ch.rt.cfg.id,
+    showThinking,
+    sessionTitle: chrome.sessionTitle,
+    sessionTemplate: chrome.sessionTemplate,
+    lastHash: payloadFingerprint(payload, false),
+    lastSegments: [...payload.segments],
+    mcpReplies: [],
+  });
+  if (messageId) trackMessageSession(messageId, sessionKey);
+  rememberSessionKey(sessionKey);
+  log("INFO", `[StreamCard] 已创建 session=${sessionKey} card=${cardId} msg=${messageId ?? "(none)"} segs=${payload.segments.length}`);
+  return { ok: true, cardId, messageId };
+}
+
+async function updateAgentStreamCard(
+  sessionKey: string,
+  payload: AgentStreamCardPayload,
+  ch: Extract<ResolvedChannel, { type: "feishu" }>,
+): Promise<{ ok: boolean; cardId?: string; messageId?: string; error?: string }> {
+  let state = agentStreamCards.get(sessionKey);
+  if (!state) {
+    const ensured = await ensureAgentStreamCard(sessionKey, payload, ch);
+    if (!ensured.ok) return ensured;
+    return { ok: true, cardId: ensured.cardId, messageId: ensured.messageId };
+  }
+  state.lastSegments = payload.segments;
+  if (!state.mcpReplies.length && !state.pendingQuestion) {
+    const merged: AgentStreamCardPayload = { segments: overlayMcpOnPayload(state, state.lastSegments) };
+    const fp = payloadFingerprint(merged, false);
+    if (fp === state.lastHash) {
+      return { ok: true, cardId: state.cardId, messageId: state.messageId };
+    }
+  }
+  const ok = await refreshAgentStreamCard(sessionKey, state, ch, { finish: false, sdkSegments: payload.segments });
+  if (!ok) return { ok: false, cardId: state.cardId, messageId: state.messageId, error: "更新流式卡片失败" };
+  return { ok: true, cardId: state.cardId, messageId: state.messageId };
+}
+
+async function finishAgentStreamCard(
+  sessionKey: string,
+  payload: AgentStreamCardPayload,
+  ch: Extract<ResolvedChannel, { type: "feishu" }>,
+): Promise<{ ok: boolean; cardId?: string; messageId?: string; error?: string }> {
+  const state = agentStreamCards.get(sessionKey);
+  if (!state) {
+    return { ok: true };
+  }
+  state.lastSegments = payload.segments;
+  const ok = await refreshAgentStreamCard(sessionKey, state, ch, { finish: true, sdkSegments: payload.segments });
+  if (!state.pendingQuestion) {
+    agentStreamCards.delete(sessionKey);
+  }
+  if (!ok) return { ok: false, cardId: state.cardId, messageId: state.messageId, error: "结束流式卡片失败" };
+  const result = { ok: true, cardId: state.cardId, messageId: state.messageId };
+  log("INFO", `[StreamCard] 已结束 session=${sessionKey} card=${result.cardId}`);
+  return result;
+}
+
+
 // ── 卡片按钮回调 ─────────────────────────────────────────
 
 interface CardQuestionEntry { text: string; options: string[]; sessionKey?: string; chatKey?: string; createdAt: number; title?: CardTitle; template?: string }
@@ -1245,7 +1603,6 @@ function rememberCardQuestion(messageId: string, entry: CardQuestionEntry): void
   scheduleCardQuestionSave();
 }
 
-/** 用户未点卡片、直接发消息时，关闭同聊天未决问题卡片 */
 function expireOpenCardQuestions(chatKey: string, note: string): void {
   if (!chatKey) return;
   const targets: { messageId: string; entry: CardQuestionEntry }[] = [];
@@ -1267,19 +1624,69 @@ function expireOpenCardQuestions(chatKey: string, note: string): void {
   const sender = ch.rt.sender;
   let closed = 0;
   for (const { messageId, entry } of targets) {
-    sender.patchCard(messageId, entry.text, entry.title, entry.template, `⏹ ${note}`)
-      .then((ok) => {
-        if (ok) {
-          cardQuestionMap.delete(messageId);
-          scheduleCardQuestionSave();
-        } else {
-          log("WARN", `关闭问题卡片 patch 未成功，保留登记: ${messageId}`);
+    void (async () => {
+      let ok = false;
+      for (const [sk, state] of agentStreamCards) {
+        if (state.messageId !== messageId) continue;
+        state.pendingQuestion = undefined;
+        const sch = resolveChannel(sk, { allowDefault: false });
+        if (sch.type === "feishu") {
+          ok = await refreshAgentStreamCard(sk, state, sch, { finish: true });
+          if (ok) agentStreamCards.delete(sk);
         }
-      })
-      .catch((e: any) => log("WARN", `关闭问题卡片失败: ${e?.message ?? e}`));
+        break;
+      }
+      if (!ok) {
+        ok = await sender.patchCard(messageId, entry.text, entry.title, entry.template, `• ${note}`);
+      }
+      if (ok) {
+        cardQuestionMap.delete(messageId);
+        scheduleCardQuestionSave();
+      } else {
+        log("WARN", `关闭问题卡片未成功，保留登记: ${messageId}`);
+      }
+    })().catch((e: any) => log("WARN", `关闭问题卡片失败: ${e?.message ?? e}`));
     closed++;
   }
   log("INFO", `已请求关闭 ${closed} 张未决问题卡片 (chat=${chatKey})`);
+}
+
+/** 按 session 关闭未决问题（poll 投递新消息时调用） */
+function expireOpenCardQuestionsForSession(sessionKey: string | undefined, note: string): void {
+  if (!sessionKey) return;
+  const chatKey = chatIdFromSessionKey(sessionKey);
+  if (chatKey) expireOpenCardQuestions(chatKey, note);
+  // chatKey 对不上时按 sessionKey 兜底关闭
+  const leftovers: { messageId: string; entry: CardQuestionEntry }[] = [];
+  for (const [messageId, entry] of cardQuestionMap) {
+    if (entry.sessionKey === sessionKey) leftovers.push({ messageId, entry });
+  }
+  if (!leftovers.length) return;
+  const ch = resolveChannel(sessionKey, { allowDefault: false });
+  if (ch.type !== "feishu" || !ch.rt.sender) return;
+  const sender = ch.rt.sender;
+  for (const { messageId, entry } of leftovers) {
+    void (async () => {
+      let ok = false;
+      for (const [sk, state] of agentStreamCards) {
+        if (state.messageId !== messageId) continue;
+        state.pendingQuestion = undefined;
+        const sch = resolveChannel(sk, { allowDefault: false });
+        if (sch.type === "feishu") {
+          ok = await refreshAgentStreamCard(sk, state, sch, { finish: true });
+          if (ok) agentStreamCards.delete(sk);
+        }
+        break;
+      }
+      if (!ok) {
+        ok = await sender.patchCard(messageId, entry.text, entry.title, entry.template, `• ${note}`);
+      }
+      if (ok) {
+        cardQuestionMap.delete(messageId);
+        scheduleCardQuestionSave();
+      }
+    })().catch((e: any) => log("WARN", `关闭问题卡片失败: ${e?.message ?? e}`));
+  }
 }
 
 /** internal 消息（卡片点击/输入框提交）→ 来源聊天 chatKey；回复 internal 消息时按此路由回原聊天，防止 chat 直发窜台 */
@@ -2537,6 +2944,20 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       json(res, { ok: await ch.rt.wechat!.sendText(ch.chatId, text) });
     } else {
       const sender = ch.rt.sender!;
+      // 有活跃卡则并入；无卡也先建流式卡再写正文，避免 ACK 独立消息 + 后续再开一张卡
+      if (session_key && !/<at\s+user_id=/i.test(text)) {
+        const stream = await ensureStreamCardForMcpMerge(session_key, ch);
+        if (stream) {
+          stream.mcpReplies.push({ text, insertAt: stream.lastSegments.length });
+          const mergedOk = await refreshAgentStreamCard(session_key, stream, ch, { finish: false });
+          if (mergedOk) {
+            sessionLastReplyAt.set(session_key, Date.now());
+            json(res, { ok: true, message_id: stream.messageId, merged: true });
+            return true;
+          }
+        }
+        // fall through on failure
+      }
       const colorKey = preferWorkspaceSessionKey(
         session_key,
         message_id ? messageSessionMap.get(message_id) : undefined,
@@ -2665,13 +3086,33 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       json(res, { ok: await ch.rt.wechat!.sendText(ch.chatId, fallback), degraded: true });
     } else {
       const sender = ch.rt.sender!;
+      if (session_key) {
+        const stream = await ensureStreamCardForMcpMerge(session_key, ch);
+        if (stream?.messageId) {
+          stream.pendingQuestion = { text, options: opts, footer: "❓ 请选择下方选项或直接输入" };
+          const mergedOk = await refreshAgentStreamCard(session_key, stream, ch, { finish: true });
+          if (mergedOk) {
+            rememberCardQuestion(stream.messageId, {
+              text, options: opts, sessionKey: session_key,
+              chatKey: session_key ? chatIdFromSessionKey(session_key) : (ch.chatId ? makeChatKey(ch.rt.cfg.id, ch.chatId) : undefined),
+              createdAt: Date.now(),
+              title: stream.sessionTitle,
+              template: stream.sessionTemplate,
+            });
+            trackMessageSession(stream.messageId, session_key);
+            sessionLastReplyAt.set(session_key, Date.now());
+            json(res, { ok: true, message_id: stream.messageId, merged: true });
+            return true;
+          }
+        }
+      }
       const colorKey = preferWorkspaceSessionKey(
         session_key,
         message_id ? messageSessionMap.get(message_id) : undefined,
         ch.chatId ? lookupActiveSessionKey(makeChatKey(ch.rt.cfg.id, ch.chatId)) : undefined,
       );
       const title = resolveReplyTitle(ch, colorKey || session_key);
-      // 问题卡与普通回复同色：用会话稳定色，关闭/点选时不变色
+      // ���⿨����ͨ�ظ�ͬɫ���ûỰ�ȶ�ɫ���ر�/��ѡʱ����ɫ
       const pendingText = text;
       const pendingFooter = "❓ 请选择下方选项或直接输入";
       const pendingTemplate = sessionHeaderTemplate(colorKey || session_key) || (title ? "turquoise" : undefined);
@@ -2747,6 +3188,42 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     return true;
   }
 
+
+  if (method === "POST" && pathname === "/api/agent-stream-card") {
+    const body = JSON.parse(await readBody(req));
+    const { session_key, action, segments } = body as {
+      session_key?: string;
+      action?: string;
+      segments?: AgentStreamSegment[];
+    };
+    if (!session_key || !action) {
+      json(res, { ok: false, error: "session_key and action required" }, 400);
+      return true;
+    }
+    const ch = resolveChannel(session_key, { allowDefault: false });
+    if (ch.type === "error") {
+      json(res, { ok: false, error: ch.message }, 400);
+      return true;
+    }
+    if (ch.type === "wechat") {
+      json(res, { ok: true, skipped: true });
+      return true;
+    }
+    const payload = normalizeAgentStreamPayload({ segments });
+    try {
+      const result = action === "ensure"
+        ? await ensureAgentStreamCard(session_key, payload, ch)
+        : action === "update"
+          ? await updateAgentStreamCard(session_key, payload, ch)
+          : await finishAgentStreamCard(session_key, payload, ch);
+      json(res, result, result.ok ? 200 : 500);
+    } catch (e: any) {
+      log("WARN", `[StreamCard] ${action} 异常: ${e?.message ?? e}`);
+      json(res, { ok: false, error: e?.message ?? String(e) }, 500);
+    }
+    return true;
+  }
+
   if (method === "GET" && pathname === "/api/session-last-reply") {
     const sk = new URL(req.url ?? "", "http://localhost").searchParams.get("sessionKey") || "";
     json(res, { lastReplyAt: sk ? (sessionLastReplyAt.get(sk) ?? null) : null });
@@ -2811,12 +3288,16 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     // Agent 干完后挂阻塞 poll 时才隐式确认删除（含上轮未完成的重投）。
     if (!blocking) {
       const messages = claimSessionMessages(sessionKeyFilter);
+      let freshIds: string[] = [];
       if (messages.length > 0) {
-        const freshIds = collectFreshAndTrack(messages, sessionKeyFilter);
+        freshIds = collectFreshAndTrack(messages, sessionKeyFilter);
         log("INFO", `消息已投递(instant): count=${messages.length} session=${sessionKeyFilter}`);
         addReactionToMessages(freshIds, sessionKeyFilter, "Get");
+        if (freshIds.length > 0) {
+          expireOpenCardQuestionsForSession(sessionKeyFilter, "已有新消息，问题已关闭");
+        }
       }
-      json(res, { messages, keepAlive });
+      json(res, { messages, keepAlive, freshIds });
       return true;
     }
 
@@ -2829,7 +3310,10 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       if (messages.length > 0) {
         const freshIds = collectFreshAndTrack(messages, sessionKeyFilter);
         log("INFO", `消息已投递(poll/on-demand): count=${messages.length} session=${sessionKeyFilter}`);
-        json(res, { messages, keepAlive });
+        if (freshIds.length > 0) {
+          expireOpenCardQuestionsForSession(sessionKeyFilter, "已有新消息，问题已关闭");
+        }
+        json(res, { messages, keepAlive, freshIds });
         addReactionToMessages(freshIds, sessionKeyFilter, "Get");
         return true;
       }
@@ -2870,7 +3354,10 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
 
     const freshIds = collectFreshAndTrack(messages, sessionKeyFilter);
     log("INFO", `消息已投递(poll): count=${messages.length} session=${sessionKeyFilter}`);
-    json(res, { messages, keepAlive });
+    if (freshIds.length > 0) {
+      expireOpenCardQuestionsForSession(sessionKeyFilter, "已有新消息，问题已关闭");
+    }
+    json(res, { messages, keepAlive, freshIds });
     addReactionToMessages(freshIds, sessionKeyFilter, "Get");
     return true;
   }

@@ -1,7 +1,7 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { randomBytes, randomUUID } from "node:crypto"
-import { DEFAULT_NODE_GROUPS, DEFAULT_NODE_GROUP_ID, type Project, type ProjectAction, type ProjectActionStatus, type ProjectActionType, type ProjectNodeDef, type ProjectNodeGroupDef } from "./project-types.js"
+import { DEFAULT_NODE_GROUPS, DEFAULT_NODE_GROUP_ID, type Project, type ProjectNodeDef, type ProjectNodeGroupDef } from "./project-types.js"
 
 let baseDir = ""
 
@@ -284,24 +284,44 @@ function writeJson(filePath: string, data: unknown): void {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8")
 }
 
+/** 存量 actions[] → lastArtifact*；去掉运行态数组 */
+function normalizeProject(raw: Project): Project {
+  const p = { ...raw }
+  if (!p.lastArtifactPath && Array.isArray(p.actions) && p.actions.length) {
+    const accepted = [...p.actions].reverse().find((a) => a.status === "accepted" && a.artifactPath)
+    const any = accepted || [...p.actions].reverse().find((a) => a.artifactPath)
+    if (any?.artifactPath) {
+      p.lastArtifactPath = any.artifactPath
+      p.lastArtifactSummary = any.summary
+      p.lastMrUrl = any.mrUrl
+      p.lastFeishuDocUrl = any.feishuDocUrl
+      p.lastArtifactAt = any.completedAt || any.startedAt
+    }
+  }
+  delete p.actions
+  return p
+}
+
 export function listProjects(): Project[] {
   if (!baseDir || !fs.existsSync(baseDir)) return []
   return fs.readdirSync(baseDir)
     .filter((f) => f.endsWith(".json") && f !== "current.json")
     .map((f) => readJsonSafe<Project | null>(path.join(baseDir, f), null))
     .filter((p): p is Project => !!p && typeof p.id === "string")
+    .map(normalizeProject)
     .sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
 export function getProject(id: string): Project | undefined {
   if (!baseDir || !id) return undefined
-  return readJsonSafe<Project | undefined>(projectPath(id), undefined)
+  const raw = readJsonSafe<Project | undefined>(projectPath(id), undefined)
+  return raw ? normalizeProject(raw) : undefined
 }
 
 export function saveProject(project: Project): void {
   if (!baseDir) throw new Error("project store not initialized")
-  project.updatedAt = Date.now()
-  writeJson(projectPath(project.id), project)
+  const toSave = normalizeProject({ ...project, updatedAt: Date.now() })
+  writeJson(projectPath(toSave.id), toSave)
 }
 
 export function deleteProject(id: string): boolean {
@@ -341,10 +361,9 @@ export function getCurrentProject(): Project | undefined {
   return id ? getProject(id) : undefined
 }
 
-export function createProject(input: Omit<Project, "id" | "actions" | "status" | "createdAt" | "updatedAt"> & {
+export function createProject(input: Omit<Project, "id" | "status" | "createdAt" | "updatedAt" | "actions"> & {
   id?: string
   status?: Project["status"]
-  actions?: ProjectAction[]
 }): Project {
   const now = Date.now()
   const groupIds = projectGroupIds(input)
@@ -364,7 +383,11 @@ export function createProject(input: Omit<Project, "id" | "actions" | "status" |
     groupId: groupIds[0],
     workspaceType: input.workspaceType,
     status: input.status ?? "active",
-    actions: input.actions ?? [],
+    lastArtifactPath: input.lastArtifactPath,
+    lastArtifactSummary: input.lastArtifactSummary,
+    lastMrUrl: input.lastMrUrl,
+    lastFeishuDocUrl: input.lastFeishuDocUrl,
+    lastArtifactAt: input.lastArtifactAt,
     sessionKey: input.sessionKey,
     notifyChatId: input.notifyChatId,
     groupChatId: input.groupChatId,
@@ -376,58 +399,21 @@ export function createProject(input: Omit<Project, "id" | "actions" | "status" |
   return project
 }
 
-export function findBusyAction(project: Project): ProjectAction | undefined {
-  // 只有正在跑的 agent 才算忙；产出后（含旧数据的 awaiting_ack）即可推进下一节点
-  return project.actions.find((a) => a.status === "running")
-}
-
-const STALE_RUNNING_MS = 12 * 60 * 60 * 1000
-
-export function startAction(projectId: string, type: ProjectActionType): { ok: true; project: Project; action: ProjectAction } | { ok: false; error: string } {
-  const project = getProject(projectId)
-  if (!project) return { ok: false, error: "项目不存在" }
-  if (project.status === "done") return { ok: false, error: "项目已结束" }
-  // 节点任务入会话队列顺序执行，允许多个 running 并存（不再因已有 running 拦截）
-  // 顺带清理崩溃遗留的超期 running，避免列表长期脏数据
-  for (const a of project.actions) {
-    if (a.status === "running" && Date.now() - (a.startedAt ?? 0) > STALE_RUNNING_MS) {
-      a.status = "failed"
-      a.error = "长时间未完成，已自动失效"
-      a.completedAt = Date.now()
-    }
-  }
-  const action: ProjectAction = {
-    id: randomUUID().replace(/-/g, "").slice(0, 10),
-    type,
-    status: "running",
-    startedAt: Date.now(),
-  }
-  project.actions.push(action)
-  saveProject(project)
-  return { ok: true, project, action }
-}
-
-export function updateAction(
+/** 登记最近产物（供后续节点注入上下文）；不发消息、不推进流程 */
+export function registerArtifact(
   projectId: string,
-  actionId: string,
-  patch: Partial<Pick<ProjectAction, "status" | "artifactPath" | "feishuDocUrl" | "summary" | "mrUrl" | "error" | "completedAt">>,
-): { ok: true; project: Project; action: ProjectAction } | { ok: false; error: string } {
+  opts: { artifactPath: string; summary?: string; mrUrl?: string; feishuDocUrl?: string },
+): { ok: true; project: Project } | { ok: false; error: string } {
   const project = getProject(projectId)
   if (!project) return { ok: false, error: "项目不存在" }
-  const action = project.actions.find((a) => a.id === actionId)
-  if (!action) return { ok: false, error: "action 不存在" }
-  Object.assign(action, patch)
-  if (patch.status && ["accepted", "rejected", "failed"].includes(patch.status) && !action.completedAt) {
-    action.completedAt = patch.completedAt ?? Date.now()
-  }
+  project.lastArtifactPath = opts.artifactPath
+  if (opts.summary !== undefined) project.lastArtifactSummary = opts.summary
+  if (opts.mrUrl !== undefined) project.lastMrUrl = opts.mrUrl
+  if (opts.feishuDocUrl !== undefined) project.lastFeishuDocUrl = opts.feishuDocUrl
+  project.lastArtifactAt = Date.now()
   saveProject(project)
-  return { ok: true, project, action }
+  return { ok: true, project }
 }
-
-export function lastAcceptedAction(project: Project): ProjectAction | undefined {
-  return [...project.actions].reverse().find((a) => a.status === "accepted")
-}
-
 export function resolveProjectRef(token: string | undefined, projects?: Project[]): Project | undefined {
   const list = projects ?? listProjects()
   if (!token) return getCurrentProject()
@@ -500,4 +486,3 @@ export function hasProjectNewDraft(chatKey: string): boolean {
   return !!getProjectNewDraft(chatKey)
 }
 
-export type { ProjectActionStatus }

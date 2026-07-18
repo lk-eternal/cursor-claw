@@ -131,6 +131,13 @@ export function getConfig(): AppConfig {
   } else {
     cfg.favoriteWorkspaces = fav
   }
+  // 读取时还原被 path.normalize 拧坏的远程 URL，避免设置页继续展示/回写脏路径
+  if (cfg.repoProfiles?.length) {
+    cfg.repoProfiles = cfg.repoProfiles.map((p) => ({ ...p, path: normalizeRepoPath(p.path) }))
+  }
+  if (cfg.repoRoots?.length) {
+    cfg.repoRoots = cfg.repoRoots.map((r) => normalizeRepoPath(r))
+  }
   return cfg
 }
 
@@ -141,13 +148,13 @@ export function saveConfig(partial: Partial<AppConfig>): void {
   if (cleaned.favoriteWorkspaces) {
     cleaned.favoriteWorkspaces = dedupeFavoriteWorkspaces(cleaned.favoriteWorkspaces)
   }
-  // 压平 D:\\foo 双反斜杠脏输入
+  // 压平 D:\\foo 双反斜杠脏输入；远程 URL 绝不能 path.normalize（Windows 会把 / 拧成 \\）
   if (cleaned.worktreeRoot?.trim()) cleaned.worktreeRoot = path.normalize(cleaned.worktreeRoot.trim())
-  if (cleaned.repoRoots) cleaned.repoRoots = cleaned.repoRoots.map((r) => path.normalize(r.trim())).filter(Boolean)
+  if (cleaned.repoRoots) cleaned.repoRoots = cleaned.repoRoots.map((r) => normalizeRepoPath(r)).filter(Boolean)
   if (cleaned.repoProfiles) {
     cleaned.repoProfiles = cleaned.repoProfiles
       .filter((p) => p?.path?.trim())
-      .map((p) => ({ ...p, path: path.normalize(p.path.trim()) }))
+      .map((p) => ({ ...p, path: normalizeRepoPath(p.path) }))
   }
   if (Object.keys(cleaned).length > 0) {
     // electron-store 的 set(object) 重载要求完整 AppConfig，实际支持部分键合并

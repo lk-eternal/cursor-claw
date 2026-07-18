@@ -14,9 +14,7 @@ import {
   listProjects,
   resolveProjectRef,
   setCurrentProjectId,
-  startAction,
-  updateAction,
-  lastAcceptedAction,
+  registerArtifact,
   getProjectNewDraft,
   saveProjectNewDraft,
   clearProjectNewDraft,
@@ -156,8 +154,6 @@ function uniqueProjectSlug(name: string): string {
 }
 
 function formatProjectCard(p: Project, index?: number): string {
-  const last = [...p.actions].reverse()[0]
-  const accepted = lastAcceptedAction(p)
   const gitLines = isPlainProject(p)
     ? [`🗂 纯会话型 · 📁 ${p.worktreePath}`]
     : [
@@ -178,10 +174,9 @@ function formatProjectCard(p: Project, index?: number): string {
     p.techDocUrl ? `📗 技术文档 · ${p.techDocUrl}` : "",
     ...gitLines,
     `💠 ${p.status}`,
-    last ? `⏭ 最近 action · ${last.type} (${last.status})` : "⏭ 尚无 action",
-    accepted?.artifactPath ? `📄 artifact · ${accepted.artifactPath}` : "",
-    accepted?.feishuDocUrl ? `📘 飞书 · ${accepted.feishuDocUrl}` : "",
-    last?.mrUrl ? `🔀 MR · ${last.mrUrl}` : "",
+    p.lastArtifactPath ? `📄 artifact · ${p.lastArtifactPath}` : "📄 尚无产物",
+    p.lastFeishuDocUrl ? `📘 飞书 · ${p.lastFeishuDocUrl}` : "",
+    p.lastMrUrl ? `🔀 MR · ${p.lastMrUrl}` : "",
   ]
   return lines.filter(Boolean).join("\n")
 }
@@ -1266,12 +1261,7 @@ async function runAction(
       }
     }
   }
-  const started = startAction(p.id, type)
-  if (!started.ok) {
-    await reportCommandResult(port, messageId, false, `❌ ${started.error}`, chatId)
-    return
-  }
-  const { action, project } = started
+  const project = getProject(p.id) ?? p
   await ensureArtifactDir(project.worktreePath)
   const sessionKey = project.groupChatId
     ? (project.sessionKey || projectSessionKey(project.groupChatId, project.id))
@@ -1284,7 +1274,7 @@ async function runAction(
   saveProject(project)
   if (!project.groupChatId) setCurrentProjectId(project.id)
 
-  let prompt = buildActionPrompt(project, action.id, type)
+  let prompt = buildActionPrompt(project, type)
   if (type === "fill-release-doc" && !isPlainProject(project)) {
     prompt += `\n\n${await releaseMrHint(project)}`
   }
@@ -1293,7 +1283,6 @@ async function runAction(
   pushUiLog("Project", "INFO", `[${sessionKey}] ${projectNodeLabel(type, project.groupId)}节点任务入队:\n${prompt}`)
   const enq = await enqueueToSession(port, sessionKey, prompt)
   if (!enq.ok) {
-    updateAction(project.id, action.id, { status: "failed", error: enq.error })
     await reportCommandResult(port, messageId, false, `❌ 节点任务入队失败: ${enq.error}`, chatId)
     return
   }
@@ -1724,17 +1713,16 @@ export async function handleFeishuProjectCommand(
       await reportCommandResult(port, messageId, false, `❌ ${hint}`, chatId, undefined, { patchMessageId })
       return
     }
-    const accepted = lastAcceptedAction(cur)
-    if (!accepted?.artifactPath) {
-      await reportCommandResult(port, messageId, false, "❌ 没有可同步的 accepted artifact", chatId)
+    if (!cur.lastArtifactPath) {
+      await reportCommandResult(port, messageId, false, "❌ 没有可同步的产物", chatId)
       return
     }
-    const abs = path.isAbsolute(accepted.artifactPath)
-      ? accepted.artifactPath
-      : path.join(cur.worktreePath, accepted.artifactPath)
-    const sync = syncArtifactToFeishu({ artifactPath: abs, title: `${cur.name} · ${accepted.type}` })
+    const abs = path.isAbsolute(cur.lastArtifactPath)
+      ? cur.lastArtifactPath
+      : path.join(cur.worktreePath, cur.lastArtifactPath)
+    const sync = syncArtifactToFeishu({ artifactPath: abs, title: cur.name })
     if (sync.docUrl) {
-      updateAction(cur.id, accepted.id, { feishuDocUrl: sync.docUrl })
+      registerArtifact(cur.id, { artifactPath: cur.lastArtifactPath, feishuDocUrl: sync.docUrl })
     }
     if (!sync.ok) {
       await reportCommandResult(port, messageId, false, `⚠️ ${sync.error}`, chatId)
@@ -1757,19 +1745,18 @@ export async function handleFeishuProjectCommand(
 
 export async function handleProjectSyncSignal(payload: {
   projectId: string
-  actionId: string
+  /** @deprecated 轻量化后忽略 */
+  actionId?: string
   artifactPath?: string
 }): Promise<void> {
   ensureStore()
   const p = getProject(payload.projectId)
   if (!p) return
-  const action = p.actions.find((a) => a.id === payload.actionId)
-  if (!action) return
-  const artifactPath = payload.artifactPath || action.artifactPath
+  const artifactPath = payload.artifactPath || p.lastArtifactPath
   if (!artifactPath) return
   const abs = path.isAbsolute(artifactPath) ? artifactPath : path.join(p.worktreePath, artifactPath)
   if (!fs.existsSync(abs)) return
-  const sync = syncArtifactToFeishu({ artifactPath: abs, title: `${p.name} · ${action.type}` })
-  if (sync.docUrl) updateAction(p.id, action.id, { feishuDocUrl: sync.docUrl })
+  const sync = syncArtifactToFeishu({ artifactPath: abs, title: p.name })
+  if (sync.docUrl) registerArtifact(p.id, { artifactPath, feishuDocUrl: sync.docUrl })
 }
 

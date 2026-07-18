@@ -595,6 +595,588 @@ export class LarkSender {
     }
   }
 
+  /** Hermes 流式卡：思考折叠面板（≤20 字符） */
+  static readonly STREAM_THINK_ID = "think_panel";
+  /** Hermes 流式卡：工具折叠面板（≤20 字符） */
+  static readonly STREAM_TOOL_ID = "tool_panel";
+  /** Hermes 流式卡：回复 markdown（仅此组件走 stream content 打字机） */
+  static readonly STREAM_REPLY_ID = "reply_md";
+  /** @deprecated 使用 STREAM_REPLY_ID */
+  static readonly STREAM_ELEMENT_ID = "reply_md";
+
+  /** 构建 Thought 折叠面板（对齐 hermes builder.py：plain_text + notation 灰字） */
+  static buildThinkPanelElement(
+    content: string,
+    opts?: { title?: string; expanded?: boolean },
+  ): Record<string, unknown> {
+    return {
+      tag: "collapsible_panel",
+      element_id: LarkSender.STREAM_THINK_ID,
+      expanded: opts?.expanded ?? false,
+      header: {
+        title: {
+          tag: "plain_text",
+          content: opts?.title || "💭 思考中…",
+          text_color: "grey",
+          text_size: "notation",
+        },
+        vertical_align: "center",
+        icon: { tag: "standard_icon", token: "down-small-ccm_outlined", size: "16px 16px", color: "grey" },
+        icon_position: "right",
+        icon_expanded_angle: -180,
+      },
+      border: { color: "grey", corner_radius: "5px" },
+      vertical_spacing: "8px",
+      padding: "8px 8px 8px 8px",
+      elements: [{
+        tag: "markdown",
+        content: content || "_（暂无）_",
+        text_size: "notation",
+      }],
+    };
+  }
+
+  /** 单步工具行：div + standard_icon + lark_md（对齐 hermes _build_tool_step_*） */
+  static buildToolStepElements(step: {
+    title: string;
+    status: string;
+    detail?: string;
+    icon?: string;
+  }): Record<string, unknown>[] {
+    const info =
+      step.status === "running" ? { label: "Running", color: "turquoise" }
+      : step.status === "error" ? { label: "Failed", color: "red" }
+      : { label: "Succeeded", color: "green" };
+    const title = (step.title || "tool").replace(/[*_`]/g, "");
+    const elements: Record<string, unknown>[] = [{
+      tag: "div",
+      icon: {
+        tag: "standard_icon",
+        token: step.icon || "setting-inter_outlined",
+        color: "grey",
+      },
+      text: {
+        tag: "lark_md",
+        content: `**${title}** · <font color='${info.color}'>${info.label}</font>`,
+        text_size: "notation",
+      },
+    }];
+    const detail = step.detail?.trim();
+    if (detail) {
+      elements.push({
+        tag: "div",
+        margin: "0px 0px 0px 22px",
+        text: {
+          tag: "plain_text",
+          content: detail.length > 200 ? `${detail.slice(0, 200)}…` : detail,
+          text_color: "grey",
+          text_size: "notation",
+        },
+      });
+    }
+    return elements;
+  }
+
+  /**
+   * 构建工具折叠面板。
+   * steps 传结构化步骤（推荐）；传 string 时降级为整段 markdown（兼容旧调用）。
+   */
+  static buildToolPanelElement(
+    steps: Array<{ title: string; status: string; detail?: string; icon?: string }> | string,
+    opts?: { title?: string; expanded?: boolean },
+  ): Record<string, unknown> {
+    let elements: Record<string, unknown>[];
+    if (typeof steps === "string") {
+      elements = [{ tag: "markdown", content: steps || "_（暂无）_", text_size: "notation" }];
+    } else if (!steps.length) {
+      elements = [{ tag: "markdown", content: "_（暂无）_", text_size: "notation" }];
+    } else {
+      elements = steps.flatMap((s) => LarkSender.buildToolStepElements(s));
+    }
+    return {
+      tag: "collapsible_panel",
+      element_id: LarkSender.STREAM_TOOL_ID,
+      expanded: opts?.expanded ?? true,
+      header: {
+        title: {
+          tag: "plain_text",
+          content: opts?.title || "🛠️ 工具执行 · 0 步",
+          text_color: "grey",
+          text_size: "notation",
+        },
+        vertical_align: "center",
+        icon: { tag: "standard_icon", token: "down-small-ccm_outlined", size: "16px 16px", color: "grey" },
+        icon_position: "right",
+        icon_expanded_angle: -180,
+      },
+      border: { color: "grey", corner_radius: "5px" },
+      vertical_spacing: "4px",
+      padding: "8px 8px 8px 8px",
+      elements,
+    };
+  }
+
+  /** 流式卡时间线段（按执行顺序交错） */
+  /** 流式卡：会话色条（目录/项目 + 分支），与 send 消息同款 */
+  static buildSessionBannerElement(title: CardTitle, elementId = "session_bar"): Record<string, unknown> {
+    const { title: titleText, subtitle } = LarkSender.normalizeCardTitle(title);
+    const t = (titleText || "会话").slice(0, 100);
+    const sub = subtitle ? subtitle.slice(0, 100) : undefined;
+    const oneLine = sub && LarkSender.displayWidth(t) + LarkSender.displayWidth(sub) + 3 <= 36;
+    const content = sub ? (oneLine ? `**${t}** · ${sub}` : `**${t}**\n${sub}`) : `**${t}**`;
+    return {
+      tag: "column_set",
+      element_id: elementId,
+      margin: "0px 0px 4px 0px",
+      columns: [{
+        tag: "column",
+        width: "weighted",
+        weight: 1,
+        background_style: "cus-hdr",
+        padding: "6px 10px 6px 10px",
+        vertical_align: "center",
+        elements: [{ tag: "markdown", content, text_size: "notation" }],
+      }],
+    };
+  }
+
+
+  /** 飞书 CardKit JSON 2.0：单卡组件/元素合计 ≤200（含嵌套 tag） */
+  static readonly STREAM_ELEMENT_BUDGET = 180;
+
+  /** 递归统计带 tag 的节点数（对齐飞书 300305 限额口径） */
+  static countCardElements(node: unknown): number {
+    if (node == null || typeof node !== "object") return 0;
+    if (Array.isArray(node)) {
+      return node.reduce<number>((n, x) => n + LarkSender.countCardElements(x), 0);
+    }
+    const rec = node as Record<string, unknown>;
+    let n = typeof rec.tag === "string" ? 1 : 0;
+    for (const v of Object.values(rec)) {
+      if (v && typeof v === "object") n += LarkSender.countCardElements(v);
+    }
+    return n;
+  }
+
+  /**
+   * 收敛时间线，避免工具步/思考块把元素顶破 200。
+   * 优先保留：会话条、最近工具步、正文 reply、交互按钮。
+   */
+  static compactStreamingSegments<T extends {
+    type: string;
+    text?: string;
+    title?: string;
+    expanded?: boolean;
+    steps?: Array<{ title: string; status: string; detail?: string; icon?: string }>;
+  }>(segments: T[], opts?: { maxToolSteps?: number; maxThinkChars?: number; stripDetails?: boolean }): T[] {
+    const maxToolSteps = opts?.maxToolSteps ?? 28;
+    const maxThinkChars = opts?.maxThinkChars ?? 1200;
+    const stripDetails = opts?.stripDetails ?? false;
+    const out: T[] = [];
+    for (const seg of segments) {
+      if (seg.type === "tools") {
+        let steps = [...(seg.steps || [])];
+        if (stripDetails) {
+          steps = steps.map((s) => ({ ...s, detail: undefined }));
+        }
+        if (steps.length > maxToolSteps) {
+          const omitted = steps.length - maxToolSteps;
+          steps = [
+            { title: `… 更早 ${omitted} 步已折叠`, status: "success" },
+            ...steps.slice(-maxToolSteps),
+          ];
+        }
+        out.push({ ...seg, steps, title: `🛠️ 工具执行 · ${steps.length} 步` } as T);
+      } else if (seg.type === "thinking") {
+        let text = seg.text || "";
+        if (text.length > maxThinkChars) {
+          text = "…" + text.slice(-(maxThinkChars - 1));
+        }
+        out.push({ ...seg, text } as T);
+      } else {
+        out.push(seg);
+      }
+    }
+    // 过多折叠块时：合并靠前的 thinking，只留最后 2 个 thinking + 全部 tools/reply
+    const thinkIdxs = out.map((s, i) => (s.type === "thinking" ? i : -1)).filter((i) => i >= 0);
+    if (thinkIdxs.length > 2) {
+      const keep = new Set(thinkIdxs.slice(-2));
+      const merged: string[] = [];
+      const next: T[] = [];
+      for (let i = 0; i < out.length; i++) {
+        const s = out[i];
+        if (s.type === "thinking" && !keep.has(i)) {
+          if (s.text?.trim()) merged.push(s.text.trim());
+          continue;
+        }
+        if (s.type === "thinking" && merged.length && keep.has(i) && i === Math.min(...keep)) {
+          const prefix = merged.join("\n\n");
+          const text = s.text?.trim() ? `${prefix}\n\n${s.text}` : prefix;
+          const clipped = text.length > maxThinkChars * 2 ? "…" + text.slice(-(maxThinkChars * 2 - 1)) : text;
+          next.push({ ...s, text: clipped } as T);
+          merged.length = 0;
+          continue;
+        }
+        next.push(s);
+      }
+      return next;
+    }
+    return out;
+  }
+
+  /** 构建流式卡 JSON；会话色条 + 时间线 segments */
+  static buildStreamingCardJson(opts?: {
+    status?: "streaming" | "completed" | "error";
+    showThinking?: boolean;
+    sessionTitle?: CardTitle;
+    sessionTemplate?: string;
+    segments?: Array<
+      | { type: "thinking"; text: string; title?: string; expanded?: boolean }
+      | { type: "tools"; title?: string; expanded?: boolean; steps: Array<{ title: string; status: string; detail?: string; icon?: string }> }
+      | { type: "reply"; text: string }
+    >;
+    thinking?: string;
+    thinkingTitle?: string;
+    thinkingExpanded?: boolean;
+    toolsSteps?: Array<{ title: string; status: string; detail?: string; icon?: string }>;
+    toolsContent?: string;
+    toolsTitle?: string;
+    toolsExpanded?: boolean;
+    reply?: string;
+    buttons?: CardButton[];
+    input?: CardInput;
+    footer?: string;
+  }): Record<string, unknown> {
+    const status = opts?.status || "streaming";
+    const showThinking = opts?.showThinking !== false;
+    const sessionTpl = opts?.sessionTemplate || "turquoise";
+    const sessionRgb = LarkSender.BANNER_RGB[sessionTpl] ?? LarkSender.BANNER_RGB.turquoise;
+
+    let segments = opts?.segments;
+    if (!segments) {
+      segments = [];
+      if (showThinking) {
+        segments.push({
+          type: "thinking",
+          text: opts?.thinking || (status === "streaming" ? "_（生成中…）_" : "_（暂无）_"),
+          title: opts?.thinkingTitle,
+          expanded: opts?.thinkingExpanded,
+        });
+      }
+      segments.push({
+        type: "tools",
+        title: opts?.toolsTitle,
+        expanded: opts?.toolsExpanded,
+        steps: opts?.toolsSteps || [],
+      });
+      if (opts?.reply?.trim()) segments.push({ type: "reply", text: opts.reply });
+    }
+
+
+    // 飞书 300305：单卡组件/元素合计 ≤200；超限前收敛工具步与思考
+    let segs = segments ?? [];
+    for (const level of [
+      { maxToolSteps: 28, maxThinkChars: 1200, stripDetails: false },
+      { maxToolSteps: 16, maxThinkChars: 800, stripDetails: true },
+      { maxToolSteps: 8, maxThinkChars: 500, stripDetails: true },
+      { maxToolSteps: 4, maxThinkChars: 300, stripDetails: true },
+    ] as const) {
+      const trial = LarkSender.compactStreamingSegments(segs, level);
+      let est = opts?.sessionTitle ? 8 : 0;
+      for (const seg of trial) {
+        if (seg.type === "thinking") est += 8;
+        else if (seg.type === "tools") est += 8 + 2 * ((seg.steps || []).length);
+        else if (seg.type === "reply" && seg.text.trim()) est += 2;
+      }
+      if (opts?.footer) est += 3;
+      if (opts?.buttons?.length) est += 2 + opts.buttons.length;
+      if (opts?.input) est += 4;
+      segs = trial;
+      if (est <= LarkSender.STREAM_ELEMENT_BUDGET) break;
+    }
+    segments = segs;
+
+    const elements: Record<string, unknown>[] = [];
+    if (opts?.sessionTitle) {
+      elements.push(LarkSender.buildSessionBannerElement(opts.sessionTitle));
+    }
+
+    let thinkIdx = 0;
+    let toolIdx = 0;
+    let replyIdx = 0;
+    const replyCount = segments.filter((s) => s.type === "reply" && s.text.trim()).length;
+    for (const seg of segments) {
+      if (seg.type === "thinking") {
+        if (!showThinking) continue;
+        const el = LarkSender.buildThinkPanelElement(seg.text || "_（暂无）_", {
+          title: seg.title || (status === "streaming" ? "💭 思考中…" : "💭 思考完成"),
+          expanded: seg.expanded ?? (status === "streaming"),
+        });
+        el.element_id = `think_${thinkIdx++}`;
+        elements.push(el);
+      } else if (seg.type === "tools") {
+        const el = LarkSender.buildToolPanelElement(seg.steps || [], {
+          title: seg.title || `🛠️ 工具执行 · ${(seg.steps || []).length} 步`,
+          expanded: seg.expanded ?? true,
+        });
+        el.element_id = `tool_${toolIdx++}`;
+        elements.push(el);
+      } else if (seg.text.trim()) {
+        const isLastReply = replyIdx === replyCount - 1;
+        elements.push({
+          tag: "markdown",
+          content: seg.text,
+          element_id: isLastReply ? LarkSender.STREAM_REPLY_ID : `reply_${replyIdx}`,
+        });
+        replyIdx++;
+      }
+    }
+
+    const buttons = opts?.buttons ?? [];
+    const input = opts?.input;
+    const foot = opts?.footer?.replace(/^\s+|\s+$/gu, "");
+    if (foot || (input && buttons.length > 0)) elements.push({ tag: "hr" });
+    if (foot) elements.push({ tag: "markdown", content: foot });
+    if (buttons.length > 0) LarkSender.appendButtonRows(elements, buttons, { singleCol: !!input });
+    if (input) {
+      elements.push({
+        tag: "input",
+        name: "custom_input",
+        input_type: "multiline_text",
+        width: "fill",
+        rows: 1,
+        auto_resize: true,
+        max_rows: 8,
+        placeholder: { tag: "plain_text", content: input.placeholder.slice(0, 100) },
+        label_position: "top",
+        behaviors: [{ type: "callback", value: input.value }],
+      });
+    }
+
+    const interactive = buttons.length > 0 || !!input;
+    return {
+      schema: "2.0",
+      config: {
+        streaming_mode: status === "streaming" && !interactive,
+        update_multi: true,
+        width_mode: "fill",
+        summary: { content: status === "streaming" ? "思考中…" : status === "completed" ? "已完成" : "出错" },
+        style: {
+          color: {
+            "cus-hdr": {
+              light_mode: `rgba(${sessionRgb},0.14)`,
+              dark_mode: `rgba(${sessionRgb},0.26)`,
+            },
+          },
+        },
+      },
+      body: { horizontal_align: "left", elements },
+    };
+  }
+
+  /**
+   * 创建 Hermes 风格 CardKit 流式卡片（schema 2.0 + streaming_mode）。
+   * 按 segments 时间线渲染；仅最后一段 reply 使用 reply_md 以便打字机。
+   */
+  async createStreamingCardEntity(opts?: {
+    title?: string;
+    template?: string;
+    showThinking?: boolean;
+    sessionTitle?: CardTitle;
+    sessionTemplate?: string;
+    segments?: Array<
+      | { type: "thinking"; text: string; title?: string; expanded?: boolean }
+      | { type: "tools"; title?: string; expanded?: boolean; steps: Array<{ title: string; status: string; detail?: string; icon?: string }> }
+      | { type: "reply"; text: string }
+    >;
+    thinking?: string;
+    thinkingTitle?: string;
+    thinkingExpanded?: boolean;
+    toolsSteps?: Array<{ title: string; status: string; detail?: string; icon?: string }>;
+    toolsContent?: string;
+    toolsTitle?: string;
+    toolsExpanded?: boolean;
+    reply?: string;
+  }): Promise<string | undefined> {
+    const cardJson = LarkSender.buildStreamingCardJson({
+      status: "streaming",
+      showThinking: opts?.showThinking,
+      sessionTitle: opts?.sessionTitle,
+      sessionTemplate: opts?.sessionTemplate,
+      segments: opts?.segments,
+      thinking: opts?.thinking,
+      thinkingTitle: opts?.thinkingTitle,
+      thinkingExpanded: opts?.thinkingExpanded,
+      toolsSteps: opts?.toolsSteps,
+      toolsContent: opts?.toolsContent,
+      toolsTitle: opts?.toolsTitle,
+      toolsExpanded: opts?.toolsExpanded,
+      reply: opts?.reply,
+    });
+    try {
+      const res = await this.client.request({
+        method: "POST",
+        url: "/open-apis/cardkit/v1/cards",
+        data: { type: "card_json", data: JSON.stringify(cardJson) },
+      }) as any;
+      const code = res?.code;
+      const cardId = res?.data?.card_id as string | undefined;
+      if (code !== undefined && code !== 0) {
+        this.log("WARN", `创建流式卡片失败 code=${code} msg=${res?.msg ?? ""}`);
+        return undefined;
+      }
+      if (!cardId) {
+        this.log("WARN", "创建流式卡片成功但未返回 card_id");
+        return undefined;
+      }
+      return cardId;
+    } catch (e: any) {
+      this.log("WARN", `创建流式卡片异常: ${e?.message ?? e}${e?.response?.data ? " " + JSON.stringify(e.response.data).slice(0, 500) : ""}`);
+      return undefined;
+    }
+  }
+
+  /** 全量更新 CardKit 卡片（时间线刷新 / 收口绿头） */
+  async updateStreamingCard(
+    cardId: string,
+    cardJson: Record<string, unknown>,
+    sequence: number,
+  ): Promise<boolean> {
+    try {
+      const res = await this.client.request({
+        method: "PUT",
+        url: `/open-apis/cardkit/v1/cards/${encodeURIComponent(cardId)}`,
+        data: {
+          card: { type: "card_json", data: JSON.stringify(cardJson) },
+          sequence,
+        },
+      }) as any;
+      const code = res?.code;
+      if (code !== undefined && code !== 0) {
+        this.log("WARN", `全量更新流式卡片失败 code=${code} msg=${res?.msg ?? ""} seq=${sequence}`);
+        return false;
+      }
+      return true;
+    } catch (e: any) {
+      this.log("WARN", `全量更新流式卡片异常: ${e?.message ?? e} seq=${sequence}`);
+      return false;
+    }
+  }
+
+  /** 全量替换卡片内某个组件（PUT element；sequence 须严格递增） */
+  async replaceCardElement(
+    cardId: string,
+    elementId: string,
+    elementObj: Record<string, unknown>,
+    sequence: number,
+  ): Promise<boolean> {
+    try {
+      const res = await this.client.request({
+        method: "PUT",
+        url: `/open-apis/cardkit/v1/cards/${encodeURIComponent(cardId)}/elements/${encodeURIComponent(elementId)}`,
+        data: { element: JSON.stringify(elementObj), sequence },
+      }) as any;
+      const code = res?.code;
+      if (code !== undefined && code !== 0) {
+        this.log("WARN", `替换卡片组件失败 code=${code} msg=${res?.msg ?? ""} id=${elementId} seq=${sequence}`);
+        return false;
+      }
+      return true;
+    } catch (e: any) {
+      this.log("WARN", `替换卡片组件异常: ${e?.message ?? e} id=${elementId} seq=${sequence}`);
+      return false;
+    }
+  }
+
+  /** 通过 card_id 发送已创建的 CardKit 卡片实体 */
+  async sendCardEntity(cardId: string, replyMessageId?: string, chatId?: string): Promise<string | null | undefined> {
+    const content = JSON.stringify({ type: "card", data: { card_id: cardId } });
+    if (replyMessageId && !replyMessageId.startsWith("internal_")) {
+      try {
+        const res = await this.client.im.message.reply({
+          path: { message_id: replyMessageId },
+          data: { content, msg_type: "interactive" },
+        });
+        const code = (res as any)?.code;
+        const mid = ((res as any)?.data?.message_id ?? (res as any)?.message_id) as string | undefined;
+        if (code !== undefined && code !== 0) {
+          this.log("WARN", `流式卡片回复失败 code=${code}`);
+          return undefined;
+        }
+        return mid ?? null;
+      } catch (e: any) {
+        this.log("WARN", `流式卡片回复失败: ${e?.message ?? e}`);
+        return undefined;
+      }
+    }
+    const target = chatId || this.chatId;
+    if (!target) { this.log("WARN", "流式卡片无发送目标"); return undefined; }
+    try {
+      const res = await this.client.im.message.create({
+        params: { receive_id_type: "chat_id" as any },
+        data: { receive_id: target, content, msg_type: "interactive" },
+      });
+      const code = (res as any)?.code;
+      const mid = ((res as any)?.data?.message_id ?? (res as any)?.message_id) as string | undefined;
+      if (code !== undefined && code !== 0) {
+        this.log("WARN", `流式卡片发送失败 code=${code} msg=${(res as any)?.msg ?? ""}`);
+        return undefined;
+      }
+      return mid ?? null;
+    } catch (e: any) {
+      this.log("WARN", `流式卡片发送异常: ${e?.message ?? e}`);
+      return undefined;
+    }
+  }
+
+  /** 流式更新 markdown 全量内容（默认 reply_md；sequence 须严格递增） */
+  async streamCardElementContent(
+    cardId: string,
+    content: string,
+    sequence: number,
+    elementId = LarkSender.STREAM_REPLY_ID,
+  ): Promise<boolean> {
+    try {
+      const res = await this.client.request({
+        method: "PUT",
+        url: `/open-apis/cardkit/v1/cards/${encodeURIComponent(cardId)}/elements/${encodeURIComponent(elementId)}/content`,
+        data: { content: content || "…", sequence },
+      }) as any;
+      const code = res?.code;
+      if (code !== undefined && code !== 0) {
+        this.log("WARN", `流式更新内容失败 code=${code} msg=${res?.msg ?? ""} seq=${sequence}`);
+        return false;
+      }
+      return true;
+    } catch (e: any) {
+      this.log("WARN", `流式更新内容异常: ${e?.message ?? e} seq=${sequence}`);
+      return false;
+    }
+  }
+
+  /** 关闭流式模式（PATCH settings streaming_mode:false） */
+  async closeStreamingCard(cardId: string, sequence: number): Promise<boolean> {
+    try {
+      const res = await this.client.request({
+        method: "PATCH",
+        url: `/open-apis/cardkit/v1/cards/${encodeURIComponent(cardId)}/settings`,
+        data: {
+          settings: JSON.stringify({ config: { streaming_mode: false } }),
+          sequence,
+        },
+      }) as any;
+      const code = res?.code;
+      if (code !== undefined && code !== 0) {
+        this.log("WARN", `关闭流式模式失败 code=${code} msg=${res?.msg ?? ""} seq=${sequence}`);
+        return false;
+      }
+      return true;
+    } catch (e: any) {
+      this.log("WARN", `关闭流式模式异常: ${e?.message ?? e} seq=${sequence}`);
+      return false;
+    }
+  }
+
   /**
    * 发送带回传按钮的交互卡片。
    * @returns message_id；回复成功但飞书未回 message_id 时返回 null（调用方不得再 create）；失败返回 undefined
