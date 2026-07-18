@@ -758,71 +758,12 @@ export class LarkSender {
     return n;
   }
 
-  /**
-   * 收敛时间线，避免工具步/思考块把元素顶破 200。
-   * 优先保留：会话条、最近工具步、正文 reply、交互按钮。
-   */
-  static compactStreamingSegments<T extends {
-    type: string;
-    text?: string;
-    title?: string;
-    expanded?: boolean;
-    steps?: Array<{ title: string; status: string; detail?: string; icon?: string }>;
-  }>(segments: T[], opts?: { maxToolSteps?: number; maxThinkChars?: number; stripDetails?: boolean }): T[] {
-    const maxToolSteps = opts?.maxToolSteps ?? 28;
-    const maxThinkChars = opts?.maxThinkChars ?? 1200;
-    const stripDetails = opts?.stripDetails ?? false;
-    const out: T[] = [];
-    for (const seg of segments) {
-      if (seg.type === "tools") {
-        let steps = [...(seg.steps || [])];
-        const realCount = steps.length;
-        if (stripDetails) {
-          steps = steps.map((s) => ({ ...s, detail: undefined }));
-        }
-        if (steps.length > maxToolSteps) {
-          const omitted = steps.length - maxToolSteps;
-          steps = [
-            { title: `… 更早 ${omitted} 步已折叠`, status: "success" },
-            ...steps.slice(-maxToolSteps),
-          ];
-        }
-        out.push({ ...seg, steps, title: `🛠️ 工具执行 · ${realCount} 步` } as T);
-      } else if (seg.type === "thinking") {
-        let text = seg.text || "";
-        if (text.length > maxThinkChars) {
-          text = "…" + text.slice(-(maxThinkChars - 1));
-        }
-        out.push({ ...seg, text } as T);
-      } else {
-        out.push(seg);
-      }
+  /** 最后一个工具段索引（最新工具块受完整精度保护，收敛时不降级） */
+  private static lastToolsIndex(segs: Array<{ type: string }>): number {
+    for (let i = segs.length - 1; i >= 0; i--) {
+      if (segs[i].type === "tools") return i;
     }
-    // 过多折叠块时：合并靠前的 thinking，只留最后 2 个 thinking + 全部 tools/reply
-    const thinkIdxs = out.map((s, i) => (s.type === "thinking" ? i : -1)).filter((i) => i >= 0);
-    if (thinkIdxs.length > 2) {
-      const keep = new Set(thinkIdxs.slice(-2));
-      const merged: string[] = [];
-      const next: T[] = [];
-      for (let i = 0; i < out.length; i++) {
-        const s = out[i];
-        if (s.type === "thinking" && !keep.has(i)) {
-          if (s.text?.trim()) merged.push(s.text.trim());
-          continue;
-        }
-        if (s.type === "thinking" && merged.length && keep.has(i) && i === Math.min(...keep)) {
-          const prefix = merged.join("\n\n");
-          const text = s.text?.trim() ? `${prefix}\n\n${s.text}` : prefix;
-          const clipped = text.length > maxThinkChars * 2 ? "…" + text.slice(-(maxThinkChars * 2 - 1)) : text;
-          next.push({ ...s, text: clipped } as T);
-          merged.length = 0;
-          continue;
-        }
-        next.push(s);
-      }
-      return next;
-    }
-    return out;
+    return -1;
   }
 
   /** 构建流式卡 JSON；会话色条 + 时间线 segments */
@@ -874,7 +815,9 @@ export class LarkSender {
     }
 
 
-    const buildBodyElements = (segs: NonNullable<typeof segments>): Record<string, unknown>[] => {
+    type BodySegment = NonNullable<typeof segments>[number] | { type: "omitted"; text: string };
+
+    const buildBodyElements = (segs: BodySegment[]): Record<string, unknown>[] => {
       const els: Record<string, unknown>[] = [];
       if (opts?.sessionTitle) {
         els.push(LarkSender.buildSessionBannerElement(opts.sessionTitle));
@@ -884,7 +827,9 @@ export class LarkSender {
       let replyIdx = 0;
       const replyCount = segs.filter((s) => s.type === "reply" && s.text.trim()).length;
       for (const seg of segs) {
-        if (seg.type === "thinking") {
+        if (seg.type === "omitted") {
+          els.push({ tag: "markdown", content: seg.text, element_id: "omitted_notice" });
+        } else if (seg.type === "thinking") {
           if (!showThinking) continue;
           const el = LarkSender.buildThinkPanelElement(seg.text || "_（暂无）_", {
             title: seg.title || (status === "streaming" ? "💭 思考中…" : "💭 思考完成"),
@@ -932,16 +877,57 @@ export class LarkSender {
       return els;
     };
 
-    // 飞书 300305：单卡组件/元素合计 ≤200；按真实元素计数逐级收敛，不超不降级（保住工具详情）
+    // 飞书 300305：单卡组件/元素合计 ≤200。收敛原则「越新精度越高」：
+    // 超预算时按时间从最早的段整段剔除（思考/工具皆可），send_* 正文（reply）永不剔除，
+    // 最新工具块保持完整精度；全部可剔段删完仍超限才对最新块从头截步兜底。
     let elements = buildBodyElements(segments);
-    for (const level of [
-      { maxToolSteps: 28, maxThinkChars: 1200, stripDetails: false },
-      { maxToolSteps: 16, maxThinkChars: 800, stripDetails: true },
-      { maxToolSteps: 8, maxThinkChars: 500, stripDetails: true },
-      { maxToolSteps: 4, maxThinkChars: 300, stripDetails: true },
-    ] as const) {
-      if (LarkSender.countCardElements(elements) <= LarkSender.STREAM_ELEMENT_BUDGET) break;
-      elements = buildBodyElements(LarkSender.compactStreamingSegments(segments, level));
+    const overBudget = () => LarkSender.countCardElements(elements) > LarkSender.STREAM_ELEMENT_BUDGET;
+    if (overBudget()) {
+      // 思考关闭时 thinking 段不渲染不占元素，先滤掉避免无效剔除轮次
+      let segs: BodySegment[] = showThinking ? [...segments] : segments.filter((s) => s.type !== "thinking");
+
+      // 1) 轻量降级：非最新工具块剥 detail
+      const lastTools = LarkSender.lastToolsIndex(segs);
+      segs = segs.map((s, i) =>
+        s.type === "tools" && i !== lastTools
+          ? { ...s, steps: (s.steps || []).map((st) => ({ ...st, detail: undefined })) }
+          : s,
+      );
+      elements = buildBodyElements(segs);
+
+      // 2) 从最早开始整段剔除（跳过 reply 与最新工具块），卡首留省略占位
+      let omittedCount = 0;
+      while (overBudget()) {
+        const lt = LarkSender.lastToolsIndex(segs);
+        const idx = segs.findIndex((s, i) => s.type === "thinking" || (s.type === "tools" && i !== lt));
+        if (idx < 0) break;
+        segs.splice(idx, 1);
+        omittedCount++;
+        const notice: BodySegment = { type: "omitted", text: `_📜 已省略更早的 ${omittedCount} 段执行记录_` };
+        if (segs[0]?.type === "omitted") segs[0] = notice;
+        else segs.unshift(notice);
+        elements = buildBodyElements(segs);
+      }
+
+      // 3) 兜底：仅剩最新工具块仍超限（单块步数极多），从头截步、保尾部精度
+      const lt = LarkSender.lastToolsIndex(segs);
+      if (overBudget() && lt >= 0) {
+        const toolSeg = segs[lt] as Extract<BodySegment, { type: "tools" }>;
+        const original = toolSeg.steps || [];
+        let keep = original.length;
+        while (overBudget() && keep > 2) {
+          keep = Math.max(2, Math.floor(keep / 2));
+          segs[lt] = {
+            ...toolSeg,
+            steps: [
+              { title: `… 更早 ${original.length - keep} 步已折叠`, status: "success" },
+              ...original.slice(-keep),
+            ],
+            title: toolSeg.title || `🛠️ 工具执行 · ${original.length} 步`,
+          };
+          elements = buildBodyElements(segs);
+        }
+      }
     }
 
     const interactive = (opts?.buttons?.length ?? 0) > 0 || !!opts?.input;
