@@ -9,29 +9,34 @@ Cursor Agent 的交互被锁死在本地 IDE 中，一旦离开电脑，所有 A
 **Cursor Claw** 打破了这种限制：
 
 - AI 的提问会通过飞书机器人或微信发到你手机上，你回复后 AI 自动继续工作
-- 即使 Cursor 会话断开，守护进程也能自动重连拉起新会话
-- 支持私聊 + 群聊多会话并行，每个会话独立工作区
+- 基于 Cursor Agent SDK 驱动，飞书侧实时展示**流式进度卡**（思考过程 / 工具调用时间线）
+- 即使会话断开，守护进程也能自动重连拉起新会话，`Resume` 延续上下文
+- 支持私聊 + 群聊 + 项目多会话并行，每个会话独立工作区
+- 支持**项目工作区**：一个需求一个 git worktree，规划 → 实现 → 审查 → 提测等节点化推进，可绑定项目独立群协作
 - 支持定时任务和临时独立 Agent，让 AI 按计划自动执行
-- 支持**多节点工作流**：需求分析 → 编码 → 审查 → 交付等流水线，节点可驳回重做
-- 通过飞书 / 微信指令系统远程管理 Agent、MCP、Rules、Skills、定时任务、工作流
-- 飞书和微信双通道可同时运行，消息自动路由到对应平台
+- 通过飞书 / 微信指令系统远程管理会话、项目、MCP、模型、定时任务
+- 多通道并行：可同时接入多个飞书机器人 + 微信账号，每个通道独立配置模型与工作目录
 
 ## 功能特性
 
 | 功能 | 说明                                                     |
 |------|--------------------------------------------------------|
 | 可视化配置 | 5 步初始化向导 + 完整设置页面，零手写配置                                |
-| 多会话管理 | 私聊 / 群聊 / 定时任务 / 临时 Agent 并行运行，Dashboard 实时展示活跃会话      |
-| 双通道消息桥接 | 飞书 + 微信双平台支持，发文本、发图片、发文件，支持消息回复和群聊 @消息路由               |
-| 自动重连 | Agent 断开后自动拉起新会话，支持 `--resume` 延续上下文                   |
-| 指令系统 | 发送 `/stop` `/status` `/model` `/task` 等 12+ 指令远程控制     |
+| SDK 驱动 | 基于 `@cursor/sdk` 在应用内直跑 Agent（API Key 接入），本机 Cursor CLI 可作为备选资源 |
+| 流式进度卡 | 飞书 CardKit 流式卡片实时展示思考过程与工具调用时间线，回复自动并入卡片，可按通道关闭思考展示 |
+| 多会话管理 | 私聊 / 群聊 / 项目 / 定时任务 / 临时会话并行运行，Dashboard 实时展示活跃会话与日志 |
+| 多通道消息桥接 | 多个飞书机器人 + 微信账号同时运行，发文本 / 图片 / 文件，消息按 `session_key` 自动路由 |
+| 项目工作区 | `/p` 建项，一个需求一个 git worktree（支持多仓），节点化推进（规划/实现/审查/提测…），可绑定项目独立群 |
+| 自动重连 | Agent 断开后自动拉起新会话，`Resume` 延续上下文；处理中消息掉线不丢（至少一次投递） |
+| 指令系统 | 发送 `/status` `/chat` `/project` `/model` 等 14 组指令远程控制，均有单字母缩写 |
 | 定时任务 | Cron 表达式调度，支持独立 Agent 模式，可视化编辑 + 运行预览                  |
-| 工作流 | 多节点流水线编排（YAML 定义），设置页可视化管理，飞书 `/workflow` 指令，支持驳回与重试 |
 | MCP 管理 | 可视化管理 MCP 服务器（JSON 编辑 / 启停 / OAuth 认证 / 工具列表）          |
 | Rule & Skill | 管理 Cursor Rules 和 Agent Skills，支持文件树浏览和编辑              |
 | 自管理能力 | Agent 可通过 MCP 工具管理自身（MCP/Rules/Skills/Tasks/Workspace） |
+| AI 间协作 | 群内机器人可互相 @ 派活（需开通机器人互收消息权限），消息带协作机器人名册         |
 | 数字身份 | 为群聊和非主用户会话注入自定义角色定义                                    |
 | 工作区注入 | 自动写入 `.cursor/mcp.json`、Loop 协议规则和自管理 Skill            |
+| 工具箱 | 一键安装 / 更新 `lark-cli`（飞书全家桶 CLI）与 `meegle`（飞书项目 CLI）    |
 | 应用隔离 | 支持多开，通过启动参数 `--profile=xxx` 隔离多个应用数据                   |
 | 应用内更新 | 支持检查更新 / 一键更新，Homebrew 用户可通过 brew 升级                   |
 | 系统托盘 | 关闭窗口可最小化到托盘，后台持续运行                                     |
@@ -39,43 +44,39 @@ Cursor Agent 的交互被锁死在本地 IDE 中，一旦离开电脑，所有 A
 ## 架构
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│  Electron 应用                                          │
-│  · 配置向导 / Dashboard / 设置（React + Tailwind）          │
-│  · 管理 Daemon 生命周期、Cron 调度、多会话管理               │
-│  · 自动注入 .cursor/mcp.json、Rules 和 Skills               │
-└──────────────┬──────────────────────────────┬──────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│  Electron 应用                                               │
+│  · 配置向导 / Dashboard / 设置（React + Tailwind）           │
+│  · Agent SDK 会话池（@cursor/sdk 直跑，流式事件 → 进度卡）   │
+│  · 管理 Daemon 生命周期、Cron 调度、项目工作区               │
+│  · 自动注入 .cursor/mcp.json、Rules 和 Skills                │
+└──────────────┬──────────────────────────────┬───────────────┘
                │ spawn                        │ 写入工作区
                ▼                              ▼
 ┌──────────────────────────┐    ┌─────────────────────────────┐
 │  Daemon 守护进程          │    │  .cursor/                    │
 │  · 飞书 WebSocket 长连接  │    │  ├── mcp.json                │
-│  · 微信 iLink 长轮询      │    │  ├── rules/                  │
-│  · 本机 HTTP API          │    │  │   └── cursor-claw.mdc     │
-│  · 文件消息队列           │    │  └── skills/                 │
-│  · 指令路由（飞书/微信）  │    │      └── cursor-claw-admin │
-│  · 会话保活（自动重连）   │    └──────────────┬──────────────┘
-└──────────────┬───────────┘                   │ stdio
-               │ HTTP 127.0.0.1                ▼
-               │                  ┌─────────────────────────────┐
-               └─────────────────►│  MCP Server                  │
-                                  │  · send_text（发送消息）      │
-                                  │  · HTTP poll-message（拉取）  │
-                                  │  · send_image / send_file    │
-                                  │  · manage_agent / mcp / ...  │
-                                  │  Cursor 子进程，stdio 通信    │
-                                  └─────────────────────────────┘
+│    （可多个飞书通道）     │    │  ├── rules/                  │
+│  · 微信 iLink 长轮询      │    │  │   └── cursor-claw.mdc     │
+│  · 本机 HTTP API + MCP    │    │  └── skills/                 │
+│  · 文件消息队列           │    │      └── cursor-claw-admin │
+│    （至少一次投递）       │    └─────────────────────────────┘
+│  · 指令路由 / 卡片回调    │
+│  · CardKit 流式进度卡     │         Agent 通过 HTTP / MCP
+│  · 会话保活（自动重连）   │◄──── 连接 127.0.0.1:19528：
+└──────────────────────────┘         · send_text / send_question
+                                     · poll-message（拉取消息）
+                                     · project_* / manage_* 工具
 ```
 
 **多会话模型：**
 
 ```
 Daemon ──┬── 主用户私聊 Agent（使用配置的工作目录）
-         ├── 群聊 Agent A（自动创建隔离工作目录）
-         ├── 群聊 Agent B（自动创建隔离工作目录）
-         ├── 定时任务 Agent（独立会话）
-         ├── 工作流 Agent（按节点顺序执行，可 isolated 独立会话）
-         └── 临时 Agent（/run 指令触发）
+         ├── 群聊 Agent A / B（自动创建隔离工作目录）
+         ├── 项目 Agent（独立 git worktree，可绑定项目专属群）
+         ├── 定时任务 Agent（可独立会话）
+         └── 临时会话 Agent（/chat new 或 MCP launch 触发）
 ```
 
 ## 安装
@@ -199,14 +200,14 @@ brew info --cask cursor-claw
 
 1. 下载安装并启动应用
 2. 按照 5 步向导完成配置：
-   - **飞书凭据**：填入 App ID / App Secret
-   - **配置权限**：按引导在飞书后台开通权限和事件订阅
-   - **绑定用户**：选择工作目录，在飞书私聊机器人完成绑定
-   - **Cursor CLI**：检测 / 安装 CLI，选择模型
-   - **检查启动**：一键保存、注入工作区并启动 Daemon
-3. （可选）在设置页面中配置微信接入，扫码登录即可双通道运行
+   - **选工作文件夹**：选择 AI 的默认工作目录
+   - **接入 AI**：填入 Cursor API Key（SDK 直跑，无需本机 IDE 常驻）
+   - **连上飞书**：填入自建应用 App ID / App Secret，按引导开通权限与事件订阅
+   - **绑定你自己**：扫码 / 私聊机器人完成主用户绑定
+   - **装点工具**：一键安装 `lark-cli` / `meegle`（可跳过，之后在工具箱补装）
+3. （可选）在设置页「消息通道」中添加更多飞书机器人或微信账号
 4. 在 Dashboard 查看运行状态，通过飞书或微信开始协作
-5. （可选）在设置页「工作流」Tab 编辑示例流水线，或通过 `/workflow run` 启动
+5. （可选）发送 `/p new` 创建项目工作区，体验节点化研发流程
 
 ## MCP 工具
 
@@ -225,140 +226,99 @@ brew info --cask cursor-claw
 
 | 工具 | 说明 |
 |------|------|
-| `manage_agent` | 查询状态、停止 Agent、重启应用、重置会话、清空队列 |
+| `manage_agent` | 查询状态、停止 Agent、重启应用、重置会话、清空队列、启动临时会话 |
 | `manage_mcp` | 管理 MCP 服务器配置（列出 / 添加 / 删除） |
 | `manage_rules` | 管理 Cursor Rules 文件（列出 / 读取 / 保存 / 删除） |
 | `manage_skills` | 管理 Agent Skills（列出 / 读取 / 保存 / 删除） |
 | `manage_tasks` | 管理定时任务（列出 / 添加 / 更新 / 删除 / 切换启用） |
 | `manage_workspace` | 查看或切换工作目录（切换后热更新生效） |
-| `manage_workflows` | 工作流管理（列出 / 查看 / 创建 / 更新 / 删除 / 运行 / 状态查询） |
 
-### 工作流执行工具
+### 项目工具
 
-在工作流节点执行过程中，Agent 使用以下工具控制流程流转：
+在项目会话中，Agent 使用以下工具读写项目元数据：
 
 | 工具 | 说明 |
 |------|------|
-| `workflow_next` | 完成当前工作流节点，提交产物并流转到下一个节点 |
-| `workflow_reject` | 驳回当前工作流节点产物，回退到指定节点重新执行 |
+| `project_get` / `project_list` | 查询项目详情 / 列出所有项目 |
+| `project_update` | 更新项目元数据（目标、文档链接、分支信息等） |
+| `project_register_artifact` | 登记节点产物（路径 / 摘要 / MR 链接 / 飞书文档），供后续节点注入上下文 |
+| `project_delete` | 删除项目（连带移除 worktree，不动主仓与远程分支） |
 
-## 工作流引擎
+## 项目工作区
 
-工作流引擎将复杂任务编排为**多节点流水线**：每个节点由 Agent 执行，产物写入上下文并传给下一节点；审查类节点可 `workflow_reject` 驳回到前序节点重做。
+项目工作区把「一个需求」封装为独立协作单元：**一个项目 = 一个 git worktree（可多仓）+ 一条 feature 分支 + 一个专属会话**，通过节点化按钮推进研发流程。
 
 ### 核心概念
 
 | 概念 | 说明 |
 |------|------|
-| **WorkflowDefinition** | 工作流定义（名称、描述、`config`、有序 `nodes`） |
-| **WorkflowNode** | 单节点：Prompt、可选模型、`maxRetries`、可选 `isolated` |
-| **WorkflowInstance** | 运行实例：当前节点、状态、各节点产物、执行历史 |
+| **项目（Project）** | 名称、目标、需求/文档链接、主仓 + 基线分支、feature 分支、worktree 路径 |
+| **流程组（NodeGroup）** | 节点集合，建项可多选；默认提供「开发」「测试」两组，节点可在设置页自由增删改 |
+| **节点（Node）** | 一个推进动作（如 规划 / 实现 / 审查），点按钮或发 `/p <节点>` 即把对应任务派给项目 Agent |
+| **工作区类型** | `worktree`＝代码开发（主仓隔离检出、分支借还）；`plain`＝纯会话目录（测试/文档协作，无 git） |
 
-定义文件位于用户数据目录 `workflows/definitions/{id}.yaml`（首次启动会从 `resources/template/workflow/example/` 种子示例）。
+默认节点：
+
+- **开发组**：规划 → 实现 → 审查 → 部署 → 提测 → 分析缺陷 → 修复缺陷 → 上线文档
+- **测试组**：测试评审 → 用例编写 → 部署 → 测试 → 提缺陷 → 复测 → 上线文档
 
 ### 使用方式
 
-1. **设置页**：打开「工作流」Tab，查看/编辑定义，点击 ▶ 启动并填写初始输入
-2. **飞书指令**：`/workflow ls`、`/workflow run <序号|ID> [输入]`、`/workflow status` 等
-3. **Agent MCP**：`manage_workflows` 创建/更新/运行；节点内用 `workflow_next` / `workflow_reject` 流转
-
-### 工作流定义示例（YAML）
-
-```yaml
-name: 代码审查流水线
-description: 需求分析 → 编码实现 → 代码审查 → 产出报告
-config:
-  gitlab_token: glpat-xxxxxxxxxxxx
-nodes:
-  - id: analyze
-    name: 需求分析
-    prompt: 分析需求并输出技术方案
-    maxRetries: 2
-  - id: implement
-    name: 编码实现
-    prompt: 根据技术方案编码
-    maxRetries: 3
-  - id: review
-    name: 代码审查
-    prompt: 审查代码质量，不达标则 workflow_reject 驳回
-    isolated: true
-    maxRetries: 1
-  - id: report
-    name: 产出报告
-    prompt: 汇总产物生成交付报告
-    maxRetries: 1
-```
-
-### 执行流程
-
-1. 创建或编辑工作流定义（设置页 / `manage_workflows` / 直接编辑 YAML）
-2. 启动实例（设置页 ▶、`/workflow run` 或 `manage_workflows` run）
-3. 引擎拉起首节点 Agent；完成后 Agent 调用 `workflow_next` 提交产物
-4. 不合格时调用 `workflow_reject` 回退到指定节点
-5. 全部节点完成后实例状态为 `completed`
+1. **建项**：发送 `/p new` 走飞书表单（或一行命令 `/p new <名> <主仓> <基线> <feature> <目标…>`）
+2. **进入**：`/p ls` 列出项目，`/p use <序号>` 进入；后续消息路由到项目专属会话与 worktree
+3. **推进**：`/p` 打开项目菜单，点节点按钮（规划 / 实现 / 审查…）派发任务
+4. **交付**：Agent 通过 `project_register_artifact` 登记产物，`send_file` / MR 链接交付
+5. **回主会话**：`/p leave` 或 `/c main`
 
 ### 关键特性
 
 | 特性 | 说明 |
 |------|------|
-| 上下文传递 | 每个节点的产物自动注入到下一个节点的输入中 |
-| 全局配置 | `config` 字段支持注入工作流级别的配置（如 API Token），所有节点可用 |
-| 驳回重做 | 审查节点可驳回到任意前序节点，支持迭代式质量把关 |
-| 失败重试 | 每个节点可配置 `maxRetries`，失败后自动重试 |
-| 独立 Agent | `isolated: true` 的节点使用全新 Agent 执行，避免上下文污染 |
-| 模型覆盖 | 每个节点可独立指定模型，关键节点可使用更强模型 |
-
-> 详细设计文档见 [docs/workflow-design.md](docs/workflow-design.md)
-
-### 内置示例
-
-系统首次启动时会自动创建内置工作流示例，帮助快速上手：
-
-| 示例 | 说明 |
-|------|------|
-| 飞书需求开发 | 从飞书需求文档出发：编写技术方案 → 实施编码 → 代码检查 → 创建 GitLab MR |
-
-使用方法：
-1. 在工作流管理页面找到「飞书需求开发（示例）」
-2. 编辑 `config.gitlab_token` 填入你的 GitLab 访问令牌
-3. 运行工作流，输入飞书需求文档链接即可
+| 隔离检出 | 独立 clone / worktree，与主仓互不干扰，同一分支可两边同时检出 |
+| 多仓支持 | 一个项目可挂多个仓库，各自独立 worktree 与分支配置 |
+| 独立群协作 | 建项可自动创建项目专属飞书群（需 `im:chat:create` 权限），群内消息强制路由到本项目，与私聊互相隔离 |
+| 产物流转 | 节点产物（文档 / MR / 文件）登记后自动注入后续节点的上下文 |
+| 分支红线 | 基线分支只作切 feature 起点，禁止直接作为推送 / MR 目标 |
+| GitLab / 飞书项目集成 | 配合 `lark-cli` / `meegle` / GitLab Token，可打通需求文档 → MR → 工作项流转 |
 
 ## 指令系统
 
-在飞书或微信对话中直接发送指令（不区分大小写），由 Daemon 处理无需 Agent 运行：
+在飞书或微信对话中直接发送指令（不区分大小写），由 Daemon 处理无需 Agent 运行；每个指令都有单字母缩写：
 
-| 指令 | 说明 |
-|------|------|
-| `/stop` | 停止运行中的 Agent |
-| `/status` | 查看 Agent / Daemon 状态 |
-| `/list` | 查看消息队列中的待处理消息 |
-| `/task` | 定时任务管理（`/task ls` 列表、`/task trigger <id>` 手动触发） |
-| `/workflow` / `/wf` | 工作流管理（`ls` / `info` / `run` / `status` / `delete`） |
-| `/run` | 启动一个独立临时 Agent 执行指定任务 |
-| `/model` | Cursor CLI 模型（`/model ls` / `info` / `set <序号>`） |
-| `/mcp` | MCP 服务器管理（`/mcp ls` / `info` / `enable` / `disable` / `add` / `delete`） |
-| `/workspace` | 查看 / 切换工作目录 |
-| `/clean` | 清空消息队列 |
-| `/reset` | 重置会话（下次拉起不使用 --continue） |
-| `/restart` | 停止 Agent → 清空队列 → 重启 Daemon |
-| `/help` | 列出所有可用指令 |
+| 指令 | 缩写 | 说明 |
+|------|------|------|
+| `/status` | `/s` | 查看 Agent / Daemon 状态（飞书返回可刷新的状态卡片） |
+| `/chat` | `/c` | 会话管理（`ls` 列表 / `<序号>` 切换 / `stop <序号>` / `new <描述>` 开临时会话 / `main` 回主会话） |
+| `/project` | `/p` | 项目工作区（`new` / `ls` / `use` / `leave` / `status` / `setup` / `sync` / `ship` 及各节点推进） |
+| `/task` | `/t` | 定时任务管理（`/task ls` 列表、`/task trigger <id>` 手动触发） |
+| `/model` | `/m` | 模型管理（`ls` / `info` / `set <序号>`） |
+| `/mcp` | `/mc` | MCP 服务器管理（`ls` / `info` / `enable` / `disable` / `add` / `delete`） |
+| `/workspace` | `/w` | 查看 / 切换工作目录 |
+| `/list` | `/ls` | 查看消息队列中的待处理消息 |
+| `/stop` | `/x` | 停止运行中的 Agent |
+| `/clean` | `/cl` | 清空消息队列 |
+| `/reset` | `/r` | 重置会话（下次拉起不延续上下文） |
+| `/restart` | `/rr` | 停止 Agent → 清空队列 → 重启 Daemon |
+| `/help` | `/h` | 列出所有可用指令 |
 
 ## 多会话与自动重连
 
 ### 多会话模型
 
-- **主用户私聊**：使用配置的工作目录，支持 `--resume` 延续会话上下文
-- **群聊**：开启后响应 @消息，每个群自动创建隔离工作目录
+- **主用户私聊**：使用通道配置的工作目录，`Resume` 延续会话上下文
+- **群聊**：开启后响应 @消息，每个群自动创建隔离工作目录；群内机器人可互相 @ 协作
+- **项目会话**：独立 git worktree + 专属会话，可绑定项目独立群
 - **定时任务**：按 Cron 表达式触发，支持独立 Agent 模式
-- **临时 Agent**：通过 `/run` 指令启动，执行完毕自动退出
+- **临时会话**：通过 `/chat new <描述>` 或 MCP `manage_agent` launch 启动，执行完自动收尾
 
-### 自动重连
+### 自动重连与消息可靠性
 
-Daemon 进程独立于 Cursor 运行，即使 Agent 会话中断，系统也能自动恢复：
+Daemon 进程独立运行，即使 Agent 会话中断，系统也能自动恢复：
 
 1. **Daemon** 通过飞书 WebSocket 长连接 / 微信 iLink 长轮询持续监听消息
-2. 当收到新消息且 Agent 已断开时，自动通过 Cursor CLI 拉起新会话
-3. 支持 `--resume` 模式延续上一次会话上下文
+2. 消息先落**文件队列**（至少一次投递）：Agent 挂阻塞 poll 才确认删除，掉线未确认的消息会在新会话重投
+3. 收到新消息且 Agent 已断开时，自动通过 Agent SDK / Cursor CLI 拉起新会话，`Resume` 延续上下文
+4. 会话保活策略可按通道配置：保留会话（Resume 延续）与长连接保活（无限 poll）均可开关
 
 ## 设置页面
 
@@ -366,15 +326,18 @@ Daemon 进程独立于 Cursor 运行，即使 Agent 会话中断，系统也能�
 
 | Tab | 功能 |
 |-----|------|
-| 通用 | 飞书凭据、微信接入、主用户绑定、工作目录、数字身份、群聊开关、关闭行为、应用更新 |
+| 通用 | 主工作目录、开机自启、关闭窗口行为 |
 | 网络 | HTTP/HTTPS 代理、NO_PROXY 配置 |
-| Agent | 模型选择（主模型 / 其他用户模型 / 定时任务模型）、驱动模式（CLI / SDK）、会话模式 |
+| Agent | Agent 资源管理（Cursor API Key / 本机 CLI）、默认模型、定时任务模型 |
+| 消息通道 | 多通道管理：飞书 / 微信凭据、主用户绑定、模型与工作目录、数字身份、群聊开关、保活策略、思考展示开关 |
+| 项目 | 项目列表（切换 / 修改 / 删除）、工作区与仓库配置、流程组与节点编辑、GitLab Token |
 | MCP | MCP 服务器可视化管理（启停 / 编辑 / 认证 / 工具列表） |
 | Rules | Cursor Rules 文件管理 |
 | Skills | Agent Skills 文件树管理 |
 | 定时任务 | Cron 任务编辑、运行预览、手动触发、状态监控 |
-| 工作流 | 工作流定义编辑（YAML）、实例状态、▶ 启动运行 |
+| 工具箱 | `lark-cli` / `meegle` 一键安装与更新、Node.js 环境检测 |
 | 帮助引导 | 飞书权限/事件订阅配置参考、重新进入引导 |
+| 关于 | 版本信息、检查更新 / 一键更新 |
 
 ## 平台接入配置
 
@@ -390,10 +353,13 @@ Daemon 进程独立于 Cursor 运行，即使 Agent 会话中断，系统也能�
 | `im:message` | 发送消息（create / reply） |
 | `im:message.p2p_msg:readonly` | 接收私聊消息 |
 | `im:message.group_at_msg:readonly` | 接收群聊 @消息 |
+| `im:message.group_at_msg.include_bot:readonly` | 接收其他机器人 @本机器人的群消息（AI 间协作） |
 | `im:resource` | 上传/下载图片与文件 |
 | `im:chat:read` | 获取群聊名称 |
 | `im:chat:create` | 创建项目独立群 |
-| `contact:contact.base:readonly` | 获取用户名（私聊会话显示） |
+| `contact:contact.base:readonly` | 获取通讯录基本信息（需同时配置通讯录数据范围） |
+| `contact:user.base:readonly` | 获取用户基本信息（姓名/昵称，私聊会话显示） |
+| `cardkit:card:write` | 创建与更新 CardKit 流式卡片（Agent 进度卡） |
 
 <details>
 <summary>批量导入权限 JSON</summary>
@@ -405,10 +371,13 @@ Daemon 进程独立于 Cursor 运行，即使 Agent 会话中断，系统也能�
       "im:message",
       "im:message.p2p_msg:readonly",
       "im:message.group_at_msg:readonly",
+      "im:message.group_at_msg.include_bot:readonly",
       "im:resource",
       "im:chat:read",
       "im:chat:create",
-      "contact:contact.base:readonly"
+      "contact:contact.base:readonly",
+      "contact:user.base:readonly",
+      "cardkit:card:write"
     ],
     "user": []
   }
@@ -424,12 +393,13 @@ Daemon 进程独立于 Cursor 运行，即使 Agent 会话中断，系统也能�
    - 开通「获取群组中用户@机器人消息」
 
    > **注意：** 配置事件订阅前需先启动 Daemon，否则飞书无法验证 WebSocket 连接。
+   > 卡片按钮回调（`card.action.trigger`）同样走长连接自动接收，无需额外配置回调地址。
 
 6. 在「版本管理与发布」中发布应用
 
 ### 微信
 
-1. 在设置页面「通用」Tab 中找到微信接入区域
+1. 在设置页「消息通道」Tab 中添加微信通道
 2. 填入 iLink Token 和 Account ID（从微信 iLink 平台获取）
 3. 点击「连接」，扫码登录
 4. 登录成功后微信消息即可与 Agent 交互
@@ -452,11 +422,10 @@ Daemon 进程独立于 Cursor 运行，即使 Agent 会话中断，系统也能�
 
 常见原因：
 - **上下文窗口超限**：超长会话会被自动截断，建议复杂任务拆分或使用 `.cursor/memory.md` 持久化关键信息
-- **工具调用过多**：单次会话中工具调用次数过多可能触发 Cursor 安全机制
-- **网络波动**：本地网络不稳定可能导致 MCP stdio 通信中断
-- **Cursor 更新/重启**：IDE 自动更新会中断当前会话
+- **工具调用过多**：单次会话中工具调用次数过多可能触发安全机制
+- **网络波动**：本地网络不稳定可能导致 SDK / MCP 通信中断
 
-> 应用可在 Agent 断开后自动拉起新会话。
+> 应用会在 Agent 断开后自动拉起新会话；未确认的消息不会丢失，会重投给新会话。
 
 </details>
 
@@ -502,7 +471,7 @@ Daemon 进程独立于 Cursor 运行，即使 Agent 会话中断，系统也能�
 
 - **凭据安全**：App Secret / iLink Token 是敏感信息，应用会加密存储
 - **网络要求**：Daemon 需保持与飞书 / 微信服务器的网络连接，企业网络如有代理限制，可在设置中配置代理
-- **Cursor CLI 依赖**：自动拉起 Agent 功能依赖 Cursor CLI，可在向导中一键安装
+- **AI 接入方式**：推荐使用 Cursor API Key（SDK 直跑）；也可绑定本机 Cursor CLI 作为 Agent 资源
 
 ## 开发
 
