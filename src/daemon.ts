@@ -24,6 +24,7 @@ import {
   getQueueCounts,
   getQueueMessages as getFileQueueMessages,
   deleteQueueMessage as deleteFileQueueMessage,
+  releaseClaimedMessages,
   getDistinctSessions,
   hasSessionQueueDir,
   cleanupStaleMessages,
@@ -491,17 +492,17 @@ function markSessionContextRestored(sessionKey: string): void {
   sessionContextRestoredAt.set(key, Date.now());
 }
 
-/** 一次性消费：标记存在且未过期返回 true（顺手清过期项） */
-function consumeSessionContextRestored(sessionKey: string): boolean {
+/** 一次性消费：标记存在且未过期时返回标记时刻（作为 freshSince 分界），否则 undefined（顺手清过期项） */
+function consumeSessionContextRestored(sessionKey: string): number | undefined {
   const now = Date.now();
   for (const [k, at] of sessionContextRestoredAt) {
     if (now - at > CONTEXT_RESTORED_TTL_MS) sessionContextRestoredAt.delete(k);
   }
   const key = normalizeSessionKey(sessionKey) || sessionKey;
   const at = sessionContextRestoredAt.get(key);
-  if (at === undefined) return false;
+  if (at === undefined) return undefined;
   sessionContextRestoredAt.delete(key);
-  return now - at <= CONTEXT_RESTORED_TTL_MS;
+  return now - at <= CONTEXT_RESTORED_TTL_MS ? at : undefined;
 }
 
 // ── 完成确认 ────────────────────────────────────────────
@@ -3417,6 +3418,24 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     return true;
   }
 
+  // 会话进程被杀（换模型/reset/stop）：掐掉残留 poll 连接 + .claimed 回退 pending。
+  // 不掐则旧 run 里 AI 挂的 curl 成孤儿继续领消息（投到无人读的 stdout = 静默丢）；
+  // 必须先掐连接再回退，否则回退出的 .qmsg 会被垂死连接立刻再领走。
+  if (method === "POST" && pathname === "/api/session-poll-release") {
+    const body = JSON.parse(await readBody(req));
+    const { session_key } = body as { session_key?: string };
+    if (!session_key) { json(res, { ok: false, error: "session_key required" }, 400); return true; }
+    const sk = normalizeSessionKey(session_key) || session_key;
+    terminateSession(sk);
+    const released = releaseClaimedMessages(sk);
+    if (released > 0) {
+      log("INFO", `会话收口: ${released} 条处理中消息回退待投递, session=${sk}`);
+      broadcastQueueEvent(sk);
+    }
+    json(res, { ok: true, released });
+    return true;
+  }
+
   if (method === "GET" && pathname === "/api/session-last-reply") {
     const sk = new URL(req.url ?? "", "http://localhost").searchParams.get("sessionKey") || "";
     json(res, { lastReplyAt: sk ? (sessionLastReplyAt.get(sk) ?? null) : null });
@@ -3480,21 +3499,22 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     // 非阻塞（冷启动/唤醒检查）：领取不删——.qmsg→.claimed，返回全部处理中消息（含重投，按时间升序）。
     // Agent 干完后挂阻塞 poll 时才隐式确认删除（含上轮未完成的重投）。
     if (!blocking) {
-      // Resume 唤醒（上下文完整）：只投新消息，处理中的 .claimed 不重投（Agent 记得手头的活）
-      const freshOnly = consumeSessionContextRestored(sessionKeyFilter);
-      const messages = claimSessionMessages(sessionKeyFilter, { freshOnly });
+      // Resume 唤醒（上下文完整）：标记时刻前投递的 .claimed 不重投（Agent 记得手头的活）；
+      // 标记后才投出的（如被残留孤儿连接领走）不可能在上下文里，照常重投防丢
+      const restoredAt = consumeSessionContextRestored(sessionKeyFilter);
+      const messages = claimSessionMessages(sessionKeyFilter, { freshSince: restoredAt });
       let freshIds: string[] = [];
       if (messages.length > 0) {
         freshIds = collectFreshAndTrack(messages, sessionKeyFilter);
-        log("INFO", `消息已投递(instant${freshOnly ? "/fresh-only" : ""}): count=${messages.length} session=${sessionKeyFilter}`);
+        log("INFO", `消息已投递(instant${restoredAt !== undefined ? "/fresh-since" : ""}): count=${messages.length} session=${sessionKeyFilter}`);
         addReactionToMessages(freshIds, sessionKeyFilter, "Get");
         // 仅新消息触发收口换卡；干活途中自查拉到的重投属于当前回合，不能换卡
         if (freshIds.length > 0) {
           expireOpenCardQuestionsForSession(sessionKeyFilter, "已有新消息，问题已关闭");
           sealActiveStreamCardOnDelivery(sessionKeyFilter);
         }
-      } else if (freshOnly) {
-        log("INFO", `Resume 唤醒无新消息，处理中消息不重投: session=${sessionKeyFilter}`);
+      } else if (restoredAt !== undefined) {
+        log("INFO", `Resume 唤醒无新消息，Resume 前的处理中消息不重投: session=${sessionKeyFilter}`);
       }
       json(res, { messages, keepAlive, freshIds });
       return true;

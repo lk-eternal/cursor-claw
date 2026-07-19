@@ -7,7 +7,7 @@ import { createRequire } from "node:module"
 import { pushUiLog, broadcastLog, broadcastSessionStatus } from "./ui-logger"
 import { type ChatType, type LaunchMeta, buildPrompt, resolveSessionChatName } from "./agent-launcher"
 import { getAgentResource, resolveChannelForSession } from "./config-store"
-import { readLockFile, httpPost } from "./daemon-client"
+import { readLockFile, httpPost, notifySessionPollRelease } from "./daemon-client"
 import {
   initSessionModelStore,
   resolveModelForSession,
@@ -1212,6 +1212,8 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
 
 /** 停止并释放会话：先等 cancel 把 run 落为终态再关进程（直接 close 会残留 active run，拖垮下次 Resume） */
 function releaseSession(s: SdkSessionAgent): Promise<void> {
+  // 进程将死，先让 daemon 掐掉本会话残留 poll 连接并回退处理中消息，防孤儿 curl 偷走新消息
+  notifySessionPollRelease(s.sessionKey)
   s.abortController.abort()
   if (s.streamAgg?.timer) {
     clearTimeout(s.streamAgg.timer)

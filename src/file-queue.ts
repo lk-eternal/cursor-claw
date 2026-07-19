@@ -240,11 +240,14 @@ function hasNewMessages(dir: string): boolean {
  * 消息在 Agent 下一次挂阻塞 poll 时隐式确认删除（Agent 干完手头活才会挂 poll）；
  * 未确认则下次领取重新投递，因此幽灵连接领走也不会丢——这是"至少一次"投递的核心。
  *
- * freshOnly：只返回本次新领取的 .qmsg（历史 .claimed 留存不重投）。
- * 用于 Resume 唤醒——上下文完整时 Agent 记得处理中的活，重投反而造成重复处理；
+ * 返回的每个文件都会刷 mtime = 本次投递时刻，供 freshSince 分界。
+ *
+ * freshSince：Resume 唤醒（上下文完整）时传标记时刻 T——
+ * 投递时刻（mtime）≤ T 的 .claimed 是 Resume 前投出的，Agent 上下文里记得，不重投防重复处理；
+ * mtime > T 的是 Resume 后才投出的（如被残留孤儿连接领走），不可能在上下文里，必须重投防丢。
  * 留存的 .claimed 仍由下一次阻塞 poll 统一确认删除，接续保障不变。
  */
-export function claimSessionMessages(filterSessionKey?: string, opts?: { freshOnly?: boolean }): QueueMessage[] {
+export function claimSessionMessages(filterSessionKey?: string, opts?: { freshSince?: number }): QueueMessage[] {
   if (!queueDir) return [];
   const dir = getSessionDir(filterSessionKey);
 
@@ -272,15 +275,46 @@ export function claimSessionMessages(filterSessionKey?: string, opts?: { freshOn
   } catch {
     return [];
   }
-  if (opts?.freshOnly) claimed = claimed.filter((f) => freshClaimed.has(f));
+  const since = opts?.freshSince;
+  if (since !== undefined) {
+    claimed = claimed.filter((f) => {
+      if (freshClaimed.has(f)) return true;
+      try { return fs.statSync(path.join(dir, f)).mtimeMs > since; } catch { return true; }
+    });
+  }
 
+  const now = new Date();
   const items: QueueMessage[] = [];
   for (const f of claimed) {
-    const parsed = parseMessageFile(path.join(dir, f));
-    if (parsed) items.push(parsed);
+    const fp = path.join(dir, f);
+    const parsed = parseMessageFile(fp);
+    if (!parsed) continue;
+    items.push(parsed);
+    try { fs.utimesSync(fp, now, now); } catch { /* ignore */ }
   }
   items.sort((a, b) => a.timestamp - b.timestamp);
   return items;
+}
+
+/**
+ * 回退已投递未确认的消息：.claimed → .qmsg（文件名时间戳不变，顺序保持）。
+ * 会话进程被杀（换模型/reset/stop/pack 重启）时调用——正在挂着的 poll 连接即将变孤儿，
+ * 投给它们的消息 Agent 不可能再读到，回退 pending 让下一轮必然重投。
+ */
+export function releaseClaimedMessages(filterSessionKey?: string): number {
+  if (!queueDir) return 0;
+  const dir = getSessionDir(filterSessionKey);
+  let count = 0;
+  try {
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith(".claimed")) continue;
+      try {
+        fs.renameSync(path.join(dir, f), path.join(dir, f.replace(/\.claimed$/, ".qmsg")));
+        count++;
+      } catch { /* 并发确认删除，忽略 */ }
+    }
+  } catch { /* ignore */ }
+  return count;
 }
 
 /**
