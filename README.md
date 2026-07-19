@@ -1,83 +1,82 @@
 # Cursor Claw
 
-远程协作应用 —— 将 Cursor 变成 7×24 小时在线的数字雇员，通过飞书 / 微信随时随地与 AI 协作。
+把 Cursor 变成 7×24 小时在线的数字雇员 —— 在飞书 / 微信里随时随地指挥 AI 干活。
 
-## 为什么需要它？
+Cursor Agent 的交互被锁死在本地 IDE 里，人一离开电脑，协作就停了。**Cursor Claw** 把整条交互搬到你的手机上：AI 干活时实时看到它的思考与操作，AI 有问题时手机上点个按钮就能拍板，会话断了自动重连接着干。
 
-Cursor Agent 的交互被锁死在本地 IDE 中，一旦离开电脑，所有 AI 协作都会停滞。
+## 效果展示
 
-**Cursor Claw** 打破了这种限制：
+| 流式进度卡：实时看 AI 思考与工具调用 | 提问卡片：手机上点按钮拍板 |
+|---|---|
+| <img src="docs/screenshots/stream-card.png" width="360" /> | <img src="docs/screenshots/question-card.png" width="360" /> |
 
-- AI 的提问会通过飞书机器人或微信发到你手机上，你回复后 AI 自动继续工作
-- 基于 Cursor Agent SDK 驱动，飞书侧实时展示**流式进度卡**（思考过程 / 工具调用时间线）
-- 即使会话断开，守护进程也能自动重连拉起新会话，`Resume` 延续上下文
-- 支持私聊 + 群聊 + 项目多会话并行，每个会话独立工作区
-- 支持**项目工作区**：一个需求一个 git worktree，规划 → 实现 → 审查 → 提测等节点化推进，可绑定项目独立群协作
-- 支持定时任务和临时独立 Agent，让 AI 按计划自动执行
-- 通过飞书 / 微信指令系统远程管理会话、项目、MCP、模型、定时任务
-- 多通道并行：可同时接入多个飞书机器人 + 微信账号，每个通道独立配置模型与工作目录
+| 状态卡片：随时掌握运行状态 | 项目菜单：节点按钮推进研发流程 |
+|---|---|
+| <img src="docs/screenshots/status-card.png" width="360" /> | <img src="docs/screenshots/project-menu.png" width="360" /> |
 
-## 功能特性
+Dashboard：通道 / 会话 / 分支 / 模型与实时日志一目了然
 
-| 功能 | 说明                                                     |
-|------|--------------------------------------------------------|
-| 可视化配置 | 5 步初始化向导 + 完整设置页面，零手写配置                                |
-| SDK 驱动 | 基于 `@cursor/sdk` 在应用内直跑 Agent（API Key 接入），本机 Cursor CLI 可作为备选资源 |
-| 流式进度卡 | 飞书 CardKit 流式卡片实时展示思考过程与工具调用时间线，回复自动并入卡片，可按通道关闭思考展示 |
-| 多会话管理 | 私聊 / 群聊 / 项目 / 定时任务 / 临时会话并行运行，Dashboard 实时展示活跃会话与日志 |
-| 多通道消息桥接 | 多个飞书机器人 + 微信账号同时运行，发文本 / 图片 / 文件，消息按 `session_key` 自动路由 |
-| 项目工作区 | `/p` 建项，一个需求一个 git worktree（支持多仓），节点化推进（规划/实现/审查/提测…），可绑定项目独立群 |
-| 自动重连 | Agent 断开后自动拉起新会话，`Resume` 延续上下文；处理中消息掉线不丢（至少一次投递） |
-| 指令系统 | 发送 `/status` `/chat` `/project` `/model` 等 14 组指令远程控制，均有单字母缩写 |
-| 定时任务 | Cron 表达式调度，支持独立 Agent 模式，可视化编辑 + 运行预览                  |
-| MCP 管理 | 可视化管理 MCP 服务器（JSON 编辑 / 启停 / OAuth 认证 / 工具列表）          |
-| Rule & Skill | 管理 Cursor Rules 和 Agent Skills，支持文件树浏览和编辑              |
-| 自管理能力 | Agent 可通过 MCP 工具管理自身（MCP/Rules/Skills/Tasks/Workspace） |
-| AI 间协作 | 群内机器人可互相 @ 派活（需开通机器人互收消息权限），消息带协作机器人名册         |
-| 数字身份 | 为群聊和非主用户会话注入自定义角色定义                                    |
-| 工作区注入 | 自动写入 `.cursor/mcp.json`、Loop 协议规则和自管理 Skill            |
-| 工具箱 | 一键安装 / 更新 `lark-cli`（飞书全家桶 CLI）与 `meegle`（飞书项目 CLI）    |
-| 应用隔离 | 支持多开，通过启动参数 `--profile=xxx` 隔离多个应用数据                   |
-| 应用内更新 | 支持检查更新 / 一键更新，Homebrew 用户可通过 brew 升级                   |
-| 系统托盘 | 关闭窗口可最小化到托盘，后台持续运行                                     |
+<img src="docs/screenshots/dashboard.png" width="760" />
 
-## 架构
+## 它能做什么
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Electron 应用                                               │
-│  · 配置向导 / Dashboard / 设置（React + Tailwind）           │
-│  · Agent SDK 会话池（@cursor/sdk 直跑，流式事件 → 进度卡）   │
-│  · 管理 Daemon 生命周期、Cron 调度、项目工作区               │
-│  · 自动注入 .cursor/mcp.json、Rules 和 Skills                │
-└──────────────┬──────────────────────────────┬───────────────┘
-               │ spawn                        │ 写入工作区
-               ▼                              ▼
-┌──────────────────────────┐    ┌─────────────────────────────┐
-│  Daemon 守护进程          │    │  .cursor/                    │
-│  · 飞书 WebSocket 长连接  │    │  ├── mcp.json                │
-│    （可多个飞书通道）     │    │  ├── rules/                  │
-│  · 微信 iLink 长轮询      │    │  │   └── cursor-claw.mdc     │
-│  · 本机 HTTP API + MCP    │    │  └── skills/                 │
-│  · 文件消息队列           │    │      └── cursor-claw-admin │
-│    （至少一次投递）       │    └─────────────────────────────┘
-│  · 指令路由 / 卡片回调    │
-│  · CardKit 流式进度卡     │         Agent 通过 HTTP / MCP
-│  · 会话保活（自动重连）   │◄──── 连接 127.0.0.1:19528：
-└──────────────────────────┘         · send_text / send_question
-                                     · poll-message（拉取消息）
-                                     · project_* / manage_* 工具
-```
+### 随时随地与 AI 协作
 
-**多会话模型：**
+- 给飞书机器人或微信发消息，AI 在你配置的工作目录里干活，结果直接回到手机
+- AI 需要决策时发**选项卡片**，点按钮即回复；也可以直接打字插话
+- 发图片、发文件双向都支持：截图给 AI 看，AI 把产物文件发回给你
+- 消息「至少一次投递」：AI 掉线、应用重启，没处理完的消息都会重投，不静默丢失
 
-```
-Daemon ──┬── 主用户私聊 Agent（使用配置的工作目录）
-         ├── 群聊 Agent A / B（自动创建隔离工作目录）
-         ├── 项目 Agent（独立 git worktree，可绑定项目专属群）
-         ├── 定时任务 Agent（可独立会话）
-         └── 临时会话 Agent（/chat new 或 MCP launch 触发）
-```
+### 流式进度卡
+
+基于 Cursor Agent SDK 直跑 + 飞书 CardKit 流式卡片：
+
+- AI 的**思考过程、每一次工具调用**按时间线实时刷新在一张卡片里
+- 回复自动并入卡片正文，长对话超出卡片容量时自动收敛（越新的内容精度越高）
+- 不想看思考过程可以按通道一键关闭
+
+### 项目工作区
+
+把「一个需求」封装成独立协作单元：**一个项目 = 一个 git worktree（可多仓）+ 一条 feature 分支 + 一个专属会话**。
+
+- `/p new` 走飞书表单建项，自动隔离检出，与主仓互不干扰
+- 点节点按钮推进流程：规划 → 实现 → 审查 → 部署 → 提测…（节点组可自定义，内置「开发」「测试」两组）
+- 可自动创建**项目专属飞书群**，群内消息强制路由到本项目，与私聊隔离
+- 节点产物（文档 / MR / 文件）登记后自动注入后续节点的上下文
+- 基线分支红线保护：只作切 feature 起点，禁止直接推送
+
+### 多会话与多通道
+
+- 私聊 / 群聊 / 项目 / 定时任务 / 临时会话并行运行，各自独立工作目录与上下文
+- 多个飞书机器人 + 微信账号同时接入，每个通道独立配置模型、工作目录、保活策略
+- 群聊里多个机器人可以互相 @ 派活（AI 间协作），消息自带协作机器人名册
+- 为群聊和非主用户会话注入自定义**数字身份**（角色定义）
+
+### 定时与自动化
+
+- Cron 表达式定时任务：让 AI 每天自动巡检、写日报、跑脚本，支持独立会话模式
+- `/c new <任务>` 随手开临时会话，执行完自动收尾回到原会话
+- Agent 可通过 MCP 工具**自管理**：改自己的 MCP 配置、Rules、Skills、定时任务、工作目录
+
+### 远程指令系统
+
+不依赖 Agent 运行，直接由守护进程响应，每个指令都有单字母缩写：
+
+| 指令 | 缩写 | 说明 |
+|------|------|------|
+| `/status` | `/s` | 查看运行状态（飞书返回可刷新的状态卡片） |
+| `/chat` | `/c` | 会话管理：`ls` 列表 / `<序号>` 切换 / `new <描述>` 开临时会话 / `main` 回主会话 |
+| `/project` | `/p` | 项目工作区：`new` / `ls` / `use` / `leave` 及各节点推进 |
+| `/task` | `/t` | 定时任务：`ls` 列表 / `trigger <id>` 手动触发 |
+| `/model` | `/m` | 模型管理：`ls` / `info` / `set <序号>`（仅当前会话生效） |
+| `/mcp` | `/mc` | MCP 服务器管理：`ls` / `enable` / `disable` / `add` / `delete` |
+| `/workspace` | `/w` | 查看 / 切换工作目录 |
+| `/list` | `/ls` | 查看队列中的待处理消息 |
+| `/stop` | `/x` | 停止运行中的 Agent |
+| `/clean` | `/cl` | 清空消息队列 |
+| `/reset` | `/r` | 重置会话（下次拉起不延续上下文） |
+| `/restart` | `/rr` | 停止 Agent → 清空队列 → 重启守护进程 |
+| `/help` | `/h` | 列出所有指令 |
 
 ## 安装
 
@@ -109,6 +108,7 @@ xattr -cr /Applications/Cursor\ Claw.app
 完成后即可在「应用程序」中正常启动。
 
 #### macOS 通过 Homebrew 安装
+
 ##### 初次安装
 
 ```bash
@@ -118,7 +118,7 @@ brew tap lk-eternal/tap
 # 2. 信任 tap
 brew trust --cask lk-eternal/tap/cursor-claw
 
-# 2. 安装
+# 3. 安装
 brew install --cask cursor-claw
 ```
 
@@ -127,7 +127,6 @@ brew install --cask cursor-claw
 ##### 更新到最新版本
 
 ```bash
-# 常规升级（推荐）
 brew update && brew upgrade --cask cursor-claw
 ```
 
@@ -140,7 +139,8 @@ brew uninstall --cask cursor-claw
 brew untap lk-eternal/tap   # 可选，移除 tap 源
 ```
 
-##### FAQ
+<details>
+<summary>Homebrew FAQ</summary>
 
 ###### Q: `brew upgrade` 提示已是最新，但实际还是旧版本？
 
@@ -159,10 +159,7 @@ brew reinstall --cask cursor-claw
 
 ###### Q: `brew update` 时出现 `Warning: No remote 'origin'` 导致 tap 无法更新？
 
-这是 Homebrew 本地 git 仓库的问题，需要手动修复：
-
 ```bash
-# 删除损坏的 tap 并重新添加
 brew untap lk-eternal/tap
 brew tap lk-eternal/tap
 brew trust --cask lk-eternal/tap/cursor-claw
@@ -183,18 +180,11 @@ brew upgrade --cask cursor-claw
 brew info --cask cursor-claw
 ```
 
-输出中 `cursor-claw: x.x.x` 即为 tap 中的最新版本，`Installed` 下方的路径显示本地已安装的版本。
+###### Q: Apple Silicon 和 Intel Mac 都支持吗？
 
-###### Q: Apple Silicon (M1/M2/M3/M4) 和 Intel Mac 都支持吗？
+是的，Cask 会自动根据芯片架构下载对应的 dmg：Apple Silicon → `*-arm64.dmg`，Intel → `*.dmg`。
 
-是的，Cask 会自动根据芯片架构下载对应的 dmg：
-- **Apple Silicon** → `*-arm64.dmg`
-- **Intel** → `*.dmg`
-
-###### Q: macOS 提示"无法打开，因为无法验证开发者"？
-
-参见上方[「首次启动：信任应用」](#macos-首次启动信任应用必读)：先尝试 `xattr -cr /Applications/Cursor\ Claw.app`；命令失败或无效时，到「系统设置 → 隐私与安全性 → 安全性」找到被阻止的提示并点「仍要打开」。
-
+</details>
 
 ## 快速开始
 
@@ -203,140 +193,83 @@ brew info --cask cursor-claw
    - **选工作文件夹**：选择 AI 的默认工作目录
    - **接入 AI**：填入 Cursor API Key（SDK 直跑，无需本机 IDE 常驻）
    - **连上飞书**：填入自建应用 App ID / App Secret，按引导开通权限与事件订阅
-   - **绑定你自己**：扫码 / 私聊机器人完成主用户绑定
+   - **绑定你自己**：私聊机器人完成主用户绑定
    - **装点工具**：一键安装 `lark-cli` / `meegle`（可跳过，之后在工具箱补装）
 3. （可选）在设置页「消息通道」中添加更多飞书机器人或微信账号
-4. 在 Dashboard 查看运行状态，通过飞书或微信开始协作
+4. 给机器人发条消息，开始协作；发 `/help` 查看全部指令
 5. （可选）发送 `/p new` 创建项目工作区，体验节点化研发流程
+
+## 工具箱：让 AI 打通飞书生态
+
+设置页「工具箱」可一键安装 / 更新两个命令行工具，装好后 AI 即可直接操作飞书生态，无需写代码调 API：
+
+<img src="docs/screenshots/toolbox.png" width="640" />
+
+### lark-cli — 飞书全家桶 CLI
+
+覆盖飞书开放平台绝大多数能力，AI 用它读写你的飞书数据：
+
+- **文档**：读写云文档 / 知识库 / 云盘，读 PRD、写技术方案、同步变更说明
+- **消息 / 群组**：搜索聊天记录、拉群、发卡片
+- **日历 / 会议**：查日程、订会议室、拉取妙记纪要与逐字稿
+- **表格 / 多维表格**：读写 Sheets 与 Base，做数据统计与报表
+- **邮件 / 任务 / 审批 / OKR**：收发邮件、管理待办、发起审批流
+
+### meegle — 飞书项目 CLI
+
+飞书项目（Meegle）的 Agent-First 命令行：工作项、视图、流程、字段全量管理。AI 用它获取待办需求、更新工作项状态、生成进度报告。
+
+两者配合项目工作区，即可串起「需求文档 → 技术方案 → 编码 → MR → 工作项流转」的完整链路。
 
 ## MCP 工具
 
-### 基础通信工具
+应用自动向工作区注入 MCP 配置，Agent 开箱即用以下工具：
 
-| 工具 | 参数 | 说明 |
-|------|------|------|
-| `send_text` | `text`, `message_id?`, `session_key?` | 发送文本消息，自动路由到飞书或微信 |
-| `send_image` | `image_path`, `message_id?`, `session_key?` | 发送本地图片到飞书 / 微信 |
-| `send_file` | `file_path`, `message_id?`, `session_key?` | 发送本地文件到飞书 / 微信 |
-| `send_question` | `text`, `options`, `message_id?`, `session_key` | 提问并附选项按钮（飞书卡片 / 微信文本降级） |
+### 通信工具
+
+| 工具 | 说明 |
+|------|------|
+| `send_text` | 发送文本消息，自动路由到飞书或微信 |
+| `send_image` / `send_file` | 发送本地图片 / 文件 |
+| `send_question` | 提问并附选项按钮（飞书卡片 / 微信文本降级） |
 
 ### 自管理工具
-
-提供一组管理工具，Agent 可通过这些工具管理自身运行环境：
 
 | 工具 | 说明 |
 |------|------|
 | `manage_agent` | 查询状态、停止 Agent、重启应用、重置会话、清空队列、启动临时会话 |
-| `manage_mcp` | 管理 MCP 服务器配置（列出 / 添加 / 删除） |
-| `manage_rules` | 管理 Cursor Rules 文件（列出 / 读取 / 保存 / 删除） |
-| `manage_skills` | 管理 Agent Skills（列出 / 读取 / 保存 / 删除） |
-| `manage_tasks` | 管理定时任务（列出 / 添加 / 更新 / 删除 / 切换启用） |
-| `manage_workspace` | 查看或切换工作目录（切换后热更新生效） |
+| `manage_mcp` | 管理 MCP 服务器配置 |
+| `manage_rules` / `manage_skills` | 管理 Cursor Rules / Agent Skills |
+| `manage_tasks` | 管理定时任务 |
+| `manage_workspace` | 查看或切换工作目录（热更新生效） |
 
 ### 项目工具
-
-在项目会话中，Agent 使用以下工具读写项目元数据：
 
 | 工具 | 说明 |
 |------|------|
 | `project_get` / `project_list` | 查询项目详情 / 列出所有项目 |
 | `project_update` | 更新项目元数据（目标、文档链接、分支信息等） |
-| `project_register_artifact` | 登记节点产物（路径 / 摘要 / MR 链接 / 飞书文档），供后续节点注入上下文 |
+| `project_register_artifact` | 登记节点产物，供后续节点注入上下文 |
 | `project_delete` | 删除项目（连带移除 worktree，不动主仓与远程分支） |
-
-## 项目工作区
-
-项目工作区把「一个需求」封装为独立协作单元：**一个项目 = 一个 git worktree（可多仓）+ 一条 feature 分支 + 一个专属会话**，通过节点化按钮推进研发流程。
-
-### 核心概念
-
-| 概念 | 说明 |
-|------|------|
-| **项目（Project）** | 名称、目标、需求/文档链接、主仓 + 基线分支、feature 分支、worktree 路径 |
-| **流程组（NodeGroup）** | 节点集合，建项可多选；默认提供「开发」「测试」两组，节点可在设置页自由增删改 |
-| **节点（Node）** | 一个推进动作（如 规划 / 实现 / 审查），点按钮或发 `/p <节点>` 即把对应任务派给项目 Agent |
-| **工作区类型** | `worktree`＝代码开发（主仓隔离检出、分支借还）；`plain`＝纯会话目录（测试/文档协作，无 git） |
-
-默认节点：
-
-- **开发组**：规划 → 实现 → 审查 → 部署 → 提测 → 分析缺陷 → 修复缺陷 → 上线文档
-- **测试组**：测试评审 → 用例编写 → 部署 → 测试 → 提缺陷 → 复测 → 上线文档
-
-### 使用方式
-
-1. **建项**：发送 `/p new` 走飞书表单（或一行命令 `/p new <名> <主仓> <基线> <feature> <目标…>`）
-2. **进入**：`/p ls` 列出项目，`/p use <序号>` 进入；后续消息路由到项目专属会话与 worktree
-3. **推进**：`/p` 打开项目菜单，点节点按钮（规划 / 实现 / 审查…）派发任务
-4. **交付**：Agent 通过 `project_register_artifact` 登记产物，`send_file` / MR 链接交付
-5. **回主会话**：`/p leave` 或 `/c main`
-
-### 关键特性
-
-| 特性 | 说明 |
-|------|------|
-| 隔离检出 | 独立 clone / worktree，与主仓互不干扰，同一分支可两边同时检出 |
-| 多仓支持 | 一个项目可挂多个仓库，各自独立 worktree 与分支配置 |
-| 独立群协作 | 建项可自动创建项目专属飞书群（需 `im:chat:create` 权限），群内消息强制路由到本项目，与私聊互相隔离 |
-| 产物流转 | 节点产物（文档 / MR / 文件）登记后自动注入后续节点的上下文 |
-| 分支红线 | 基线分支只作切 feature 起点，禁止直接作为推送 / MR 目标 |
-| GitLab / 飞书项目集成 | 配合 `lark-cli` / `meegle` / GitLab Token，可打通需求文档 → MR → 工作项流转 |
-
-## 指令系统
-
-在飞书或微信对话中直接发送指令（不区分大小写），由 Daemon 处理无需 Agent 运行；每个指令都有单字母缩写：
-
-| 指令 | 缩写 | 说明 |
-|------|------|------|
-| `/status` | `/s` | 查看 Agent / Daemon 状态（飞书返回可刷新的状态卡片） |
-| `/chat` | `/c` | 会话管理（`ls` 列表 / `<序号>` 切换 / `stop <序号>` / `new <描述>` 开临时会话 / `main` 回主会话） |
-| `/project` | `/p` | 项目工作区（`new` / `ls` / `use` / `leave` / `status` / `setup` / `sync` / `ship` 及各节点推进） |
-| `/task` | `/t` | 定时任务管理（`/task ls` 列表、`/task trigger <id>` 手动触发） |
-| `/model` | `/m` | 模型管理（`ls` / `info` / `set <序号>`） |
-| `/mcp` | `/mc` | MCP 服务器管理（`ls` / `info` / `enable` / `disable` / `add` / `delete`） |
-| `/workspace` | `/w` | 查看 / 切换工作目录 |
-| `/list` | `/ls` | 查看消息队列中的待处理消息 |
-| `/stop` | `/x` | 停止运行中的 Agent |
-| `/clean` | `/cl` | 清空消息队列 |
-| `/reset` | `/r` | 重置会话（下次拉起不延续上下文） |
-| `/restart` | `/rr` | 停止 Agent → 清空队列 → 重启 Daemon |
-| `/help` | `/h` | 列出所有可用指令 |
-
-## 多会话与自动重连
-
-### 多会话模型
-
-- **主用户私聊**：使用通道配置的工作目录，`Resume` 延续会话上下文
-- **群聊**：开启后响应 @消息，每个群自动创建隔离工作目录；群内机器人可互相 @ 协作
-- **项目会话**：独立 git worktree + 专属会话，可绑定项目独立群
-- **定时任务**：按 Cron 表达式触发，支持独立 Agent 模式
-- **临时会话**：通过 `/chat new <描述>` 或 MCP `manage_agent` launch 启动，执行完自动收尾
-
-### 自动重连与消息可靠性
-
-Daemon 进程独立运行，即使 Agent 会话中断，系统也能自动恢复：
-
-1. **Daemon** 通过飞书 WebSocket 长连接 / 微信 iLink 长轮询持续监听消息
-2. 消息先落**文件队列**（至少一次投递）：Agent 挂阻塞 poll 才确认删除，掉线未确认的消息会在新会话重投
-3. 收到新消息且 Agent 已断开时，自动通过 Agent SDK / Cursor CLI 拉起新会话，`Resume` 延续上下文
-4. 会话保活策略可按通道配置：保留会话（Resume 延续）与长连接保活（无限 poll）均可开关
 
 ## 设置页面
 
-应用提供完整的可视化设置，包含以下模块：
+全部配置可视化，无需手写任何配置文件：
+
+<img src="docs/screenshots/settings-channels.png" width="640" />
 
 | Tab | 功能 |
 |-----|------|
 | 通用 | 主工作目录、开机自启、关闭窗口行为 |
 | 网络 | HTTP/HTTPS 代理、NO_PROXY 配置 |
-| Agent | Agent 资源管理（Cursor API Key / 本机 CLI）、默认模型、定时任务模型 |
-| 消息通道 | 多通道管理：飞书 / 微信凭据、主用户绑定、模型与工作目录、数字身份、群聊开关、保活策略、思考展示开关 |
-| 项目 | 项目列表（切换 / 修改 / 删除）、工作区与仓库配置、流程组与节点编辑、GitLab Token |
+| Agent | Agent 资源管理（Cursor API Key / 本机 CLI）、默认模型 |
+| 消息通道 | 多通道管理：凭据、主用户绑定、模型、工作目录、数字身份、群聊开关、保活策略 |
+| 项目 | 项目列表、工作区与仓库配置、流程组与节点编辑、GitLab Token |
 | MCP | MCP 服务器可视化管理（启停 / 编辑 / 认证 / 工具列表） |
-| Rules | Cursor Rules 文件管理 |
-| Skills | Agent Skills 文件树管理 |
-| 定时任务 | Cron 任务编辑、运行预览、手动触发、状态监控 |
+| Rules / Skills | Cursor Rules 与 Agent Skills 文件管理 |
+| 定时任务 | Cron 任务编辑、运行预览、手动触发 |
 | 工具箱 | `lark-cli` / `meegle` 一键安装与更新、Node.js 环境检测 |
-| 帮助引导 | 飞书权限/事件订阅配置参考、重新进入引导 |
+| 帮助引导 | 飞书权限 / 事件订阅配置参考、重新进入引导 |
 | 关于 | 版本信息、检查更新 / 一键更新 |
 
 ## 平台接入配置
@@ -392,7 +325,7 @@ Daemon 进程独立运行，即使 Agent 会话中断，系统也能自动恢复
    - 开通「读取用户发给机器人的单聊消息」
    - 开通「获取群组中用户@机器人消息」
 
-   > **注意：** 配置事件订阅前需先启动 Daemon，否则飞书无法验证 WebSocket 连接。
+   > **注意：** 配置事件订阅前需先启动应用，否则飞书无法验证 WebSocket 连接。
    > 卡片按钮回调（`card.action.trigger`）同样走长连接自动接收，无需额外配置回调地址。
 
 6. 在「版本管理与发布」中发布应用
@@ -404,16 +337,15 @@ Daemon 进程独立运行，即使 Agent 会话中断，系统也能自动恢复
 3. 点击「连接」，扫码登录
 4. 登录成功后微信消息即可与 Agent 交互
 
-> 微信通道使用微信ClawBot，通过长轮询方式接收消息。
+## 工作原理
 
-## 全链路研发自动化
+三层结构，职责简单清晰：
 
-配合以下 MCP 服务，可实现从需求分析到代码交付的全链路自动化：
+- **Electron 应用**：可视化配置 + Agent SDK 会话池（`@cursor/sdk` 直跑，流式事件转进度卡）+ Cron 调度 + 项目 worktree 管理
+- **守护进程（Daemon）**：飞书 WebSocket 长连接 / 微信长轮询收消息 → 落**文件消息队列**（至少一次投递）→ 本机 HTTP + MCP 服务供 Agent 收发消息
+- **工作区注入**：自动写入 `.cursor/mcp.json`、Loop 协议规则与自管理 Skill，Agent 启动即具备全部远程协作能力
 
-- **飞书文档 MCP**：读取 PRD、撰写技术方案、同步变更说明
-  - 配置入口：[https://open.feishu.cn/page/mcp](https://open.feishu.cn/page/mcp)
-- **飞书项目 MCP**：获取待办任务、更新工作项状态、生成进度报告
-  - 配置入口：[https://project.feishu.cn/b/mcp](https://project.feishu.cn/b/mcp)
+消息可靠性：消息先落盘再投递，Agent 挂阻塞 poll 才确认删除；掉线未确认的消息会重投给新会话。Agent 断开后守护进程自动拉起新会话，`Resume` 延续上下文。会话保活策略可按通道配置。
 
 ## 常见问题
 
@@ -437,7 +369,7 @@ Daemon 进程独立运行，即使 Agent 会话中断，系统也能自动恢复
 2. 确认已开通「读取用户发给机器人的单聊消息」和「获取群组中用户@机器人消息」
 3. 确认应用已发布（未发布的应用无法接收消息）
 4. 确认所有权限已添加并发布
-5. 确认 Daemon 已启动且飞书 WebSocket 连接成功
+5. 确认应用已启动且飞书 WebSocket 连接成功
 6. 确认是在机器人私聊窗口或群聊 @机器人 发送消息
 
 </details>
@@ -449,7 +381,7 @@ Daemon 进程独立运行，即使 Agent 会话中断，系统也能自动恢复
 1. 确认 iLink Token 和 Account ID 已正确填入设置页面
 2. 确认已点击「连接」并成功扫码登录
 3. 确认设置页面显示微信状态为「已连接」
-4. 确认 Daemon 已启动
+4. 确认守护进程已启动
 
 </details>
 
@@ -463,15 +395,16 @@ Daemon 进程独立运行，即使 Agent 会话中断，系统也能自动恢复
 <details>
 <summary>群聊消息如何路由？</summary>
 
-每个群聊会创建独立的 Agent 会话和工作目录。消息通过 `session_key` 路由到对应会话，Agent 回复时需携带 `message_id` 或 `session_key` 以确保消息发送到正确的群（飞书群）或群聊（微信群）。
+每个群聊会创建独立的 Agent 会话和工作目录。消息通过 `session_key` 路由到对应会话，Agent 回复时携带 `message_id` / `session_key` 确保消息发到正确的群。
 
 </details>
 
 ## 注意事项
 
-- **凭据安全**：App Secret / iLink Token 是敏感信息，应用会加密存储
-- **网络要求**：Daemon 需保持与飞书 / 微信服务器的网络连接，企业网络如有代理限制，可在设置中配置代理
+- **凭据安全**：App Secret / iLink Token / API Key 等敏感信息使用系统级加密（Windows DPAPI / macOS Keychain）落盘
+- **网络要求**：需保持与飞书 / 微信服务器的网络连接，企业网络如有代理限制，可在设置中配置代理
 - **AI 接入方式**：推荐使用 Cursor API Key（SDK 直跑）；也可绑定本机 Cursor CLI 作为 Agent 资源
+- **应用隔离**：支持多开，通过启动参数 `--profile=xxx` 隔离多个应用数据
 
 ## 开发
 
