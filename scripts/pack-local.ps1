@@ -7,6 +7,13 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 
+# Agent/IDE 壳常把 PATH 堆满重复 .bin，嵌套 npm 时 CreateProcess 截断后会找不到 rimraf/npm
+$machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if ($machinePath -or $userPath) {
+  $env:Path = (@($machinePath, $userPath) | Where-Object { $_ }) -join ";"
+}
+
 $LogDir = Join-Path $Root "temp"
 if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir | Out-Null }
 $LogFile = Join-Path $LogDir ("pack-local-{0:yyyyMMdd-HHmmss}.log" -f (Get-Date))

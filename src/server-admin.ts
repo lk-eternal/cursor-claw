@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
 import { LOCK_FILE_NAME } from "./shared/constants.js";
+import { parseChatKey } from "./shared/channel-types.js";
 
 const APP_DATA_DIR = process.env.APP_DATA_DIR ?? "";
 
@@ -80,7 +81,8 @@ export function registerAdminTools(mcpServer: McpServer): void {
         if (action === "launch") {
           if (!message?.trim()) return txt("❌ launch 操作需要提供 message 参数");
           const chatId = session_key?.includes("::") ? session_key.split("::")[0] : session_key;
-          const res = await daemonPost("/api/agent", { action: "launch", message, chatId });
+          const channelId = chatId ? parseChatKey(chatId).channelId : undefined;
+          const res = await daemonPost("/api/agent", { action: "launch", message, chatId, channelId });
           return txt(res.ok ? `✅ 临时 Agent 已启动` : `❌ ${res.error ?? "启动失败"}`);
         }
         const res = await daemonPost("/api/agent", { action });

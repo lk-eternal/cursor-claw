@@ -425,8 +425,10 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
   // 项目会话 / 独立群：不算「其他人使用」，不注入数字身份，用主模型
   const projectOwned = chatType === "project" || !!boundProject
 
-  // 通道与 Agent 资源解析
-  const channel: MessageChannel | undefined = getChannel(p.channelId) ?? resolveChannelForSession(sessionKey)
+  // 通道与 Agent 资源解析（temp/task 的 sessionKey 无 ch_ 前缀时，从 meta.chatId 兜底）
+  const channel: MessageChannel | undefined = getChannel(p.channelId)
+    ?? resolveChannelForSession(sessionKey)
+    ?? (meta?.chatId ? getChannel(parseChatKey(meta.chatId).channelId) : undefined)
   const resource = getAgentResource(channel?.agentResourceId)
 
   const isOwnTask = chatType === "task" || chatType === "temp" || chatType === "project" || projectOwned
@@ -949,7 +951,8 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
     const taskMsg = tokens.slice(2).join(" ").trim()
     if (!taskMsg) { await reply(false, "💡 用法：/c new <任务描述>\n例如：/c new 帮我检查一下服务器状态"); return }
     const taskId = `temp_${Date.now()}`
-    const result = await launchIndependentAgent(taskId, "临时会话", taskMsg, "temp", chatId)
+    const channelId = chatId ? parseChatKey(chatId).channelId : undefined
+    const result = await launchIndependentAgent(taskId, "临时会话", taskMsg, "temp", chatId, channelId)
     if (result.ok && chatId) {
       const currentActive = await getCurrentActiveSession(port, chatId)
       if (currentActive && currentActive !== taskId) previousActiveSessionMap.set(taskId, currentActive)

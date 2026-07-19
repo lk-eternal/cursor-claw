@@ -3028,10 +3028,15 @@ async function handleAgentAdmin(_method: string, req: http.IncomingMessage, res:
   const supportedActions = ["stop", "restart", "reset", "clean", "launch"];
 
   if (action === "launch") {
-    const { message, chatId } = body as { message?: string; chatId?: string };
+    const { message, chatId, channelId: bodyChannelId } = body as {
+      message?: string; chatId?: string; channelId?: string;
+    };
     if (!message?.trim()) { json(res, { ok: false, error: "message is required" }, 400); return true; }
     const taskId = `temp-${Date.now()}`;
-    const payload = JSON.stringify({ taskId, taskName: "临时会话", content: message.trim(), chatType: "temp", chatId });
+    const channelId = bodyChannelId || (chatId ? parseChatKey(chatId).channelId : undefined);
+    const payload = JSON.stringify({
+      taskId, taskName: "临时会话", content: message.trim(), chatType: "temp", chatId, channelId,
+    });
     process.stdout.write(`__IND_LAUNCH__:${payload}\n`);
     json(res, { ok: true, taskId, message: "临时 Agent 已启动" });
     return true;
