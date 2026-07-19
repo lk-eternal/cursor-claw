@@ -3,12 +3,14 @@
     "version": "1.5.2",
     "date": "2026-07-19",
     "changes": [
+      "修复杀会话后孤儿 poll 连接吞消息：换模型/reset/stop 时收口残留连接并回退处理中消息",
+      "Resume 唤醒重投改按投递时刻分界：Resume 前投递的不重投（上下文里有），之后投出的必重投防丢",
+      "修复临时会话/管理端 launch 忽略通道 Agent 绑定，SDK 通道误起 CLI",
       "流式卡超限收敛重做「越新精度越高」：从最早的段整段剔除（思考/工具皆可），卡首留省略占位",
       "send_* 正文永不剔除；最新工具块全程保持完整精度（不截步数、不剥 detail）",
-      "极端场景（单块步数过多）才对最新块从头截步兜底，尾部精度优先",
       "敏感凭据（App Secret / iLink Token / API Key / GitLab Token）改用系统级 safeStorage 加密落盘，存量明文自动迁移",
       "修复 send_image / send_file 发送失败仍报成功的问题，失败原因回传给 Agent",
-      "README 对齐 v1.5.x 实际功能：项目工作区 / SDK 驱动 / 多通道 / 流式卡"
+      "README 面向用户重写：效果图前置、功能优先、新增工具箱（lark-cli / meegle）介绍"
     ]
   },
   {
