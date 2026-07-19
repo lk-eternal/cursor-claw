@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog, shell } from "electron"
 import * as path from "node:path"
 import * as fs from "node:fs"
 import * as os from "node:os"
-import { getConfig, saveConfig } from "./config-store"
+import { getConfig, saveConfig, migrateSecretsToSafeStorage } from "./config-store"
 import {
   startDaemon,
   stopDaemon,
@@ -408,6 +408,7 @@ app.on("before-quit", (e) => {
 })
 
 app.whenReady().then(() => {
+  migrateSecretsToSafeStorage()
   registerIpcHandlers()
   applyLoginItemSetting(getConfig().autoStart)
   createWindow()

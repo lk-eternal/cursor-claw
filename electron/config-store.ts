@@ -1,4 +1,5 @@
 import Store from "electron-store"
+import { safeStorage } from "electron"
 import { randomBytes } from "node:crypto"
 import * as path from "node:path"
 import type { AgentResource, MessageChannel } from "../src/shared/channel-types"
@@ -115,6 +116,7 @@ function getStore(): Store<AppConfig> {
   if (!_store) {
     _store = new Store<AppConfig>({
       name: "cursor-claw-config",
+      // 文件级混淆密钥（历史格式兼容，防手滑翻看）；真实凭据保护靠下方 safeStorage 字段级加密
       encryptionKey: "cursor-claw-desktop-v1",
       defaults,
     })
@@ -122,8 +124,90 @@ function getStore(): Store<AppConfig> {
   return _store
 }
 
+// ── 敏感凭据 OS 级加密 ────────────────────────────────────
+// App Secret / iLink Token / API Key / GitLab Token 落盘为 enc:v1:<base64> 密文
+// （Windows DPAPI / macOS Keychain）；getConfig 读出即明文，调用方无感。
+// safeStorage 不可用（部分 Linux 无 keyring）时保持明文，行为同旧版。
+
+const SECRET_PREFIX = "enc:v1:"
+
+function canUseSafeStorage(): boolean {
+  try { return safeStorage.isEncryptionAvailable() } catch { return false }
+}
+
+function sealSecret(value: string | undefined): string | undefined {
+  if (!value || value.startsWith(SECRET_PREFIX) || !canUseSafeStorage()) return value
+  try {
+    return SECRET_PREFIX + safeStorage.encryptString(value).toString("base64")
+  } catch { return value }
+}
+
+function openSecret(value: string | undefined): string | undefined {
+  if (!value || !value.startsWith(SECRET_PREFIX)) return value
+  try {
+    return safeStorage.decryptString(Buffer.from(value.slice(SECRET_PREFIX.length), "base64"))
+  } catch {
+    // OS 密钥不可用（换机/换用户）：密文无法还原，视为未配置
+    return ""
+  }
+}
+
+type SecretMapper = (value: string | undefined) => string | undefined
+
+function mapChannelSecrets(channels: MessageChannel[] | undefined, fn: SecretMapper): MessageChannel[] | undefined {
+  return channels?.map((c) => ({ ...c, larkAppSecret: fn(c.larkAppSecret), wechatToken: fn(c.wechatToken) }))
+}
+
+function mapResourceSecrets(resources: AgentResource[] | undefined, fn: SecretMapper): AgentResource[] | undefined {
+  return resources?.map((r) => ({ ...r, apiKey: fn(r.apiKey) }))
+}
+
+/** 读侧解密（含旧顶层字段：迁移路径仍需可读） */
+function openConfigSecrets(cfg: AppConfig): AppConfig {
+  return {
+    ...cfg,
+    channels: mapChannelSecrets(cfg.channels, openSecret) ?? [],
+    agentResources: mapResourceSecrets(cfg.agentResources, openSecret) ?? [],
+    gitlabToken: openSecret(cfg.gitlabToken) ?? "",
+    larkAppSecret: openSecret(cfg.larkAppSecret) ?? "",
+    wechatToken: openSecret(cfg.wechatToken) ?? "",
+    cursorApiKey: openSecret(cfg.cursorApiKey) ?? "",
+  }
+}
+
+/** 写侧加密：仅处理本次要写的敏感键 */
+function sealPartialSecrets(partial: Partial<AppConfig>): Partial<AppConfig> {
+  const out = { ...partial }
+  if (out.channels) out.channels = mapChannelSecrets(out.channels, sealSecret)!
+  if (out.agentResources) out.agentResources = mapResourceSecrets(out.agentResources, sealSecret)!
+  if (out.gitlabToken !== undefined) out.gitlabToken = sealSecret(out.gitlabToken) ?? ""
+  if (out.larkAppSecret !== undefined) out.larkAppSecret = sealSecret(out.larkAppSecret) ?? ""
+  if (out.wechatToken !== undefined) out.wechatToken = sealSecret(out.wechatToken) ?? ""
+  if (out.cursorApiKey !== undefined) out.cursorApiKey = sealSecret(out.cursorApiKey) ?? ""
+  return out
+}
+
+/** 启动时一次性把存量明文凭据加密落盘（app ready 后调用；不可用则跳过） */
+export function migrateSecretsToSafeStorage(): void {
+  if (!canUseSafeStorage()) return
+  const raw = getStore().store
+  const plain = (v?: string) => !!v && !v.startsWith(SECRET_PREFIX)
+  const dirty = (raw.channels ?? []).some((c) => plain(c.larkAppSecret) || plain(c.wechatToken))
+    || (raw.agentResources ?? []).some((r) => plain(r.apiKey))
+    || plain(raw.gitlabToken) || plain(raw.larkAppSecret) || plain(raw.wechatToken) || plain(raw.cursorApiKey)
+  if (!dirty) return
+  getStore().set(sealPartialSecrets({
+    channels: raw.channels,
+    agentResources: raw.agentResources,
+    gitlabToken: raw.gitlabToken,
+    larkAppSecret: raw.larkAppSecret,
+    wechatToken: raw.wechatToken,
+    cursorApiKey: raw.cursorApiKey,
+  }) as unknown as AppConfig)
+}
+
 export function getConfig(): AppConfig {
-  const cfg = { ...defaults, ...getStore().store }
+  const cfg = openConfigSecrets({ ...defaults, ...getStore().store })
   const fav = dedupeFavoriteWorkspaces(cfg.favoriteWorkspaces)
   if (fav.length !== (cfg.favoriteWorkspaces?.length ?? 0)) {
     getStore().set({ favoriteWorkspaces: fav } as unknown as AppConfig)
@@ -158,7 +242,7 @@ export function saveConfig(partial: Partial<AppConfig>): void {
   }
   if (Object.keys(cleaned).length > 0) {
     // electron-store 的 set(object) 重载要求完整 AppConfig，实际支持部分键合并
-    getStore().set(cleaned as unknown as AppConfig)
+    getStore().set(sealPartialSecrets(cleaned) as unknown as AppConfig)
   }
 }
 

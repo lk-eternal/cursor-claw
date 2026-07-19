@@ -1644,7 +1644,10 @@ async function finishAgentStreamCard(
   // 空时间线不覆盖（队列语义：空的丢弃），避免收口把卡冲短
   if (payload.segments.length) state.lastSegments = payload.segments;
   // 未决问题：保留状态等点击/过期；否则先摘卡，后续 send_* 走新卡
-  if (!state.pendingQuestion) agentStreamCards.delete(sessionKey);
+  if (!state.pendingQuestion) {
+    agentStreamCards.delete(sessionKey);
+    streamCardEnsureChains.delete(sessionKey);
+  }
   const ok = await refreshAgentStreamCard(sessionKey, state, ch, { finish: true });
   if (!ok) return { ok: false, cardId: state.cardId, messageId: state.messageId, error: "结束流式卡片失败" };
   const result = { ok: true, cardId: state.cardId, messageId: state.messageId };
@@ -1657,6 +1660,7 @@ function sealActiveStreamCardOnDelivery(sessionKey: string): void {
   const state = agentStreamCards.get(sessionKey);
   if (!state) return;
   agentStreamCards.delete(sessionKey);
+  streamCardEnsureChains.delete(sessionKey);
   const q = state.pendingQuestion;
   if (q) {
     state.pendingQuestion = undefined;
@@ -3274,7 +3278,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
         ch.chatId ? lookupActiveSessionKey(makeChatKey(ch.rt.cfg.id, ch.chatId)) : undefined,
       );
       const title = resolveReplyTitle(ch, colorKey || session_key);
-      // ���⿨����ͨ�ظ�ͬɫ���ûỰ�ȶ�ɫ���ر�/��ѡʱ����ɫ
+      // 问题卡与普通回复同色：用会话稳定色，关闭/点选时不变色
       const pendingText = text;
       const pendingFooter = "❓ 请选择下方选项或直接输入";
       const pendingTemplate = sessionHeaderTemplate(colorKey || session_key) || (title ? "turquoise" : undefined);
@@ -3315,17 +3319,19 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     if (rejectUnroutedSend(res, "send-image", session_key, message_id)) return true;
     const ch = resolveChannel(routeTargetKey(session_key, message_id), { allowDefault: false });
     if (ch.type === "error") { json(res, { ok: false, error: ch.message }, 400); return true; }
+    let sentOk: boolean;
     if (ch.type === "wechat") {
-      await ch.rt.wechat!.sendMedia(ch.chatId, image_path);
+      sentOk = await ch.rt.wechat!.sendMedia(ch.chatId, image_path);
     } else {
       const replyId = shouldReplyToMessage(ch, message_id) ? message_id : undefined;
       if (!replyId && !ch.chatId) { json(res, { ok: false, error: "无法解析发送目标 chatId" }, 400); return true; }
       const sentId = await ch.rt.sender!.sendImage(image_path, replyId, ch.chatId);
       // 登记出站消息路由：用户引用这张图片回复时能路由回原会话
       if (sentId && session_key) trackMessageSession(sentId, session_key);
+      sentOk = !!sentId;
     }
-    json(res, { ok: true });
-    if (session_key) sessionLastReplyAt.set(session_key, Date.now());
+    json(res, sentOk ? { ok: true } : { ok: false, error: "图片发送失败（文件不存在或上传/发送被拒，详见 daemon 日志）" });
+    if (sentOk && session_key) sessionLastReplyAt.set(session_key, Date.now());
     return true;
   }
 
@@ -3336,17 +3342,19 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     if (rejectUnroutedSend(res, "send-file", session_key, message_id)) return true;
     const ch = resolveChannel(routeTargetKey(session_key, message_id), { allowDefault: false });
     if (ch.type === "error") { json(res, { ok: false, error: ch.message }, 400); return true; }
+    let sentOk: boolean;
     if (ch.type === "wechat") {
-      await ch.rt.wechat!.sendMedia(ch.chatId, file_path);
+      sentOk = await ch.rt.wechat!.sendMedia(ch.chatId, file_path);
     } else {
       const replyId = shouldReplyToMessage(ch, message_id) ? message_id : undefined;
       if (!replyId && !ch.chatId) { json(res, { ok: false, error: "无法解析发送目标 chatId" }, 400); return true; }
       const sentId = await ch.rt.sender!.sendFile(file_path, replyId, ch.chatId);
       // 登记出站消息路由：用户引用这份文件回复时能路由回原会话
       if (sentId && session_key) trackMessageSession(sentId, session_key);
+      sentOk = !!sentId;
     }
-    json(res, { ok: true });
-    if (session_key) sessionLastReplyAt.set(session_key, Date.now());
+    json(res, sentOk ? { ok: true } : { ok: false, error: "文件发送失败（文件不存在或上传/发送被拒，详见 daemon 日志）" });
+    if (sentOk && session_key) sessionLastReplyAt.set(session_key, Date.now());
     return true;
   }
 
