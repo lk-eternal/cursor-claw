@@ -22,7 +22,9 @@ Write-Log "root=$Root log=$LogFile"
 
 try {
   Write-Log "1/4 npm run pack:win"
-  & npm run pack:win
+  # cmd /c 合流 stderr：npm 的 warn 走 stderr，Stop 偏好下会被当成 NativeCommandError 直接掐死任务，
+  # 必须合并输出后仅按退出码判断；构建输出顺带落日志便于排障
+  & cmd /c "npm run pack:win 2>&1" | Add-Content -Path $LogFile -Encoding UTF8
   if ($LASTEXITCODE -ne 0) { throw "pack:win failed exit=$LASTEXITCODE" }
 
   $src = Join-Path $Root "release\win-unpacked"
