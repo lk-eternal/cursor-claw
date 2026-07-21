@@ -1578,18 +1578,17 @@ async function ensureStreamCardForMcpMerge(
   sessionKey: string,
   ch: Extract<ResolvedChannel, { type: "feishu" }>,
   firstBody?: string,
-): Promise<AgentStreamCardState | undefined> {
+): Promise<{ state?: AgentStreamCardState; bodyMerged: boolean }> {
   // 应用无 cardkit 权限：直接走普通消息，不白撞建卡 API
-  if (ch.rt.sender?.isCardkitDenied()) return undefined;
-  const existing = agentStreamCards.get(sessionKey);
-  if (existing) return existing;
-  // 建卡即带首段正文，一次到位——先空卡再补正文会闪现「只有色条」的空白卡
+  if (ch.rt.sender?.isCardkitDenied()) return { bodyMerged: false };
+  // 注意不能先查 map 再决定语义：SDK flush 与本调用会竞态建卡，
+  // 必须把 firstBody 交给 ensureAgentStreamCard 在串行链内处理（无论新建还是并入已有卡）
   const ensured = await ensureAgentStreamCard(sessionKey, { segments: [] }, ch, firstBody);
   if (!ensured.ok) {
     log("WARN", `[StreamCard] MCP 合并建卡失败: ${ensured.error ?? "unknown"}`);
-    return undefined;
+    return { bodyMerged: false };
   }
-  return agentStreamCards.get(sessionKey);
+  return { state: agentStreamCards.get(sessionKey), bodyMerged: ensured.bodyMerged === true };
 }
 
 async function ensureAgentStreamCard(
@@ -1597,11 +1596,12 @@ async function ensureAgentStreamCard(
   payload: AgentStreamCardPayload,
   ch: Extract<ResolvedChannel, { type: "feishu" }>,
   mcpBody?: string,
-): Promise<{ ok: boolean; cardId?: string; messageId?: string; error?: string }> {
-  const run = async (): Promise<{ ok: boolean; cardId?: string; messageId?: string; error?: string }> => {
+): Promise<{ ok: boolean; cardId?: string; messageId?: string; error?: string; bodyMerged?: boolean }> {
+  const run = async (): Promise<{ ok: boolean; cardId?: string; messageId?: string; error?: string; bodyMerged?: boolean }> => {
   if (ch.rt.sender?.isCardkitDenied()) {
     return { ok: false, error: "应用未开通 cardkit:card:write，流式卡已降级普通消息" };
   }
+  const body = mcpBody?.trim();
   const existing = agentStreamCards.get(sessionKey);
   if (existing) {
     // MCP 已建空卡时，SDK ensure 须把当前队列写入，否则会一直只有 send_* 正文
@@ -1612,7 +1612,14 @@ async function ensureAgentStreamCard(
         await refreshAgentStreamCard(sessionKey, existing, ch, { finish: false });
       }
     }
-    return { ok: true, cardId: existing.cardId, messageId: existing.messageId };
+    // mcpBody 语义 = 「确保这段正文落卡」：SDK 竞态先建卡时正文必须并入已有卡，
+    // 绝不能静默丢弃（曾导致回复被吞：Agent 报成功但用户看不到正文）
+    if (body && !existing.pendingQuestion) {
+      enqueueMcpBody(existing, body);
+      const merged = await refreshAgentStreamCard(sessionKey, existing, ch, { finish: false });
+      return { ok: true, cardId: existing.cardId, messageId: existing.messageId, bodyMerged: merged };
+    }
+    return { ok: true, cardId: existing.cardId, messageId: existing.messageId, bodyMerged: false };
   }
   const sender = ch.rt.sender!;
   const showThinking = ch.rt.cfg.showThinking !== false;
@@ -1657,8 +1664,8 @@ async function ensureAgentStreamCard(
   });
   if (messageId) trackMessageSession(messageId, sessionKey);
   rememberSessionKey(sessionKey);
-  log("INFO", `[StreamCard] 已创建 session=${sessionKey} card=${cardId} msg=${messageId ?? "(none)"} segs=${payload.segments.length}`);
-  return { ok: true, cardId, messageId };
+  log("INFO", `[StreamCard] 已创建 session=${sessionKey} card=${cardId} msg=${messageId ?? "(none)"} segs=${payload.segments.length}${mcpReplies.length ? " +body" : ""}`);
+  return { ok: true, cardId, messageId, bodyMerged: mcpReplies.length > 0 };
   };
   const prev = streamCardEnsureChains.get(sessionKey) ?? Promise.resolve();
   const next = prev.then(run, run);
@@ -3240,27 +3247,16 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       json(res, { ok: await ch.rt.wechat!.sendText(ch.chatId, text) });
     } else {
       const sender = ch.rt.sender!;
-      // 有活跃卡则并入；无卡则建卡即带正文一次到位（先空卡再补正文会闪现空白卡）
+      // 有活跃卡则正文并入；无卡则建卡即带正文（防空白卡闪现）。
+      // bodyMerged 由串行链内保证（SDK 竞态建卡时并入已有卡）——为 false 必须回退独立消息，严禁静默吞正文
       if (session_key && !/<at\s+user_id=/i.test(text)) {
-        const hadCard = agentStreamCards.has(session_key);
-        const stream = await ensureStreamCardForMcpMerge(session_key, ch, text);
-        // 未决问题卡勿合并刷卡（会清空自定义输入）；改走下方独立消息
-        if (stream && !stream.pendingQuestion) {
-          if (!hadCard) {
-            // 新建卡已随建带上正文，无需再刷
-            touchSessionLastReply(session_key);
-            json(res, { ok: true, message_id: stream.messageId, merged: true });
-            return true;
-          }
-          enqueueMcpBody(stream, text);
-          const mergedOk = await refreshAgentStreamCard(session_key, stream, ch, { finish: false });
-          if (mergedOk) {
-            touchSessionLastReply(session_key);
-            json(res, { ok: true, message_id: stream.messageId, merged: true });
-            return true;
-          }
+        const r = await ensureStreamCardForMcpMerge(session_key, ch, text);
+        if (r.state && r.bodyMerged) {
+          touchSessionLastReply(session_key);
+          json(res, { ok: true, message_id: r.state.messageId, merged: true });
+          return true;
         }
-        // fall through on failure / pendingQuestion
+        // fall through：无卡（降级/建卡失败）、pendingQuestion、刷卡失败 → 独立消息兜底
       }
       const colorKey = preferWorkspaceSessionKey(
         session_key,
@@ -3391,7 +3387,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     } else {
       const sender = ch.rt.sender!;
       if (session_key) {
-        const stream = await ensureStreamCardForMcpMerge(session_key, ch);
+        const stream = (await ensureStreamCardForMcpMerge(session_key, ch)).state;
         if (stream) {
           stream.pendingQuestion = { text, options: opts, footer: "❓ 请选择下方选项或直接输入" };
           const mergedOk = await refreshAgentStreamCard(session_key, stream, ch, { finish: true });
