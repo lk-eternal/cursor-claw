@@ -1789,9 +1789,13 @@ async function finishAgentStreamCard(
   return result;
 }
 
-/** 消息送达（含重投）：收口当前卡，后续回复走新卡；未决问题转存正文防内容丢失。入全序链执行。 */
-function sealActiveStreamCardOnDelivery(sessionKey: string): void {
-  void enqueueCardOp(sessionKey, async () => {
+/**
+ * 消息送达（含重投）：收口当前卡，后续回复走新卡；未决问题转存正文防内容丢失。入全序链执行。
+ * 投递路径必须 await 完成后再响应 poll——顺序保证「收口时刻早于 Agent 收到消息」，
+ * 新回合队列的诞生时间恒晚于收口时间，建卡放行不再依赖毫秒时序。
+ */
+function sealActiveStreamCardOnDelivery(sessionKey: string): Promise<void> {
+  return enqueueCardOp(sessionKey, async () => {
     const state = agentStreamCards.get(sessionKey);
     if (!state) return;
     agentStreamCards.delete(sessionKey);
@@ -3492,7 +3496,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     json(res, sentOk ? { ok: true } : { ok: false, error: "图片发送失败（文件不存在或上传/发送被拒，详见 daemon 日志）" });
     if (sentOk && session_key) {
       // 媒体是独立消息：封口当前流式卡，避免后续 send_text/question 合并进旧卡
-      sealActiveStreamCardOnDelivery(session_key);
+      void sealActiveStreamCardOnDelivery(session_key);
       touchSessionLastReply(session_key);
     }
     return true;
@@ -3519,7 +3523,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     json(res, sentOk ? { ok: true } : { ok: false, error: "文件发送失败（文件不存在或上传/发送被拒，详见 daemon 日志）" });
     if (sentOk && session_key) {
       // 媒体是独立消息：封口当前流式卡，避免后续 send_text/question 合并进旧卡
-      sealActiveStreamCardOnDelivery(session_key);
+      void sealActiveStreamCardOnDelivery(session_key);
       touchSessionLastReply(session_key);
     }
     return true;
@@ -3582,7 +3586,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const sk = normalizeSessionKey(session_key) || session_key;
     if (!resumed) {
       // 全新会话（上下文丢失）：收口上一个 run 的残留流式卡，防新回复追加旧卡
-      sealActiveStreamCardOnDelivery(sk);
+      void sealActiveStreamCardOnDelivery(sk);
     }
     json(res, { ok: true });
     return true;
@@ -3714,10 +3718,11 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
         log("INFO", `消息已投递(instant): count=${messages.length} session=${sessionKeyFilter}`);
         touchSessionDelivery(sessionKeyFilter);
         addReactionToMessages(freshIds, sessionKeyFilter, "Get");
-        // 仅新消息触发收口换卡；干活途中自查拉到的重投属于当前回合，不能换卡
+        // 仅新消息触发收口换卡；干活途中自查拉到的重投属于当前回合，不能换卡。
+        // 收口 await 完成后才响应：保证收口时刻早于 Agent 收到消息（新回合队列必然晚于收口）
         if (freshIds.length > 0) {
           expireOpenCardQuestionsForSession(sessionKeyFilter, "已有新消息，问题已关闭");
-          sealActiveStreamCardOnDelivery(sessionKeyFilter);
+          await sealActiveStreamCardOnDelivery(sessionKeyFilter);
         }
       }
       json(res, { messages, keepAlive, freshIds });
@@ -3751,7 +3756,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
           log("INFO", `疑似黑洞投递（投递后无出站回复），重投 ${pending.length} 条未确认消息: session=${sessionKeyFilter}`);
           if (freshIds.length > 0) {
             expireOpenCardQuestionsForSession(sessionKeyFilter, "已有新消息，问题已关闭");
-            sealActiveStreamCardOnDelivery(sessionKeyFilter);
+            await sealActiveStreamCardOnDelivery(sessionKeyFilter);
           }
           json(res, { messages: pending, keepAlive, freshIds });
           addReactionToMessages(freshIds, sessionKeyFilter, "Get");
@@ -3767,7 +3772,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     // 空等挂起 = 回合结束：兜底收口无未决问题的活卡（SDK 侧 ensure 失败无 cardId 时不会自己 finish）
     const liveCard = agentStreamCards.get(sessionKeyFilter);
     if (liveCard && !liveCard.pendingQuestion) {
-      sealActiveStreamCardOnDelivery(sessionKeyFilter);
+      void sealActiveStreamCardOnDelivery(sessionKeyFilter);
     }
 
     // keep_alive=false 不真挂起：队列空则秒回结束指令收回合
@@ -3807,9 +3812,10 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const freshIds = collectFreshAndTrack(messages, sessionKeyFilter);
     log("INFO", `消息已投递(poll): count=${messages.length} session=${sessionKeyFilter}`);
     touchSessionDelivery(sessionKeyFilter);
+    // 收口 await 完成后才响应：保证收口时刻早于 Agent 收到消息（新回合队列必然晚于收口）
     if (freshIds.length > 0) {
       expireOpenCardQuestionsForSession(sessionKeyFilter, "已有新消息，问题已关闭");
-      sealActiveStreamCardOnDelivery(sessionKeyFilter);
+      await sealActiveStreamCardOnDelivery(sessionKeyFilter);
     }
     json(res, { messages, keepAlive, freshIds });
     addReactionToMessages(freshIds, sessionKeyFilter, "Get");

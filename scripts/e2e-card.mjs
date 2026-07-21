@@ -100,19 +100,20 @@ async function s1() {
 }
 
 // ── S2 换卡后思考渲染：收口后诞生的新队列必须放行建卡 ──
+// 投递响应返回时收口必须已落定（顺序保证），新队列 ensure 不允许任何 sleep 缓冲
 async function s2() {
-  console.log("S2 换卡后新回合思考渲染（gone 不误伤新队列）");
+  console.log("S2 换卡后新回合思考渲染（投递前收口落定，新队列放行）");
   const key = sk("s2");
   await get(pollUrl(key, false));
   const born1 = Date.now();
   await streamCard(key, "ensure", [thinkingSeg("旧回合思考")], { queue_born_at: born1 });
   await pushMsg(key, "S2用户消息");
-  const polled = await get(pollUrl(key, false)); // 投递 → seal 旧卡
+  const polled = await get(pollUrl(key, false)); // 投递 → 响应前 seal 必须已完成
   check("消息投递", (polled.messages ?? []).length === 1, polled);
-  await sleep(500); // seal 在链上异步执行
   const afterSeal = await debugCard(key);
-  check("旧卡已收口摘除", afterSeal.exists === false, afterSeal);
-  check("sealAt 已记录", typeof afterSeal.sealAt === "number", afterSeal);
+  check("投递响应返回时旧卡已收口（无 sleep）", afterSeal.exists === false, afterSeal);
+  check("投递响应返回时 sealAt 已记录（无 sleep）", typeof afterSeal.sealAt === "number", afterSeal);
+  // 模拟 Agent 收到消息后立刻思考：新队列诞生于收到响应之后，必然晚于收口
   const born2 = Date.now();
   const r2 = await streamCard(key, "ensure", [thinkingSeg("新回合思考")], { queue_born_at: born2 });
   check("新队列 ensure 放行（非 gone）", r2.ok === true && r2.gone !== true, r2);

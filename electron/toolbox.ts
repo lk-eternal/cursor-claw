@@ -1,7 +1,8 @@
 // ── 工具箱：飞书 lark-cli / 飞书项目 meegle 的安装、更新与登录态检测 ──
-import { execFile } from "node:child_process"
+import { execFile, spawn } from "node:child_process"
 import { promisify } from "node:util"
-import { ipcMain } from "electron"
+import { ipcMain, shell } from "electron"
+import { getConfig } from "./config-store"
 
 const execFileAsync = promisify(execFile)
 
@@ -88,6 +89,11 @@ function friendlyInstallError(raw: string): string {
   if (looksLikeMissingCmd(raw, "npm") || looksLikeMissingCmd(raw, "node")) {
     return "未检测到 Node.js / npm。请先安装 Node.js（https://nodejs.org ，勾选 Add to PATH），重新打开 Cursor Claw 后再点一键安装。"
   }
+  if (/EACCES|permission|rejected by your operating system|as root\/Administrator/i.test(raw)) {
+    return process.platform === "darwin"
+      ? "npm 全局目录无写入权限（macOS 常见）。请打开终端手动执行：\nsudo npm install -g @larksuite/cli @lark-project/meegle\n或将 npm 全局目录改到用户目录：npm config set prefix ~/.npm-global 后把 ~/.npm-global/bin 加入 PATH，再回来点一键安装。"
+      : "npm 全局目录无写入权限。请以管理员身份打开终端执行：npm install -g @larksuite/cli @lark-project/meegle"
+  }
   if (/禁止运行脚本|running scripts is disabled|ExecutionPolicy/i.test(raw)) {
     return "PowerShell 禁止运行脚本。本应用已优先使用 .cmd；若仍失败，请用「以管理员打开 PowerShell」执行：Set-ExecutionPolicy -Scope CurrentUser RemoteSigned"
   }
@@ -140,12 +146,62 @@ export async function installTool(key: "larkCli" | "meegle"): Promise<{ ok: bool
   return { ok: true }
 }
 
-/** lark-cli 设备码登录：非交互执行，浏览器完成授权后命令自行退出 */
-export async function loginLarkCli(): Promise<{ ok: boolean; error?: string }> {
-  // v1.0.70+ 必须显式指定授权范围，否则报 please specify the scopes / --scope
-  const r = await runCommand("lark-cli", ["auth", "login", "--recommend"], 300_000)
-  if (!r.ok) return { ok: false, error: friendlyInstallError(r.stderr || r.stdout) }
-  return { ok: true }
+/** Windows 下经 cmd.exe 跑 .cmd 且向 stdin 写入内容（喂 app secret，避免进程列表暴露） */
+async function runCommandWithStdin(cmd: string, args: string[], input: string, timeoutMs = 30_000): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const isWin = process.platform === "win32"
+    const child = isWin
+      ? spawn("cmd.exe", ["/d", "/s", "/c", [`${cmd}.cmd`, ...args].join(" ")], { windowsHide: true })
+      : spawn(cmd, args)
+    let stdout = ""
+    let stderr = ""
+    const timer = setTimeout(() => { try { child.kill() } catch { /* noop */ } }, timeoutMs)
+    child.stdout?.on("data", (d) => { stdout += String(d) })
+    child.stderr?.on("data", (d) => { stderr += String(d) })
+    child.on("error", (e) => { clearTimeout(timer); resolve({ ok: false, stdout, stderr: stderr || String(e) }) })
+    child.on("close", (code) => { clearTimeout(timer); resolve({ ok: code === 0, stdout, stderr }) })
+    child.stdin?.write(input)
+    child.stdin?.end()
+  })
+}
+
+/**
+ * lark-cli 登录（两段式设备码流）：
+ * 1. 先把当前飞书通道的应用凭据配置给 lark-cli——授权页显示用户自己的应用；
+ *    不配置时 lark-cli 会用官方公共应用发起授权（用户看到「其他应用」且 scope 不可控）
+ * 2. --no-wait 拿授权 URL 后由应用主动打开浏览器——此前依赖 CLI 在隐藏子进程里自开浏览器，
+ *    窗口被 windowsHide 憋死，用户看到「点击登录没反应」
+ * 3. --device-code 阻塞轮询直到用户在浏览器完成授权
+ */
+export async function loginLarkCli(): Promise<{ ok: boolean; error?: string; verificationUrl?: string }> {
+  const ch = getConfig().channels?.find((c) => c.type === "feishu" && c.enabled !== false && c.larkAppId && c.larkAppSecret)
+  if (ch) {
+    const init = await runCommandWithStdin(
+      "lark-cli",
+      ["config", "init", "--app-id", ch.larkAppId ?? "", "--app-secret-stdin", "--brand", "feishu"],
+      `${ch.larkAppSecret}\n`,
+    )
+    if (!init.ok) {
+      // 配置失败降级继续：老版本 CLI 无这些参数时仍可用其现有配置登录
+      console.warn(`[toolbox] lark-cli config init 失败(降级继续): ${(init.stderr || init.stdout).slice(-200)}`)
+    }
+  }
+
+  const start = await runCommand("lark-cli", ["auth", "login", "--recommend", "--no-wait", "--json"], 30_000)
+  const rawJson = start.stdout.slice(start.stdout.indexOf("{"))
+  let flow: { device_code?: string; verification_url?: string } | undefined
+  try { flow = JSON.parse(rawJson) } catch { /* fallthrough */ }
+  if (!flow?.device_code || !flow?.verification_url) {
+    return { ok: false, error: `发起授权失败：${friendlyInstallError(start.stderr || start.stdout)}` }
+  }
+
+  await shell.openExternal(flow.verification_url).catch(() => { /* URL 随结果返回，用户可手动打开 */ })
+
+  const done = await runCommand("lark-cli", ["auth", "login", "--device-code", flow.device_code], 300_000)
+  if (!done.ok) {
+    return { ok: false, error: friendlyInstallError(done.stderr || done.stdout), verificationUrl: flow.verification_url }
+  }
+  return { ok: true, verificationUrl: flow.verification_url }
 }
 
 export function initToolbox(): void {

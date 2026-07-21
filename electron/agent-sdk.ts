@@ -1052,7 +1052,15 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
       const detectSummary = summary || summarizeToolArgs(event.args) || ""
       pushUiLog("SDK", "INFO", `[${session.sessionKey}] [tool] ${event.name}: ${event.status}${summary ? ` · ${summary}` : ""}`)
       if (stream && !stream.finished) {
-        if (isPollMessageInvocation(event.name, detectSummary, event.args)) {
+        const argsSayPoll = isPollMessageInvocation(event.name, detectSummary, event.args)
+        // poll 的 completed/error 事件不携带 args（识别必失败）：改用状态位判定——
+        // 挂 poll 时 running 已正确识别并置位，此后同类 shell 工具的终态即为 poll 返回。
+        // 挂起期间 Agent 无并发 shell，误判风险极低；此前识别失败导致换队列从未执行、新回合思考整段被丢
+        const pollReturnByState = event.status !== "running"
+          && !argsSayPoll
+          && (stream.pendingBlockingPoll || stream.pendingNonBlockingPoll)
+          && /shell|bash|terminal|command/i.test(event.name)
+        if (argsSayPoll || pollReturnByState) {
           const blocking = isBlockingPollMessage(event.name, detectSummary, event.args)
           if (event.status === "running") {
             if (blocking) {
