@@ -1261,7 +1261,8 @@ async function checkAndExecutePendingCommands(): Promise<void> {
 
         case "/m":
         case "/model": {
-          if (!isAdmin) { await denyNonAdmin(); break }
+          // 项目专属群内放行（与 /p 一致）：独立群项目的模型切换入口只在群里
+          if (!isAdmin && !isProjectGroup) { await denyNonAdmin(); break }
           await handleFeishuModelCommand(lock.port, claimed.messageId, rawCmd, claimed.chatId, patchTarget)
           break
         }
