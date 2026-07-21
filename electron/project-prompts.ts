@@ -31,7 +31,14 @@ const ACTION_GUIDES: Record<string, string[]> = {
   deploy: [
     "部署到开发分支：",
     "- 核对全部改动已提交 feature 分支，推送 feature 到 origin 同名分支",
-    "- 在 AI 工作目录执行 git push origin HEAD:<开发分支全名> 推送到配置的开发分支；被拒（non-fast-forward）时先 fetch 并把远端开发分支合入当前分支再推，禁止 force push",
+    "- 在 AI 工作目录执行 git push origin HEAD:<开发分支全名> 推送到配置的开发分支",
+    "- 被拒（non-fast-forward）时用临时合流分支解决，feature 分支必须保持纯净：",
+    "  1. git fetch origin",
+    "  2. git checkout -b <feature名>-deploy origin/<开发分支全名>（从远端开发分支拉临时分支）",
+    "  3. git merge <feature分支全名>（在临时分支上解决冲突并提交）",
+    "  4. git push origin HEAD:<开发分支全名>，然后 git checkout 回 feature 分支（临时分支可删）",
+    "- 红线：严禁把开发分支 merge/rebase 进 feature 分支——feature 会被灌入开发分支上他人未上线内容，后续提测/上线全部被污染",
+    "- 禁止 force push",
     "- 产物写部署摘要：推送分支、关键 commit、部署后验证方式",
   ],
   "submit-test": [
@@ -39,6 +46,11 @@ const ACTION_GUIDES: Record<string, string[]> = {
     "- 推送 feature 到 origin 同名分支",
     "- 创建 feature → 测试分支的 MR：在 AI 工作目录执行 git push origin HEAD -o merge_request.create -o merge_request.target=<测试分支全名> -o merge_request.title=\"Draft: <项目名>\"，命令输出中会返回 MR 链接",
     "- push option 建不出 MR 时改用 glab CLI；仍不行则给出 GitLab 新建 MR 页面链接引导用户手动创建，拿到 MR 链接后继续",
+    "- 建完 MR 必查冲突（glab/API 看 has_conflicts / merge_status，detected_merge_conflicts 即有冲突），有冲突时用临时合流分支解决，feature 必须保持纯净：",
+    "  1. git fetch origin && git checkout -b <feature名>-mr origin/<测试分支全名>",
+    "  2. git merge <feature分支全名>（在临时分支上解决冲突并提交）",
+    "  3. git push origin <feature名>-mr 并改建「<feature名>-mr → 测试分支」的 MR（关闭原冲突 MR），后续提测信息用新 MR 链接",
+    "  4. git checkout 回 feature 分支；严禁把测试分支 merge/rebase 进 feature",
     "- 将 MR 信息（链接 / 源分支 / 目标分支 / 变更摘要）评论到本项目的需求工作项",
     "- 评论 @ 测试人员必须真正生效，缺一步都会变成纯文本、对方收不到通知：",
     "  1. 逐个查测试人员拿 lark_user_id（meegle user search / search_user_info）",
@@ -64,6 +76,7 @@ const ACTION_GUIDES: Record<string, string[]> = {
     "- 评论/产物里允许出现的 MR 有且仅有：源分支=本项目 feature、目标=配置的测试分支、且状态为 open（未合并）",
     "- 获取方式：project_get 查 lastMrUrl → 用 glab/API 核对 target 与 state；对不上或已 merged 一律作废",
     "- 没有合格 open MR 时必须新建：git push origin HEAD -o merge_request.create -o merge_request.target=<测试分支全名> …（与提测节点相同）；建不出再用 glab；禁止开往生产基线/release",
+    "- 建完 MR 必查冲突（has_conflicts / merge_status）：有冲突时按提测节点的临时合流分支方案处理（从测试分支拉临时分支合入 feature 解决，改建临时分支 → 测试分支的 MR）；严禁把测试分支 merge/rebase 进 feature",
     "- 严禁：贴已 merged 的旧 MR、贴合到 release/基线的 MR、贴其它需求/其它分支的 MR、把「曾经合过」的 MR 当本次修复凭证",
     "",
     "【缺陷评论——必须中文，写清楚，别吓人】",
@@ -109,6 +122,7 @@ const ACTION_GUIDES: Record<string, string[]> = {
     "部署（合并研发提测 MR）。研发的提测信息在需求工作项评论里（开发与测试是不同项目实例，本地 project_get 拿不到对方的 mrUrl）：",
     "- 读本项目关联需求工作项的评论，找研发最新提测评论中的 MR 链接；找不到时向用户询问 MR 地址，禁止猜测",
     "- 确认 MR 内容与提测信息一致后合并该 MR（无权限时引导用户手动合并并回报结果）",
+    "- MR 有冲突无法合并时：通知研发用临时合流分支解决（从测试分支拉临时分支、把 feature 合进去解决冲突后合回测试分支），严禁让研发把测试分支合回 feature 分支",
     "- 产物写部署说明：MR 链接、合并结果、测试环境生效确认方式",
   ],
   "test-exec": [
@@ -227,6 +241,7 @@ function contextBlock(p: Project): string[] {
     "",
     "仓库与分支（git 操作必须使用下列确切全名，禁止缩写、猜测或自建分支）：",
     ...repos.flatMap((r, i) => repoBranchLines(r, repos.length > 1, i)),
+    "分支纯净红线：严禁把开发/测试/基线分支 merge 或 rebase 进 feature 分支（会灌入他人未上线内容，污染后续提测与上线）；与目标分支冲突时一律从目标分支拉临时合流分支、把 feature 合进去解决，feature 本身保持只含本需求提交",
   ].filter(Boolean)
 }
 

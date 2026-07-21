@@ -275,6 +275,8 @@ async function httpGetText(
         "User-Agent": "cursor-claw-desktop-updater",
         ...(headers || {}),
       },
+      // 被墙的源（api.github.com 直连）会长时间挂起，必须限时让并发查询尽快收敛
+      signal: AbortSignal.timeout(12_000),
     })
     return { status: res.status, text: await res.text() }
   } catch {
@@ -315,17 +317,36 @@ function parsePackageJsonVersion(text: string): LatestRelease | null {
   }
 }
 
-export async function fetchLatestRelease(): Promise<LatestRelease | null> {
-  const apiPath = `/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`
-  const api = await httpGetText(`https://api.github.com${apiPath}`, {
-    Accept: "application/vnd.github+json",
-  })
-  if (api?.status === 200) {
-    const rel = parseGithubReleaseJson(api.text)
-    if (rel) return rel
-  }
+async function fetchViaGithubApi(): Promise<LatestRelease | null> {
+  const api = await httpGetText(
+    `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`,
+    { Accept: "application/vnd.github+json" },
+  )
+  if (api?.status !== 200) return null
+  return parseGithubReleaseJson(api.text)
+}
 
-  // GitHub API 不可达时：用 CDN 读 package.json 版本，至少能完成「检查更新」
+/** jsdelivr data API 返回全部 git tag（实时性远好于其文件 CDN 的 12h 缓存），取语义化最大版本 */
+async function fetchViaJsdelivrTags(): Promise<LatestRelease | null> {
+  const r = await httpGetText(`https://data.jsdelivr.com/v1/packages/gh/${GITHUB_OWNER}/${GITHUB_REPO}`)
+  if (r?.status !== 200) return null
+  try {
+    const json = JSON.parse(r.text) as { versions?: Array<{ version?: string }> }
+    const versions = (json.versions ?? [])
+      .map((v) => normalizeReleaseVersion(v.version ?? ""))
+      .filter((v) => semver.valid(v))
+    if (versions.length === 0) return null
+    const max = versions.sort(semver.rcompare)[0]
+    return {
+      version: max,
+      htmlUrl: `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/tag/v${max}`,
+    }
+  } catch {
+    return null
+  }
+}
+
+async function fetchViaJsdelivrPackageJson(): Promise<LatestRelease | null> {
   const mirrors = [
     `https://cdn.jsdelivr.net/gh/${GITHUB_OWNER}/${GITHUB_REPO}@main/package.json`,
     `https://cdn.jsdelivr.net/gh/${GITHUB_OWNER}/${GITHUB_REPO}@master/package.json`,
@@ -338,6 +359,26 @@ export async function fetchLatestRelease(): Promise<LatestRelease | null> {
     }
   }
   return null
+}
+
+/**
+ * 多源并发取版本最大者。单源不可靠：api.github.com 直连常被墙，
+ * jsdelivr 文件 CDN 有边缘缓存（曾拿到滞后数个版本的 package.json 造成「最新是旧版」）。
+ */
+export async function fetchLatestRelease(): Promise<LatestRelease | null> {
+  const results = await Promise.all([
+    fetchViaGithubApi(),
+    fetchViaJsdelivrTags(),
+    fetchViaJsdelivrPackageJson(),
+  ])
+  const candidates = results.filter((r): r is LatestRelease => r !== null)
+  if (candidates.length === 0) return null
+  candidates.sort((a, b) => semver.rcompare(a.version, b.version))
+  const best = candidates[0]
+  // GitHub API 的结果带 release notes，同版本时优先用它
+  const github = results[0]
+  if (github && semver.eq(github.version, best.version)) return github
+  return best
 }
 
 function parseChangelogJson(text: string): ChangelogEntry[] {
@@ -763,7 +804,8 @@ export function registerUpdaterIpc(): void {
     return {
       status: "latest",
       currentVersion,
-      latestVersion: rel.version,
+      // 版本源缓存可能滞后于本机（远端 < 当前），此时「最新」就是当前版本，不显示旧远端号
+      latestVersion: semver.gt(currentVersion, rel.version) ? currentVersion : rel.version,
     }
   })
 
