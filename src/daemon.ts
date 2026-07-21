@@ -361,9 +361,18 @@ const sessionToChatMap = new Map<string, string>();
 const MSG_SESSION_MAP_MAX = 5000;
 const sessionLastReplyAt = new Map<string, number>();
 
-/** 记录出站回复时刻（仅供 zombie 假死判定，不参与消息确认语义） */
+/** 记录出站回复时刻（zombie 假死判定 + 黑洞投递嫌疑判定） */
 function touchSessionLastReply(sessionKey: string): void {
   sessionLastReplyAt.set(sessionKey, Date.now());
+}
+
+/** 最后一次向 Agent 投递消息的时刻（poll 响应写出即记，无论对端是否真收到） */
+const sessionLastDeliveryAt = new Map<string, number>();
+/** 已因黑洞嫌疑重投过一次的消息 id：第二次进 poll 不再重投，防 Agent 拒不回复导致死循环 */
+const redeliveredMsgIds = new Map<string, Set<string>>();
+
+function touchSessionDelivery(sessionKey: string): void {
+  sessionLastDeliveryAt.set(sessionKey, Date.now());
 }
 /** chatKey / 裸 chatId → p2p|group，供发送时决定是否 reply */
 const chatTypeByChatKey = new Map<string, string>();
@@ -3646,6 +3655,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       if (messages.length > 0) {
         freshIds = collectFreshAndTrack(messages, sessionKeyFilter);
         log("INFO", `消息已投递(instant): count=${messages.length} session=${sessionKeyFilter}`);
+        touchSessionDelivery(sessionKeyFilter);
         addReactionToMessages(freshIds, sessionKeyFilter, "Get");
         // 仅新消息触发收口换卡；干活途中自查拉到的重投属于当前回合，不能换卡
         if (freshIds.length > 0) {
@@ -3665,8 +3675,37 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     req.on("close", () => { disconnected = true; unregisterPollConn(sessionKeyFilter, res); });
     req.socket.setTimeout(0);
 
+    // 黑洞投递嫌疑：上次投递后 Agent 没有任何出站（send_* 均未发生）就直接来挂 poll——
+    // 大概率上次响应写进了已死连接（curl 被工具桥杀掉但 TCP 未断，daemon 无感知），Agent 从未见过那批消息。
+    // 此时不确认，把全部未确认消息立即重投给本次 poll；每条只重投一次，防 Agent 拒不回复时死循环。
+    {
+      const deliveredAt = sessionLastDeliveryAt.get(sessionKeyFilter) ?? 0;
+      const repliedAt = sessionLastReplyAt.get(sessionKeyFilter) ?? 0;
+      if (deliveredAt > repliedAt) {
+        const pending = claimSessionMessages(sessionKeyFilter);
+        let seen = redeliveredMsgIds.get(sessionKeyFilter);
+        const firstTime = pending.filter((m) => m.messageId && !seen?.has(m.messageId));
+        if (firstTime.length > 0) {
+          if (!seen) { seen = new Set(); redeliveredMsgIds.set(sessionKeyFilter, seen); }
+          for (const m of firstTime) seen.add(m.messageId);
+          unregisterPollConn(sessionKeyFilter, res);
+          const freshIds = collectFreshAndTrack(pending, sessionKeyFilter);
+          touchSessionDelivery(sessionKeyFilter);
+          log("INFO", `疑似黑洞投递（投递后无出站回复），重投 ${pending.length} 条未确认消息: session=${sessionKeyFilter}`);
+          if (freshIds.length > 0) {
+            expireOpenCardQuestionsForSession(sessionKeyFilter, "已有新消息，问题已关闭");
+            sealActiveStreamCardOnDelivery(sessionKeyFilter);
+          }
+          json(res, { messages: pending, keepAlive, freshIds });
+          addReactionToMessages(freshIds, sessionKeyFilter, "Get");
+          return true;
+        }
+      }
+    }
+
     // 阻塞 poll = Agent 声明手头事项全部处理完：确认全部 .claimed 并打 DONE
     confirmSessionDone(sessionKeyFilter);
+    redeliveredMsgIds.delete(sessionKeyFilter);
 
     // 空等挂起 = 回合结束：兜底收口无未决问题的活卡（SDK 侧 ensure 失败无 cardId 时不会自己 finish）
     const liveCard = agentStreamCards.get(sessionKeyFilter);
@@ -3710,6 +3749,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
 
     const freshIds = collectFreshAndTrack(messages, sessionKeyFilter);
     log("INFO", `消息已投递(poll): count=${messages.length} session=${sessionKeyFilter}`);
+    touchSessionDelivery(sessionKeyFilter);
     if (freshIds.length > 0) {
       expireOpenCardQuestionsForSession(sessionKeyFilter, "已有新消息，问题已关闭");
       sealActiveStreamCardOnDelivery(sessionKeyFilter);
