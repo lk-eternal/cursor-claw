@@ -65,6 +65,8 @@ interface StreamAgg {
   forceNewThinking: boolean
   /** 断线挂起：不 finish 收口，Resume 后继续同一张卡 */
   suspended: boolean
+  /** 队列诞生时刻：daemon 用它区分「seal 前的旧队列」（gone 丢弃）与「seal 后的新队列」（放行建卡） */
+  bornAt: number
 }
 
 interface SdkSessionAgent {
@@ -368,6 +370,7 @@ function newStreamAgg(gateOpen = false): StreamAgg {
     pendingBlockingPoll: false,
     forceNewThinking: false,
     suspended: false,
+    bornAt: Date.now(),
   }
 }
 
@@ -651,7 +654,7 @@ async function postStreamCard(
   sessionKey: string,
   action: "ensure" | "update" | "finish",
   payload: StreamCardPayload,
-  opts?: { cardId?: string },
+  opts?: { cardId?: string; queueBornAt?: number },
 ): Promise<{ cardId?: string; gone?: boolean } | undefined> {
   const lock = readLockFile()
   if (!lock?.port) return undefined
@@ -663,6 +666,7 @@ async function postStreamCard(
         action,
         segments: payload.segments,
         ...(opts?.cardId ? { card_id: opts.cardId } : {}),
+        ...(opts?.queueBornAt ? { queue_born_at: opts.queueBornAt } : {}),
       },
       15_000,
     ) as { ok?: boolean; skipped?: boolean; error?: string; cardId?: string; gone?: boolean } | null
@@ -737,7 +741,7 @@ async function flushStreamCard(session: SdkSessionAgent, finish: boolean): Promi
     // finish 已抢占：丢弃排队中的 update
     if (agg.finished) return
     if (!agg.ensured) {
-      const ensured = await postStreamCard(session.sessionKey, "ensure", payload)
+      const ensured = await postStreamCard(session.sessionKey, "ensure", payload, { queueBornAt: agg.bornAt })
       if (ensured?.gone) {
         dropStaleStreamQueue(session, agg)
         return
@@ -748,7 +752,7 @@ async function flushStreamCard(session: SdkSessionAgent, finish: boolean): Promi
         patchResumableStreamCard(session.sessionKey, ensured.cardId)
       }
       // Resume 复用 Daemon 已有卡时，ensure 本身不写内容，再补一帧 update
-      const updated = await postStreamCard(session.sessionKey, "update", payload, agg.cardId ? { cardId: agg.cardId } : undefined)
+      const updated = await postStreamCard(session.sessionKey, "update", payload, { cardId: agg.cardId, queueBornAt: agg.bornAt })
       if (updated?.gone) {
         dropStaleStreamQueue(session, agg)
         return
@@ -759,7 +763,7 @@ async function flushStreamCard(session: SdkSessionAgent, finish: boolean): Promi
       }
       return
     }
-    const updated = await postStreamCard(session.sessionKey, "update", payload, agg.cardId ? { cardId: agg.cardId } : undefined)
+    const updated = await postStreamCard(session.sessionKey, "update", payload, { cardId: agg.cardId, queueBornAt: agg.bornAt })
     if (updated?.gone) {
       dropStaleStreamQueue(session, agg)
       return
@@ -1084,6 +1088,12 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
           // 阻塞 poll 仅在真正拉到新消息时开门；超时/空结果保持关门
           if (wasBlocking && !pollResultHasFreshMessages(event.result)) {
             stream.gateOpen = false
+            break
+          }
+          if (wasBlocking) {
+            // 拿到新消息 = 新回合：重开队列。bornAt 晚于 daemon 投递时打的 gone 标记，
+            // 新回合思考不会被 gone 误丢（曾致换卡后思考全部不渲染）；顺带丢掉挂起期间的收尾念叨
+            session.streamAgg = isFeishuStreamEnabled(session.sessionKey) ? newStreamAgg(true) : null
             break
           }
           stream.gateOpen = true
