@@ -239,15 +239,9 @@ function hasNewMessages(dir: string): boolean {
  *
  * 消息在 Agent 下一次挂阻塞 poll 时隐式确认删除（Agent 干完手头活才会挂 poll）；
  * 未确认则下次领取重新投递，因此幽灵连接领走也不会丢——这是"至少一次"投递的核心。
- *
- * 返回的每个文件都会刷 mtime = 本次投递时刻，供 freshSince 分界。
- *
- * freshSince：Resume 唤醒（上下文完整）时传标记时刻 T——
- * 投递时刻（mtime）≤ T 的 .claimed 是 Resume 前投出的，Agent 上下文里记得，不重投防重复处理；
- * mtime > T 的是 Resume 后才投出的（如被残留孤儿连接领走），不可能在上下文里，必须重投防丢。
- * 留存的 .claimed 仍由下一次阻塞 poll 统一确认删除，接续保障不变。
+ * 代价是 Resume 后可能重复投递已处理过的消息（上下文完整时 Agent 自行判断跳过）：重复优于丢失。
  */
-export function claimSessionMessages(filterSessionKey?: string, opts?: { freshSince?: number }): QueueMessage[] {
+export function claimSessionMessages(filterSessionKey?: string): QueueMessage[] {
   if (!queueDir) return [];
   const dir = getSessionDir(filterSessionKey);
 
@@ -258,14 +252,11 @@ export function claimSessionMessages(filterSessionKey?: string, opts?: { freshSi
     return [];
   }
 
-  const freshClaimed = new Set<string>();
   for (const f of files) {
     if (!f.endsWith(".qmsg")) continue;
     const src = path.join(dir, f);
-    const claimedName = f.replace(/\.qmsg$/, ".claimed");
     try {
-      fs.renameSync(src, path.join(dir, claimedName));
-      freshClaimed.add(claimedName);
+      fs.renameSync(src, path.join(dir, f.replace(/\.qmsg$/, ".claimed")));
     } catch { /* 并发已被领取，忽略 */ }
   }
 
@@ -274,13 +265,6 @@ export function claimSessionMessages(filterSessionKey?: string, opts?: { freshSi
     claimed = fs.readdirSync(dir).filter((f) => f.endsWith(".claimed")).sort();
   } catch {
     return [];
-  }
-  const since = opts?.freshSince;
-  if (since !== undefined) {
-    claimed = claimed.filter((f) => {
-      if (freshClaimed.has(f)) return true;
-      try { return fs.statSync(path.join(dir, f)).mtimeMs > since; } catch { return true; }
-    });
   }
 
   const now = new Date();
@@ -294,27 +278,6 @@ export function claimSessionMessages(filterSessionKey?: string, opts?: { freshSi
   }
   items.sort((a, b) => a.timestamp - b.timestamp);
   return items;
-}
-
-/**
- * 回退已投递未确认的消息：.claimed → .qmsg（文件名时间戳不变，顺序保持）。
- * 会话进程被杀（换模型/reset/stop/pack 重启）时调用——正在挂着的 poll 连接即将变孤儿，
- * 投给它们的消息 Agent 不可能再读到，回退 pending 让下一轮必然重投。
- */
-export function releaseClaimedMessages(filterSessionKey?: string): number {
-  if (!queueDir) return 0;
-  const dir = getSessionDir(filterSessionKey);
-  let count = 0;
-  try {
-    for (const f of fs.readdirSync(dir)) {
-      if (!f.endsWith(".claimed")) continue;
-      try {
-        fs.renameSync(path.join(dir, f), path.join(dir, f.replace(/\.claimed$/, ".qmsg")));
-        count++;
-      } catch { /* 并发确认删除，忽略 */ }
-    }
-  } catch { /* ignore */ }
-  return count;
 }
 
 /**
@@ -347,10 +310,13 @@ export function waitForSessionMessages(
 /**
  * 确认已投递消息完成：删除会话中的 .claimed 并返回其 messageId（用于打 DONE 表情）。
  * 主路径：Agent 挂阻塞 poll = 声明手头活全部干完，进入时自动确认全部 .claimed。
- * messageId 指定时删除「时间戳 ≤ 目标消息」的 .claimed；缺省删除该会话全部 .claimed。
- * 未投递的 .qmsg 永不删除（防时钟乱序误删新消息）。session_key 缺省时全局兜底。
+ * messageId 指定时删除「时间戳 ≤ 目标消息」的 .claimed。
+ * 未投递的 .qmsg 永不删除。session_key 缺省时全局兜底。
  */
-export function confirmClaimedMessages(messageId?: string, filterSessionKey?: string): string[] {
+export function confirmClaimedMessages(
+  messageId?: string,
+  filterSessionKey?: string,
+): string[] {
   if (!queueDir) return [];
   const safeId = messageId ? messageId.replace(/[^a-zA-Z0-9_-]/g, "_") : "";
   // 指定会话目录优先（快路径）；未命中时全局兜底——messageId 全局唯一，
@@ -362,12 +328,15 @@ export function confirmClaimedMessages(messageId?: string, filterSessionKey?: st
   const removeClaimed = (dir: string, files: string[], cutoff: number): string[] => {
     const done: string[] = [];
     for (const f of files) {
-      if (fileTimestamp(f) > cutoff) continue;
       const filePath = path.join(dir, f);
       let mid = "";
+      let msgTs = fileTimestamp(f);
       try {
-        mid = JSON.parse(fs.readFileSync(filePath, "utf-8")).messageId || "";
+        const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+        mid = parsed.messageId || "";
+        if (typeof parsed.timestamp === "number") msgTs = parsed.timestamp;
       } catch { /* ignore */ }
+      if (msgTs > cutoff) continue;
       try {
         fs.unlinkSync(filePath);
         if (mid) done.push(mid);

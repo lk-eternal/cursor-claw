@@ -7,7 +7,7 @@ import { createRequire } from "node:module"
 import { pushUiLog, broadcastLog, broadcastSessionStatus } from "./ui-logger"
 import { type ChatType, type LaunchMeta, buildPrompt, resolveSessionChatName } from "./agent-launcher"
 import { getAgentResource, resolveChannelForSession } from "./config-store"
-import { readLockFile, httpPost, notifySessionPollRelease } from "./daemon-client"
+import { readLockFile, httpPost } from "./daemon-client"
 import {
   initSessionModelStore,
   resolveModelForSession,
@@ -30,6 +30,13 @@ type StreamSegment =
   | { type: "thinking"; text: string; startedAt?: number; ms?: number }
   | { type: "tools"; tools: StreamToolEntry[] }
   | { type: "reply"; text: string }
+  | { type: "todos"; items: StreamTodoItem[] }
+
+interface StreamTodoItem {
+  id?: string
+  content: string
+  status: string
+}
 
 
 /**
@@ -42,6 +49,8 @@ interface StreamAgg {
   dirty: boolean
   timer: ReturnType<typeof setTimeout> | null
   ensured: boolean
+  /** Daemon 侧 cardId：finish 必须带上，防延迟 finish 误杀下一轮新卡 */
+  cardId?: string
   lastFlushAt: number
   /** 串行化 ensure/update/finish，避免乱序 */
   inflight: Promise<void>
@@ -50,6 +59,10 @@ interface StreamAgg {
   gateOpen: boolean
   /** 正在跑 wait=false，结束后清空预热片段 */
   pendingNonBlockingPoll: boolean
+  /** 已挂阻塞 poll：期间关门，防思考刷新卡；重复 poll 不再 endStreamRound */
+  pendingBlockingPoll: boolean
+  /** send_* 正文边界：下一段思考必须新开，禁止并进 send 前的思考块 */
+  forceNewThinking: boolean
   /** 断线挂起：不 finish 收口，Resume 后继续同一张卡 */
   suspended: boolean
 }
@@ -79,7 +92,9 @@ interface SdkSessionAgent {
   logAgg: { kind: "thinking" | "text" | null; buf: string }
   /** 飞书流式进度卡；非飞书通道为 null */
   streamAgg: StreamAgg | null
-  /** 最近一次终态状态事件（ERROR/EXPIRED/CANCELLED），用于结束时还原真实错误原因 */
+  /** 任务清单最新快照（会话级，跨换卡存活）：merge 更新基于它，新卡渲染完整清单 */
+  todoSnapshot: StreamTodoItem[] | null
+  /** 最近一次 status 事件（含 RUNNING/ERROR 等），结束诊断与断线挂起判定用 */
   lastStatus?: { status: string; message?: string }
 }
 
@@ -92,7 +107,15 @@ const sessionResetGen = new Map<string, number>()
 // 不保留闲置 agent 进程：闲置连接会被代理/NAT 静默掐死，复用必报 SSL WRONG_VERSION_NUMBER。
 // run 结束即释放进程，仅持久化 sessionKey→agentId 映射；新消息 Agent.resume 恢复——
 // 全新连接 + 历史上下文完整保留，应用重启后同样有效。
-interface ResumeEntry { agentId: string; workspaceDir: string; updatedAt: number; senderOpenId?: string; rulesHash?: string }
+interface ResumeEntry {
+  agentId: string
+  workspaceDir: string
+  updatedAt: number
+  senderOpenId?: string
+  rulesHash?: string
+  /** 最近一次飞书流式卡 cardId；进程重启后用于收口孤儿卡，避免 Resume 再建一张重复卡 */
+  streamCardId?: string
+}
 
 /** 工作区 rules 目录内容 hash：Resume 会话的规则是创建时的快照，靠它感知规则更新 */
 function computeRulesHash(workspaceDir: string): string {
@@ -152,11 +175,25 @@ function isResumeEligible(session: SdkSessionAgent): boolean {
 
 function rememberResumable(session: SdkSessionAgent): void {
   if (!isResumeEligible(session) || !session.workspaceDir) return
+  const prev = getResumableMap().get(session.sessionKey)
   getResumableMap().set(session.sessionKey, {
     agentId: session.agentId, workspaceDir: session.workspaceDir, updatedAt: Date.now(),
     senderOpenId: session.senderOpenId,
     rulesHash: computeRulesHash(session.workspaceDir),
+    streamCardId: session.streamAgg?.cardId ?? prev?.streamCardId,
   })
+  saveResumableMap()
+}
+
+function patchResumableStreamCard(sessionKey: string, streamCardId: string | undefined, opts?: { onlyIf?: string }): void {
+  const map = getResumableMap()
+  const e = map.get(sessionKey)
+  if (!e) return
+  // 清除必须带期望值：延迟 finish 的清理不能抹掉新回合刚记录的新卡
+  if (opts?.onlyIf && e.streamCardId !== opts.onlyIf) return
+  if (e.streamCardId === streamCardId) return
+  e.streamCardId = streamCardId
+  e.updatedAt = Date.now()
   saveResumableMap()
 }
 
@@ -328,6 +365,8 @@ function newStreamAgg(gateOpen = false): StreamAgg {
     finished: false,
     gateOpen,
     pendingNonBlockingPoll: false,
+    pendingBlockingPoll: false,
+    forceNewThinking: false,
     suspended: false,
   }
 }
@@ -381,6 +420,7 @@ interface StreamCardPayload {
     | { type: "thinking"; text: string; ms?: number }
     | { type: "tools"; tools: { name: string; status: string; summary?: string; ms?: number }[] }
     | { type: "reply"; text: string }
+    | { type: "todos"; items: { content: string; status: string }[] }
   >
 }
 
@@ -403,15 +443,22 @@ function dropEmptyTail(stream: StreamAgg): void {
 
 function sealLastThinking(stream: StreamAgg): void {
   const last = stream.segments[stream.segments.length - 1]
-  if (last?.type === "thinking" && last.startedAt != null && last.ms == null) {
-    last.ms = Date.now() - last.startedAt
-  }
+  if (last?.type !== "thinking" || last.ms != null) return
+  // startedAt 缺失也要封存，否则后续思考会并进同一块
+  last.ms = last.startedAt != null ? Date.now() - last.startedAt : 0
 }
 
 /** 入队思考：与上一块同类则合并，否则新开；空文本丢弃 */
 function enqueueThinking(stream: StreamAgg, text: string): void {
   if (!text) return
   dropEmptyTail(stream)
+  if (stream.forceNewThinking) {
+    stream.forceNewThinking = false
+    sealLastThinking(stream)
+    stream.segments.push({ type: "thinking", text, startedAt: Date.now() })
+    stream.dirty = true
+    return
+  }
   const last = stream.segments[stream.segments.length - 1]
   if (last?.type === "thinking" && last.ms == null) {
     last.text += text
@@ -424,6 +471,82 @@ function enqueueThinking(stream: StreamAgg, text: string): void {
   }
   sealLastThinking(stream)
   stream.segments.push({ type: "thinking", text, startedAt: Date.now() })
+}
+
+/** updateTodos 工具调用：解析任务快照（merge=true 按 id 合并），原地刷新时间线中的任务清单段 */
+function isTodoUpdateInvocation(name: string): boolean {
+  const n = name.trim().toLowerCase().replace(/[_-]/g, "")
+  return n === "updatetodos" || n === "todowrite" || n === "writetodos"
+}
+
+/** status 归一化：事件里是驼峰（inProgress），渲染映射用下划线（in_progress） */
+function normalizeTodoStatus(s: unknown): string {
+  const n = String(s ?? "").trim().replace(/[-_\s]/g, "").toLowerCase()
+  if (n === "inprogress") return "in_progress"
+  if (n === "completed" || n === "done") return "completed"
+  if (n === "cancelled" || n === "canceled") return "cancelled"
+  return "pending"
+}
+
+/**
+ * 基于真实事件形态（实测）设计：
+ * - 同一次调用会发多个 running 事件，args.todos 从 1 项流式增长到本次调用的全部项；
+ * - 事件里无 id、无 merge 字段；status 为驼峰。
+ * 因此按 content 匹配「合并」到会话级快照（跨换卡存活）：命中更新状态、未命中追加；
+ * 仅当新清单与快照零交集时才视为全新清单整体替换。
+ */
+function applyTodoUpdate(session: SdkSessionAgent, stream: StreamAgg, args: unknown): void {
+  if (typeof args === "string") {
+    try { args = JSON.parse(args) } catch { return }
+  }
+  if (!args || typeof args !== "object") return
+  const rec = args as { todos?: unknown }
+  if (!Array.isArray(rec.todos)) return
+  const incoming: StreamTodoItem[] = []
+  for (const t of rec.todos) {
+    if (!t || typeof t !== "object") continue
+    const item = t as { id?: unknown; content?: unknown; status?: unknown }
+    const content = typeof item.content === "string" ? item.content.trim() : ""
+    if (!content) continue
+    incoming.push({
+      id: typeof item.id === "string" ? item.id : undefined,
+      content,
+      status: normalizeTodoStatus(item.status),
+    })
+  }
+  if (!incoming.length) return
+
+  const snapshot = session.todoSnapshot ?? []
+  const sameItem = (a: StreamTodoItem, b: StreamTodoItem): boolean =>
+    (!!a.id && a.id === b.id) || a.content === b.content
+  const overlap = incoming.filter((inc) => snapshot.some((x) => sameItem(inc, x))).length
+  if (snapshot.length && overlap === 0) {
+    // 零交集 = 全新任务清单：整体替换
+    session.todoSnapshot = incoming
+  } else {
+    for (const inc of incoming) {
+      const hit = snapshot.find((x) => sameItem(inc, x))
+      if (hit) {
+        hit.status = inc.status
+        if (inc.id && !hit.id) hit.id = inc.id
+      } else {
+        snapshot.push(inc)
+      }
+    }
+    session.todoSnapshot = snapshot
+  }
+  pushUiLog("SDK", "DEBUG",
+    `[${session.sessionKey}] [todos] incoming=${incoming.length} overlap=${overlap} snapshot=${session.todoSnapshot.length}`)
+
+  let seg = stream.segments.find((s): s is Extract<StreamSegment, { type: "todos" }> => s.type === "todos")
+  if (!seg) {
+    dropEmptyTail(stream)
+    sealLastThinking(stream)
+    seg = { type: "todos", items: [] }
+    stream.segments.push(seg)
+  }
+  seg.items = session.todoSnapshot.map((t) => ({ ...t }))
+  stream.dirty = true
 }
 
 /** 入队工具：callId 已存在则更新；running 新开步；孤儿终态事件（上一回合遗留）丢弃 */
@@ -506,6 +629,9 @@ function buildStreamPayload(agg: StreamAgg, sessionKey: string): StreamCardPaylo
           })),
         })
       }
+    } else if (seg.type === "todos") {
+      if (!seg.items.length) continue
+      segments.push({ type: "todos", items: seg.items.map((t) => ({ content: t.content, status: t.status })) })
     } else if (seg.type === "reply") {
       // 兼容残段：SDK 正文视作思考（独立块，不并入上一块）
       const text = seg.text.trim()
@@ -525,9 +651,10 @@ async function postStreamCard(
   sessionKey: string,
   action: "ensure" | "update" | "finish",
   payload: StreamCardPayload,
-): Promise<void> {
+  opts?: { cardId?: string },
+): Promise<{ cardId?: string; gone?: boolean } | undefined> {
   const lock = readLockFile()
-  if (!lock?.port) return
+  if (!lock?.port) return undefined
   try {
     const r = await httpPost(
       `http://127.0.0.1:${lock.port}/api/agent-stream-card`,
@@ -535,14 +662,27 @@ async function postStreamCard(
         session_key: sessionKey,
         action,
         segments: payload.segments,
+        ...(opts?.cardId ? { card_id: opts.cardId } : {}),
       },
       15_000,
-    ) as { ok?: boolean; skipped?: boolean; error?: string } | null
+    ) as { ok?: boolean; skipped?: boolean; error?: string; cardId?: string; gone?: boolean } | null
     if (r && r.ok === false && !r.skipped) {
       pushUiLog("SDK", "DEBUG", `[${sessionKey}] 流式卡片 ${action} 失败: ${r.error || "unknown"}`)
     }
+    if (r?.gone) return { gone: true }
+    return r?.cardId ? { cardId: r.cardId } : undefined
   } catch (e: unknown) {
     pushUiLog("SDK", "DEBUG", `[${sessionKey}] 流式卡片 ${action} 异常: ${e instanceof Error ? e.message : String(e)}`)
+    return undefined
+  }
+}
+
+/** daemon 判定本队列已随旧卡收口（gone）：丢弃旧时间线，换新空队列——后续新内容走新卡 */
+function dropStaleStreamQueue(session: SdkSessionAgent, agg: StreamAgg): void {
+  agg.finished = true
+  pushUiLog("SDK", "DEBUG", `[${session.sessionKey}] 流式卡队列已随收口作废，丢弃旧时间线`)
+  if (session.streamAgg === agg) {
+    session.streamAgg = isFeishuStreamEnabled(session.sessionKey) ? newStreamAgg(true) : null
   }
 }
 
@@ -579,6 +719,8 @@ async function flushStreamCard(session: SdkSessionAgent, finish: boolean): Promi
   if (!finish && !agg.gateOpen) return
 
   const payload = buildStreamPayload(agg, session.sessionKey)
+  // 空 payload 不建卡（只有会话条的空白卡会闪现给用户）；保留 dirty 等真内容
+  if (!finish && !agg.ensured && payload.segments.length === 0) return
   agg.dirty = false
   agg.lastFlushAt = Date.now()
   // 同步标记，防止 status FINISHED 与 stream finally 双重 finish
@@ -586,46 +728,96 @@ async function flushStreamCard(session: SdkSessionAgent, finish: boolean): Promi
 
   const run = async (): Promise<void> => {
     if (finish) {
-      // 门未开且从未建卡：丢弃预热，不发空完成卡
-      if (!agg.ensured && !agg.gateOpen) return
-      await postStreamCard(session.sessionKey, "finish", payload)
+      // 与 endStreamRound 对齐：无 cardId 不 finish，防误杀 MCP 新卡
+      if (!agg.cardId) return
+      await postStreamCard(session.sessionKey, "finish", payload, { cardId: agg.cardId })
+      patchResumableStreamCard(session.sessionKey, undefined, { onlyIf: agg.cardId })
       return
     }
     // finish 已抢占：丢弃排队中的 update
     if (agg.finished) return
     if (!agg.ensured) {
-      await postStreamCard(session.sessionKey, "ensure", payload)
+      const ensured = await postStreamCard(session.sessionKey, "ensure", payload)
+      if (ensured?.gone) {
+        dropStaleStreamQueue(session, agg)
+        return
+      }
       agg.ensured = true
+      if (ensured?.cardId) {
+        agg.cardId = ensured.cardId
+        patchResumableStreamCard(session.sessionKey, ensured.cardId)
+      }
       // Resume 复用 Daemon 已有卡时，ensure 本身不写内容，再补一帧 update
-      await postStreamCard(session.sessionKey, "update", payload)
+      const updated = await postStreamCard(session.sessionKey, "update", payload, agg.cardId ? { cardId: agg.cardId } : undefined)
+      if (updated?.gone) {
+        dropStaleStreamQueue(session, agg)
+        return
+      }
+      if (!agg.cardId && updated?.cardId) {
+        agg.cardId = updated.cardId
+        patchResumableStreamCard(session.sessionKey, updated.cardId)
+      }
       return
     }
-    await postStreamCard(session.sessionKey, "update", payload)
+    const updated = await postStreamCard(session.sessionKey, "update", payload, agg.cardId ? { cardId: agg.cardId } : undefined)
+    if (updated?.gone) {
+      dropStaleStreamQueue(session, agg)
+      return
+    }
+    if (!agg.cardId && updated?.cardId) {
+      agg.cardId = updated.cardId
+      patchResumableStreamCard(session.sessionKey, updated.cardId)
+    }
   }
 
   agg.inflight = agg.inflight.then(run, run)
   await agg.inflight
 }
 
-function toolArgsCommandText(args: unknown): string {
+// ── 工具调用识别：优先结构化解析 args，字符串匹配只留给 shell command ──
+// tool_call 事件本身是结构化的：MCP 工具有 args.toolName，shell 有 args.command。
+// 严禁把整个 args 序列化后模糊匹配——Task 的 prompt / send_text 的 text 等长文本里
+// 出现 "poll-message"、"send_text" 字样就会整体误判（Subagent 步被隐藏、卡片被错误收口）。
+
+/** MCP 调用的目标工具名（args.toolName / tool_name）；非 MCP 调用返回 "" */
+function mcpToolName(args: unknown): string {
+  if (!args || typeof args !== "object") return ""
+  const rec = args as Record<string, unknown>
+  for (const key of ["toolName", "tool_name"]) {
+    const v = rec[key]
+    if (typeof v === "string" && v.trim()) return v.trim()
+  }
+  return ""
+}
+
+/** shell 类工具的命令文本；非 shell 调用返回 "" */
+function shellCommandText(args: unknown): string {
   if (!args || typeof args !== "object") return ""
   const rec = args as Record<string, unknown>
   for (const key of ["command", "cmd", "script", "code", "input"]) {
     const v = rec[key]
     if (typeof v === "string" && v.trim()) return v
   }
-  try { return JSON.stringify(rec) } catch { return "" }
+  return ""
 }
 
+/** cursor-claw 出站工具（已有独立飞书消息，不进流式工具区） */
+const OUTBOUND_MCP_RE = /^(?:send_(?:text|question|image|file)|project_\w+)$/i
+const MEDIA_MCP_RE = /^send_(?:file|image)$/i
+
 function isPollMessageInvocation(name: string, summary: string, args?: unknown): boolean {
-  const full = `${name}\n${summary}\n${args != null ? toolArgsCommandText(args) : ""}`
-  return /poll-message/i.test(full)
+  // MCP 调用（含 send_*）绝不可能是 poll 的 curl 命令；text 参数里聊到 poll-message 不算
+  if (mcpToolName(args)) return false
+  const cmd = shellCommandText(args)
+  if (cmd) return /poll-message/i.test(cmd)
+  // args 缺失（部分事件只有摘要）：summary 对 shell 是 command 截断，可兜底
+  return /poll-message/i.test(summary)
 }
 
 /** 仅阻塞 poll 才换卡。必须看完整 command（摘要 120 字会裁掉 wait=false） */
 function isBlockingPollMessage(name: string, summary: string, args?: unknown): boolean {
-  const full = `${name}\n${summary}\n${args != null ? toolArgsCommandText(args) : ""}`
-  if (!/poll-message/i.test(full)) return false
+  if (!isPollMessageInvocation(name, summary, args)) return false
+  const full = shellCommandText(args) || summary
   if (/wait\s*=\s*false/i.test(full)) return false
   if (/["']wait["']\s*:\s*false/i.test(full)) return false
   if (/wait%3[Dd]false/i.test(full)) return false
@@ -634,20 +826,38 @@ function isBlockingPollMessage(name: string, summary: string, args?: unknown): b
 
 /** 仅隐藏本通道出站 MCP（send_text 等）与 poll；其它 MCP/工具都进流式工具区 */
 function shouldOmitFromStreamCard(name: string, summary: string, args?: unknown): boolean {
-  const full = `${name}\n${summary}\n${args != null ? toolArgsCommandText(args) : ""}`
-  // cursor-claw 出站：已有独立飞书消息，不重复进工具区
-  if (/(?:^|[\s:.])send_(?:text|question|image|file)\b/i.test(full)) return true
-  if (/(?:^|[\s:.])project_(?:action|update|get|list|delete|register)/i.test(full)) return true
-  if (/toolName["']?\s*[:=]\s*["']send_/i.test(full)) return true
-  if (/toolName["']?\s*[:=]\s*["']project_/i.test(full)) return true
+  const mcp = mcpToolName(args)
+  if (mcp) return OUTBOUND_MCP_RE.test(mcp)
+  if (OUTBOUND_MCP_RE.test(name.trim())) return true
   if (isPollMessageInvocation(name, summary, args)) return true
-  return false
+  // MCP 退避方案：shell curl 直连 daemon HTTP API 也是出站
+  const cmd = shellCommandText(args)
+  return !!cmd && /\/api\/send-(?:text|question|image|file)/i.test(cmd)
 }
 
-/** MCP 工具展示名：优先 args.toolName / tool_name */
+/** send_file / send_image：独立消息，完成后必须换回合，否则 daemon seal 后 SDK 会 ensure 复制整卡 */
+function isMediaSendInvocation(name: string, summary: string, args?: unknown): boolean {
+  const mcp = mcpToolName(args)
+  if (mcp) return MEDIA_MCP_RE.test(mcp)
+  if (MEDIA_MCP_RE.test(name.trim())) return true
+  const cmd = shellCommandText(args)
+  return !!cmd && /\/api\/send-(?:file|image)/i.test(cmd)
+}
+
+/** MCP 工具展示名：优先 args.toolName / tool_name；Task/subagent 加可见标记 */
 function resolveToolDisplayName(name: string, args: unknown): string {
+  const raw = name.trim()
+  const isTask = /^task$/i.test(raw) || /^task\b/i.test(raw)
+  let label = raw
   if (args && typeof args === "object") {
     const rec = args as Record<string, unknown>
+    if (isTask) {
+      const desc = typeof rec.description === "string" ? rec.description.trim()
+        : typeof rec.prompt === "string" ? rec.prompt.trim().slice(0, 80) : ""
+      const sub = typeof rec.subagent_type === "string" ? rec.subagent_type.trim() : ""
+      label = desc ? `🤖 Subagent · ${desc}` : sub ? `🤖 Subagent · ${sub}` : "🤖 Subagent"
+      return label
+    }
     for (const key of ["toolName", "tool_name", "name"]) {
       const v = rec[key]
       if (typeof v === "string" && v.trim()) {
@@ -657,7 +867,7 @@ function resolveToolDisplayName(name: string, args: unknown): string {
       }
     }
   }
-  return name
+  return isTask ? "🤖 Subagent" : label
 }
 
 
@@ -679,8 +889,7 @@ function pollResultHasFreshMessages(result: unknown): boolean {
 }
 
 /**
- * 拉起后通知 daemon：resumed=true 上下文完整（首次非阻塞 poll 只投新消息）；
- * resumed=false 全新会话（收口上一 run 残留流式卡）。失败静默＝降级默认行为。
+ * 拉起后通知 daemon：resumed=false 全新会话（收口上一 run 残留流式卡）。失败静默＝降级默认行为。
  */
 async function notifySessionLaunched(sessionKey: string, resumed: boolean): Promise<void> {
   const lock = readLockFile()
@@ -708,8 +917,9 @@ function endStreamRound(session: SdkSessionAgent): void {
     clearTimeout(agg.timer)
     agg.timer = null
   }
-  // gateOpen 也算：MCP send_* 可能已在 Daemon 建卡，即使 SDK 从未 ensure 也要收口
-  const shouldPost = !agg.finished && (agg.ensured || agg.gateOpen)
+  const finishCardId = agg.cardId
+  // 仅收口本 SDK 队列建过的卡；无 cardId 时 finish 会误杀 MCP 刚建的卡（拆卡/空卡）
+  const shouldPost = !agg.finished && !!finishCardId
   agg.finished = true
   sealAllThinking(agg)
   sealRunningTools(agg)
@@ -717,10 +927,13 @@ function endStreamRound(session: SdkSessionAgent): void {
   session.streamAgg = isFeishuStreamEnabled(session.sessionKey) ? newStreamAgg(true) : null
   if (!shouldPost) return
   const payload = buildStreamPayload(agg, session.sessionKey)
-  agg.inflight = agg.inflight.then(
-    async () => { await postStreamCard(session.sessionKey, "finish", payload) },
-    async () => { await postStreamCard(session.sessionKey, "finish", payload) },
-  )
+  // 必须带上旧卡 cardId：延迟 finish 不能误杀下一轮 MCP/SDK 新建的卡
+  const finishAndClear = async (): Promise<void> => {
+    await postStreamCard(session.sessionKey, "finish", payload, { cardId: finishCardId })
+    // 已收口的卡不再留给 Resume 孤儿收口（条件清，防抹掉新回合的卡）
+    patchResumableStreamCard(session.sessionKey, undefined, { onlyIf: finishCardId })
+  }
+  agg.inflight = agg.inflight.then(finishAndClear, finishAndClear)
 }
 
 function flushSdkLog(session: SdkSessionAgent): void {
@@ -809,6 +1022,8 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
       for (const block of event.message.content) {
         if (block.type === "text" && block.text) {
           appendSdkLog(session, "text", block.text)
+          // 阻塞 poll 挂起期间不刷卡（避免重复 poll 思考落成新卡）
+          if (stream?.pendingBlockingPoll) continue
           // SDK 正文视作思考，不进用户可见正文区
           if (stream && !stream.finished && isShowThinkingEnabled(session.sessionKey)) {
             enqueueThinking(stream, block.text)
@@ -820,6 +1035,7 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
     case "thinking":
       if (event.text) {
         appendSdkLog(session, "thinking", event.text)
+        if (stream?.pendingBlockingPoll) break
         if (stream && !stream.finished && isShowThinkingEnabled(session.sessionKey)) {
           enqueueThinking(stream, event.text)
           scheduleFlushStreamCard(session)
@@ -836,8 +1052,15 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
           const blocking = isBlockingPollMessage(event.name, detectSummary, event.args)
           if (event.status === "running") {
             if (blocking) {
-              // 挂阻塞 poll = 本回合结束：收口当前卡换新队列
+              // 已在等第一条阻塞 poll：忽略重复 running，防再 endStreamRound 刷卡
+              if (stream.pendingBlockingPoll) break
+              // 挂阻塞 poll = 本回合结束：收口当前卡；新队列关门，挂起期间不刷思考卡
               endStreamRound(session)
+              const next = session.streamAgg
+              if (next) {
+                next.gateOpen = false
+                next.pendingBlockingPoll = true
+              }
             } else {
               stream.pendingNonBlockingPoll = true
             }
@@ -845,7 +1068,9 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
           }
           // poll 返回
           const wasNonBlocking = stream.pendingNonBlockingPoll
+          const wasBlocking = stream.pendingBlockingPoll
           stream.pendingNonBlockingPoll = false
+          stream.pendingBlockingPoll = false
           if (wasNonBlocking && stream.gateOpen && pollResultHasFreshMessages(event.result)) {
             // 干活途中拉到新消息：回合边界（重投是当前回合的活，不换卡）
             endStreamRound(session)
@@ -856,15 +1081,41 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
             stream.segments = stream.segments.filter((s) => s.type === "tools" && s.tools.length > 0)
             stream.dirty = stream.segments.length > 0
           }
+          // 阻塞 poll 仅在真正拉到新消息时开门；超时/空结果保持关门
+          if (wasBlocking && !pollResultHasFreshMessages(event.result)) {
+            stream.gateOpen = false
+            break
+          }
           stream.gateOpen = true
           break
         }
-        // 非 poll 工具 = 真实工作开始：开门
+        // 非 poll 工具 = 真实工作开始：开门；poll completed 事件若丢失（工具桥中断）
+        // pendingBlockingPoll 会残留，这里顺手复位，避免本回合思考永久不进卡
         stream.gateOpen = true
+        stream.pendingBlockingPoll = false
+        // updateTodos：独立任务清单面板（原地实时刷新），不进普通工具步。
+        // running/completed 都应用一次（幂等）：running 的 args 偶见缺失/截断，completed 兜底
+        if (isTodoUpdateInvocation(event.name)) {
+          applyTodoUpdate(session, stream, event.args)
+          scheduleFlushStreamCard(session, true)
+          break
+        }
         if (shouldOmitFromStreamCard(event.name, detectSummary, event.args)) {
+          if (isMediaSendInvocation(event.name, detectSummary, event.args)) {
+            if (event.status === "running") {
+              sealLastThinking(stream)
+              stream.forceNewThinking = true
+              scheduleFlushStreamCard(session, true)
+            } else {
+              // completed/error：与 daemon seal 对齐，换新队列，防复制整卡 / 思考中挂起
+              endStreamRound(session)
+            }
+            break
+          }
           if (event.status === "running") {
-            // send_* 是正文边界：封存当前思考块（后续思考开新块），再刷时间线保证正文落点
+            // send_* 是正文边界：封存当前思考块，后续思考强制新开
             sealLastThinking(stream)
+            stream.forceNewThinking = true
             scheduleFlushStreamCard(session, true)
           }
           break
@@ -877,9 +1128,8 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
     case "status": {
       flushSdkLog(session)
       const isErr = event.status === "ERROR" || event.status === "EXPIRED"
-      if (isErr || event.status === "CANCELLED") {
-        session.lastStatus = { status: event.status, message: event.message }
-      }
+      // 含 RUNNING：换模等待依赖 lastStatus，不能只记终态
+      session.lastStatus = { status: event.status, message: event.message }
       const lvl = isErr ? "ERROR" as const : "INFO" as const
       pushUiLog("SDK", lvl, `[${session.sessionKey}] [status] ${event.status}${event.message ? ` - ${event.message}` : ""}`)
       // FINISHED / 终态：尽快收口流式卡（finally 还会再 finish 一次，daemon 侧幂等）
@@ -1159,6 +1409,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       modelParams,
       logAgg: { kind: null, buf: "" },
       streamAgg: isFeishuStreamEnabled(sessionKey) ? newStreamAgg() : null,
+      todoSnapshot: null,
     }
 
     sdkSessions.set(sessionKey, session)
@@ -1174,6 +1425,12 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       ? buildWakePrompt(session, rulesUpdated, taskMessage)
       : buildPrompt(meta, taskMessage, sessionKey, opts.useMainWorkspace)
     pushUiLog("SDK", "INFO", `[${sessionKey}] ${resumed ? "恢复" : "启动"} Prompt:\n${prompt}`)
+    // pack/进程重启后 daemon 内存无卡，飞书旧流式卡仍在：Resume 前先按持久化 cardId 收口，避免再建一张重复卡
+    if (resumed && resumable?.streamCardId && session.streamAgg) {
+      pushUiLog("SDK", "INFO", `[${sessionKey}] Resume 收口孤儿流式卡 card=${resumable.streamCardId}`)
+      await postStreamCard(sessionKey, "finish", { segments: [] }, { cardId: resumable.streamCardId })
+      patchResumableStreamCard(sessionKey, undefined, { onlyIf: resumable.streamCardId })
+    }
     // 发 prompt 前通知 daemon 拉起形态：Resume 打 fresh-only 标；全新会话收残留旧卡
     await notifySessionLaunched(sessionKey, resumed)
     let run: Run
@@ -1212,8 +1469,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
 
 /** 停止并释放会话：先等 cancel 把 run 落为终态再关进程（直接 close 会残留 active run，拖垮下次 Resume） */
 function releaseSession(s: SdkSessionAgent): Promise<void> {
-  // 进程将死，先让 daemon 掐掉本会话残留 poll 连接并回退处理中消息，防孤儿 curl 偷走新消息
-  notifySessionPollRelease(s.sessionKey)
+  // 残留的 poll 连接无需专门收口：新回合的任意 poll 会顶掉它，claimed 消息下次 poll 重新可见
   s.abortController.abort()
   if (s.streamAgg?.timer) {
     clearTimeout(s.streamAgg.timer)
@@ -1240,9 +1496,16 @@ export function stopSdkSession(sessionKey: string): void {
   broadcastSdkSessionStatus()
 }
 
+async function waitSdkPendingLaunch(sessionKey: string, ms = 12_000): Promise<void> {
+  const deadline = Date.now() + ms
+  while (pendingLaunches.has(sessionKey) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50))
+  }
+}
+
 /**
- * 仅本会话切换模型：写 override；有 live/resumable 则停当前 run 后 Resume（禁止 Create 丢上下文）。
- * 无可恢复会话时只写 override，返回 deferred=true（下次唤醒生效）。
+ * 仅本会话切换模型：写 override；有 live 则停当前 run（保留 resume）。
+ * 不主动拉起——有队列消息时由调度器拉起，否则下次唤醒生效。
  */
 export async function switchSdkSessionModel(
   sessionKey: string,
@@ -1256,56 +1519,21 @@ export async function switchSdkSessionModel(
   setSessionOverride(sessionKey, { model: mid, modelParams: params })
   pushRecentModel({ model: mid, modelParams: params })
 
+  // 先等掉进行中的拉起，避免 pendingLaunches 合流后旧模型占坑
+  await waitSdkPendingLaunch(sessionKey)
+
   const live = sdkSessions.get(sessionKey)
-  const resumable = getResumableMap().get(sessionKey)
-  if (!live && !resumable) {
-    pushUiLog("SDK", "INFO", `[${sessionKey}] 会话未拉起，已记下模型 ${mid}（下次唤醒生效）`)
-    return { ok: true, deferred: true }
-  }
-
-  const channel = resolveChannelForSession(sessionKey)
-  const resource = getAgentResource(channel?.agentResourceId)
-  if (resource.type !== "sdk" || !resource.apiKey?.trim()) {
-    return { ok: false, error: "通道未绑定 SDK 资源或缺少 API Key" }
-  }
-
-  const workspaceDir = live?.workspaceDir || resumable!.workspaceDir
-  if (!workspaceDir) return { ok: false, error: "无法解析会话工作目录" }
-
   if (live) {
-    pushUiLog("SDK", "INFO", `[${sessionKey}] 换模：停止当前 run，准备 Resume → ${mid}`)
+    pushUiLog("SDK", "INFO", `[${sessionKey}] 换模：停止当前 run，记下 ${mid}（有消息再拉起）`)
     await releaseSession(live)
     broadcastSdkSessionStatus()
+  } else {
+    pushUiLog("SDK", "INFO", `[${sessionKey}] 已记下模型 ${mid}（下次唤醒生效）`)
   }
-
-  const chatType: ChatType = live?.chatType
-    ?? (projectIdFromSessionKey(sessionKey) ? "project" : "p2p")
-  const r = await launchSdkAgent({
-    sessionKey,
-    chatType,
-    workspaceDir,
-    apiKey: resource.apiKey,
-    model: mid,
-    modelParams: params,
-    keepSession: live?.keepSession ?? channel?.keepSession ?? true,
-    persistentPoll: live?.persistentPoll ?? (channel?.keepSession !== false && (channel?.persistentPoll ?? true)),
-    senderOpenId: live?.senderOpenId ?? resumable?.senderOpenId,
-    chatName: live?.chatName,
-  })
-  if (!r.ok) return { ok: false, error: r.error || "Resume 换模失败" }
-  // 等新 run 真正 RUNNING（最多 15s），避免「已切换」报喜后实际还在 error 重试
-  const deadline = Date.now() + 15_000
-  while (Date.now() < deadline) {
-    const s = sdkSessions.get(sessionKey)
-    if (s?.run && (s.lastStatus?.status === "RUNNING" || s.lastStatus?.status === "running")) {
-      clearSdkFailStreak(sessionKey)
-      return { ok: true }
-    }
-    // launch 成功但已又 error 退出：继续等退避重试拉起
-    await new Promise((r) => setTimeout(r, 400))
-  }
-  // 超时仍返回 ok（override 已写入），但提示调用方可能仍在重试
-  return { ok: true }
+  // 日志带完整 key 后缀，避免飞书/微信同目录都显示「📂 xxx」看不出切到哪
+  const chatPart = sessionKey.includes("::") ? sessionKey.slice(0, sessionKey.indexOf("::")) : sessionKey
+  pushUiLog("SDK", "INFO", `[${sessionKey}] 切模目标 chat=${chatPart} → ${mid}`)
+  return { ok: true, deferred: true }
 }
 
 /** 显式重置会话上下文（/reset）：停掉在跑的 run、丢弃 resume 映射，下条消息全新会话 */

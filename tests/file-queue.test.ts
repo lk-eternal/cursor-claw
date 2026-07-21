@@ -9,7 +9,6 @@ import {
   claimSessionMessages,
   waitForSessionMessages,
   confirmClaimedMessages,
-  releaseClaimedMessages,
   getQueueLength,
   getEarliestMessageTime,
   getQueueMessages,
@@ -173,83 +172,31 @@ describe("confirmClaimedMessages", () => {
   })
 })
 
-describe("freshSince 分界（Resume 唤醒重投判定）", () => {
-  it("Resume 标记前投递的 claimed 不重投（已在 Agent 上下文）", async () => {
-    pushToFileQueue("Resume 前投出", "m1", "test", SESSION_A)
-    claimSessionMessages(SESSION_A)
-    await new Promise((r) => setTimeout(r, 15))
-    const restoredAt = Date.now()
-
-    expect(claimSessionMessages(SESSION_A, { freshSince: restoredAt })).toHaveLength(0)
-    // 留存的 claimed 仍由阻塞 poll 统一确认
-    expect(confirmClaimedMessages(undefined, SESSION_A)).toEqual(["m1"])
+describe("至少一次投递（简单模型）", () => {
+  it("幽灵连接领走后（claimed），下一次领取仍然可见——宁重复不丢", () => {
+    pushToFileQueue("被幽灵领走", "m1", "test", SESSION_A)
+    claimSessionMessages(SESSION_A) // 模拟幽灵连接领取投递
+    const again = claimSessionMessages(SESSION_A)
+    expect(again.map((m) => m.messageId)).toEqual(["m1"])
   })
 
-  it("Resume 标记后才投递的 claimed 必须重投（孤儿连接领走，从未进上下文）", async () => {
-    const restoredAt = Date.now()
-    await new Promise((r) => setTimeout(r, 15))
-    pushToFileQueue("Resume 后被孤儿领走", "m1", "test", SESSION_A)
-    claimSessionMessages(SESSION_A) // 模拟孤儿连接领取投递
-
-    const msgs = claimSessionMessages(SESSION_A, { freshSince: restoredAt })
-    expect(msgs.map((m) => m.messageId)).toEqual(["m1"])
-  })
-
-  it("新 .qmsg 不受 freshSince 影响，总是投递", async () => {
+  it("claimed 与新 qmsg 混合时一并返回，按时间升序", async () => {
     pushToFileQueue("旧的处理中", "m1", "test", SESSION_A)
     claimSessionMessages(SESSION_A)
-    await new Promise((r) => setTimeout(r, 15))
-    const restoredAt = Date.now()
+    await new Promise((r) => setTimeout(r, 5))
     pushToFileQueue("新消息", "m2", "test", SESSION_A)
 
-    const msgs = claimSessionMessages(SESSION_A, { freshSince: restoredAt })
-    expect(msgs.map((m) => m.messageId)).toEqual(["m2"])
-  })
-
-  it("重投会刷新投递时刻：再次 Resume 时仍在重投范围内（宁重复不丢）", async () => {
-    pushToFileQueue("消息", "m1", "test", SESSION_A)
-    claimSessionMessages(SESSION_A)
-    await new Promise((r) => setTimeout(r, 15))
-    const firstResume = Date.now()
-    await new Promise((r) => setTimeout(r, 15))
-    pushToFileQueue("触发搭车重投", "m2", "test", SESSION_A)
-    claimSessionMessages(SESSION_A) // m1 搭车重投，mtime 刷新到现在
-
-    await new Promise((r) => setTimeout(r, 15))
-    const msgs = claimSessionMessages(SESSION_A, { freshSince: firstResume })
-    expect(msgs.map((m) => m.messageId).sort()).toEqual(["m1", "m2"])
-  })
-})
-
-describe("releaseClaimedMessages（杀会话收口回退）", () => {
-  it("claimed 回退 pending，下一轮领取必然重投", () => {
-    pushToFileQueue("一", "m1", "test", SESSION_A)
-    pushToFileQueue("二", "m2", "test", SESSION_A)
-    claimSessionMessages(SESSION_A)
-
-    expect(releaseClaimedMessages(SESSION_A)).toBe(2)
-    const views = getQueueMessages(SESSION_A)
-    expect(views.every((v) => v.status === "pending")).toBe(true)
-    // 回退后即使带 freshSince（Resume 场景）也会作为新领取投递
-    const msgs = claimSessionMessages(SESSION_A, { freshSince: Date.now() })
+    const msgs = claimSessionMessages(SESSION_A)
     expect(msgs.map((m) => m.messageId)).toEqual(["m1", "m2"])
   })
 
-  it("无 claimed 时回退 0 条，qmsg 不受影响", () => {
-    pushToFileQueue("未领取", "m1", "test", SESSION_A)
-    expect(releaseClaimedMessages(SESSION_A)).toBe(0)
-    expect(getQueueLength(SESSION_A)).toBe(1)
-  })
-
-  it("只回退指定会话，不影响其他会话", () => {
-    pushToFileQueue("给A", "ma", "test", SESSION_A)
-    pushToFileQueue("给B", "mb", "test", SESSION_B)
+  it("阻塞 poll 全量确认后队列干净，只剩确认后新到的消息", () => {
+    pushToFileQueue("一", "m1", "test", SESSION_A)
+    pushToFileQueue("二", "m2", "test", SESSION_A)
     claimSessionMessages(SESSION_A)
-    claimSessionMessages(SESSION_B)
-
-    expect(releaseClaimedMessages(SESSION_A)).toBe(1)
-    const bViews = getQueueMessages(SESSION_B)
-    expect(bViews[0].status).toBe("processing")
+    expect(confirmClaimedMessages(undefined, SESSION_A).sort()).toEqual(["m1", "m2"])
+    pushToFileQueue("确认后新到", "m3", "test", SESSION_A)
+    expect(claimSessionMessages(SESSION_A).map((m) => m.messageId)).toEqual(["m3"])
   })
 })
 

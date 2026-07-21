@@ -254,20 +254,16 @@ export default function Dashboard({ onSettings, active }: Props) {
   const [sessionList, setSessionList] = useState<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string; workspaceDir?: string; source?: "cli" | "sdk"; model?: string; modelParams?: string }[]>([])
   const [sessionDiag, setSessionDiag] = useState<Record<string, { running: boolean; resumeAgentId?: string; resumeUpdatedAt?: number; lastRun?: { status: string; endedAt: number; durationMs?: number; error?: string }; lastReplyAt: number | null }>>({})
 
-  /** 首页切模型：当前 active 会话；无则最近活跃；再无则按工作目录写 pending */
+  /** 首页切模型：只认 UI 选中页签或主用户页签当前项，禁止跨通道「猜最近」 */
   const resolveModelTargetSession = useCallback(async (): Promise<string | null> => {
-    if (activeSessionKey) return activeSessionKey
-    if (sessionList.length > 0) {
-      const sorted = [...sessionList].sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0))
-      return sorted[0].sessionKey
+    if (activeSessionKey.trim()) return activeSessionKey
+    const tabs = await window.electronAPI.listSessionTabs()
+    if (tabs.ok) {
+      const key = tabs.activeKey ?? tabs.tabs.find((t) => t.current)?.sessionKey
+      if (key) return key
     }
-    const ws = wsTabs.current
-    if (!ws?.trim()) return null
-    const cfg = await window.electronAPI.getConfig()
-    const ch = (cfg.channels ?? []).find((c) => c.enabled && c.mainUserEnabled && c.mainUserChatId?.trim())
-    if (!ch) return null
-    return `${ch.id}|${ch.mainUserChatId}::${ws}`
-  }, [activeSessionKey, sessionList, wsTabs.current])
+    return null
+  }, [activeSessionKey])
 
   const switchSessionModel = async (m: { model: string; modelParams?: string; label?: string }) => {
     const key = `${m.model}\0${m.modelParams ?? ""}`
@@ -276,7 +272,7 @@ export default function Dashboard({ onSettings, active }: Props) {
     try {
       const sk = await resolveModelTargetSession()
       if (!sk) {
-        setActionError("无法解析目标会话：请先有活跃会话，或绑定主用户并配置工作目录")
+        setActionError("请先在上方选中要切模型的会话页签（不会自动猜微信/其它通道）")
         return
       }
       const r = await window.electronAPI.setSessionModel(sk, m.model, m.modelParams)
@@ -490,7 +486,9 @@ export default function Dashboard({ onSettings, active }: Props) {
     if (!logStickRef.current) return
     const el = logRef.current
     if (!el) return
-    // rAF 合并同帧多次日志更新，减少与用户滚动的竞态
+    // rAF 合并同帧多次日志更新，减少与用户滚动的竞态。
+    // 不做 gap 猜测（新日志 append 本身就会撑大 gap，猜会把「内容增长」误判成「用户上翻」）；
+    // 用户上翻由 scroll/wheel 事件显式解除 stick。
     const raf = requestAnimationFrame(() => {
       if (!logStickRef.current || !logRef.current) return
       programmaticScrollRef.current = true
@@ -498,6 +496,15 @@ export default function Dashboard({ onSettings, active }: Props) {
     })
     return () => cancelAnimationFrame(raf)
   }, [logLines, logFilter])
+
+  /** 向上滚 = 明确离开底部的用户意图；scroll 事件可能被程序化标记吞掉，wheel 兜底解除吸底 */
+  const handleLogWheel = (e: React.WheelEvent) => {
+    if (e.deltaY < 0 && logStickRef.current) {
+      logStickRef.current = false
+      programmaticScrollRef.current = false
+      setLogAtBottom(false)
+    }
+  }
 
   const handleLogScroll = () => {
     const el = logRef.current
@@ -1383,6 +1390,7 @@ export default function Dashboard({ onSettings, active }: Props) {
           <div
             ref={logRef}
             onScroll={handleLogScroll}
+            onWheel={handleLogWheel}
             className="h-full overflow-auto rounded-lg border border-gray-800 bg-gray-900/50 p-3 font-mono text-xs leading-5"
           >
             {filteredLogLines.length > 0

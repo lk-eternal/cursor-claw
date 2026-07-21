@@ -106,6 +106,8 @@ export class LarkSender {
   private client: Lark.Client;
   private messagePrefix: string;
   private log: (level: string, ...args: unknown[]) => void;
+  /** 应用未开通 cardkit:card:write：检测到 99991672 后置位，流式卡整体降级普通消息，不再白撞 API */
+  private cardkitDenied = false;
 
   chatId: string | null = null;
 
@@ -114,6 +116,22 @@ export class LarkSender {
     this.messagePrefix = opts.messagePrefix;
     this.log = opts.log;
     if (opts.chatId) this.chatId = opts.chatId;
+  }
+
+  isCardkitDenied(): boolean {
+    return this.cardkitDenied;
+  }
+
+  private markCardkitDeniedIfPermissionError(codeOrMsg: unknown): boolean {
+    const s = String(codeOrMsg ?? "");
+    if (s.includes("99991672") || s.includes("cardkit:card:write")) {
+      if (!this.cardkitDenied) {
+        this.cardkitDenied = true;
+        this.log("WARN", "应用未开通 cardkit:card:write 权限，流式卡片已降级为普通消息（开通权限并重启后恢复）");
+      }
+      return true;
+    }
+    return false;
   }
 
   async fetchMessageContent(messageId: string): Promise<string | null> {
@@ -677,6 +695,58 @@ export class LarkSender {
     return elements;
   }
 
+  /** 任务清单状态 → 素雅 outlined 图标（全灰，不用彩色 emoji；token 已实卡验证） */
+  private static readonly TODO_STATUS_ICON: Record<string, string> = {
+    completed: "done_outlined",
+    in_progress: "time_outlined",
+    pending: "more_outlined",
+    cancelled: "close_outlined",
+  };
+
+  /** 任务清单折叠面板：与工具块同款样式（collapsible_panel + 灰色 outlined 图标行） */
+  static buildTodoPanelElement(
+    items: Array<{ content: string; status: string }>,
+    opts?: { expanded?: boolean; elementId?: string },
+  ): Record<string, unknown> {
+    const done = items.filter((t) => t.status === "completed").length;
+    const rows: Record<string, unknown>[] = items.map((t) => {
+      const text = (t.content || "").replace(/[*_`~]/g, "");
+      const content = t.status === "completed" || t.status === "cancelled"
+        ? `~~${text}~~`
+        : t.status === "in_progress" ? `**${text}**` : text;
+      return {
+        tag: "div",
+        icon: {
+          tag: "standard_icon",
+          token: LarkSender.TODO_STATUS_ICON[t.status] || LarkSender.TODO_STATUS_ICON.pending,
+          color: "grey",
+        },
+        text: { tag: "lark_md", content, text_size: "notation" },
+      };
+    });
+    return {
+      tag: "collapsible_panel",
+      element_id: opts?.elementId || "todo_panel",
+      expanded: opts?.expanded ?? true,
+      header: {
+        title: {
+          tag: "plain_text",
+          content: `📋 任务清单 · ${done}/${items.length}`,
+          text_color: "grey",
+          text_size: "notation",
+        },
+        vertical_align: "center",
+        icon: { tag: "standard_icon", token: "down-small-ccm_outlined", size: "16px 16px", color: "grey" },
+        icon_position: "right",
+        icon_expanded_angle: -180,
+      },
+      border: { color: "grey", corner_radius: "5px" },
+      vertical_spacing: "4px",
+      padding: "8px 8px 8px 8px",
+      elements: rows.length ? rows : [{ tag: "markdown", content: "_（暂无）_", text_size: "notation" }],
+    };
+  }
+
   /**
    * 构建工具折叠面板。
    * steps 传结构化步骤（推荐）；传 string 时降级为整段 markdown（兼容旧调用）。
@@ -776,6 +846,7 @@ export class LarkSender {
       | { type: "thinking"; text: string; title?: string; expanded?: boolean }
       | { type: "tools"; title?: string; expanded?: boolean; steps: Array<{ title: string; status: string; detail?: string; icon?: string }> }
       | { type: "reply"; text: string }
+      | { type: "todos"; items: Array<{ content: string; status: string }> }
     >;
     thinking?: string;
     thinkingTitle?: string;
@@ -824,6 +895,7 @@ export class LarkSender {
       }
       let thinkIdx = 0;
       let toolIdx = 0;
+      let todoIdx = 0;
       let replyIdx = 0;
       const replyCount = segs.filter((s) => s.type === "reply" && s.text.trim()).length;
       for (const seg of segs) {
@@ -844,6 +916,9 @@ export class LarkSender {
           });
           el.element_id = `tool_${toolIdx++}`;
           els.push(el);
+        } else if (seg.type === "todos") {
+          if (!seg.items?.length) continue;
+          els.push(LarkSender.buildTodoPanelElement(seg.items, { elementId: `todos_${todoIdx++}` }));
         } else if (seg.text.trim()) {
           const isLastReply = replyIdx === replyCount - 1;
           els.push({
@@ -965,6 +1040,7 @@ export class LarkSender {
       | { type: "thinking"; text: string; title?: string; expanded?: boolean }
       | { type: "tools"; title?: string; expanded?: boolean; steps: Array<{ title: string; status: string; detail?: string; icon?: string }> }
       | { type: "reply"; text: string }
+      | { type: "todos"; items: Array<{ content: string; status: string }> }
     >;
     thinking?: string;
     thinkingTitle?: string;
@@ -990,6 +1066,7 @@ export class LarkSender {
       toolsExpanded: opts?.toolsExpanded,
       reply: opts?.reply,
     });
+    if (this.cardkitDenied) return undefined;
     try {
       const res = await this.client.request({
         method: "POST",
@@ -999,7 +1076,9 @@ export class LarkSender {
       const code = res?.code;
       const cardId = res?.data?.card_id as string | undefined;
       if (code !== undefined && code !== 0) {
-        this.log("WARN", `创建流式卡片失败 code=${code} msg=${res?.msg ?? ""}`);
+        if (!this.markCardkitDeniedIfPermissionError(`${code} ${res?.msg ?? ""}`)) {
+          this.log("WARN", `创建流式卡片失败 code=${code} msg=${res?.msg ?? ""}`);
+        }
         return undefined;
       }
       if (!cardId) {
@@ -1008,7 +1087,10 @@ export class LarkSender {
       }
       return cardId;
     } catch (e: any) {
-      this.log("WARN", `创建流式卡片异常: ${e?.message ?? e}${e?.response?.data ? " " + JSON.stringify(e.response.data).slice(0, 500) : ""}`);
+      const detail = e?.response?.data ? JSON.stringify(e.response.data) : "";
+      if (!this.markCardkitDeniedIfPermissionError(`${e?.message ?? ""} ${detail}`)) {
+        this.log("WARN", `创建流式卡片异常: ${e?.message ?? e}${detail ? " " + detail.slice(0, 500) : ""}`);
+      }
       return undefined;
     }
   }

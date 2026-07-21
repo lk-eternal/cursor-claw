@@ -35,3 +35,7 @@ Thumbs.db
 
 temp/
 .cursor-claw
+# pack:local debug leftovers
+.pack-*.txt
+.pack-local.log
+.run-pack-local.cmd

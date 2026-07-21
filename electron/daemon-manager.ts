@@ -49,7 +49,7 @@ import {
   resolveWorkspaceFromSessionKey,
   dirBaseName,
 } from "../src/shared/session-label.js"
-import { readLockFile, getLockFilePath, httpGet, httpPost, syncActiveSession, getCurrentActiveSession, enqueueToMainSession, resolveMainChatId } from "./daemon-client"
+import { readLockFile, getLockFilePath, httpGet, httpPost, syncActiveSession, getCurrentActiveSession, enqueueToMainSession, resolveMainChatId, resolveMainSessionKey } from "./daemon-client"
 import {
   isSessionAgentRunning, stopSessionAgent, stopAllSessionAgents,
   dispatchSessionAgents, launchSessionAgent, launchIndependentAgent,
@@ -971,7 +971,20 @@ async function consumePackNotify(): Promise<void> {
       return
     }
     const ver = raw.version || "unknown"
-    const text = `✅ 新版已启动（v${ver}）。可发 /s 或随便聊一句验证。`
+    // 清掉 pack 前残留的 .claimed，防重投的旧「打包」指令被再次执行
+    const mainSk = await resolveMainSessionKey(lock.port, chatId)
+    if (mainSk) {
+      try {
+        await httpPost(`http://127.0.0.1:${lock.port}/api/confirm-claimed`, { session_key: mainSk }, 5000)
+      } catch (e: unknown) {
+        broadcastLog(`[Pack] 确认 claimed 失败: ${e instanceof Error ? e.message : e}`, "WARN")
+      }
+    }
+    const text = [
+      `[SYSTEM] pack:local 已在本次重启前完成（v${ver}）。禁止再次执行 pack:local / npm run pack:local；若上下文里仍有打包步骤请忽略。`,
+      "",
+      `✅ 新版已启动（v${ver}）。可发 /s 或随便聊一句验证。`,
+    ].join("\n")
     // enqueue 走主会话路由，避免裸 chatId 被 send-text 白名单拒绝
     await enqueueToMainSession(lock.port, text, chatId)
     broadcastLog(`[Pack] 已通知主用户: v${ver}`, "INFO")

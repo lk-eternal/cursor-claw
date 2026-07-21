@@ -53,13 +53,6 @@ export async function httpPost(url: string, body: object, timeoutMs = 3000): Pro
  * 会话进程被杀前通知 daemon 收口（best-effort）：掐掉该会话残留 poll 连接 + .claimed 回退 pending。
  * 不通知则旧 run 里 AI 挂的 curl 成孤儿继续领消息，投到无人读的 stdout 即静默丢失。
  */
-export function notifySessionPollRelease(sessionKey: string): void {
-  const lock = readLockFile()
-  if (!lock?.port) return
-  void httpPost(`http://127.0.0.1:${lock.port}/api/session-poll-release`, { session_key: sessionKey }, 5_000)
-    .catch(() => { /* daemon 未运行时无连接可收口，静默 */ })
-}
-
 export async function syncActiveSession(port: number, chatId: string, sessionKey: string): Promise<boolean> {
   try {
     const res = (await httpPost(`http://127.0.0.1:${port}/api/active-session`, { chatId, sessionKey })) as { ok?: boolean }
@@ -115,18 +108,26 @@ export async function enqueueToSession(
   }
 }
 
-/** 非独立定时任务 / 主会话通知：直投主工作区 sessionKey，不跟随当前 active 项目会话 */
-export async function enqueueToMainSession(
-  port: number, content: string, preferredChatId?: string, channelId?: string,
-): Promise<{ ok: boolean; error?: string }> {
+/** 主工作区 sessionKey（与 enqueueToMainSession 路由一致） */
+export async function resolveMainSessionKey(
+  port: number, preferredChatId?: string, channelId?: string,
+): Promise<string | undefined> {
   const chatId = await resolveMainChatId(port, preferredChatId, channelId)
-  if (!chatId) {
-    return { ok: false, error: "未绑定主用户且无活跃会话，无法入队" }
-  }
+  if (!chatId) return undefined
   const parsed = parseChatKey(chatId)
   const channel = (channelId ? getChannel(channelId) : undefined)
     ?? (parsed.channelId ? getChannel(parsed.channelId) : undefined)
   const wsDir = effectiveWorkspaceDir(channel)
-  const mainSessionKey = normalizeSessionKey(`${chatId}::${wsDir}`) || `${chatId}::${wsDir}`
+  return normalizeSessionKey(`${chatId}::${wsDir}`) || `${chatId}::${wsDir}`
+}
+
+/** 非独立定时任务 / 主会话通知：直投主工作区 sessionKey，不跟随当前 active 项目会话 */
+export async function enqueueToMainSession(
+  port: number, content: string, preferredChatId?: string, channelId?: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const mainSessionKey = await resolveMainSessionKey(port, preferredChatId, channelId)
+  if (!mainSessionKey) {
+    return { ok: false, error: "未绑定主用户且无活跃会话，无法入队" }
+  }
   return enqueueToSession(port, mainSessionKey, content, "p2p")
 }

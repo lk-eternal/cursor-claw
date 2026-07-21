@@ -136,7 +136,7 @@ async function applySessionModelPick(
   if (picked.label) rememberModelLabel(picked.id, picked.params, picked.label)
   const lines = [
     r.deferred
-      ? `✅ 已记下模型，下次对话时生效`
+      ? `✅ 已记下模型（已停当前 run / 空闲），下次有消息时按新模型 Resume`
       : `✅ 已切换模型（当前对话上下文保留）`,
     idxLabel ? ` # · ${idxLabel}` : undefined,
     `🧠 ${display}`,

@@ -142,7 +142,8 @@ export async function installTool(key: "larkCli" | "meegle"): Promise<{ ok: bool
 
 /** lark-cli 设备码登录：非交互执行，浏览器完成授权后命令自行退出 */
 export async function loginLarkCli(): Promise<{ ok: boolean; error?: string }> {
-  const r = await runCommand("lark-cli", ["auth", "login"], 300_000)
+  // v1.0.70+ 必须显式指定授权范围，否则报 please specify the scopes / --scope
+  const r = await runCommand("lark-cli", ["auth", "login", "--recommend"], 300_000)
   if (!r.ok) return { ok: false, error: friendlyInstallError(r.stderr || r.stdout) }
   return { ok: true }
 }

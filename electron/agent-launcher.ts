@@ -11,7 +11,6 @@ import {
   broadcastLog, pushUiLog, flushAgentStreamChunk, logCursorAgentInvocation, logCursorAgentResponse,
   broadcastSessionStatus as broadcastSessionStatusToUi,
 } from "./ui-logger"
-import { notifySessionPollRelease } from "./daemon-client"
 
 // ── 会话 Agent ──────────────────────────────────────────
 
@@ -353,8 +352,7 @@ export function stopAgent(): void {
 export function stopSessionAgent(sessionKey: string): void {
   const sa = sessionAgents.get(sessionKey)
   if (sa && !sa.child.killed) {
-    // 进程将死，先让 daemon 掐掉本会话残留 poll 连接并回退处理中消息，防孤儿 curl 偷走新消息
-    notifySessionPollRelease(sessionKey)
+    // 残留 poll 连接由下一次 poll 顶掉；claimed 消息下次 poll 重新可见
     try { sa.child.kill("SIGTERM") } catch { /* ignore */ }
   }
   sessionAgents.delete(sessionKey)
