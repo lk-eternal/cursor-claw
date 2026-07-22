@@ -1991,7 +1991,7 @@ function findStreamCardByMessageId(messageId: string): { sessionKey: string; sta
 
 /** 卡片按钮点击回调；返回值作为 card.action.trigger 响应（toast + 更新卡片） */
 async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): Promise<unknown> {
-  const value = evt.value as { kind?: string; opt?: string; cmd?: string; sk?: string } | undefined;
+  const value = evt.value as { kind?: string; opt?: string; cmd?: string; sk?: string; approve?: string; dir?: string } | undefined;
   const chatKey = makeChatKey(rt.cfg.id, evt.chatId);
 
   if (value?.kind === "question") {
