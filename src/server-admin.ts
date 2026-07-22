@@ -234,9 +234,9 @@ export function registerAdminTools(mcpServer: McpServer): void {
 
   mcpServer.tool(
     "manage_workspace",
-    "管理工作目录。查询当前工作目录或切换到新目录。",
+    "管理工作目录。查询当前工作目录或切换到新目录。set 不会立即生效：需主用户在私聊确认卡片上批准（防止会话误切全局目录导致消息窜台），提交后等待用户批准即可，禁止重试。",
     {
-      action: z.enum(["get", "set"]).describe("操作：get=查看当前工作目录, set=切换工作目录"),
+      action: z.enum(["get", "set"]).describe("操作：get=查看当前工作目录, set=请求切换工作目录（需主用户批准）"),
       dir: z.string().optional().describe("新的工作目录路径（set 时必填）"),
     },
     async ({ action, dir }) => {

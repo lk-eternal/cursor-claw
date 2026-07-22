@@ -48,7 +48,7 @@ import { z } from "zod";
 import { registerAdminTools } from "./server-admin.js";
 import { registerProjectAgentTools } from "./server-project.js";
 import { initProjectStore, hasProjectNewDraft, getProject, getNodeGroups, listProjects } from "./shared/project-store.js";
-import { projectIdFromSessionKey, decodeRepoPair, isRemoteRepoRef, DEFAULT_NODE_GROUP_ID } from "./shared/project-types.js";
+import { projectIdFromSessionKey, decodeRepoPair, splitRepoPairValues, isRemoteRepoRef, DEFAULT_NODE_GROUP_ID } from "./shared/project-types.js";
 import { buildSessionCardTitle, isSpecialSessionSuffix, resolveWorkspaceFromSessionKey, sessionHeaderTemplate } from "./shared/session-label.js";
 
 const _require = createRequire(import.meta.url);
@@ -2079,6 +2079,41 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
     };
   }
 
+  if (value?.kind === "ws_confirm") {
+    const approve = String(value.approve ?? "") === "1";
+    const dir = String(value.dir ?? "").trim();
+    // 只认主用户本人点击（卡片只发主用户私聊，双保险）
+    if (!rt.cfg.mainUserEnabled || rt.cfg.mainUserChatId !== evt.chatId) {
+      return { toast: { type: "warning", content: "仅主用户可操作" } };
+    }
+    if (!pendingWorkspaceSwitch || pendingWorkspaceSwitch.dir !== dir) {
+      return {
+        toast: { type: "warning", content: "该请求已过期" },
+        card: { type: "raw", data: LarkSender.buildCard(`⌛ 切换请求已过期\n📁 \`${dir}\``) },
+      };
+    }
+    pendingWorkspaceSwitch = null;
+    if (!approve) {
+      log("INFO", `[Workspace] 主用户拒绝切换: ${dir}`);
+      return {
+        toast: { type: "info", content: "已取消" },
+        card: { type: "raw", data: LarkSender.buildCard(`❌ 已拒绝切换全局工作目录\n📁 \`${dir}\``) },
+      };
+    }
+    if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
+      return {
+        toast: { type: "error", content: "目录已不存在" },
+        card: { type: "raw", data: LarkSender.buildCard(`❌ 目录已不存在，切换取消\n📁 \`${dir}\``) },
+      };
+    }
+    applyWorkspaceHotSwitch(dir);
+    log("INFO", `[Workspace] 主用户批准切换: ${dir}`);
+    return {
+      toast: { type: "success", content: "已切换" },
+      card: { type: "raw", data: LarkSender.buildCard(`✅ 全局工作目录已切换\n📁 \`${dir}\``) },
+    };
+  }
+
   if (value?.kind === "cmd") {
     const cmd = String(value.cmd ?? "").trim();
     if (!cmd || !isCommand(cmd)) return { toast: { type: "error", content: "无效指令" } };
@@ -2143,10 +2178,7 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
       const r = decodeRepoPair(String(raw || ""));
       return { ...r, path: normalizeRepoRef(r.path || "") };
     };
-    const selectedRaw = f.repoPairs;
-    const selectedList: string[] = Array.isArray(selectedRaw)
-      ? selectedRaw.map(String)
-      : (selectedRaw ? [String(selectedRaw)] : []);
+    const selectedList = splitRepoPairValues(f.repoPairs);
     type RepoIn = { repoPath: string; baseBranch: string; testBranch?: string; developBranch?: string };
     const repos: RepoIn[] = [];
     const seen = new Set<string>();
@@ -3136,6 +3168,61 @@ const ADMIN_CRUD_ROUTES: Record<string, RouteHandler> = {
   "/api/tasks": handleTasksAdmin,
 };
 
+/** chatKey 是否某启用通道的主用户私聊 */
+function isMainUserChatKey(chatKey: string): boolean {
+  const { channelId, chatId } = parseChatKey(chatKey);
+  const rt = channelId ? channels.get(channelId) : undefined;
+  return !!rt && rt.cfg.mainUserEnabled === true && (rt.cfg.mainUserChatId || "").trim() === chatId;
+}
+
+/** 全局工作目录热切换主体：只迁移主用户私聊的会话指针——群聊/微信/其它会话不被全局切换拽走 */
+function applyWorkspaceHotSwitch(newDir: string): { oldDir: string } {
+  const oldDir = WORKSPACE_DIR;
+  WORKSPACE_DIR = newDir;
+  if (oldDir !== newDir) {
+    for (const [chatId, oldSessionKey] of activeSessionMap) {
+      if (!isMainUserChatKey(chatId)) continue;
+      const idx = oldSessionKey.indexOf("::");
+      const suffix = idx >= 0 ? oldSessionKey.slice(idx + 2) : "";
+      if (idx >= 0 && isSpecialSessionSuffix(suffix)) continue;
+      if (suffix === newDir) continue;
+      const newSessionKey = normalizeSessionKey(`${chatId}::${newDir}`) || `${chatId}::${newDir}`;
+      activeSessionMap.set(chatId, newSessionKey);
+      if (idx >= 0) sessionToChatMap.delete(oldSessionKey);
+      sessionToChatMap.set(newSessionKey, chatId);
+      log("INFO", `[Workspace] 会话路由迁移: ${oldSessionKey} → ${newSessionKey}`);
+    }
+    scheduleRoutingSave();
+  }
+  log("INFO", `[Workspace] hot-updated: ${oldDir} -> ${newDir}`);
+  process.stdout.write(`__WORKSPACE_SWITCH__:${JSON.stringify({ dir: newDir })}\n`);
+  return { oldDir };
+}
+
+/** MCP 发起的切目录待确认请求（单槽，新请求顶旧）；曾有项目子代理误调 set 把全局目录偷走造成全面窜台 */
+let pendingWorkspaceSwitch: { dir: string; requestedAt: number } | null = null;
+
+async function sendWorkspaceConfirmCard(dir: string): Promise<boolean> {
+  let sent = false;
+  for (const rt of channels.values()) {
+    if (rt.cfg.type !== "feishu" || !rt.sender) continue;
+    if (!rt.cfg.mainUserEnabled || !rt.cfg.mainUserChatId?.trim()) continue;
+    const buttons: CardButton[] = [
+      { label: "✅ 确认切换", value: { kind: "ws_confirm", approve: "1", dir } },
+      { label: "❌ 取消", value: { kind: "ws_confirm", approve: "0", dir } },
+    ];
+    const text = [
+      "**⚠️ 有会话请求切换全局工作目录**",
+      `📁 目标: \`${dir}\``,
+      "",
+      "切换会影响主会话的消息路由，请确认是否放行。",
+    ].join("\n");
+    const msgId = await rt.sender.sendCardWithButtons(text, buttons, undefined, rt.cfg.mainUserChatId.trim());
+    if (msgId) sent = true;
+  }
+  return sent;
+}
+
 async function handleWorkspaceAdmin(method: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> {
   if (method === "GET") {
     json(res, { ok: true, workspaceDir: WORKSPACE_DIR });
@@ -3143,7 +3230,7 @@ async function handleWorkspaceAdmin(method: string, req: http.IncomingMessage, r
   }
   if (method === "PUT" || method === "POST") {
     const body = JSON.parse(await readBody(req));
-    const { dir } = body as { dir?: string };
+    const { dir, confirmed } = body as { dir?: string; confirmed?: boolean };
     if (!dir?.trim()) { json(res, { ok: false, error: "dir is required" }, 400); return true; }
     // path.normalize 压平 D:\\foo（Windows existsSync 对双重反斜杠仍返回 true，但 sessionKey 哈希会分裂）
     const newDir = path.normalize(dir.trim()).replace(/[\\/]+$/, "");
@@ -3151,25 +3238,24 @@ async function handleWorkspaceAdmin(method: string, req: http.IncomingMessage, r
       json(res, { ok: false, error: "directory does not exist" }, 400);
       return true;
     }
-    const oldDir = WORKSPACE_DIR;
-    WORKSPACE_DIR = newDir;
-    if (oldDir !== newDir) {
-      // 迁移会话指针到新主目录；仅保留 ::wf_ / ::project_；顺带清掉误写入的展示标签后缀
-      for (const [chatId, oldSessionKey] of activeSessionMap) {
-        const idx = oldSessionKey.indexOf("::");
-        const suffix = idx >= 0 ? oldSessionKey.slice(idx + 2) : "";
-        if (idx >= 0 && isSpecialSessionSuffix(suffix)) continue;
-        if (suffix === newDir) continue;
-        const newSessionKey = normalizeSessionKey(`${chatId}::${newDir}`) || `${chatId}::${newDir}`;
-        activeSessionMap.set(chatId, newSessionKey);
-        if (idx >= 0) sessionToChatMap.delete(oldSessionKey);
-        sessionToChatMap.set(newSessionKey, chatId);
-        log("INFO", `[Workspace] 会话路由迁移: ${oldSessionKey} → ${newSessionKey}`);
-      }
-      scheduleRoutingSave();
+    if (WORKSPACE_DIR === newDir) {
+      json(res, { ok: true, message: "已是当前工作目录", dir: newDir });
+      return true;
     }
-    log("INFO", `[Workspace] hot-updated: ${oldDir} -> ${newDir}`);
-    process.stdout.write(`__WORKSPACE_SWITCH__:${JSON.stringify({ dir: newDir })}\n`);
+    // 未经确认的切换（MCP manage_workspace 等程序化调用）必须主用户批准——
+    // 项目会话/子代理误调 set 会把全局目录偷走，所有主会话消息随之窜台
+    if (!confirmed) {
+      pendingWorkspaceSwitch = { dir: newDir, requestedAt: Date.now() };
+      const sent = await sendWorkspaceConfirmCard(newDir);
+      if (sent) {
+        json(res, { ok: true, pending: true, message: "切换全局工作目录需主用户批准，确认卡片已发送，批准后自动生效" });
+      } else {
+        pendingWorkspaceSwitch = null;
+        json(res, { ok: false, error: "无法发送确认卡片（无可用主用户通道），请在应用设置中手动切换工作目录" }, 400);
+      }
+      return true;
+    }
+    const { oldDir } = applyWorkspaceHotSwitch(newDir);
     json(res, { ok: true, message: `工作目录已切换`, dir: newDir, oldDir });
     return true;
   }

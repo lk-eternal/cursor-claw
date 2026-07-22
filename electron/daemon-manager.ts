@@ -4,7 +4,7 @@ import * as http from "node:http"
 import * as path from "node:path"
 import * as fs from "node:fs"
 import * as os from "node:os"
-import { app, BrowserWindow, ipcMain, powerSaveBlocker, shell } from "electron"
+import { app, BrowserWindow, dialog, ipcMain, powerSaveBlocker, shell } from "electron"
 import {
   getConfig, saveConfig, type AppConfig,
   getChannels, getEnabledChannels, getChannel,
@@ -41,7 +41,7 @@ import { FileCommand, reportCommandResult, handleFeishuModelCommand, handleFeish
 import { handleFeishuProjectCommand, handleProjectSyncSignal, fillProjectNewFromText, handleProjectNewSubmit, replySetupHub, executeProjectDelete, archiveProjectGroup } from "./project-commands"
 import { isGitRepoRoot } from "./project-worktree"
 import { getDefaultNodeGuide } from "./project-prompts"
-import { initProjectStore, getProject, getCurrentProject, listProjects, getNodeGroups, saveNodeGroups, saveProject, projectGroupIds } from "../src/shared/project-store.js"
+import { initProjectStore, getProject, getCurrentProject, listProjects, getNodeGroups, saveNodeGroups, saveProject, projectGroupIds, parseNodeGroupExport, resolveUniqueNodeGroupId } from "../src/shared/project-store.js"
 import { projectIdFromSessionKey, projectSessionKey, DEFAULT_NODE_GROUP_ID, canEnterProjectFromChat } from "../src/shared/project-types.js"
 import {
   readGitBranch,
@@ -1468,7 +1468,8 @@ export async function applyWorkspaceSwitch(workspaceDir: string, stopOldSessions
     const lock = readLockFile()
     if (lock?.port) {
       try {
-        await httpPost(`http://127.0.0.1:${lock.port}/api/workspace`, { dir: w })
+        // UI/Electron 路径 = 用户亲手操作，带 confirmed 直接生效；MCP 程序化调用不带则走主用户确认卡
+        await httpPost(`http://127.0.0.1:${lock.port}/api/workspace`, { dir: w, confirmed: true })
       } catch (e: unknown) {
         broadcastLog(`[Workspace] Daemon WORKSPACE_DIR 同步失败: ${e instanceof Error ? e.message : e}`, "WARN")
       }
@@ -2098,6 +2099,46 @@ export function initDaemonManager(): void {
       usage[gid] = (usage[gid] ?? 0) + 1
     }
     return usage
+  })
+  ipcMain.handle("project-node-groups:export", async (_e, groupId: string) => {
+    initProjectStore(app.getPath("userData"))
+    const group = getNodeGroups().find((g) => g.id === groupId)
+    if (!group) return { ok: false, error: "流程组不存在" }
+    const win = BrowserWindow.getAllWindows()[0]
+    if (!win) return { ok: false, error: "窗口不可用" }
+    const result = await dialog.showSaveDialog(win, {
+      title: "导出流程组",
+      defaultPath: `${group.id}.json`,
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    })
+    if (result.canceled || !result.filePath) return { ok: false, error: "已取消" }
+    const envelope = { kind: "cursor-claw-node-group", version: 1, group }
+    fs.writeFileSync(result.filePath, JSON.stringify(envelope, null, 2), "utf-8")
+    return { ok: true, path: result.filePath }
+  })
+  ipcMain.handle("project-node-groups:import", async () => {
+    initProjectStore(app.getPath("userData"))
+    const win = BrowserWindow.getAllWindows()[0]
+    if (!win) return { ok: false, error: "窗口不可用" }
+    const result = await dialog.showOpenDialog(win, {
+      title: "导入流程组",
+      properties: ["openFile"],
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    })
+    if (result.canceled || !result.filePaths[0]) return { ok: false, error: "已取消" }
+    let raw: unknown
+    try {
+      raw = JSON.parse(fs.readFileSync(result.filePaths[0], "utf-8"))
+    } catch {
+      return { ok: false, error: "JSON 解析失败" }
+    }
+    const parsed = parseNodeGroupExport(raw)
+    if (!parsed) return { ok: false, error: "不是有效的流程组文件" }
+    const groups = getNodeGroups()
+    const newId = resolveUniqueNodeGroupId(parsed.id, parsed.name, groups.map((g) => g.id))
+    const imported = { ...parsed, id: newId }
+    saveNodeGroups([...groups, imported])
+    return { ok: true, group: imported }
   })
 
   void autoStartDaemonOnLaunch()

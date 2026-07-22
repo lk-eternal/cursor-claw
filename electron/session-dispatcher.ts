@@ -28,7 +28,7 @@ import {
 } from "./agent-sdk"
 import { injectWorkspaceToDir } from "./workspace-injector"
 import { buildSessionCardTitle, readGitBranch, dirBaseName } from "../src/shared/session-label.js"
-import { getProject, listProjects, setCurrentProjectId, saveProject } from "../src/shared/project-store.js"
+import { getProject, listProjects, getCurrentProjectId, setCurrentProjectId, saveProject } from "../src/shared/project-store.js"
 import { projectIdFromSessionKey, projectSessionKey, projectRepoRefs, isPlainProject, canEnterProjectFromChat, projectGroupChatMatches } from "../src/shared/project-types.js"
 import { ensureCheckouts } from "./project-worktree"
 import { buildProjectSessionPrompt } from "./project-prompts"
@@ -929,7 +929,17 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
     if (!chatId) { await reply(false, "❌ 无法定位会话来源"); return }
     const mainKey = resolveMainSessionKey(chatId)
     if (!mainKey || mainKey === chatId) { await reply(false, "❌ 未配置主工作目录，无法定位主会话"); return }
-    if (activeKey === mainKey) { await reply(true, "🏠 当前已在主会话"); return }
+    if (activeKey === mainKey) {
+      const ws = workspaceDirFromSessionKey(mainKey)
+      const stalePid = getCurrentProjectId()
+      if (stalePid) setCurrentProjectId(null)
+      const lines = ["🏠 当前已在主会话"]
+      if (stalePid) lines.push(`已清除残留的项目指针（${stalePid}）`)
+      if (ws) lines.push(`主工作目录: ${ws}`)
+      await reply(true, lines.join("\n"))
+      return
+    }
+    setCurrentProjectId(null)
     const fromProject = activeKey ? projectIdFromSessionKey(activeKey) : null
     await syncActiveSession(port, chatId, mainKey)
     const ws = workspaceDirFromSessionKey(mainKey)

@@ -1,4 +1,4 @@
-import { isPlainProject, type Project, type ProjectActionType, type ProjectRepo } from "../src/shared/project-types.js"
+import { isPlainProject, projectRootDir, type Project, type ProjectActionType, type ProjectRepo } from "../src/shared/project-types.js"
 import { getProjectNode, getProjectNodes, projectNodeLabel, projectGroupIds } from "../src/shared/project-store.js"
 
 // ════════════════════════════════════════════════════════════
@@ -231,12 +231,14 @@ function contextBlock(p: Project): string[] {
     p.productDocUrl ? `产品文档: ${p.productDocUrl}` : "",
     p.techDocUrl ? `技术文档: ${p.techDocUrl}` : "",
   ]
+  const root = projectRootDir(p)
   if (isPlainProject(p)) {
-    return [...head, `工作目录: ${p.worktreePath}（纯会话型项目，无代码仓）`].filter(Boolean)
+    return [...head, `项目目录: ${root || p.worktreePath}（纯会话型项目，无代码仓）`].filter(Boolean)
   }
   const repos = projectRepos(p)
   return [
     ...head,
+    root ? `项目目录: ${root}` : "",
     `feature 分支: ${p.featureBranch}`,
     "",
     "仓库与分支（git 操作必须使用下列确切全名，禁止缩写、猜测或自建分支）：",

@@ -399,7 +399,7 @@ export class LarkSender {
       const remote = /^(https?:\/\/|ssh:\/\/|git@)/i.test(rp.trim())
       const norm = rp.replace(/\\/g, "/").replace(/\/+$/, "")
       const name = (norm.split("/").pop() || norm).replace(/\.git$/i, "")
-      return [`${remote ? "☁ " : ""}${name}`, b || "main", t || "", d || ""].filter((x) => !!x).join(" · ").slice(0, 50)
+      return [`${remote ? "☁ " : ""}${name}`, b || "main", t || "", d || ""].filter((x) => !!x).join(" · ").slice(0, 100)
     }
 
     if (profiles.length > 0) {
@@ -408,6 +408,7 @@ export class LarkSender {
         tag: "multi_select_static",
         name: "repoPairs",
         required: false,
+        width: "fill",
         placeholder: { tag: "plain_text", content: "点此选择主仓·分支（可多选，可空）" },
         options: profiles.slice(0, 50).map((pr) => ({
           text: { tag: "plain_text", content: labelOf(pr.path, pr.baseBranch, pr.testBranch, pr.developBranch) },

@@ -1,3 +1,4 @@
+import * as path from "node:path"
 import { parseChatKey } from "./channel-types.js"
 
 export type ProjectStatus = "active" | "paused" | "done"
@@ -231,6 +232,55 @@ export function decodeRepoPair(value: string): {
   const testBranch = (parts[2] || "").trim() || undefined
   const developBranch = (parts[3] || "").trim() || undefined
   return { path: pathPart, baseBranch, testBranch, developBranch }
+}
+
+/** 飞书 multi_select 有时把多个 encodeRepoPair 逗号拼成一条；按完整四段 pair 拆回 */
+const REPO_PAIR_GLUE_RE = /,(?=https?:\/\/|ssh:\/\/|git@|[A-Za-z]:[/\\])/i
+
+export function splitRepoPairValues(raw: unknown): string[] {
+  const out: string[] = []
+  const pushOne = (v: string) => {
+    const t = v.trim()
+    if (!t) return
+    if (REPO_PAIR_GLUE_RE.test(t)) {
+      for (const part of t.split(REPO_PAIR_GLUE_RE)) {
+        const p = part.trim()
+        if (p) out.push(p)
+      }
+      return
+    }
+    const segs = t.split(REPO_PAIR_SEP)
+    if (segs.length > 4 && segs.length % 4 === 0) {
+      for (let i = 0; i < segs.length; i += 4) {
+        out.push(segs.slice(i, i + 4).join(REPO_PAIR_SEP))
+      }
+      return
+    }
+    out.push(t)
+  }
+  if (Array.isArray(raw)) {
+    for (const v of raw) pushOne(String(v))
+  } else if (raw != null && String(raw).trim()) {
+    pushOne(String(raw))
+  }
+  return out
+}
+
+/** 项目根目录：单仓为 worktree 父层 root/slug；多仓取各 worktree 公共父目录 */
+export function projectRootDir(p: Project): string {
+  const wts = projectWorktrees(p).filter(Boolean)
+  if (!wts.length) return (p.worktreePath || "").trim()
+  if (wts.length === 1) return path.dirname(wts[0])
+  const parts = wts.map((wt) => path.normalize(wt).split(path.sep))
+  const minLen = Math.min(...parts.map((p) => p.length))
+  const common: string[] = []
+  for (let i = 0; i < minLen; i++) {
+    const seg = parts[0][i]
+    if (parts.every((p) => p[i] === seg)) common.push(seg)
+    else break
+  }
+  if (common.length >= 2) return common.join(path.sep)
+  return path.dirname(wts[0])
 }
 
 export function repoShortName(repoPath: string): string {

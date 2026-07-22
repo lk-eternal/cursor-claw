@@ -28,6 +28,7 @@ import { repoShortName,
   projectSessionKey,
   projectWorktrees,
   projectRepoRefs,
+  projectRootDir,
   isPlainProject,
   canEnterProjectFromChat,
   projectGroupChatMatches,
@@ -154,16 +155,19 @@ function uniqueProjectSlug(name: string): string {
 }
 
 function formatProjectCard(p: Project, index?: number): string {
+  const root = projectRootDir(p)
   const gitLines = isPlainProject(p)
-    ? [`🗂 纯会话型 · 📁 ${p.worktreePath}`]
+    ? [`🗂 纯会话型`, `📁 项目目录: ${root || p.worktreePath}`]
     : [
       `🌿 feature: ${p.featureBranch}`,
+      root ? `📁 项目目录: ${root}` : "",
       ...(p.repos && p.repos.length
         ? p.repos.map((r, i) => {
             const tags = [`base=${r.baseBranch}`, r.testBranch ? `test=${r.testBranch}` : "", r.developBranch ? `dev=${r.developBranch}` : ""].filter(Boolean).join(" ")
-            return `📦#${i + 1} ${r.repoPath}\n   ${tags}\n   📁 ${r.worktreePath}`
+            const sub = p.repos!.length > 1 ? `\n   📂 ${repoShortName(r.repoPath)}` : ""
+            return `📦#${i + 1} ${r.repoPath}\n   ${tags}${sub}`
           })
-        : [`base=${p.baseBranch}`, `📁 ${p.worktreePath}`]),
+        : [`base=${p.baseBranch}`]),
     ]
   const lines = [
     index != null ? `📦 项目 #${index} · ${p.name}` : `📦 项目 · ${p.name}`,
