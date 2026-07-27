@@ -10,6 +10,7 @@ import {
   getChannels, getEnabledChannels, getChannel,
   updateChannel, migrateLegacyConfig, effectiveWorkspaceDir,
   resolveChannelForSession, getAgentResource, resolveChannelModel,
+  getChannelFavoriteWorkspaces, setChannelFavoriteWorkspaces, migrateFavoriteWorkspacesToChannels,
   mainChatScopeKey, setMainChatIdForScope, upsertRepoProfiles, type MessageChannel,
 } from "./config-store"
 import { parseChatKey, channelIdFromSessionKey, type DaemonChannelConfig, type ChannelStatusInfo } from "../src/shared/channel-types"
@@ -55,7 +56,7 @@ import {
   dispatchSessionAgents, launchSessionAgent, launchIndependentAgent,
   notifyChatFallback,
   getSessionAgentList, handleChatCommand, clearMessageQueue, getQueueMessages, formatSessionStatusBlock,
-  listMainSessionTabs, switchMainSession, deleteUserSession, leaveProjectSession,
+  listMainSessionTabs, listDashboardTree, switchMainSession, deleteUserSession, leaveProjectSession,
   pullMergedMessagesFromQueue, isMainUser, extractChatId, chatNameCache,
   fetchChatNames, fetchUserNames, initSessionDispatcher, previousActiveSessionMap,
 } from "./session-dispatcher"
@@ -1328,7 +1329,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
             const d = cfg.workspaceDir || "(未配置)"
             const b = cfg.workspaceDir ? readGitBranch(cfg.workspaceDir) : undefined
             const info = b ? `📁 当前工作目录: ${d}\n🌿 分支: ${b}` : `📁 当前工作目录: ${d}`
-            const favDirs = cfg.favoriteWorkspaces ?? []
+            const favDirs = getChannelFavoriteWorkspaces(getChannel(claimed.chatId ? parseChatKey(claimed.chatId).channelId : undefined))
             const lastSeg = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() ?? p
             const wsBtns = favDirs.map((dir) => {
               const parts = dir.split(/[\\/]/).filter(Boolean)
@@ -1515,12 +1516,15 @@ async function notifyMainUsersWorkspaceSwitched(dir: string): Promise<void> {
 
 /** 通道中影响 Daemon 连接的字段子集（变更后才需要重启 Daemon）；配置类字段走热更新，不入此名单 */
 function daemonRelevantChannelView(channels: MessageChannel[]): string {
-  return JSON.stringify(channels.map((c) => ({
-    id: c.id, type: c.type, enabled: c.enabled,
-    appId: c.larkAppId, appSecret: c.larkAppSecret,
-    token: c.wechatToken, account: c.wechatAccountId,
-    ws: c.workspaceDir,
-  })))
+  // 按 id 排序后再序列化：通道显示顺序只影响 UI，重排不应重启 Daemon 断连
+  return JSON.stringify([...channels]
+    .sort((a, b) => a.id.localeCompare(b.id))
+    .map((c) => ({
+      id: c.id, type: c.type, enabled: c.enabled,
+      appId: c.larkAppId, appSecret: c.larkAppSecret,
+      token: c.wechatToken, account: c.wechatAccountId,
+      ws: c.workspaceDir,
+    })))
 }
 
 /** 运行时可热更新的通道配置（保存后直推 daemon 内存，不重启、不打断会话） */
@@ -1676,6 +1680,8 @@ export function initDaemonManager(): void {
   initSessionModelStore(app.getPath("userData"))
   initProjectStore(app.getPath("userData"))
   runLegacyConfigMigration()
+  // 必须在 legacy 迁移之后：首次运行时通道由上一步创建
+  migrateFavoriteWorkspacesToChannels()
   initSessionDispatcher()
   ipcMain.handle("config:apply-workspace-switch", (_, workspaceDir: string, stopOldSessions: boolean, notifyMain?: boolean) => applyWorkspaceSwitch(workspaceDir, stopOldSessions, false, !!notifyMain))
   ipcMain.handle("daemon:get-log-buffer", () => getLogBuffer())
@@ -1823,6 +1829,13 @@ export function initDaemonManager(): void {
     return switchSdkSessionModel(sessionKey, model, modelParams)
   })
   ipcMain.handle("session:list-tabs", () => listMainSessionTabs())
+  ipcMain.handle("session:dashboard-tree", () => listDashboardTree())
+  ipcMain.handle("channel:add-favorite-workspace", (_e, channelId: string, dir: string) => {
+    const ch = getChannel(channelId)
+    if (!ch) return { ok: false as const, error: "通道不存在" }
+    const dirs = [...getChannelFavoriteWorkspaces(ch), dir]
+    return { ok: true as const, favoriteWorkspaces: setChannelFavoriteWorkspaces(channelId, dirs) }
+  })
   ipcMain.handle("session:switch", (_e, sessionKey: string) => switchMainSession(sessionKey))
   ipcMain.handle("session:delete", async (_e, sessionKey: string) => deleteUserSession(sessionKey))
   ipcMain.handle("project:list", () => {

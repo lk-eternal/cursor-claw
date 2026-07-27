@@ -14,10 +14,12 @@ export interface AppConfig {
   channels: MessageChannel[]
   /** 旧配置 → 通道模型 一次性迁移标记 */
   channelsMigrated: boolean
+  /** 全局常用目录是否已复制到各通道 */
+  favWorkspacesMigrated: boolean
 
   // ── 全局配置 ──
   workspaceDir: string
-  /** 常用工作目录（首页快速切换标签） */
+  /** 常用工作目录种子；实际读写以 channel.favoriteWorkspaces 为准（无通道时的兜底） */
   favoriteWorkspaces: string[]
   /** 常用模型（飞书/Dashboard 快捷切会话模型） */
   favoriteModels: { model: string; modelParams?: string; label?: string }[]
@@ -70,6 +72,7 @@ const defaults: AppConfig = {
   agentResources: [],
   channels: [],
   channelsMigrated: false,
+  favWorkspacesMigrated: false,
 
   workspaceDir: "",
   favoriteWorkspaces: [],
@@ -339,6 +342,35 @@ export function updateChannel(id: string, partial: Partial<MessageChannel>): Mes
   channels[idx] = { ...channels[idx], ...partial }
   saveConfig({ channels })
   return channels[idx]
+}
+
+// ── 通道级常用目录 ────────────────────────────────────────
+// 全局 favoriteWorkspaces 会让每个通道都列出同一批目录，看起来像会话串了。
+// 通道自带列表后各自独立；undefined 表示尚未迁移，读时回退全局。
+
+export function getChannelFavoriteWorkspaces(channel: MessageChannel | undefined): string[] {
+  if (channel?.favoriteWorkspaces) return dedupeFavoriteWorkspaces(channel.favoriteWorkspaces)
+  return dedupeFavoriteWorkspaces(getConfig().favoriteWorkspaces)
+}
+
+export function setChannelFavoriteWorkspaces(channelId: string, dirs: string[]): string[] {
+  const next = dedupeFavoriteWorkspaces(dirs)
+  updateChannel(channelId, { favoriteWorkspaces: next })
+  return next
+}
+
+/** 全局常用目录一次性复制到各通道，此后两边独立演进 */
+export function migrateFavoriteWorkspacesToChannels(): void {
+  const cfg = getConfig()
+  if (cfg.favWorkspacesMigrated) return
+  const channels = getChannels()
+  if (channels.length > 0) {
+    const global = dedupeFavoriteWorkspaces(cfg.favoriteWorkspaces)
+    const next = channels.map((c) => c.favoriteWorkspaces ? c : { ...c, favoriteWorkspaces: [...global] })
+    saveConfig({ channels: next, favWorkspacesMigrated: true })
+    return
+  }
+  saveConfig({ favWorkspacesMigrated: true })
 }
 
 export type ModelScenario = "primary" | "others"

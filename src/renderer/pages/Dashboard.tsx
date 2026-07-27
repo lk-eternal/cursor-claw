@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo, memo } from "react"
+import { createPortal } from "react-dom"
 import {
   Play,
   Square,
@@ -30,9 +31,14 @@ import {
 import logoUrl from "../assets/logo.png"
 import TitleBar from "../components/TitleBar"
 import useInlineModal from "../components/useInlineModal"
+import ChannelTree from "../components/dashboard/ChannelTree"
+import PanelShell from "../components/dashboard/PanelShell"
 import { modelSlug } from "../model-utils"
 import { disambiguatePathLabel } from "../../shared/path-label"
 import { formatLogLineForUi, cardLabelFromSessionTab } from "../../shared/log-format"
+import { buildDashboardTree, GROUP_IDS, type DashboardChannelNode, type DashboardSessionNode } from "../../shared/dashboard-tree"
+import SessionRow from "../components/dashboard/SessionRow"
+import { makeChatKey } from "../../shared/channel-types"
 
 interface Props {
   /** 打开设置页，可指定初始 Tab */
@@ -54,17 +60,20 @@ export default function Dashboard({ onSettings, active }: Props) {
   const [stopping, setStopping] = useState(false)
   const [actionError, setActionError] = useState("")
   const [queueMessages, setQueueMessages] = useState<{ index: number; fileId: string; preview: string; status?: "pending" | "processing"; sessionKey?: string; chatType?: string; timestamp?: number; senderOpenId?: string; sessionLabel?: string }[]>([])
-  const [showQueue, setShowQueue] = useState(false)
-  const [showChannels, setShowChannels] = useState(false)
-  const [expandedSession, setExpandedSession] = useState<string | null>(null)
-  const [modelMenuSession, setModelMenuSession] = useState<string | null>(null)
-  const [quickModels, setQuickModels] = useState<{ model: string; modelParams?: string; label?: string }[]>([])
+  const [treeChannels, setTreeChannels] = useState<DashboardChannelNode[]>([])
+  /** 卡片面板互斥：同一时刻只展开一个，避免几块面板叠着把日志挤没 */
+  const [activePanel, setActivePanel] = useState<"channels" | "sessions" | "queue" | null>(null)
+  const showChannels = activePanel === "channels"
+  const showSessions = activePanel === "sessions"
+  const showQueue = activePanel === "queue"
+  const togglePanel = (p: "channels" | "sessions" | "queue") =>
+    setActivePanel((cur) => (cur === p ? null : p))
+  const [expandedActive, setExpandedActive] = useState<string | null>(null)
   const [cliStatus, setCliStatus] = useState<"checking" | "installed" | "missing" | "need-login">("checking")
   const [cliLoggingIn, setCliLoggingIn] = useState(false)
   const [cliMessage, setCliMessage] = useState("")
   const [stoppingAgent, setStoppingAgent] = useState(false)
   const [clearingQueue, setClearingQueue] = useState(false)
-  const [showSessions, setShowSessions] = useState(false)
   const [onboard, setOnboard] = useState<OnboardState | null>(null)
   const [onboardDismissed, setOnboardDismissed] = useState(false)
   const [wsTabs, setWsTabs] = useState<{ current: string; favorites: string[] }>({ current: "", favorites: [] })
@@ -74,6 +83,30 @@ export default function Dashboard({ onSettings, active }: Props) {
     [sessionTabs],
   )
   const { showConfirm, ModalPortal } = useInlineModal()
+  /** Agent 卡片下的扁平视图：跨通道拉平所有运行中会话，只用徽标标出来源通道 */
+  const activeSessions = useMemo(() => {
+    const out: { channelName: string; node: DashboardSessionNode }[] = []
+    for (const ch of treeChannels) {
+      for (const gid of GROUP_IDS) {
+        for (const s of ch.groups[gid].sessions) {
+          if (s.running) out.push({ channelName: ch.name, node: s })
+        }
+      }
+    }
+    return out
+  }, [treeChannels])
+  /** 队列行复用会话树的通道名与会话 label，两处徽标口径一致 */
+  const sessionMetaByKey = useMemo(() => {
+    const m = new Map<string, { channelName: string; label: string }>()
+    for (const ch of treeChannels) {
+      for (const gid of GROUP_IDS) {
+        for (const s of ch.groups[gid].sessions) {
+          m.set(s.sessionKey.toLowerCase(), { channelName: ch.name, label: s.label })
+        }
+      }
+    }
+    return m
+  }, [treeChannels])
   const [projectNameById, setProjectNameById] = useState<Map<string, string>>(() => new Map())
 
   const refreshProjectNames = useCallback(() => {
@@ -128,7 +161,14 @@ export default function Dashboard({ onSettings, active }: Props) {
   const [modelFavLoading, setModelFavLoading] = useState(false)
   const [modelFavOptions, setModelFavOptions] = useState<{ model: string; modelParams?: string; label?: string; used?: boolean }[]>([])
   const [modelFavQuery, setModelFavQuery] = useState("")
-  const modelFavPickerRef = useRef<HTMLDivElement>(null)
+  const [sessionList, setSessionList] = useState<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string; workspaceDir?: string; source?: "cli" | "sdk"; model?: string; modelParams?: string }[]>([])
+  const [sessionDiag, setSessionDiag] = useState<Record<string, { running: boolean; resumeAgentId?: string; resumeUpdatedAt?: number; lastRun?: { status: string; endedAt: number; durationMs?: number; error?: string }; lastReplyAt: number | null }>>({})
+  /** 切模后短暂锁住高亮，避免旧 sessionList 把 UI 刷回上一模型 */
+  const modelPickHoldRef = useRef<{ sk: string; model: string; modelParams?: string; until: number } | null>(null)
+  /** 走 ref 读 sessionList：让 refreshDashboardTree 引用恒定，否则会与 refreshOnboard 的 effect 互相触发成刷新风暴 */
+  const sessionListRef = useRef(sessionList)
+  sessionListRef.current = sessionList
+  const treeBusyRef = useRef(false)
 
   useEffect(() => {
     if (!actionError) return
@@ -136,32 +176,109 @@ export default function Dashboard({ onSettings, active }: Props) {
     return () => window.clearTimeout(t)
   }, [actionError])
 
-  useEffect(() => {
-    if (!modelFavPickerOpen) return
-    const onDoc = (e: MouseEvent) => {
-      if (modelFavPickerRef.current && !modelFavPickerRef.current.contains(e.target as Node)) {
-        setModelFavPickerOpen(false)
-        setModelFavQuery("")
-      }
-    }
-    document.addEventListener("mousedown", onDoc)
-    return () => document.removeEventListener("mousedown", onDoc)
-  }, [modelFavPickerOpen])
-
   const refreshModelTabs = useCallback(async () => {
     const r = await window.electronAPI.listQuickModels()
     if (r.ok) setModelTabs(r.models)
   }, [])
 
-  const refreshSessionTabs = useCallback(async () => {
-    const r = await window.electronAPI.listSessionTabs()
-    if (!r.ok) {
-      setSessionTabs([])
-      setActiveSessionKey("")
-      return
+  const refreshDashboardTree = useCallback(async () => {
+    // 定时器与 onSessionAgents 推送都会触发；同一时刻只跑一轮，丢弃的由 5s 定时器兜底
+    if (treeBusyRef.current) return
+    treeBusyRef.current = true
+    try {
+      const [dash, queue, st, cfg] = await Promise.all([
+        window.electronAPI.listDashboardTree().catch(() => ({ ok: false as const, channels: [], running: [], error: "ipc" })),
+        window.electronAPI.getQueueMessages().catch(() => []),
+        window.electronAPI.getDaemonStatus(),
+        window.electronAPI.getConfig(),
+      ])
+      setQueueMessages(queue)
+      const connected = new Map((st.channels ?? []).map((c) => [c.id, !!c.connected]))
+      const cfgChannels = (cfg.channels ?? []).filter((c) => c.enabled !== false)
+
+      const dashChannels = (dash.ok && dash.channels.length > 0)
+        ? dash.channels
+        : cfgChannels.map((c) => {
+            const raw = c.mainUserEnabled ? (c.mainUserChatId?.trim() || undefined) : undefined
+            return {
+              channelId: c.id,
+              name: c.name,
+              mainUserChatId: raw ? makeChatKey(c.id, raw) : undefined,
+              mainTabs: [] as { sessionKey: string; label: string; kind: "main" | "project" | "dir" | "temp" | "other"; running: boolean; current: boolean; removable?: boolean; model?: string; modelParams?: string }[],
+              activeKey: undefined as string | undefined,
+            }
+          })
+
+      const activeKeyByChat: Record<string, string | undefined> = {}
+      const mainSwitchable: {
+        channelId: string
+        sessionKey: string
+        label: string
+        kind?: string
+        removable?: boolean
+        model?: string
+        modelParams?: string
+      }[] = []
+      const labelByKey = new Map<string, string>()
+      const removable = new Set<string>()
+      for (const ch of dashChannels) {
+        if (ch.mainUserChatId && ch.activeKey) activeKeyByChat[ch.mainUserChatId] = ch.activeKey
+        for (const t of ch.mainTabs) {
+          labelByKey.set(t.sessionKey, t.label)
+          if (t.removable) removable.add(t.sessionKey)
+          if (!t.running) {
+            mainSwitchable.push({
+              channelId: ch.channelId,
+              sessionKey: t.sessionKey,
+              label: t.label,
+              kind: t.kind,
+              removable: t.removable,
+              model: t.model,
+              modelParams: t.modelParams,
+            })
+          }
+        }
+      }
+      const runningSrc = (dash.ok && dash.running.length > 0) ? dash.running : sessionListRef.current
+      const running = runningSrc.map((s) => ({
+        sessionKey: s.sessionKey,
+        chatType: s.chatType,
+        label: labelByKey.get(s.sessionKey) || s.chatName || s.sessionKey,
+        model: s.model,
+        modelParams: s.modelParams,
+        workspaceDir: s.workspaceDir,
+        chatName: s.chatName,
+      }))
+      const tree = buildDashboardTree({
+        channels: dashChannels.map((c) => ({
+          id: c.channelId,
+          name: c.name,
+          connected: connected.get(c.channelId) ?? false,
+          mainUserChatId: c.mainUserChatId,
+        })),
+        running,
+        mainSwitchable,
+        activeKeyByChat,
+        queue,
+      })
+      for (const ch of tree.channels) {
+        for (const g of Object.values(ch.groups)) {
+          for (const s of g.sessions) {
+            if (removable.has(s.sessionKey)) s.removable = true
+          }
+        }
+      }
+      setTreeChannels(tree.channels)
+      const cur = dashChannels.find((c) => c.activeKey)?.activeKey
+        || dashChannels.flatMap((c) => c.mainTabs).find((t) => t.current)?.sessionKey
+        || ""
+      if (cur) setActiveSessionKey(cur)
+      setSessionTabs(dashChannels.flatMap((c) => c.mainTabs))
+    } catch {
+      /* 保留上一棵树，避免闪成「未配置」 */
+    } finally {
+      treeBusyRef.current = false
     }
-    setSessionTabs(r.tabs)
-    setActiveSessionKey(r.activeKey ?? r.tabs.find((t) => t.current)?.sessionKey ?? "")
   }, [])
 
   const refreshOnboard = useCallback(async () => {
@@ -176,7 +293,6 @@ export default function Dashboard({ onSettings, active }: Props) {
       agentReady: hasSdkKey || (prev?.agentReady ?? false),
       channelReady,
     }))
-    // 打开过的目录自动收入常用列表，供「可切换会话」与 /c 共用
     const current = cfg.workspaceDir ?? ""
     let favorites = cfg.favoriteWorkspaces ?? []
     const same = (a: string, b: string) => a.replace(/[\\/]+$/g, "").toLowerCase() === b.replace(/[\\/]+$/g, "").toLowerCase()
@@ -185,13 +301,15 @@ export default function Dashboard({ onSettings, active }: Props) {
       void window.electronAPI.saveConfig({ favoriteWorkspaces: favorites })
     }
     setWsTabs({ current, favorites })
-    await Promise.all([refreshModelTabs(), refreshSessionTabs()])
-  }, [refreshModelTabs, refreshSessionTabs])
+    await refreshModelTabs()
+  }, [refreshModelTabs])
 
   // 从设置页返回时立即刷新清单状态
   useEffect(() => {
-    if (active) void refreshOnboard()
-  }, [active, refreshOnboard])
+    if (!active) return
+    void refreshOnboard()
+    void refreshDashboardTree()
+  }, [active, refreshOnboard, refreshDashboardTree])
 
   const switchSessionTab = async (sessionKey: string) => {
     if (!sessionKey || sessionKey === activeSessionKey || sessionSwitching) return
@@ -203,39 +321,42 @@ export default function Dashboard({ onSettings, active }: Props) {
         return
       }
       setActionError("")
-      await refreshSessionTabs()
+      await refreshDashboardTree()
     } finally {
       setSessionSwitching("")
     }
   }
 
-  const addFavoriteWorkspace = async () => {
+  const addFavoriteWorkspace = async (channelId: string) => {
     const dir = await window.electronAPI.selectDirectory()
     if (!dir) return
-    const same = (a: string, b: string) => a.replace(/[\\/]+$/g, "").toLowerCase() === b.replace(/[\\/]+$/g, "").toLowerCase()
-    const favorites = wsTabs.favorites.some((f) => same(f, dir)) ? wsTabs.favorites : [...wsTabs.favorites, dir]
-    setWsTabs((t) => ({ ...t, favorites }))
-    await window.electronAPI.saveConfig({ favoriteWorkspaces: favorites })
-    await refreshSessionTabs()
+    const r = await window.electronAPI.addChannelFavoriteWorkspace(channelId, dir)
+    if (!r.ok) {
+      setActionError(r.error ?? "添加常用目录失败")
+      return
+    }
+    await refreshDashboardTree()
   }
 
   const deleteSessionTab = async (sessionKey: string, kind?: string, label?: string) => {
     const tab = sessionTabs.find((t) => t.sessionKey === sessionKey)
     const k = kind || tab?.kind
     const name = label || tab?.label || sessionKey
-    if (k === "project") {
+    // 项目行由项目表派生：只清会话上下文的话行不会消失，所以这里就是删项目本身。
+    // 以 sessionKey 为准，运行中的项目会话不一定带 kind。
+    const pid = sessionKey.match(/::project_([a-f0-9]+)/i)?.[1]
+    if (pid || k === "project") {
       const short = name.split(" · ")[0]?.trim() || name
-      if (!(await showConfirm(
-        "删除项目",
-        `确定删除「${short}」？\n将移除 AI 工作目录（含未提交改动）；主仓与远程分支不受影响。`,
-        "删除",
-        "取消",
-      ))) return
-      const pid = sessionKey.match(/::project_([a-f0-9]+)/i)?.[1]
       if (!pid) {
         setActionError("无法解析项目 id")
         return
       }
+      if (!(await showConfirm(
+        "删除项目",
+        `确定删除项目「${short}」？\n将移除 AI 工作目录（含未提交改动），主仓与远程分支不受影响。`,
+        "删除项目",
+        "取消",
+      ))) return
       const r = await window.electronAPI.deleteProject(pid)
       if (!r.ok) {
         setActionError(r.error ?? "删除项目失败")
@@ -249,13 +370,8 @@ export default function Dashboard({ onSettings, active }: Props) {
         return
       }
     }
-    await refreshSessionTabs()
+    await refreshDashboardTree()
   }
-
-  const [sessionList, setSessionList] = useState<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string; workspaceDir?: string; source?: "cli" | "sdk"; model?: string; modelParams?: string }[]>([])
-  const [sessionDiag, setSessionDiag] = useState<Record<string, { running: boolean; resumeAgentId?: string; resumeUpdatedAt?: number; lastRun?: { status: string; endedAt: number; durationMs?: number; error?: string }; lastReplyAt: number | null }>>({})
-  /** 切模后短暂锁住高亮，避免旧 sessionList 把 UI 刷回上一模型 */
-  const modelPickHoldRef = useRef<{ sk: string; model: string; modelParams?: string; until: number } | null>(null)
 
   /** 首页切模型：只认 UI 选中页签或主用户页签当前项，禁止跨通道「猜最近」 */
   const resolveModelTargetSession = useCallback(async (): Promise<string | null> => {
@@ -268,16 +384,11 @@ export default function Dashboard({ onSettings, active }: Props) {
     return null
   }, [activeSessionKey])
 
-  const switchSessionModel = async (m: { model: string; modelParams?: string; label?: string }) => {
+  const switchSessionModel = async (sk: string, m: { model: string; modelParams?: string; label?: string }) => {
     const key = `${m.model}\0${m.modelParams ?? ""}`
-    if (modelSwitching) return
+    if (modelSwitching || !sk) return
     setModelSwitching(key)
     try {
-      const sk = await resolveModelTargetSession()
-      if (!sk) {
-        setActionError("请先在上方选中要切模型的会话页签（不会自动猜微信/其它通道）")
-        return
-      }
       const r = await window.electronAPI.setSessionModel(sk, m.model, m.modelParams)
       if (!r.ok) {
         setActionError(r.error ?? "切换模型失败")
@@ -287,6 +398,7 @@ export default function Dashboard({ onSettings, active }: Props) {
       modelPickHoldRef.current = { sk, model: m.model, modelParams: m.modelParams, until: Date.now() + 12_000 }
       setActiveSessionModel({ model: m.model, modelParams: m.modelParams })
       await refreshModelTabs()
+      await refreshDashboardTree()
     } finally {
       setModelSwitching("")
     }
@@ -399,10 +511,6 @@ export default function Dashboard({ onSettings, active }: Props) {
     if (hit?.model) setActiveSessionModel({ model: hit.model, modelParams: hit.modelParams })
   }, [sessionList, activeSessionKey])
 
-  useEffect(() => {
-    void refreshSessionTabs()
-  }, [sessionList, refreshSessionTabs])
-
   const [exportingDiag, setExportingDiag] = useState(false)
   const [logFilter, setLogFilter] = useState("")
   const [logAtBottom, setLogAtBottom] = useState(true)
@@ -427,12 +535,7 @@ export default function Dashboard({ onSettings, active }: Props) {
       syncCliStatus(s)
       window.electronAPI.getSessionAgents().then(setSessionList).catch(() => {})
       await refreshOnboard()
-      if (s.queueLength && s.queueLength > 0) {
-        const msgs = await window.electronAPI.getQueueMessages()
-        setQueueMessages(msgs)
-      } else {
-        setQueueMessages([])
-      }
+      await refreshDashboardTree()
     }
     refresh()
     const timer = setInterval(refresh, 5_000)
@@ -481,8 +584,7 @@ export default function Dashboard({ onSettings, active }: Props) {
       }
     })
 
-    window.electronAPI.getSessionAgents().then(setSessionList).catch(() => {})
-    const unsubSessions = window.electronAPI.onSessionAgents?.((list: typeof sessionList) => setSessionList(list))
+    const unsubSessions = window.electronAPI.onSessionAgents?.((list: typeof sessionList) => { setSessionList(list); void refreshDashboardTree() })
 
     return () => {
       clearInterval(timer)
@@ -664,12 +766,8 @@ export default function Dashboard({ onSettings, active }: Props) {
   }
 
   const toggleQueue = async () => {
-    if (!showQueue) {
-      await refreshQueueMessages()
-      setShowSessions(false)
-      setShowChannels(false)
-    }
-    setShowQueue(!showQueue)
+    if (!showQueue) await refreshQueueMessages()
+    togglePanel("queue")
   }
 
   const handleClearQueue = async (e: React.MouseEvent) => {
@@ -681,28 +779,15 @@ export default function Dashboard({ onSettings, active }: Props) {
     setClearingQueue(false)
   }
 
-  const handleDeleteQueueMessage = async (fileId: string, e: React.MouseEvent) => {
-    e.stopPropagation()
+  const handleDeleteQueueMessage = async (fileId: string, e?: React.MouseEvent) => {
+    e?.stopPropagation()
     await window.electronAPI.deleteQueueMessage(fileId)
     const msgs = queueMessages.filter((m) => m.fileId !== fileId)
     setQueueMessages(msgs)
     setStatus((prev) => ({ ...prev, queueLength: Math.max(0, (prev.queueLength ?? 1) - 1) }))
   }
 
-  const toggleSessionExpand = async (sessionKey: string) => {
-    if (expandedSession === sessionKey) {
-      setExpandedSession(null)
-      return
-    }
-    setExpandedSession(sessionKey)
-    if (queueMessages.length === 0) void refreshQueueMessages()
-    try {
-      const diag = await window.electronAPI.getSessionDiagnostics(sessionKey)
-      setSessionDiag((prev) => ({ ...prev, [sessionKey]: diag }))
-    } catch { /* daemon 未运行等，展开区显示占位 */ }
-  }
-
-  const handleExportDiagnostics = async () => {
+    const handleExportDiagnostics = async () => {
     setExportingDiag(true)
     try {
       const r = await window.electronAPI.exportDiagnostics()
@@ -755,8 +840,9 @@ export default function Dashboard({ onSettings, active }: Props) {
     if (!seconds) return "-"
     const h = Math.floor(seconds / 3600)
     const m = Math.floor((seconds % 3600) / 60)
-    const s = seconds % 60
-    return h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${s}s` : `${s}s`
+    if (h > 0) return m > 0 ? `${h} 小时 ${m} 分钟` : `${h} 小时`
+    if (m > 0) return `${m} 分钟`
+    return `${seconds} 秒`
   }
 
   const isStarting = starting || !!status.starting
@@ -796,7 +882,7 @@ export default function Dashboard({ onSettings, active }: Props) {
       </TitleBar>
 
       {/* Status cards */}
-      <div className="grid grid-cols-4 gap-3 px-6 py-4">
+      <div className="grid shrink-0 grid-cols-4 gap-3 px-6 py-4">
         <StatusCard
           icon={status.running ? Wifi : WifiOff}
           label="Daemon"
@@ -805,7 +891,7 @@ export default function Dashboard({ onSettings, active }: Props) {
           sub={
             status.running
               ? [
-                  `uptime ${formatUptime(status.uptime)}`,
+                  status.uptime != null ? `已运行 ${formatUptime(status.uptime)}` : "",
                   status.workspaceMismatch
                     ? (status.daemonWorkspaceDir
                       ? `目录与设置不一致（Daemon: ${status.daemonWorkspaceDir}）`
@@ -842,8 +928,8 @@ export default function Dashboard({ onSettings, active }: Props) {
           )}
         />
         <div
-          onClick={() => { if ((status.channels ?? []).length > 0) { const next = !showChannels; setShowChannels(next); if (next) { setShowQueue(false); setShowSessions(false) } } }}
-          className={(status.channels ?? []).length > 0 ? "cursor-pointer" : ""}
+          onClick={() => { if (treeChannels.length > 0) togglePanel("channels") }}
+          className={treeChannels.length > 0 ? "cursor-pointer" : ""}
         >
           <StatusCard
             icon={(status.channels ?? []).some((c) => c.connected) ? Wifi : WifiOff}
@@ -863,470 +949,165 @@ export default function Dashboard({ onSettings, active }: Props) {
               if (ok > 0 || (status.running && chs.length > 0)) return "yellow"
               return "gray"
             })()}
-            sub={(() => {
-              const chs = status.channels ?? []
-              if (chs.length === 0) return "等待目标"
-              return chs.map((c) => `${c.name}${c.connected ? "✓" : c.status === "qr_pending" ? "(扫码)" : "…"}`).join(" · ")
-            })()}
-          />
-        </div>
-        <div onClick={async () => { if (sessionList.length > 0 || status.agentRunning) { const next = !showSessions; setShowSessions(next); if (next) { setShowQueue(false); setShowChannels(false); await refreshQueueMessages() } } }} className={sessionList.length > 0 || status.agentRunning ? "cursor-pointer" : ""}>
-          <StatusCard
-            icon={Bot}
-            label="Agent"
-            value={
-              sessionList.length > 0
-                ? `${sessionList.length} 个会话`
-                : status.agentRunning ? `会话中 PID:${status.agentPid}` : "空闲"
-            }
-            color={status.agentRunning || sessionList.length > 0 ? "blue" : "gray"}
-            sub={sessionList.length > 0 ? "点击查看详情" : "等待消息"}
-            action={status.agentRunning || sessionList.length > 0 ? (
-              <button
-                onClick={(e) => { e.stopPropagation(); handleStopAgent() }}
-                disabled={stoppingAgent}
-                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-red-400 transition hover:bg-red-600/20 disabled:opacity-50"
-                title="停止全部 Agent"
-              >
-                {stoppingAgent ? <Loader2 size={10} className="animate-spin" /> : <Square size={10} />}
-                停止
-              </button>
+            sub={treeChannels.length > 0 ? (showChannels ? "点击收起会话树" : "点击展开会话树") : "等待目标"}
+            action={treeChannels.length > 0 ? (
+              showChannels ? <ChevronDown size={12} className="text-gray-500" /> : <ChevronRight size={12} className="text-gray-500" />
             ) : undefined}
           />
         </div>
-        <div onClick={toggleQueue} className="cursor-pointer">
-          <StatusCard
-            icon={MessageSquare}
-            label="消息队列"
-            value={(() => {
-              const processing = status.queueCounts?.processing ?? 0
-              const pending = status.queueCounts?.pending ?? 0
-              if (processing === 0 && pending === 0) return "0"
-              return (
-                <span className="flex items-baseline gap-2.5">
-                  {processing > 0 && (
-                    <span className="flex items-baseline gap-1 text-blue-400" title="处理中">
-                      {processing}<span className="text-[10px] text-blue-500/70">处理中</span>
-                    </span>
-                  )}
-                  {pending > 0 && (
-                    <span className="flex items-baseline gap-1 text-yellow-400" title="排队中">
-                      {pending}<span className="text-[10px] text-yellow-500/70">排队</span>
-                    </span>
-                  )}
-                </span>
-              )
-            })()}
-            color={(status.queueCounts?.processing ?? 0) > 0 ? "blue" : (status.queueCounts?.pending ?? 0) > 0 ? "yellow" : "gray"}
-            action={status.queueLength ? (
-              <button
-                onClick={handleClearQueue}
-                disabled={clearingQueue}
-                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-red-400 transition hover:bg-red-600/20 disabled:opacity-50"
-                title="清空队列"
-              >
-                {clearingQueue ? <Loader2 size={10} className="animate-spin" /> : <Trash2 size={10} />}
-                清空
-              </button>
-            ) : undefined}
-          />
+        <div
+          onClick={() => { if (sessionList.length > 0) togglePanel("sessions") }}
+          className={sessionList.length > 0 ? "cursor-pointer" : ""}
+        >
+        <StatusCard
+          icon={Bot}
+          label="Agent"
+          value={
+            sessionList.length > 0
+              ? `${sessionList.length} 个会话`
+              : status.agentRunning ? `会话中 PID:${status.agentPid}` : "空闲"
+          }
+          color={status.agentRunning || sessionList.length > 0 ? "blue" : "gray"}
+          sub={sessionList.length > 0 ? (showSessions ? "点击收起活跃会话" : "点击查看活跃会话") : "等待消息"}
+          action={status.agentRunning || sessionList.length > 0 ? (
+            <button
+              onClick={(e) => { e.stopPropagation(); handleStopAgent() }}
+              disabled={stoppingAgent}
+              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-red-400 transition hover:bg-red-600/20 disabled:opacity-50"
+              title="停止全部 Agent"
+            >
+              {stoppingAgent ? <Loader2 size={10} className="animate-spin" /> : <Square size={10} />}
+              停止
+            </button>
+          ) : undefined}
+        />
+        </div>
+        <div onClick={() => void toggleQueue()} className="cursor-pointer">
+        <StatusCard
+          icon={MessageSquare}
+          label="消息队列"
+          value={(() => {
+            const processing = status.queueCounts?.processing ?? 0
+            const pending = status.queueCounts?.pending ?? 0
+            if (processing === 0 && pending === 0) return "0"
+            return (
+              <span className="flex items-baseline gap-2.5">
+                {processing > 0 && (
+                  <span className="flex items-baseline gap-1 text-blue-400" title="处理中">
+                    {processing}<span className="text-[10px] text-blue-500/70">处理中</span>
+                  </span>
+                )}
+                {pending > 0 && (
+                  <span className="flex items-baseline gap-1 text-yellow-400" title="排队中">
+                    {pending}<span className="text-[10px] text-yellow-500/70">排队</span>
+                  </span>
+                )}
+              </span>
+            )
+          })()}
+          color={(status.queueCounts?.processing ?? 0) > 0 ? "blue" : (status.queueCounts?.pending ?? 0) > 0 ? "yellow" : "gray"}
+          sub={showQueue ? "点击收起明细" : "点击查看明细"}
+          action={status.queueLength ? (
+            <button
+              onClick={handleClearQueue}
+              disabled={clearingQueue}
+              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-red-400 transition hover:bg-red-600/20 disabled:opacity-50"
+              title="清空队列"
+            >
+              {clearingQueue ? <Loader2 size={10} className="animate-spin" /> : <Trash2 size={10} />}
+              清空
+            </button>
+          ) : undefined}
+        />
         </div>
       </div>
 
-      {/* Session quick-switch tabs（对齐 /c） */}
-      <div className="mx-6 mb-3 flex flex-wrap items-center gap-1.5">
-        <MessageSquare size={13} className="shrink-0 text-gray-500" />
-        {sessionTabs.map((t) => {
-          const short = t.label
-          const Icon = t.kind === "project" ? Package : FolderOpen
-          return (
-            <span key={t.sessionKey} title={t.sessionKey}
-              onClick={() => void switchSessionTab(t.sessionKey)}
-              className={`group inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs transition ${
-                t.current ? "border-blue-500/70 bg-blue-950/40 text-blue-200"
-                : "cursor-pointer border-gray-700 text-gray-400 hover:border-blue-500 hover:text-blue-300"}`}
-            >
-              {sessionSwitching === t.sessionKey
-                ? <Loader2 size={11} className="animate-spin" />
-                : <Icon size={11} className={t.current ? "text-blue-300" : "text-gray-500"} />}
-              {t.running && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400" title="运行中" />}
-              {short}
-              {t.removable && (
-                <button onClick={(e) => { e.stopPropagation(); void deleteSessionTab(t.sessionKey, t.kind, t.label) }}
-                  className="hidden text-gray-600 hover:text-red-400 group-hover:inline-flex" title={t.kind === "project" ? "删除项目" : "删除会话"}>
-                  <X size={11} />
-                </button>
-              )}
-            </span>
-          )
-        })}
-        <button onClick={() => void addFavoriteWorkspace()}
-          className="inline-flex items-center gap-0.5 rounded-md border border-dashed border-gray-700 px-2 py-1 text-xs text-gray-500 transition hover:border-blue-500 hover:text-blue-300"
-          title="添加目录型会话到可切换列表（与 /c 常用目录同源）">
-          <Plus size={11} />常用
-        </button>
-      </div>
+      {showSessions && (
+        <PanelShell title="活跃会话" meta={`${activeSessions.length} 个运行中`}>
+          {activeSessions.length === 0 ? (
+            <p className="px-3 py-6 text-center text-xs text-gray-600">当前没有运行中的会话</p>
+          ) : (
+            activeSessions.map(({ channelName, node }) => (
+              <SessionRow
+                key={node.sessionKey}
+                node={node}
+                channelName={channelName}
+                quickModels={modelTabs}
+                modelSwitching={modelSwitching}
+                expanded={expandedActive === node.sessionKey}
+                onToggle={() => setExpandedActive((k) => k === node.sessionKey ? null : node.sessionKey)}
+                onSwitchModel={(m) => void switchSessionModel(node.sessionKey, m)}
+                onAddFavoriteModel={() => void addFavoriteModel()}
+                onRemoveFavoriteModel={(m) => void removeFavoriteModel(m)}
+                onStop={() => { void window.electronAPI.stopSessionAgent(node.sessionKey); void refreshDashboardTree() }}
+                onDeleteQueueItem={(fileId) => void handleDeleteQueueMessage(fileId)}
+              />
+            ))
+          )}
+        </PanelShell>
+      )}
 
-      {/* Model quick-switch tabs（仅本会话） */}
-      <div className="relative mx-6 mb-3 flex flex-wrap items-center gap-1.5" ref={modelFavPickerRef}>
-        <Cpu size={13} className="shrink-0 text-gray-500" />
-        {modelTabs.map((m) => {
-          const key = `${m.model}\0${m.modelParams ?? ""}`
-          const label = m.label || modelSlug(m.model, m.modelParams)
-          const isCurrent = !!activeSessionModel
-            && activeSessionModel.model === m.model
-            && (activeSessionModel.modelParams ?? "") === (m.modelParams ?? "")
-          return (
-            <span key={key} title={`切换本会话模型: ${m.model}`}
-              onClick={() => void switchSessionModel(m)}
-              className={`group inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs transition ${
-                isCurrent ? "border-violet-500/70 bg-violet-950/40 text-violet-200"
-                : "cursor-pointer border-gray-700 text-gray-400 hover:border-violet-500 hover:text-violet-300"}`}
-            >
-              {modelSwitching === key && <Loader2 size={11} className="animate-spin" />}
-              {label}
-              {!isCurrent && (
-                <button onClick={(e) => { e.stopPropagation(); void removeFavoriteModel(m) }}
-                  className="hidden text-gray-600 hover:text-red-400 group-hover:inline-flex" title="从常用移除">
-                  <X size={11} />
-                </button>
-              )}
-            </span>
-          )
-        })}
-        <button onClick={() => void addFavoriteModel()}
-          className={`inline-flex items-center gap-0.5 rounded-md border border-dashed px-2 py-1 text-xs transition ${
-            modelFavPickerOpen ? "border-violet-500 text-violet-300" : "border-gray-700 text-gray-500 hover:border-violet-500 hover:text-violet-300"}`}
-          title="从模型列表添加常用（用过的优先；点击标签切换本会话模型）">
-          <Plus size={11} />常用模型
-        </button>
-        {modelFavPickerOpen && (
-          <div className="absolute left-0 top-full z-30 mt-1 flex max-h-64 w-72 flex-col overflow-hidden rounded-lg border border-gray-700 bg-gray-900 shadow-xl">
-            <div className="sticky top-0 border-b border-gray-800 bg-gray-900 p-2">
-              <div className="relative flex items-center">
-                <Search size={12} className="pointer-events-none absolute left-2 text-gray-600" />
-                <input
-                  autoFocus
-                  value={modelFavQuery}
-                  onChange={(e) => setModelFavQuery(e.target.value)}
-                  onClick={(e) => e.stopPropagation()}
-                  placeholder="搜索模型…"
-                  className="w-full rounded border border-gray-700 bg-gray-950 py-1.5 pl-7 pr-2 text-xs text-gray-200 outline-none placeholder:text-gray-600 focus:border-violet-500"
-                />
-              </div>
-            </div>
-            <div className="min-h-0 flex-1 overflow-auto py-1">
-              {modelFavLoading && (
-                <div className="flex items-center gap-2 px-3 py-2 text-xs text-gray-500">
-                  <Loader2 size={12} className="animate-spin" />加载模型列表…
-                </div>
-              )}
-              {!modelFavLoading && (() => {
-                const q = modelFavQuery.trim().toLowerCase()
-                const filtered = q
-                  ? modelFavOptions.filter((m) =>
-                      (m.label || "").toLowerCase().includes(q)
-                      || m.model.toLowerCase().includes(q)
-                      || (m.modelParams || "").toLowerCase().includes(q))
-                  : modelFavOptions
-                const used = filtered.filter((m) => m.used)
-                const rest = filtered.filter((m) => !m.used)
-                if (filtered.length === 0) {
-                  return <div className="px-3 py-2 text-xs text-gray-500">{modelFavOptions.length === 0 ? "暂无可添加的模型" : "无匹配模型"}</div>
-                }
+      {showQueue && (
+        <PanelShell title="全局消息队列" meta={`${queueMessages.length} 条`}>
+          {queueMessages.length === 0 ? (
+            <p className="px-3 py-6 text-center text-xs text-gray-600">队列为空</p>
+          ) : (
+            <div className="space-y-1.5 p-3">
+              {queueMessages.map((msg) => {
+                const meta = msg.sessionKey ? sessionMetaByKey.get(msg.sessionKey.toLowerCase()) : undefined
                 return (
-                  <>
-                    {used.length > 0 && (
-                      <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-gray-600">用过的</div>
-                    )}
-                    {used.map((m) => (
-                      <button key={`u:${m.model}\0${m.modelParams ?? ""}`} type="button"
-                        className="block w-full truncate px-3 py-1.5 text-left text-xs text-violet-200 hover:bg-gray-800"
-                        onClick={() => void pickFavoriteModel(m)}>
-                        {m.label || m.model}
-                      </button>
-                    ))}
-                    {rest.length > 0 && (
-                      <div className={`px-3 py-1 text-[10px] uppercase tracking-wide text-gray-600 ${used.length ? "mt-1 border-t border-gray-800" : ""}`}>全部模型</div>
-                    )}
-                    {rest.map((m) => (
-                      <button key={`a:${m.model}\0${m.modelParams ?? ""}`} type="button"
-                        className="block w-full truncate px-3 py-1.5 text-left text-xs text-gray-300 hover:bg-gray-800"
-                        onClick={() => void pickFavoriteModel(m)}>
-                        {m.label || m.model}
-                      </button>
-                    ))}
-                  </>
-                )
-              })()}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Onboarding checklist */}
-      {onboard && !onboardDismissed && !(onboard.workspaceReady && onboard.agentReady && onboard.channelReady) && (
-        <div className="mx-6 mb-3 rounded-xl border border-blue-800/50 bg-blue-950/20 p-4">
-          <div className="mb-1 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Rocket size={15} className="text-blue-400" />
-              <span className="text-sm font-medium text-blue-200">开始使用 Cursor Claw</span>
-            </div>
-            <button onClick={() => setOnboardDismissed(true)} className="rounded px-1.5 py-0.5 text-xs text-gray-500 transition hover:bg-gray-800 hover:text-gray-300">暂时隐藏</button>
-          </div>
-          <p className="mb-3 text-xs text-gray-500">完成以下三步配置，即可通过飞书 / 微信与 AI Agent 协作。</p>
-          <div className="space-y-1.5">
-            {(() => {
-              const items = [
-                { done: onboard.workspaceReady, icon: FolderOpen, label: "选择主工作目录", desc: "Agent 在此目录中工作", tab: "general" },
-                { done: onboard.agentReady, icon: Bot, label: "配置 Agent 资源", desc: "登录 Cursor CLI 或添加 SDK Key", tab: "agent" },
-                { done: onboard.channelReady, icon: MessageSquare, label: "添加消息通道", desc: "接入飞书或微信并绑定 Agent 资源", tab: "channel" },
-              ]
-              const nextIdx = items.findIndex((it) => !it.done)
-              return items.map((item, i) => {
-                const isNext = i === nextIdx
-                return (
-                  <button
-                    key={item.tab}
-                    onClick={() => onSettings(item.tab)}
-                    className={`flex w-full items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition ${
-                      item.done ? "border-green-800/40 bg-green-950/20"
-                      : isNext ? "border-blue-500/70 bg-blue-950/30 hover:bg-blue-900/30"
-                      : "border-gray-700 hover:border-blue-500 hover:bg-gray-800/40"}`}
-                  >
-                    {item.done
-                      ? <CheckCircle2 size={16} className="shrink-0 text-green-400" />
-                      : <Circle size={16} className={`shrink-0 ${isNext ? "text-blue-400" : "text-gray-600"}`} />}
-                    <item.icon size={14} className={`shrink-0 ${item.done ? "text-green-400/70" : isNext ? "text-blue-300" : "text-gray-400"}`} />
+                  <div key={msg.fileId || msg.index} className="flex items-start justify-between gap-2 rounded-lg bg-gray-800/60 px-3 py-2">
                     <div className="min-w-0 flex-1">
-                      <span className={`text-xs font-medium ${item.done ? "text-green-300/80" : isNext ? "text-blue-100" : "text-gray-200"}`}>{i + 1}. {item.label}</span>
-                      <span className="ml-2 text-xs text-gray-600">{item.desc}</span>
-                    </div>
-                    {isNext && <span className="shrink-0 rounded bg-blue-600/30 px-1.5 py-0.5 text-[10px] font-medium text-blue-300">下一步</span>}
-                    {!item.done && <ChevronRight size={14} className={`shrink-0 ${isNext ? "text-blue-400" : "text-gray-600"}`} />}
-                  </button>
-                )
-              })
-            })()}
-          </div>
-        </div>
-      )}
-
-      {showChannels && (status.channels ?? []).length > 0 && (
-        <div className="mx-6 rounded-xl border border-gray-800 bg-gray-900/80 p-3">
-          <div className="mb-2 flex items-center justify-between">
-            <span className="text-xs font-medium text-gray-400">消息通道详情</span>
-            <button onClick={() => onSettings("channel")} className="text-xs text-blue-400 hover:text-blue-300">管理通道</button>
-          </div>
-          <div className="space-y-1.5">
-            {(status.channels ?? []).map((c) => (
-              <div key={c.id} className="flex items-center justify-between gap-2 rounded-lg bg-gray-800/60 px-3 py-2">
-                <div className="flex min-w-0 items-center gap-2">
-                  {c.type === "feishu" ? <Bird size={14} className="shrink-0 text-blue-400" /> : <MessageSquare size={14} className="shrink-0 text-green-400" />}
-                  <span className="truncate text-xs text-gray-300">{c.name}</span>
-                  {c.botName && <span className="truncate text-[10px] text-gray-500">{c.botName}</span>}
-                  {c.mainUserBound && <span className="shrink-0 rounded bg-blue-900/40 px-1.5 py-0.5 text-[10px] text-blue-400">主用户</span>}
-                </div>
-                <span className={`inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] ${c.connected ? "bg-green-900/40 text-green-400" : c.status === "error" ? "bg-red-900/40 text-red-400" : "bg-yellow-900/40 text-yellow-400"}`}>
-                  <span className={`h-1.5 w-1.5 rounded-full ${c.connected ? "bg-green-400" : c.status === "error" ? "bg-red-400" : "bg-yellow-400"}`} />
-                  {c.connected ? "在线" : (CHANNEL_STATUS_TEXT[c.status] ?? c.status ?? "未连接")}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {showSessions && sessionList.length > 0 && (
-        <div className="mx-6 rounded-xl border border-gray-800 bg-gray-900/80 p-3">
-          <div className="mb-2 flex items-center justify-between">
-            <span className="text-xs font-medium text-gray-400">活跃会话</span>
-            <button onClick={async () => { await window.electronAPI.stopAllSessionAgents(); setSessionList([]) }} className="text-xs text-red-400 hover:text-red-300">全部停止</button>
-          </div>
-          <div className="space-y-1.5">
-            {sessionList.map((s) => {
-              const pendingMsgs = getSessionQueueMessages(s.sessionKey)
-              const processingCount = pendingMsgs.filter((m) => m.status === "processing").length
-              const queuedCount = pendingMsgs.length - processingCount
-              const isExpanded = expandedSession === s.sessionKey
-              return (
-                <div key={s.sessionKey}>
-                  <div
-                    className="flex cursor-pointer items-center justify-between rounded-lg bg-gray-800/60 px-3 py-2 hover:bg-gray-800/80"
-                    onClick={() => void toggleSessionExpand(s.sessionKey)}
-                  >
-                    <div className="flex items-center gap-2 overflow-hidden">
-                      <span className={`h-2 w-2 rounded-full ${s.chatType === "group" ? "bg-green-400" : s.chatType === "task" ? "bg-yellow-400" : "bg-blue-400"}`} />
-                      <span className="truncate text-xs text-gray-300" title={s.sessionKey}>
-                        {s.chatType === "group" ? "群聊" : s.chatType === "task" ? "定时" : "私聊"} {s.chatName || (s.sessionKey.length > 20 ? s.sessionKey.slice(0, 20) + "…" : s.sessionKey)}
-                        {s.workspaceDir && s.chatType === "p2p" && (
-                          <span className="ml-1 text-[10px] text-gray-500" title={s.workspaceDir}>
-                            📁{disambiguatePathLabel(s.workspaceDir, sessionWsDirs)}
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {meta && (
+                          <span className="shrink-0 rounded bg-gray-800 px-1 text-[10px] text-gray-400" title="所属通道">
+                            {meta.channelName}
                           </span>
                         )}
-                      </span>
-                      <span className="text-xs text-gray-600">PID:{s.pid || "sdk"}</span>
-                      {s.model && (
-                        <span className="relative" onClick={(e) => e.stopPropagation()}>
-                          <button
-                            type="button"
-                            className="truncate text-[10px] text-violet-400 hover:text-violet-300"
-                            title="切换本会话模型"
-                            onClick={async () => {
-                              if (modelMenuSession === s.sessionKey) { setModelMenuSession(null); return }
-                              const r = await window.electronAPI.listQuickModels()
-                              if (r.ok) setQuickModels(r.models)
-                              setModelMenuSession(s.sessionKey)
-                            }}
-                          >
-                            {(() => {
-                              const hit = modelTabs.find((m) => m.model === s.model && (m.modelParams ?? "") === (s.modelParams ?? ""))
-                              return hit?.label || modelSlug(s.model, s.modelParams)
-                            })()} ▾
-                          </button>
-                          {modelMenuSession === s.sessionKey && (
-                            <div className="absolute left-0 top-full z-20 mt-1 max-h-48 w-48 overflow-auto rounded border border-gray-700 bg-gray-900 py-1 shadow-lg">
-                              {quickModels.length === 0 && (
-                                <div className="px-2 py-1 text-[10px] text-gray-500">暂无常用/最近模型，先在设置收藏或 /model ls</div>
-                              )}
-                              {quickModels.map((m) => (
-                                <button
-                                  key={`${m.model}\0${m.modelParams ?? ""}`}
-                                  type="button"
-                                  className="block w-full truncate px-2 py-1 text-left text-[10px] text-gray-300 hover:bg-gray-800"
-                                  onClick={async () => {
-                                    setModelMenuSession(null)
-                                    const r = await window.electronAPI.setSessionModel(s.sessionKey, m.model, m.modelParams)
-                                    if (!r.ok) window.alert(r.error || "切换失败")
-                                  }}
-                                >
-                                  {m.label || m.model}
-                                </button>
-                              ))}
-                              {s.model && (
-                                <button
-                                  type="button"
-                                  className="mt-1 block w-full border-t border-gray-700 px-2 py-1 text-left text-[10px] text-amber-400 hover:bg-gray-800"
-                                  onClick={async () => {
-                                    const cfg = await window.electronAPI.getConfig()
-                                    const favs = [...(cfg.favoriteModels ?? [])]
-                                    if (!favs.some((f) => f.model === s.model && (f.modelParams ?? "") === (s.modelParams ?? ""))) {
-                                      favs.push({ model: s.model!, modelParams: s.modelParams, label: modelSlug(s.model, s.modelParams) })
-                                      await window.electronAPI.saveConfig({ favoriteModels: favs })
-                                    }
-                                    setModelMenuSession(null)
-                                  }}
-                                >
-                                  ☆ 收藏当前模型
-                                </button>
-                              )}
-                            </div>
-                          )}
+                        <span className="min-w-0 truncate text-[10px] font-medium text-blue-400" title={msg.sessionKey}>
+                          {meta?.label ?? getSessionLabel(msg)}
                         </span>
-                      )}
-                      {processingCount > 0 && (
-                        <span className="ml-1 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-blue-500/90 px-1 text-[10px] font-bold text-gray-900" title={`处理中 ${processingCount} 条`}>
-                          {processingCount}
+                        <span className={`shrink-0 rounded px-1 text-[9px] ${msg.status === "processing" ? "bg-blue-600/25 text-blue-300" : "bg-yellow-600/20 text-yellow-300"}`}>
+                          {msg.status === "processing" ? "处理中" : "排队"}
                         </span>
-                      )}
-                      {queuedCount > 0 && (
-                        <span className="ml-1 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-yellow-500/90 px-1 text-[10px] font-bold text-gray-900" title={`排队中 ${queuedCount} 条`}>
-                          {queuedCount}
-                        </span>
-                      )}
+                        <span className="shrink-0 text-[10px] text-gray-500">{formatTimestamp(msg.timestamp)}</span>
+                      </div>
+                      <p className="mt-0.5 truncate text-xs text-gray-300">{msg.preview}</p>
                     </div>
-                    <div className="flex items-center gap-1">
-                    <button onClick={(e) => { e.stopPropagation(); window.electronAPI.stopSessionAgent(s.sessionKey) }} className="rounded px-1.5 py-0.5 text-xs text-red-400 hover:bg-red-600/20" title="停止此会话">
-                      <Square size={10} />
+                    <button
+                      onClick={(e) => handleDeleteQueueMessage(msg.fileId, e)}
+                      className="shrink-0 rounded p-0.5 text-gray-500 transition hover:bg-red-600/20 hover:text-red-400"
+                      title="删除此消息"
+                    >
+                      <Trash2 size={12} />
                     </button>
-                    {deletableSessionKeys.has(s.sessionKey) && (
-                      <button onClick={(e) => {
-                        e.stopPropagation()
-                        const tab = sessionTabs.find((t) => t.sessionKey === s.sessionKey)
-                        void deleteSessionTab(s.sessionKey, tab?.kind, tab?.label || s.chatName)
-                      }} className="rounded px-1.5 py-0.5 text-xs text-gray-500 hover:bg-red-600/20 hover:text-red-400" title="删除">
-                        <Trash2 size={10} />
-                      </button>
-                    )}
-                    </div>
                   </div>
-                  {isExpanded && (
-                    <div className="ml-4 mt-1 space-y-1 border-l-2 border-gray-700/50 pl-3">
-                      {(() => {
-                        const d = sessionDiag[s.sessionKey]
-                        return (
-                          <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 rounded bg-gray-800/30 px-2.5 py-1.5 text-[10px] text-gray-500">
-                            <span>来源: {s.source === "cli" ? "CLI" : "SDK"} · 启动于 {formatTimestamp(s.startedAt)}</span>
-                            <span>最后回复: {d?.lastReplyAt ? formatTimestamp(d.lastReplyAt) : "—"}</span>
-                            <span title={d?.resumeAgentId}>Resume 上下文: {d?.resumeAgentId ? `${d.resumeAgentId.slice(0, 14)}…（${formatTimestamp(d.resumeUpdatedAt)}）` : "无"}</span>
-                            <span className={d?.lastRun?.status === "error" ? "text-red-400" : ""}>
-                              上次运行: {d?.lastRun ? `${d.lastRun.status}${d.lastRun.durationMs ? ` · ${Math.round(d.lastRun.durationMs / 1000)}s` : ""} · ${formatTimestamp(d.lastRun.endedAt)}` : "—"}
-                            </span>
-                            {d?.lastRun?.error && <span className="col-span-2 truncate text-red-400/80" title={d.lastRun.error}>错误: {d.lastRun.error}</span>}
-                            <span className="col-span-2">队列: 排队 {pendingMsgs.filter((m) => m.status !== "processing").length} · 处理中 {pendingMsgs.filter((m) => m.status === "processing").length}</span>
-                          </div>
-                        )
-                      })()}
-                      {pendingMsgs.map((msg) => (
-                        <div key={msg.fileId} className="group flex items-start justify-between gap-2 rounded bg-gray-800/40 px-2.5 py-1.5">
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-1.5">
-                              <span className={`rounded px-1 text-[9px] ${msg.status === "processing" ? "bg-blue-600/25 text-blue-300" : "bg-gray-700/70 text-gray-400"}`}>{msg.status === "processing" ? "处理中" : "排队中"}</span>
-                              <span className="text-[10px] text-gray-500">{formatTimestamp(msg.timestamp)}</span>
-                            </div>
-                            <p className="truncate text-xs text-gray-300">{msg.preview}</p>
-                          </div>
-                          <button
-                            onClick={(e) => handleDeleteQueueMessage(msg.fileId, e)}
-                            className="shrink-0 rounded p-0.5 text-gray-600 opacity-0 transition hover:bg-red-600/20 hover:text-red-400 group-hover:opacity-100"
-                            title="删除此消息"
-                          >
-                            <Trash2 size={12} />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* Queue messages */}
-      {showQueue && (
-        <div className="mx-6 rounded-xl border border-gray-800 bg-gray-900/80 p-3">
-          <div className="mb-2 flex items-center justify-between">
-            <span className="text-xs font-medium text-gray-400">全局消息队列</span>
-            <span className="text-xs text-gray-600">{queueMessages.length} 条</span>
-          </div>
-          {queueMessages.length === 0 ? (
-            <p className="text-center text-xs text-gray-600">队列为空</p>
-          ) : (
-            <div className="space-y-1.5">
-              {queueMessages.map((msg) => (
-                <div key={msg.fileId || msg.index} className="group flex items-start justify-between gap-2 rounded-lg bg-gray-800/60 px-3 py-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] font-medium text-blue-400">{getSessionLabel(msg)}</span>
-                      <span className={`rounded px-1 text-[9px] ${msg.status === "processing" ? "bg-blue-600/25 text-blue-300" : "bg-gray-700/70 text-gray-400"}`}>{msg.status === "processing" ? "处理中" : "排队中"}</span>
-                      <span className="text-[10px] text-gray-500">{formatTimestamp(msg.timestamp)}</span>
-                    </div>
-                    <p className="mt-0.5 truncate text-xs text-gray-300">{msg.preview}</p>
-                  </div>
-                  <button
-                    onClick={(e) => handleDeleteQueueMessage(msg.fileId, e)}
-                    className="shrink-0 rounded p-0.5 text-gray-600 opacity-0 transition hover:bg-red-600/20 hover:text-red-400 group-hover:opacity-100"
-                    title="删除此消息"
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                </div>
-              ))}
+                )
+              })}
             </div>
           )}
-        </div>
+        </PanelShell>
+      )}
+
+      {showChannels && treeChannels.length > 0 && (
+        <PanelShell
+          title="消息通道"
+          meta={`${treeChannels.length} 通道${activeSessions.length > 0 ? ` · 运行 ${activeSessions.length}` : ""}`}
+        >
+        <ChannelTree
+          channels={treeChannels}
+          quickModels={modelTabs}
+          modelSwitching={modelSwitching}
+          onAddFavorite={(channelId) => void addFavoriteWorkspace(channelId)}
+          onSwitchModel={(sk, m) => void switchSessionModel(sk, m)}
+          onAddFavoriteModel={() => void addFavoriteModel()}
+          onRemoveFavoriteModel={(m) => void removeFavoriteModel(m)}
+          onStopSession={(sk) => { void window.electronAPI.stopSessionAgent(sk); void refreshDashboardTree() }}
+          onDeleteSession={(node) => void deleteSessionTab(node.sessionKey, node.kind, node.label)}
+          onActivateSession={(sk) => void switchSessionTab(sk)}
+          onDeleteQueueItem={(fileId) => void handleDeleteQueueMessage(fileId)}
+        />
+        </PanelShell>
       )}
 
       {/* CLI 未安装不在首页提示（Agent 资源可选 CLI 或 SDK，向导内可安装） */}
@@ -1484,6 +1265,76 @@ export default function Dashboard({ onSettings, active }: Props) {
           )}
         </div>
       </div>
+      {modelFavPickerOpen && createPortal(
+        <div
+          className="fixed inset-0 z-[60] flex items-start justify-center bg-black/50 pt-24"
+          onClick={() => { setModelFavPickerOpen(false); setModelFavQuery("") }}
+        >
+          <div
+            className="flex max-h-[60vh] w-96 flex-col overflow-hidden rounded-lg border border-gray-700 bg-gray-900 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="border-b border-gray-800 p-2">
+              <div className="relative flex items-center">
+                <Search size={12} className="pointer-events-none absolute left-2 text-gray-600" />
+                <input
+                  autoFocus
+                  value={modelFavQuery}
+                  onChange={(e) => setModelFavQuery(e.target.value)}
+                  placeholder="搜索模型…"
+                  className="w-full rounded border border-gray-700 bg-gray-950 py-1.5 pl-7 pr-2 text-xs text-gray-200 outline-none placeholder:text-gray-600 focus:border-violet-500"
+                />
+              </div>
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto py-1">
+              {modelFavLoading && (
+                <div className="flex items-center gap-2 px-3 py-2 text-xs text-gray-500">
+                  <Loader2 size={12} className="animate-spin" />加载模型列表…
+                </div>
+              )}
+              {!modelFavLoading && (() => {
+                const q = modelFavQuery.trim().toLowerCase()
+                const filtered = q
+                  ? modelFavOptions.filter((m) =>
+                      (m.label || "").toLowerCase().includes(q)
+                      || m.model.toLowerCase().includes(q)
+                      || (m.modelParams || "").toLowerCase().includes(q))
+                  : modelFavOptions
+                if (filtered.length === 0) {
+                  return <div className="px-3 py-2 text-xs text-gray-500">{modelFavOptions.length === 0 ? "暂无可添加的模型" : "无匹配模型"}</div>
+                }
+                const used = filtered.filter((m) => m.used)
+                const rest = filtered.filter((m) => !m.used)
+                return (
+                  <>
+                    {used.length > 0 && (
+                      <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-gray-600">用过的</div>
+                    )}
+                    {used.map((m) => (
+                      <button key={`u:${m.model}\0${m.modelParams ?? ""}`} type="button"
+                        className="block w-full truncate px-3 py-1.5 text-left text-xs text-violet-200 hover:bg-gray-800"
+                        onClick={() => void pickFavoriteModel(m)}>
+                        {m.label || m.model}
+                      </button>
+                    ))}
+                    {rest.length > 0 && (
+                      <div className={`px-3 py-1 text-[10px] uppercase tracking-wide text-gray-600 ${used.length ? "mt-1 border-t border-gray-800" : ""}`}>全部模型</div>
+                    )}
+                    {rest.map((m) => (
+                      <button key={`a:${m.model}\0${m.modelParams ?? ""}`} type="button"
+                        className="block w-full truncate px-3 py-1.5 text-left text-xs text-gray-300 hover:bg-gray-800"
+                        onClick={() => void pickFavoriteModel(m)}>
+                        {m.label || m.model}
+                      </button>
+                    ))}
+                  </>
+                )
+              })()}
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
       {ModalPortal}
     </div>
   )

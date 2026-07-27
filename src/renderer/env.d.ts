@@ -163,7 +163,20 @@ declare global {
     exportDiagnostics(): Promise<{ ok: boolean; path?: string; error?: string }>
     stopSessionAgent(sessionKey: string): Promise<{ ok: boolean }>
     setSessionModel(sessionKey: string, model: string, modelParams?: string): Promise<{ ok: boolean; deferred?: boolean; error?: string }>
-    listSessionTabs(): Promise<{ ok: boolean; chatId?: string; activeKey?: string; tabs: { sessionKey: string; label: string; kind: "main" | "project" | "dir" | "temp" | "other"; running: boolean; current: boolean; removable?: boolean }[]; error?: string }>
+    listSessionTabs(): Promise<{ ok: boolean; chatId?: string; activeKey?: string; tabs: { sessionKey: string; label: string; kind: "main" | "project" | "dir" | "temp" | "other"; running: boolean; current: boolean; removable?: boolean; model?: string; modelParams?: string }[]; error?: string }>
+    listDashboardTree(): Promise<{
+      ok: boolean
+      channels: {
+        channelId: string
+        name: string
+        mainUserChatId?: string
+        mainTabs: { sessionKey: string; label: string; kind: "main" | "project" | "dir" | "temp" | "other"; running: boolean; current: boolean; removable?: boolean; model?: string; modelParams?: string }[]
+        activeKey?: string
+      }[]
+      running: { sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string; workspaceDir?: string; source?: "cli" | "sdk"; model?: string; modelParams?: string }[]
+      error?: string
+    }>
+    addChannelFavoriteWorkspace(channelId: string, dir: string): Promise<{ ok: boolean; favoriteWorkspaces?: string[]; error?: string }>
     switchSession(sessionKey: string): Promise<{ ok: boolean; error?: string }>
     deleteSession(sessionKey: string): Promise<{ ok: boolean; error?: string; label?: string }>
     listProjects(): Promise<{

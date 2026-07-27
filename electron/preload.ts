@@ -185,8 +185,22 @@ const api = {
   stopSessionAgent: (sessionKey: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("agent:stop-session", sessionKey),
   setSessionModel: (sessionKey: string, model: string, modelParams?: string): Promise<{ ok: boolean; deferred?: boolean; error?: string }> =>
     ipcRenderer.invoke("session:set-model", sessionKey, model, modelParams),
-  listSessionTabs: (): Promise<{ ok: boolean; chatId?: string; activeKey?: string; tabs: { sessionKey: string; label: string; kind: "main" | "project" | "dir" | "temp" | "other"; running: boolean; current: boolean; removable?: boolean }[]; error?: string }> =>
+  listSessionTabs: (): Promise<{ ok: boolean; chatId?: string; activeKey?: string; tabs: { sessionKey: string; label: string; kind: "main" | "project" | "dir" | "temp" | "other"; running: boolean; current: boolean; removable?: boolean; model?: string; modelParams?: string }[]; error?: string }> =>
     ipcRenderer.invoke("session:list-tabs"),
+  listDashboardTree: (): Promise<{
+    ok: boolean
+    channels: {
+      channelId: string
+      name: string
+      mainUserChatId?: string
+      mainTabs: { sessionKey: string; label: string; kind: "main" | "project" | "dir" | "temp" | "other"; running: boolean; current: boolean; removable?: boolean; model?: string; modelParams?: string }[]
+      activeKey?: string
+    }[]
+    running: { sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string; workspaceDir?: string; source?: "cli" | "sdk"; model?: string; modelParams?: string }[]
+    error?: string
+  }> => ipcRenderer.invoke("session:dashboard-tree"),
+  addChannelFavoriteWorkspace: (channelId: string, dir: string): Promise<{ ok: boolean; favoriteWorkspaces?: string[]; error?: string }> =>
+    ipcRenderer.invoke("channel:add-favorite-workspace", channelId, dir),
   switchSession: (sessionKey: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke("session:switch", sessionKey),
   deleteSession: (sessionKey: string): Promise<{ ok: boolean; error?: string; label?: string }> =>

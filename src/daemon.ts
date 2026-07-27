@@ -1293,7 +1293,12 @@ const cardOpChains = new Map<string, Promise<void>>();
 function enqueueCardOp<T>(sessionKey: string, fn: () => Promise<T> | T): Promise<T> {
   const prev = cardOpChains.get(sessionKey) ?? Promise.resolve();
   const next = prev.then(fn, fn);
-  cardOpChains.set(sessionKey, next.then(() => undefined, () => undefined));
+  const tail = next.then(() => undefined, () => undefined);
+  cardOpChains.set(sessionKey, tail);
+  // 链跑完且没人接在后面就摘掉，否则每个历史会话都永久占一条 Promise 链
+  void tail.then(() => {
+    if (cardOpChains.get(sessionKey) === tail) cardOpChains.delete(sessionKey);
+  });
   return next;
 }
 
@@ -1305,8 +1310,15 @@ function enqueueCardOp<T>(sessionKey: string, fn: () => Promise<T> | T): Promise
  */
 const sessionCardSealAt = new Map<string, number>();
 const CARD_SEAL_STALE_TTL_MS = 60_000;
+const CARD_SEAL_MAP_MAX = 500;
 
 function markCardSealed(sessionKey: string): void {
+  // 按插入序淘汰最早的：每次 set 前先 delete，保证活跃会话排到队尾不被误删
+  sessionCardSealAt.delete(sessionKey);
+  if (sessionCardSealAt.size >= CARD_SEAL_MAP_MAX) {
+    const oldest = sessionCardSealAt.keys().next().value;
+    if (oldest) sessionCardSealAt.delete(oldest);
+  }
   sessionCardSealAt.set(sessionKey, Date.now());
 }
 
@@ -1798,7 +1810,11 @@ async function finishAgentStreamCard(
   agentStreamCards.delete(sessionKey);
   markCardSealed(sessionKey);
   const ok = await refreshAgentStreamCard(sessionKey, state, ch, { finish: true });
-  if (!ok) return { ok: false, cardId: state.cardId, messageId: state.messageId, error: "结束流式卡片失败" };
+  if (!ok) {
+    // 状态已摘，再失败就没人能关这张卡了：至少把 streaming 灭掉，不留转圈的孤儿卡
+    await finishOrphanStreamCardById(state.cardId, ch);
+    return { ok: false, cardId: state.cardId, messageId: state.messageId, error: "结束流式卡片失败" };
+  }
   const result = { ok: true, cardId: state.cardId, messageId: state.messageId };
   log("INFO", `[StreamCard] 已结束 session=${sessionKey} card=${result.cardId}`);
   return result;
@@ -1824,7 +1840,10 @@ function sealActiveStreamCardOnDelivery(sessionKey: string): Promise<void> {
     const ch = resolveChannel(sessionKey, { allowDefault: false });
     if (ch.type !== "feishu") return;
     const ok = await refreshAgentStreamCard(sessionKey, state, ch, { finish: true });
-    if (!ok) log("WARN", `[StreamCard] 消息送达收口失败 session=${sessionKey} card=${state.cardId}`);
+    if (!ok) {
+      log("WARN", `[StreamCard] 消息送达收口失败 session=${sessionKey} card=${state.cardId}`);
+      await finishOrphanStreamCardById(state.cardId, ch);
+    }
   });
 }
 
@@ -1971,6 +1990,21 @@ function expireOpenCardQuestionsForSession(sessionKey: string | undefined, note:
   log("INFO", `已请求关闭 ${targets.length} 张未决问题卡片 (session=${sessionKey})`);
 }
 
+/** 已应答过的问题卡 messageId：防连点/重复提交把同一个选项入队多次 */
+const answeredCardQuestions = new Set<string>();
+const ANSWERED_CARD_MAX = 500;
+
+function markCardQuestionAnswered(messageId: string): boolean {
+  if (!messageId) return true;
+  if (answeredCardQuestions.has(messageId)) return false;
+  answeredCardQuestions.add(messageId);
+  if (answeredCardQuestions.size > ANSWERED_CARD_MAX) {
+    const oldest = answeredCardQuestions.values().next().value;
+    if (oldest) answeredCardQuestions.delete(oldest);
+  }
+  return true;
+}
+
 /** internal 消息（卡片点击/输入框提交）→ 来源聊天 chatKey；回复 internal 消息时按此路由回原聊天，防止 chat 直发窜台 */
 const internalMsgChatMap = new Map<string, string>();
 
@@ -2005,6 +2039,17 @@ function findStreamCardByMessageId(messageId: string): { sessionKey: string; sta
   return undefined;
 }
 
+/**
+ * 卡片回调事件不带 chat_type，而飞书 p2p 的 chat_id 同样是 oc_ 开头——只按前缀猜会把
+ * 「别人的私聊」判成群，进而污染 chatTypeByChatKey 与群专属路由。优先查收消息时记下的真实类型。
+ */
+function resolveCardActionChatType(rt: ChannelRuntime, chatKey: string, rawChatId?: string): string {
+  const known = chatTypeByChatKey.get(chatKey) || (rawChatId ? chatTypeByChatKey.get(rawChatId) : undefined);
+  if (known === "p2p" || known === "group") return known;
+  if (rt.cfg.mainUserEnabled && rt.cfg.mainUserChatId === rawChatId) return "p2p";
+  return rawChatId?.startsWith("on_") ? "group" : "p2p";
+}
+
 /** 卡片按钮点击回调；返回值作为 card.action.trigger 响应（toast + 更新卡片） */
 async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): Promise<unknown> {
   const value = evt.value as { kind?: string; opt?: string; cmd?: string; sk?: string; approve?: string; dir?: string } | undefined;
@@ -2016,17 +2061,14 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
     const entry = cardQuestionMap.get(evt.messageId);
     // 优先 map；map 缺失时用按钮内嵌的 session_key（防 reply 未回 message_id 导致未登记）
     const sessionKey = entry?.sessionKey || value.sk || undefined;
-    if (!opt) {
-      return {
-        toast: { type: "warning", content: "该问题已过期" },
-        card: { type: "raw", data: LarkSender.buildCard("⌛ 该问题已过期，请直接发消息告知你的选择") },
-      };
+    // 只回 toast：返回 raw card 会把整张流式卡（思考/工具/正文）冲成一行提示
+    if (!opt || (!entry && !sessionKey)) {
+      return { toast: { type: "warning", content: "该问题已过期，请直接发消息告知选择" } };
     }
-    if (!entry && !sessionKey) {
-      return {
-        toast: { type: "warning", content: "该问题已过期" },
-        card: { type: "raw", data: LarkSender.buildCard("⌛ 该问题已过期，请直接发消息告知你的选择") },
-      };
+    // 连点/重复提交：只回 toast，不重复入队也不动卡片
+    if (!markCardQuestionAnswered(evt.messageId)) {
+      log("INFO", `[${rt.cfg.name}] 问题卡片重复点击已忽略 (msg=${evt.messageId})`);
+      return { toast: { type: "info", content: "已提交，请稍候" } };
     }
     log("INFO", `[${rt.cfg.name}] 问题卡片选择: ${opt} (msg=${evt.messageId}, session=${sessionKey ?? "-"})`);
     if (sessionKey) trackMessageSession(evt.messageId, sessionKey);
@@ -2034,8 +2076,7 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
     // 记录来源聊天：Agent 回复这条 internal 消息时按此路由回原聊天（点击发生在哪个聊天就回哪个）
     trackInternalMsgChat(internalId, chatKey);
     // chatType 用点击所在聊天推断，保证 pushMessage 路由稳定
-    const chatType = rt.cfg.mainUserEnabled && rt.cfg.mainUserChatId === evt.chatId ? "p2p"
-      : (evt.chatId?.startsWith("oc_") || evt.chatId?.startsWith("on_") ? "group" : "p2p");
+    const chatType = resolveCardActionChatType(rt, chatKey, evt.chatId);
     pushMessage(opt, internalId, chatKey, chatType, evt.operatorOpenId, evt.messageId, { senderType: "user" });
     if (entry) {
       cardQuestionMap.delete(evt.messageId);
@@ -2135,9 +2176,7 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
     if (!cmd || !isCommand(cmd)) return { toast: { type: "error", content: "无效指令" } };
     log("INFO", `[${rt.cfg.name}] 卡片指令点击: ${cmd}`);
     // 主用户私聊点按钮 → p2p（供 isMainUser）；群内点按钮 → group（供独立群放行 /p）
-    const chatType = rt.cfg.mainUserEnabled && rt.cfg.mainUserChatId === evt.chatId
-      ? "p2p"
-      : (evt.chatId?.startsWith("oc_") || evt.chatId?.startsWith("on_") ? "group" : "p2p");
+    const chatType = resolveCardActionChatType(rt, chatKey, evt.chatId);
     handleCommand(cmd, evt.messageId, chatKey, chatType, true).catch((e: any) => log("ERROR", `卡片指令失败: ${e?.message ?? e}`));
     return { toast: { type: "info", content: `已执行 ${cmd}` } };
   }

@@ -4,9 +4,10 @@ import { app } from "electron"
 import {
   getConfig, getChannel, getChannels, getAgentResource, resolveChannelForSession,
   resolveChannelModel, effectiveWorkspaceDir, mainChatScopeKey, saveConfig,
+  getChannelFavoriteWorkspaces, setChannelFavoriteWorkspaces,
   type MessageChannel, type ModelScenario,
 } from "./config-store"
-import { parseChatKey, workspaceDirFromSessionKey, normalizeSessionKey } from "../src/shared/channel-types"
+import { parseChatKey, workspaceDirFromSessionKey, normalizeSessionKey, makeChatKey } from "../src/shared/channel-types"
 import { broadcastLog } from "./ui-logger"
 import { readLockFile, httpGet, httpPost, syncActiveSession, getCurrentActiveSession, drainSessionMessages, resolveMainChatId } from "./daemon-client"
 import { reportCommandResult } from "./command-handler"
@@ -28,6 +29,7 @@ import {
 } from "./agent-sdk"
 import { injectWorkspaceToDir } from "./workspace-injector"
 import { buildSessionCardTitle, readGitBranch, dirBaseName } from "../src/shared/session-label.js"
+import { disambiguatePathLabel } from "../src/shared/path-label.js"
 import { getProject, listProjects, getCurrentProjectId, setCurrentProjectId, saveProject } from "../src/shared/project-store.js"
 import { projectIdFromSessionKey, projectSessionKey, projectRepoRefs, isPlainProject, canEnterProjectFromChat, projectGroupChatMatches } from "../src/shared/project-types.js"
 import { ensureCheckouts } from "./project-worktree"
@@ -570,13 +572,12 @@ function buildSwitchableSessions(
     seen.add(key)
     out.push({ sessionKey: key, label })
   }
-  const cfg = getConfig()
   const channel = resolveChannelForSession(chatId)
   const mainDir = effectiveWorkspaceDir(channel)
   // 目录会话：重名目录带父目录区分 + 显示当前分支
   const dirs: { dir: string; main?: boolean }[] = []
   if (mainDir) dirs.push({ dir: mainDir, main: true })
-  for (const d of cfg.favoriteWorkspaces ?? []) dirs.push({ dir: d })
+  for (const d of getChannelFavoriteWorkspaces(channel)) dirs.push({ dir: d })
   const nameCount = new Map<string, number>()
   for (const { dir } of dirs) {
     const n = dirBaseName(dir).toLowerCase()
@@ -740,6 +741,7 @@ export async function deleteUserSession(
   const resolvedChatId = chatId || await resolveMainChatId(lock.port)
   if (!resolvedChatId) return { ok: false, error: "未绑定主用户" }
 
+  // 项目会话由项目表派生，只清上下文的话列表项不会消失，反而像是没生效
   if (projectIdFromSessionKey(key)) {
     return { ok: false, error: "项目会话请用 /p del 删除" }
   }
@@ -755,10 +757,12 @@ export async function deleteUserSession(
   previousActiveSessionMap.delete(key)
 
   const ws = workspaceDirFromSessionKey(key)
-  if (ws) {
-    const favs = getConfig().favoriteWorkspaces ?? []
+  const owner = resolveChannelForSession(key)
+  if (ws && owner) {
+    // 只从该会话所属通道摘掉目录，别的通道的同名目录不受影响
+    const favs = getChannelFavoriteWorkspaces(owner)
     const next = favs.filter((d) => !sameDirPath(d, ws))
-    if (next.length !== favs.length) saveConfig({ favoriteWorkspaces: next })
+    if (next.length !== favs.length) setChannelFavoriteWorkspaces(owner.id, next)
   }
 
   const activeKey = await getCurrentActiveSession(lock.port, resolvedChatId)
@@ -780,6 +784,90 @@ export type SessionTabItem = {
   running: boolean
   current: boolean
   removable?: boolean
+  model?: string
+  modelParams?: string
+}
+
+/** 未运行会话也要能显示模型：跑着的用实时值，否则回落到 override，最后是通道默认 */
+function tabModelFor(
+  sessionKey: string,
+  running?: { model?: string; modelParams?: string },
+): { model?: string; modelParams?: string } {
+  if (running?.model) return { model: running.model, modelParams: running.modelParams }
+  const ov = getSessionOverride(sessionKey)
+  if (ov) return { model: ov.model, modelParams: ov.modelParams }
+  const fallback = resolveChannelModel(resolveChannelForSession(sessionKey), "primary")
+  return fallback.model ? { model: fallback.model, modelParams: fallback.modelParams } : {}
+}
+
+async function buildTabsForChat(chatId: string, port: number): Promise<{ activeKey?: string; tabs: SessionTabItem[] }> {
+  const activeKey = (await getCurrentActiveSession(port, chatId)) ?? undefined
+  const running = getSessionAgentList()
+    .filter((s) => sessionBelongsToChat(s.sessionKey, chatId) || (!!activeKey && s.sessionKey === activeKey))
+    .sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0))
+  const switchable = buildSwitchableSessions(chatId, running, activeKey)
+  const tabs: SessionTabItem[] = []
+  const seen = new Set<string>()
+  for (const s of running) {
+    seen.add(s.sessionKey)
+    tabs.push({
+      sessionKey: s.sessionKey,
+      label: tabLabelForSession(s.sessionKey, s),
+      kind: sessionTabKind(s.sessionKey),
+      running: true,
+      current: !!activeKey && s.sessionKey === activeKey,
+      removable: isDeletableSession(s.sessionKey, chatId) || sessionTabKind(s.sessionKey) === "project",
+      ...tabModelFor(s.sessionKey, s),
+    })
+  }
+  if (activeKey && !seen.has(activeKey)) {
+    tabs.unshift({
+      sessionKey: activeKey,
+      label: tabLabelForSession(activeKey),
+      kind: sessionTabKind(activeKey),
+      running: false,
+      current: true,
+      removable: isDeletableSession(activeKey, chatId) || sessionTabKind(activeKey) === "project",
+      ...tabModelFor(activeKey),
+    })
+    seen.add(activeKey)
+  }
+  for (const sw of switchable) {
+    if (seen.has(sw.sessionKey)) continue
+    tabs.push({
+      sessionKey: sw.sessionKey,
+      label: tabLabelForSession(sw.sessionKey),
+      kind: sessionTabKind(sw.sessionKey),
+      running: false,
+      current: !!activeKey && sw.sessionKey === activeKey,
+      removable: isDeletableSession(sw.sessionKey, chatId) || sessionTabKind(sw.sessionKey) === "project",
+      ...tabModelFor(sw.sessionKey),
+    })
+  }
+  return { activeKey, tabs: disambiguateTabLabels(tabs) }
+}
+
+/**
+ * 目录 tab 的 label 只取末段目录名，D:\workspace\cp-scheduling 与 D:\bugfix\cp-scheduling
+ * 会渲染成两行一模一样的文字。同名的补上父目录再区分。
+ */
+function disambiguateTabLabels(tabs: SessionTabItem[]): SessionTabItem[] {
+  const dirOf = new Map<string, string>()
+  for (const t of tabs) {
+    const ws = workspaceDirFromSessionKey(t.sessionKey)
+    if (ws) dirOf.set(t.sessionKey, ws)
+  }
+  const dupLabels = new Set(
+    tabs.map((t) => t.label).filter((l, i, all) => all.indexOf(l) !== i),
+  )
+  if (dupLabels.size === 0) return tabs
+  const peers = [...dirOf.values()]
+  return tabs.map((t) => {
+    const ws = dirOf.get(t.sessionKey)
+    if (!ws || !dupLabels.has(t.label)) return t
+    const suffix = t.label.slice(dirBaseName(ws).length)
+    return { ...t, label: `${disambiguatePathLabel(ws, peers)}${suffix}` }
+  })
 }
 
 /** 首页常用会话：对齐 /c（主用户 chat 下活跃 + 可切换） */
@@ -794,47 +882,59 @@ export async function listMainSessionTabs(): Promise<{
   if (!lock?.port) return { ok: false, error: "服务未运行", tabs: [] }
   const chatId = await resolveMainChatId(lock.port)
   if (!chatId) return { ok: false, error: "未绑定主用户", tabs: [] }
-  const activeKey = await getCurrentActiveSession(lock.port, chatId)
-  const running = getSessionAgentList()
-    .filter((s) => sessionBelongsToChat(s.sessionKey, chatId) || (!!activeKey && s.sessionKey === activeKey))
-    .sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0))
-  const switchable = buildSwitchableSessions(chatId, running, activeKey ?? undefined)
-  const tabs: SessionTabItem[] = []
-  const seen = new Set<string>()
-  for (const s of running) {
-    seen.add(s.sessionKey)
-    tabs.push({
-      sessionKey: s.sessionKey,
-      label: tabLabelForSession(s.sessionKey, s),
-      kind: sessionTabKind(s.sessionKey),
-      running: true,
-      current: !!activeKey && s.sessionKey === activeKey,
-      removable: isDeletableSession(s.sessionKey, chatId) || sessionTabKind(s.sessionKey) === "project",
-    })
+  const { activeKey, tabs } = await buildTabsForChat(chatId, lock.port)
+  return { ok: true, chatId, activeKey, tabs }
+}
+
+/** 首页通道树：按配置通道聚合主用户 tabs + 全量运行会话 */
+export async function listDashboardTree(): Promise<{
+  ok: boolean
+  channels: {
+    channelId: string
+    name: string
+    mainUserChatId?: string
+    mainTabs: SessionTabItem[]
+    activeKey?: string
+  }[]
+  running: ReturnType<typeof getSessionAgentList>
+  error?: string
+}> {
+  const lock = cachedLock()
+  const channels = getChannels().filter((c) => c.enabled !== false)
+  const out: {
+    channelId: string
+    name: string
+    mainUserChatId?: string
+    mainTabs: SessionTabItem[]
+    activeKey?: string
+  }[] = []
+  for (const c of channels) {
+    const rawMain = c.mainUserEnabled ? (c.mainUserChatId?.trim() || undefined) : undefined
+    // 配置里是裸 chatId；会话/路由用 ch_xxx|chatId
+    const mainUserChatId = rawMain ? makeChatKey(c.id, rawMain) : undefined
+    if (!mainUserChatId || !lock?.port) {
+      out.push({ channelId: c.id, name: c.name, mainUserChatId, mainTabs: [] })
+      continue
+    }
+    try {
+      const { activeKey, tabs } = await buildTabsForChat(mainUserChatId, lock.port)
+      out.push({
+        channelId: c.id,
+        name: c.name,
+        mainUserChatId,
+        mainTabs: tabs,
+        activeKey,
+      })
+    } catch {
+      out.push({ channelId: c.id, name: c.name, mainUserChatId, mainTabs: [] })
+    }
   }
-  if (activeKey && !seen.has(activeKey)) {
-    tabs.unshift({
-      sessionKey: activeKey,
-      label: tabLabelForSession(activeKey),
-      kind: sessionTabKind(activeKey),
-      running: false,
-      current: true,
-      removable: isDeletableSession(activeKey, chatId) || sessionTabKind(activeKey) === "project",
-    })
-    seen.add(activeKey)
+  return {
+    ok: true,
+    channels: out,
+    running: lock?.port ? getSessionAgentList() : [],
+    error: lock?.port ? undefined : "服务未运行",
   }
-  for (const sw of switchable) {
-    if (seen.has(sw.sessionKey)) continue
-    tabs.push({
-      sessionKey: sw.sessionKey,
-      label: tabLabelForSession(sw.sessionKey),
-      kind: sessionTabKind(sw.sessionKey),
-      running: false,
-      current: !!activeKey && sw.sessionKey === activeKey,
-      removable: isDeletableSession(sw.sessionKey, chatId) || sessionTabKind(sw.sessionKey) === "project",
-    })
-  }
-  return { ok: true, chatId, activeKey: activeKey ?? undefined, tabs }
 }
 
 /** 与 /c <序号> 相同：只改路由指针，不强制拉起 */
