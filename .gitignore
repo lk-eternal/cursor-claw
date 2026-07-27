@@ -39,3 +39,5 @@ temp/
 .pack-*.txt
 .pack-local.log
 .run-pack-local.cmd
+
+.superpowers/
