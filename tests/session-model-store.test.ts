@@ -59,6 +59,15 @@ describe("resolveModelForSession", () => {
     const r = resolveModelForSession(SESSION, { model: "auto", modelParams: "" })
     expect(r).toEqual({ model: "auto", modelParams: "" })
   })
+
+  it("Windows 下 sessionKey 大小写不同仍能命中 override", () => {
+    if (process.platform !== "win32") return
+    setSessionOverride(SESSION, { model: "grok-x", modelParams: "[]" })
+    const alt = SESSION.replace("D:\\", "d:\\")
+    expect(alt).not.toBe(SESSION)
+    const r = resolveModelForSession(alt, { model: "fb", modelParams: "" })
+    expect(r).toEqual({ model: "grok-x", modelParams: "[]" })
+  })
 })
 
 describe("pushRecentModel / listQuickModels", () => {

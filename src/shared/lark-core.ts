@@ -814,6 +814,8 @@ export class LarkSender {
 
   /** 飞书 CardKit JSON 2.0：单卡组件/元素合计 ≤200（含嵌套 tag） */
   static readonly STREAM_ELEMENT_BUDGET = 180;
+  /** 思考块 / 工具块各保留最近 N 个；reply 与 todos 永不丢 */
+  static readonly STREAM_KEEP_PER_KIND = 5;
 
   /** 递归统计带 tag 的节点数（对齐飞书 300305 限额口径） */
   static countCardElements(node: unknown): number {
@@ -835,6 +837,26 @@ export class LarkSender {
       if (segs[i].type === "tools") return i;
     }
     return -1;
+  }
+
+  /** 按类型保留最近 keep 个 thinking/tools；reply、todos 全留；不插省略占位 */
+  static keepRecentStreamSegments<T extends { type: string }>(
+    segments: T[],
+    keep = LarkSender.STREAM_KEEP_PER_KIND,
+    showThinking = true,
+  ): T[] {
+    const src = showThinking ? segments : segments.filter((s) => s.type !== "thinking");
+    const thinkIdxs: number[] = [];
+    const toolIdxs: number[] = [];
+    for (let i = 0; i < src.length; i++) {
+      if (src[i].type === "thinking") thinkIdxs.push(i);
+      else if (src[i].type === "tools") toolIdxs.push(i);
+    }
+    const drop = new Set<number>([
+      ...thinkIdxs.slice(0, Math.max(0, thinkIdxs.length - keep)),
+      ...toolIdxs.slice(0, Math.max(0, toolIdxs.length - keep)),
+    ]);
+    return src.filter((_, i) => !drop.has(i));
   }
 
   /** 构建流式卡 JSON；会话色条 + 时间线 segments */
@@ -953,15 +975,16 @@ export class LarkSender {
       return els;
     };
 
-    // 飞书 300305：单卡组件/元素合计 ≤200。收敛原则「越新精度越高」：
-    // 超预算时按时间从最早的段整段剔除（思考/工具皆可），send_* 正文（reply）永不剔除，
-    // 最新工具块保持完整精度；全部可剔段删完仍超限才对最新块从头截步兜底。
-    let elements = buildBodyElements(segments);
+    // 飞书 300305：单卡组件/元素合计 ≤200。
+    // 收敛原则：思考/工具各留最近 N 块；reply 与 todos 永不丢；不插「已省略」占位（避免卡顶跳动）。
+    let segs: BodySegment[] = LarkSender.keepRecentStreamSegments(
+      segments as BodySegment[],
+      LarkSender.STREAM_KEEP_PER_KIND,
+      showThinking,
+    );
+    let elements = buildBodyElements(segs);
     const overBudget = () => LarkSender.countCardElements(elements) > LarkSender.STREAM_ELEMENT_BUDGET;
     if (overBudget()) {
-      // 思考关闭时 thinking 段不渲染不占元素，先滤掉避免无效剔除轮次
-      let segs: BodySegment[] = showThinking ? [...segments] : segments.filter((s) => s.type !== "thinking");
-
       // 1) 轻量降级：非最新工具块剥 detail
       const lastTools = LarkSender.lastToolsIndex(segs);
       segs = segs.map((s, i) =>
@@ -971,21 +994,16 @@ export class LarkSender {
       );
       elements = buildBodyElements(segs);
 
-      // 2) 从最早开始整段剔除（跳过 reply 与最新工具块），卡首留省略占位
-      let omittedCount = 0;
+      // 2) 仍超限：继续丢掉最早的思考/非最新工具（无省略文案）
       while (overBudget()) {
         const lt = LarkSender.lastToolsIndex(segs);
         const idx = segs.findIndex((s, i) => s.type === "thinking" || (s.type === "tools" && i !== lt));
         if (idx < 0) break;
         segs.splice(idx, 1);
-        omittedCount++;
-        const notice: BodySegment = { type: "omitted", text: `_📜 已省略更早的 ${omittedCount} 段执行记录_` };
-        if (segs[0]?.type === "omitted") segs[0] = notice;
-        else segs.unshift(notice);
         elements = buildBodyElements(segs);
       }
 
-      // 3) 兜底：仅剩最新工具块仍超限（单块步数极多），从头截步、保尾部精度
+      // 3) 兜底：仅剩最新工具块仍超限，从头截步、保尾部精度
       const lt = LarkSender.lastToolsIndex(segs);
       if (overBudget() && lt >= 0) {
         const toolSeg = segs[lt] as Extract<BodySegment, { type: "tools" }>;

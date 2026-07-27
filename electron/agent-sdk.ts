@@ -12,6 +12,8 @@ import {
   initSessionModelStore,
   resolveModelForSession,
   setSessionOverride,
+  getSessionOverride,
+  clearSessionOverride,
   pushRecentModel,
 } from "../src/shared/session-model-store.js"
 import { modelSlugFromParams, rememberModelLabel } from "../src/shared/model-utils.js"
@@ -266,6 +268,22 @@ export function sdkFailCooldownRemaining(_sessionKey: string): number {
   return 0
 }
 
+/** pack/异常退出后 force 重发偶发挂死；超时后丢 resume，下次全新会话 */
+const FORCE_SEND_TIMEOUT_MS = 30_000
+
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+    p.then(
+      (v) => { clearTimeout(timer); resolve(v) },
+      (e) => { clearTimeout(timer); reject(e) },
+    )
+  })
+}
+
+/** 换模期间抑制 idle 自动拉起，避免旧模型抢先占坑 */
+const modelSwitchHold = new Set<string>()
+
 function scheduleSdkIdle(sessionKey: string, errored: boolean, opts?: { network?: boolean; silent?: boolean }): void {
   if (errored) {
     const st = sdkFailStreak.get(sessionKey) ?? { count: 0, lastFailAt: 0, network: false }
@@ -284,8 +302,69 @@ function scheduleSdkIdle(sessionKey: string, errored: boolean, opts?: { network?
       pushUiLog("SDK", "INFO", `[${sessionKey}] 已恢复（曾连续失败 ${prev.count} 次）`)
     }
   }
+  if (hasModelSwitchHold(sessionKey)) return
   // 成功失败都立即叫醒调度器；失败无冷却，可立刻再拉起
   sdkIdleHandler?.(sessionKey)
+}
+
+function sessionKeyEquals(a: string, b: string): boolean {
+  if (a === b) return true
+  return process.platform === "win32" && a.toLowerCase() === b.toLowerCase()
+}
+
+/** live 查找：精确 → Win 大小写对齐 → 同 chatId 唯一匹配（带 workspace 时必须对齐） */
+function findSdkSessionLoose(sessionKey: string): SdkSessionAgent | undefined {
+  const exact = sdkSessions.get(sessionKey)
+  if (exact) return exact
+  for (const [k, s] of sdkSessions) {
+    if (sessionKeyEquals(k, sessionKey)) return s
+  }
+  const chatId = sessionKey.includes("::") ? sessionKey.slice(0, sessionKey.indexOf("::")) : sessionKey
+  const matches = [...sdkSessions.values()].filter((s) => {
+    const k = s.sessionKey
+    return k === chatId || k.startsWith(`${chatId}::`)
+      || (process.platform === "win32" && (
+        k.toLowerCase() === chatId.toLowerCase()
+        || k.toLowerCase().startsWith(`${chatId.toLowerCase()}::`)
+      ))
+  })
+  if (matches.length === 0) return undefined
+  if (sessionKey.includes("::")) {
+    const ws = sessionKey.slice(sessionKey.indexOf("::") + 2)
+    return matches.find((s) => {
+      const i = s.sessionKey.indexOf("::")
+      if (i < 0) return false
+      const sw = s.sessionKey.slice(i + 2)
+      return sessionKeyEquals(sw, ws)
+    })
+  }
+  // 未带 workspace：仅当同 chat 唯一 live 时才兜底
+  return matches.length === 1 ? matches[0] : undefined
+}
+
+function hasModelSwitchHold(sessionKey: string): boolean {
+  if (modelSwitchHold.has(sessionKey)) return true
+  for (const k of modelSwitchHold) {
+    if (sessionKeyEquals(k, sessionKey)) return true
+  }
+  return false
+}
+
+function clearModelSwitchHold(sessionKey: string): void {
+  modelSwitchHold.delete(sessionKey)
+  for (const k of [...modelSwitchHold]) {
+    if (sessionKeyEquals(k, sessionKey)) modelSwitchHold.delete(k)
+  }
+}
+
+function findResumableLoose(sessionKey: string): { key: string; entry: ResumeEntry } | undefined {
+  const map = getResumableMap()
+  const exact = map.get(sessionKey)
+  if (exact) return { key: sessionKey, entry: exact }
+  for (const [k, e] of map) {
+    if (sessionKeyEquals(k, sessionKey)) return { key: k, entry: e }
+  }
+  return undefined
 }
 
 function closeAndRemoveSession(session: SdkSessionAgent): void {
@@ -887,9 +966,25 @@ function extractToolResultText(result: unknown): string {
   try { return JSON.stringify(rec) } catch { return "" }
 }
 
-/** poll 结果里 freshIds 非空 = 拉到新用户消息（重投属于当前回合，不算回合边界） */
-function pollResultHasFreshMessages(result: unknown): boolean {
-  return /"freshIds"\s*:\s*\[\s*"/.test(extractToolResultText(result))
+/** poll 结果投递语义（优先读 daemon 的 kind；旧响应回退文案/freshIds） */
+type PollDeliveryKind = "user" | "timeout" | "end" | "unknown"
+
+function parsePollDelivery(result: unknown): {
+  kind: PollDeliveryKind
+  fresh: boolean
+  hasUserMsgs: boolean
+} {
+  const raw = extractToolResultText(result)
+  const kindMatch = /"kind"\s*:\s*"(user|timeout|end)"/.exec(raw)
+  let kind: PollDeliveryKind = kindMatch ? (kindMatch[1] as PollDeliveryKind) : "unknown"
+  if (kind === "unknown" && /\[SYSTEM OVERRIDE/.test(raw)) {
+    kind = /按需唤醒|安静结束/.test(raw) ? "end" : "timeout"
+  }
+  const fresh = /"freshIds"\s*:\s*\[\s*"/.test(raw)
+  // 有带 messageId 的对象 ≈ 用户消息（系统指令 messageId 为空）
+  const hasUserMsgs = /"messageId"\s*:\s*"(?!internal_)[^"]+"/.test(raw)
+  if (kind === "unknown" && hasUserMsgs) kind = "user"
+  return { kind, fresh, hasUserMsgs }
 }
 
 /**
@@ -1083,7 +1178,12 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
           const wasBlocking = stream.pendingBlockingPoll
           stream.pendingNonBlockingPoll = false
           stream.pendingBlockingPoll = false
-          if (wasNonBlocking && stream.gateOpen && pollResultHasFreshMessages(event.result)) {
+          const delivery = parsePollDelivery(event.result)
+          if (wasBlocking || wasNonBlocking) {
+            pushUiLog("SDK", "DEBUG",
+              `[${session.sessionKey}] poll返回诊断 blocking=${wasBlocking} nonBlocking=${wasNonBlocking} kind=${delivery.kind} fresh=${delivery.fresh} hasUserMsgs=${delivery.hasUserMsgs} bornAt=${stream.bornAt}`)
+          }
+          if (wasNonBlocking && stream.gateOpen && delivery.fresh) {
             // 干活途中拉到新消息：回合边界（重投是当前回合的活，不换卡）
             endStreamRound(session)
             break
@@ -1093,15 +1193,19 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
             stream.segments = stream.segments.filter((s) => s.type === "tools" && s.tools.length > 0)
             stream.dirty = stream.segments.length > 0
           }
-          // 阻塞 poll 仅在真正拉到新消息时开门；超时/空结果保持关门
-          if (wasBlocking && !pollResultHasFreshMessages(event.result)) {
-            stream.gateOpen = false
-            break
-          }
+          // 阻塞 poll：timeout/end 保持关门；user（含重投）换新队列
           if (wasBlocking) {
-            // 拿到新消息 = 新回合：重开队列。bornAt 晚于 daemon 投递时打的 gone 标记，
-            // 新回合思考不会被 gone 误丢（曾致换卡后思考全部不渲染）；顺带丢掉挂起期间的收尾念叨
-            session.streamAgg = isFeishuStreamEnabled(session.sessionKey) ? newStreamAgg(true) : null
+            if (delivery.kind === "timeout" || delivery.kind === "end") {
+              stream.gateOpen = false
+              break
+            }
+            if (delivery.kind === "user" || delivery.hasUserMsgs) {
+              session.streamAgg = isFeishuStreamEnabled(session.sessionKey) ? newStreamAgg(true) : null
+              pushUiLog("SDK", "DEBUG",
+                `[${session.sessionKey}] 阻塞poll换新队列 kind=${delivery.kind} bornAt=${session.streamAgg?.bornAt ?? "null"}`)
+              break
+            }
+            stream.gateOpen = false
             break
           }
           stream.gateOpen = true
@@ -1391,7 +1495,14 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
         pushUiLog("SDK", "INFO", `[${sessionKey}] Resume 恢复会话 (agentId=${resumable.agentId}, model=${JSON.stringify(modelSelection)}, 新连接/上下文保留)`)
         agent = await Agent.resume(resumable.agentId, { apiKey, model: modelSelection, local: localOptions })
       } catch (e: unknown) {
-        pushUiLog("SDK", "WARN", `[${sessionKey}] Resume 失败，回退全新会话: ${e instanceof Error ? e.message : String(e)}`)
+        const msg = e instanceof Error ? e.message : String(e)
+        // 只有服务端确认上下文不存在才允许回退全新会话；网络等瞬时故障直接放弃本次拉起——
+        // resume 映射保留、消息还在队列，调度器下轮重试 Resume，上下文绝不因瞬时故障丢失
+        if (!/not found/i.test(msg)) {
+          pushUiLog("SDK", "WARN", `[${sessionKey}] Resume 暂不可用（瞬时故障，保留上下文稍后重试）: ${msg}`)
+          return { ok: false, error: `Resume 暂不可用: ${msg}` }
+        }
+        pushUiLog("SDK", "WARN", `[${sessionKey}] Resume 上下文已不存在，回退全新会话: ${msg}`)
       }
     }
     const resumed = agent !== undefined
@@ -1406,6 +1517,14 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       try { agent.close() } catch { /* best-effort */ }
       pushUiLog("SDK", "INFO", `[${sessionKey}] 拉起期间会话被重置，丢弃本次拉起（下次全新会话）`)
       return { ok: false, error: "会话已重置" }
+    }
+
+    // 残留旧实例必须先释放（abort 事件流）再登记新实例：直接 set 覆盖会留下无人管的旧事件流，
+    // 新旧两个实例交替刷同一张流式卡（内容来回跳动、任务清单时有时无的根因）
+    const stale = sdkSessions.get(sessionKey)
+    if (stale) {
+      pushUiLog("SDK", "WARN", `[${sessionKey}] 检测到残留旧会话实例，先行释放防双写 (agentId=${stale.agentId})`)
+      await releaseSession(stale)
     }
 
     const abortController = new AbortController()
@@ -1439,9 +1558,28 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     const rulesUpdated = resumed && !!resumable?.rulesHash
       && resumable.rulesHash !== computeRulesHash(workspaceDir)
     if (rulesUpdated) pushUiLog("SDK", "INFO", `[${sessionKey}] 检测到规则更新，唤醒时要求重读规则`)
+    // 全新项目会话（not found 回退 / reset 后 / resume 映射丢失）必须重带项目元数据——
+    // 新 Agent 没有历史上下文，不注入就不知道项目/仓库/分支/角色
+    let effectiveTask = taskMessage
+    if (!resumed && !effectiveTask?.trim() && chatType === "project") {
+      const pid = projectIdFromSessionKey(sessionKey)
+      if (pid) {
+        try {
+          const { getProject } = await import("../src/shared/project-store.js")
+          const { buildProjectSessionPrompt } = await import("./project-prompts")
+          const proj = getProject(pid)
+          if (proj) {
+            effectiveTask = buildProjectSessionPrompt(proj)
+            pushUiLog("SDK", "INFO", `[${sessionKey}] 全新项目会话，已重新注入项目上下文（${proj.name}）`)
+          }
+        } catch (e: unknown) {
+          pushUiLog("SDK", "WARN", `[${sessionKey}] 项目上下文注入失败: ${e instanceof Error ? e.message : String(e)}`)
+        }
+      }
+    }
     const prompt = resumed
       ? buildWakePrompt(session, rulesUpdated, taskMessage)
-      : buildPrompt(meta, taskMessage, sessionKey, opts.useMainWorkspace)
+      : buildPrompt(meta, effectiveTask, sessionKey, opts.useMainWorkspace)
     pushUiLog("SDK", "INFO", `[${sessionKey}] ${resumed ? "恢复" : "启动"} Prompt:\n${prompt}`)
     // pack/进程重启后 daemon 内存无卡，飞书旧流式卡仍在：Resume 前先按持久化 cardId 收口，避免再建一张重复卡
     if (resumed && resumable?.streamCardId && session.streamAgg) {
@@ -1456,11 +1594,22 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       run = await agent.send(prompt)
     } catch (e: unknown) {
       // 上次进程异常退出未落终态的 wedged run 会卡死会话（already has active run）；
-      // SDK 官方恢复路径：force 过期残留 run 后重发
+      // SDK 官方恢复路径：force 过期残留 run 后重发（必须限时：曾挂死 10min+ 堵死全局调度）
       const msg = e instanceof Error ? e.message : String(e)
       if (!msg.includes("already has active run")) throw e
       pushUiLog("SDK", "WARN", `[${sessionKey}] 检测到残留 active run，force 恢复重发`)
-      run = await agent.send(prompt, { local: { force: true } })
+      try {
+        run = await withTimeout(
+          agent.send(prompt, { local: { force: true } }),
+          FORCE_SEND_TIMEOUT_MS,
+          "force send",
+        )
+      } catch (forceErr: unknown) {
+        const forceMsg = forceErr instanceof Error ? forceErr.message : String(forceErr)
+        pushUiLog("SDK", "WARN", `[${sessionKey}] force 恢复失败，丢弃 resume 映射下次全新会话: ${forceMsg}`)
+        forgetResumable(sessionKey)
+        throw forceErr instanceof Error ? forceErr : new Error(forceMsg)
+      }
     }
     startRunLifecycle(session, run)
     // 失败计数不在拉起时清零（断网时 Resume 总能成功、run 中途才死）：
@@ -1522,8 +1671,8 @@ async function waitSdkPendingLaunch(sessionKey: string, ms = 12_000): Promise<vo
 }
 
 /**
- * 仅本会话切换模型：写 override；有 live 则停当前 run（保留 resume）。
- * 不主动拉起——有队列消息时由调度器拉起，否则下次唤醒生效。
+ * 仅本会话切换模型：写 override；有 live/resumable 则停当前 run 后立即 Resume。
+ * 换模期间抑制 idle 自动拉起，避免旧模型抢坑。完全空闲时 deferred（下次唤醒生效）。
  */
 export async function switchSdkSessionModel(
   sessionKey: string,
@@ -1534,24 +1683,106 @@ export async function switchSdkSessionModel(
   if (!mid) return { ok: false, error: "model 不能为空" }
   ensureModelStore()
   const params = modelParams ?? ""
+  const prevOverride = getSessionOverride(sessionKey)
   setSessionOverride(sessionKey, { model: mid, modelParams: params })
   pushRecentModel({ model: mid, modelParams: params })
 
-  // 先等掉进行中的拉起，避免 pendingLaunches 合流后旧模型占坑
-  await waitSdkPendingLaunch(sessionKey)
-
-  const live = sdkSessions.get(sessionKey)
-  if (live) {
-    pushUiLog("SDK", "INFO", `[${sessionKey}] 换模：停止当前 run，记下 ${mid}（有消息再拉起）`)
-    await releaseSession(live)
-    broadcastSdkSessionStatus()
-  } else {
-    pushUiLog("SDK", "INFO", `[${sessionKey}] 已记下模型 ${mid}（下次唤醒生效）`)
+  modelSwitchHold.add(sessionKey)
+  let effectiveKey = sessionKey
+  let prevEffectiveOverride: ReturnType<typeof getSessionOverride> | undefined
+  const rollbackOverrides = () => {
+    if (prevOverride) setSessionOverride(sessionKey, prevOverride)
+    else clearSessionOverride(sessionKey)
+    if (effectiveKey !== sessionKey && !sessionKeyEquals(effectiveKey, sessionKey)) {
+      if (prevEffectiveOverride) setSessionOverride(effectiveKey, prevEffectiveOverride)
+      else clearSessionOverride(effectiveKey)
+    }
   }
-  // 日志带完整 key 后缀，避免飞书/微信同目录都显示「📂 xxx」看不出切到哪
-  const chatPart = sessionKey.includes("::") ? sessionKey.slice(0, sessionKey.indexOf("::")) : sessionKey
-  pushUiLog("SDK", "INFO", `[${sessionKey}] 切模目标 chat=${chatPart} → ${mid}`)
-  return { ok: true, deferred: true }
+  try {
+    await waitSdkPendingLaunch(sessionKey)
+
+    const live = findSdkSessionLoose(sessionKey)
+    effectiveKey = live?.sessionKey ?? sessionKey
+    if (effectiveKey !== sessionKey) {
+      if (!sessionKeyEquals(effectiveKey, sessionKey)) {
+        prevEffectiveOverride = getSessionOverride(effectiveKey)
+        setSessionOverride(effectiveKey, { model: mid, modelParams: params })
+      }
+      modelSwitchHold.add(effectiveKey)
+    }
+
+    const resumableHit = findResumableLoose(effectiveKey) ?? findResumableLoose(sessionKey)
+    if (!live && !resumableHit) {
+      pushUiLog("SDK", "INFO", `[${sessionKey}] 已记下模型 ${mid}（下次唤醒生效）`)
+      const chatPart = sessionKey.includes("::") ? sessionKey.slice(0, sessionKey.indexOf("::")) : sessionKey
+      pushUiLog("SDK", "INFO", `[${sessionKey}] 切模目标 chat=${chatPart} → ${mid}`)
+      return { ok: true, deferred: true }
+    }
+
+    const channel = resolveChannelForSession(effectiveKey)
+    const resource = getAgentResource(channel?.agentResourceId)
+    if (resource.type !== "sdk" || !resource.apiKey?.trim()) {
+      rollbackOverrides()
+      return { ok: false, error: "通道未绑定 SDK 资源或缺少 API Key" }
+    }
+
+    const workspaceDir = live?.workspaceDir || resumableHit!.entry.workspaceDir
+    if (!workspaceDir) {
+      rollbackOverrides()
+      return { ok: false, error: "无法解析会话工作目录" }
+    }
+    const chatType: ChatType = live?.chatType
+      ?? (projectIdFromSessionKey(effectiveKey) ? "project" : "p2p")
+    const keepSession = live?.keepSession ?? channel?.keepSession ?? true
+    const persistentPoll = live?.persistentPoll ?? (channel?.keepSession !== false && (channel?.persistentPoll ?? true))
+    const senderOpenId = live?.senderOpenId ?? resumableHit?.entry.senderOpenId
+    const chatName = live?.chatName
+
+    if (live) {
+      pushUiLog("SDK", "INFO", `[${effectiveKey}] 换模：停止当前 run，立即 Resume → ${mid}`)
+      await releaseSession(live)
+      broadcastSdkSessionStatus()
+    } else {
+      pushUiLog("SDK", "INFO", `[${effectiveKey}] 换模：空闲可恢复，立即 Resume → ${mid}`)
+    }
+
+    await waitSdkPendingLaunch(effectiveKey)
+
+    const r = await launchSdkAgent({
+      sessionKey: effectiveKey,
+      chatType,
+      workspaceDir,
+      apiKey: resource.apiKey,
+      model: mid,
+      modelParams: params,
+      keepSession,
+      persistentPoll,
+      senderOpenId,
+      chatName,
+    })
+    if (!r.ok) {
+      rollbackOverrides()
+      return { ok: false, error: r.error || "Resume 换模失败" }
+    }
+
+    const deadline = Date.now() + 8_000
+    while (Date.now() < deadline) {
+      const s = findSdkSessionLoose(effectiveKey)
+      if (s && s.model === mid && (s.modelParams ?? "") === params) {
+        clearSdkFailStreak(effectiveKey)
+        const chatPart = effectiveKey.includes("::") ? effectiveKey.slice(0, effectiveKey.indexOf("::")) : effectiveKey
+        pushUiLog("SDK", "INFO", `[${effectiveKey}] 切模已生效 chat=${chatPart} → ${mid}`)
+        return { ok: true }
+      }
+      await new Promise((wait) => setTimeout(wait, 200))
+    }
+    const chatPart = effectiveKey.includes("::") ? effectiveKey.slice(0, effectiveKey.indexOf("::")) : effectiveKey
+    pushUiLog("SDK", "INFO", `[${effectiveKey}] 切模目标 chat=${chatPart} → ${mid}（已发起 Resume）`)
+    return { ok: true }
+  } finally {
+    clearModelSwitchHold(sessionKey)
+    clearModelSwitchHold(effectiveKey)
+  }
 }
 
 /** 显式重置会话上下文（/reset）：停掉在跑的 run、丢弃 resume 映射，下条消息全新会话 */

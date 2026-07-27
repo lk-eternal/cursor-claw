@@ -87,22 +87,39 @@ export function pendingKeyFromSession(sessionKey: string): string {
   return sessionKey
 }
 
+/** Windows 路径大小写不一致时，用已有 key 对齐，避免 override 写了读不到 */
+function findStoredSessionKey(sessions: Record<string, unknown>, sessionKey: string): string | undefined {
+  if (sessionKey in sessions) return sessionKey
+  if (process.platform !== "win32") return undefined
+  const lower = sessionKey.toLowerCase()
+  for (const k of Object.keys(sessions)) {
+    if (k.toLowerCase() === lower) return k
+  }
+  return undefined
+}
+
 export function setSessionOverride(sessionKey: string, ref: ModelRef): void {
   const s = load()
+  const prev = findStoredSessionKey(s.sessions, sessionKey)
+  if (prev && prev !== sessionKey) delete s.sessions[prev]
   s.sessions[sessionKey] = { model: ref.model, modelParams: ref.modelParams ?? "", updatedAt: Date.now() }
   save()
 }
 
 export function getSessionOverride(sessionKey: string): ModelRef | undefined {
-  const e = load().sessions[sessionKey]
+  const s = load()
+  const key = findStoredSessionKey(s.sessions, sessionKey)
+  if (!key) return undefined
+  const e = s.sessions[key]
   if (!e?.model) return undefined
   return { model: e.model, modelParams: e.modelParams ?? "" }
 }
 
 export function clearSessionOverride(sessionKey: string): void {
   const s = load()
-  if (!(sessionKey in s.sessions)) return
-  delete s.sessions[sessionKey]
+  const key = findStoredSessionKey(s.sessions, sessionKey)
+  if (!key) return
+  delete s.sessions[key]
   save()
 }
 

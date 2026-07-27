@@ -49,7 +49,7 @@ import {
   resolveWorkspaceFromSessionKey,
   dirBaseName,
 } from "../src/shared/session-label.js"
-import { readLockFile, getLockFilePath, httpGet, httpPost, syncActiveSession, getCurrentActiveSession, enqueueToMainSession, resolveMainChatId, resolveMainSessionKey } from "./daemon-client"
+import { readLockFile, getLockFilePath, httpGet, httpPost, syncActiveSession, getCurrentActiveSession, enqueueToMainSession, enqueueToSession, resolveMainChatId, resolveMainSessionKey } from "./daemon-client"
 import {
   isSessionAgentRunning, stopSessionAgent, stopAllSessionAgents,
   dispatchSessionAgents, launchSessionAgent, launchIndependentAgent,
@@ -2067,11 +2067,16 @@ export function initDaemonManager(): void {
     if (!task) return { ok: false, error: "任务不存在" }
     const nowStr = new Date().toLocaleString("zh-CN")
     const content = `[定时任务: ${task.name}] (手动触发: ${nowStr})\n\n${task.content}`
-    if (task.independent !== false) {
-      return launchIndependentAgent(task.id, task.name, content, "task", undefined, task.channelId, task.model, task.modelParams)
-    }
     const lock = readLockFile()
     if (!lock?.port) return { ok: false, error: "守护进程未运行" }
+    if (task.independent !== false) {
+      // 与 cron 触发同一套入队逻辑，失败由调度器按队列重拉
+      return enqueueToSession(lock.port, task.id, content, "task", {
+        channelId: task.channelId,
+        model: task.model,
+        modelParams: task.modelParams,
+      })
+    }
     const result = await enqueueToMainSession(lock.port, content, undefined, task.channelId)
     return result
   })

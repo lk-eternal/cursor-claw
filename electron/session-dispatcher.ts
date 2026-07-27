@@ -2,7 +2,7 @@ import * as path from "node:path"
 import * as fs from "node:fs"
 import { app } from "electron"
 import {
-  getConfig, getChannel, getAgentResource, resolveChannelForSession,
+  getConfig, getChannel, getChannels, getAgentResource, resolveChannelForSession,
   resolveChannelModel, effectiveWorkspaceDir, mainChatScopeKey, saveConfig,
   type MessageChannel, type ModelScenario,
 } from "./config-store"
@@ -34,6 +34,7 @@ import { ensureCheckouts } from "./project-worktree"
 import { buildProjectSessionPrompt } from "./project-prompts"
 import { getSessionOverride } from "../src/shared/session-model-store.js"
 import { resolveModelLabel } from "../src/shared/model-utils.js"
+import { readTasksFromFile } from "./cron-scheduler"
 
 // ── readLockFile 短 TTL 缓存 ─────────────────────────────
 let _lockCache: { value: ReturnType<typeof readLockFile>; ts: number } | null = null
@@ -1099,19 +1100,23 @@ async function isZombieAgent(sessionKey: string): Promise<boolean> {
 
 let dispatching = false
 
+/** 规划阶段互斥；真正的 launch 在锁外并行，避免单会话 force/Resume 挂死堵死其它会话 */
 export async function dispatchSessionAgents(): Promise<void> {
   if (dispatching) return
   dispatching = true
+  let launches: Promise<void>[] = []
   try {
-    await _dispatchSessionAgentsInner()
+    launches = await _planSessionLaunches()
   } finally {
     dispatching = false
   }
+  if (launches.length > 0) await Promise.allSettled(launches)
 }
 
-async function _dispatchSessionAgentsInner(): Promise<void> {
+async function _planSessionLaunches(): Promise<Promise<void>[]> {
   const config = getConfig()
   const sessions = await getQueueSessions()
+  const launches: Promise<void>[] = []
 
   const feishuOn = (config.channels ?? []).some((c) => c.enabled && c.type === "feishu")
   const groupKeys = sessions.filter((s) => s.chatType === "group").map((s) => extractChatId(s.sessionKey))
@@ -1138,17 +1143,26 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
       broadcastLog(`[Agent] 工作流会话 ${sessionKey} 有残留消息，等待引擎调度，跳过`, "WARN")
       continue
     }
-    // 裸 id 会话（临时/定时任务）：续聊必须按任务语义拉起（主工作目录 + Resume），
-    // 按 p2p 拉会换到访客临时目录、上下文全断
+    // 裸 id 会话（临时/定时任务）：按队列 chatType 拉起；续聊走主工作目录 + Resume
     if (!sessionKey.includes("|") && !sessionKey.includes("::")) {
+      const launchType: ChatType = chatType === "task" ? "task" : "temp"
       const resumableT = hasResumableSdkSession(sessionKey)
-      broadcastLog(`[Agent] 任务会话 ${sessionKey} 有新消息，正在启动Agent（${resumableT ? "Resume 恢复上下文" : "全新会话"}）`)
-      const r = await launchAgent({
-        sessionKey,
-        chatType: "temp",
-        meta: { chatId: sessionKey, chatType: "temp" },
-      })
-      if (!r.ok) broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${r.error}`, "WARN")
+      // 队列唤醒必须带回任务绑定的通道，否则 getAgentResource(undefined) 会默落 CLI
+      const task = readTasksFromFile().find((t) => t.id === sessionKey)
+      const channelId = task?.channelId
+        || getChannels().find((c) => c.enabled)?.id
+      broadcastLog(`[Agent] 任务会话 ${sessionKey} 有新消息，正在启动Agent（${resumableT ? "Resume 恢复上下文" : "全新会话"}/${launchType}${channelId ? `/${channelId}` : ""}）`)
+      launches.push((async () => {
+        const r = await launchAgent({
+          sessionKey,
+          chatType: launchType,
+          meta: { chatId: sessionKey, chatType: launchType },
+          channelId,
+          modelOverride: task?.model,
+          modelParamsOverride: task?.modelParams,
+        })
+        if (!r.ok) broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${r.error}`, "WARN")
+      })())
       continue
     }
 
@@ -1185,19 +1199,21 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
       const resumableP = hasResumableSdkSession(sessionKey)
       broadcastLog(`[Agent] 项目「${proj.name}」有新消息，正在启动Agent（${resumableP ? "Resume 恢复上下文" : "全新会话"}）`)
       if (!resumableP) await notifyChat(sessionKey, "正在启动Agent，请稍等...")
-      const r = await launchAgent({
-        sessionKey,
-        chatType: "project",
-        chatName: `P: ${proj.name}`,
-        workingDirectory: proj.worktreePath,
-        meta: { chatId, chatType: "project" },
-        channelId: parseChatKey(chatId).channelId,
-        taskMessage: resumableP ? undefined : buildProjectSessionPrompt(proj),
-      })
-      if (!r.ok) {
-        broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${r.error}`)
-        await notifyChat(sessionKey, `⚠️ Agent 启动失败，本条消息未能处理，请稍后重发。\n原因: ${r.error ?? "未知错误"}`)
-      }
+      launches.push((async () => {
+        const r = await launchAgent({
+          sessionKey,
+          chatType: "project",
+          chatName: `P: ${proj.name}`,
+          workingDirectory: proj.worktreePath,
+          meta: { chatId, chatType: "project" },
+          channelId: parseChatKey(chatId).channelId,
+          taskMessage: resumableP ? undefined : buildProjectSessionPrompt(proj),
+        })
+        if (!r.ok) {
+          broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${r.error}`)
+          await notifyChat(sessionKey, `⚠️ Agent 启动失败，本条消息未能处理，请稍后重发。\n原因: ${r.error ?? "未知错误"}`)
+        }
+      })())
       continue
     }
 
@@ -1217,26 +1233,29 @@ async function _dispatchSessionAgentsInner(): Promise<void> {
     if (!resumable) await notifyChat(sessionKey, "正在启动Agent，请稍等...")
 
     const meta: import("./agent-launcher").LaunchMeta = { chatId, chatType: chatType as "p2p" | "group" }
-    const result = await launchSessionAgent(sessionKey, chatType as "p2p" | "group", meta, mainUser, senderOpenId)
-    if (result.ok && chatId !== sessionKey) {
-      // 被动拉起（处理残留消息）不得抢占用户已选路由：重启后主会话恢复曾把用户从项目会话踢回主会话。
-      // 仅在该 chat 尚无具体 active 路由（无记录/裸 chatKey 兜底态）时才登记
-      const lock = cachedLock()
-      if (lock?.port) {
-        const cur = await getCurrentActiveSession(lock.port, chatId)
-        if (!cur || cur === chatId) await syncActiveSession(lock.port, chatId, sessionKey)
+    launches.push((async () => {
+      const result = await launchSessionAgent(sessionKey, chatType as "p2p" | "group", meta, mainUser, senderOpenId)
+      if (result.ok && chatId !== sessionKey) {
+        // 被动拉起（处理残留消息）不得抢占用户已选路由：重启后主会话恢复曾把用户从项目会话踢回主会话。
+        // 仅在该 chat 尚无具体 active 路由（无记录/裸 chatKey 兜底态）时才登记
+        const lock = cachedLock()
+        if (lock?.port) {
+          const cur = await getCurrentActiveSession(lock.port, chatId)
+          if (!cur || cur === chatId) await syncActiveSession(lock.port, chatId, sessionKey)
+        }
       }
-    }
-    if (!result.ok) {
-      broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${result.error}`)
-      await notifyChat(sessionKey, `⚠️ Agent 启动失败，本条消息未能处理，请稍后重发。\n原因: ${result.error ?? "未知错误"}`)
-      const lock = cachedLock()
-      if (lock?.port) {
-        const drained = await drainSessionMessages(lock.port, sessionKey)
-        if (drained > 0) broadcastLog(`[Agent] ${sessionKey} 已丢弃 ${drained} 条消息（启动被拒绝）`)
+      if (!result.ok) {
+        broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${result.error}`)
+        await notifyChat(sessionKey, `⚠️ Agent 启动失败，本条消息未能处理，请稍后重发。\n原因: ${result.error ?? "未知错误"}`)
+        const lock = cachedLock()
+        if (lock?.port) {
+          const drained = await drainSessionMessages(lock.port, sessionKey)
+          if (drained > 0) broadcastLog(`[Agent] ${sessionKey} 已丢弃 ${drained} 条消息（启动被拒绝）`)
+        }
       }
-    }
+    })())
   }
+  return launches
 }
 
 // ── 初始化 ────────────────────────────────────────────────

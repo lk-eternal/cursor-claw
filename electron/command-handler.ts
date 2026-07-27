@@ -136,8 +136,8 @@ async function applySessionModelPick(
   if (picked.label) rememberModelLabel(picked.id, picked.params, picked.label)
   const lines = [
     r.deferred
-      ? `✅ 已记下模型（已停当前 run / 空闲），下次有消息时按新模型 Resume`
-      : `✅ 已切换模型（当前对话上下文保留）`,
+      ? `✅ 已记下模型（会话空闲），下次有消息时按新模型 Resume`
+      : `✅ 已切换模型（已 Resume，上下文保留）`,
     idxLabel ? ` # · ${idxLabel}` : undefined,
     `🧠 ${display}`,
     `应用默认模型未改：${resolveModelLabel(channel.model, channel.modelParams) || channel.model?.trim() || "auto"}`,

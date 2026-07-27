@@ -96,12 +96,21 @@ export async function resolveMainChatId(port: number, preferredChatId?: string, 
   }
 }
 
-/** 直投指定会话队列：任务与聊天消息同一套崩溃重投保障（项目节点任务用） */
+/** 直投指定会话队列：任务与聊天消息同一套崩溃重投保障（独立定时任务 / 项目节点任务用） */
 export async function enqueueToSession(
-  port: number, sessionKey: string, content: string, chatType = "project",
+  port: number,
+  sessionKey: string,
+  content: string,
+  chatType = "project",
+  opts?: { channelId?: string; model?: string; modelParams?: string },
 ): Promise<{ ok: boolean; error?: string }> {
   try {
-    await httpPost(`http://127.0.0.1:${port}/enqueue`, { content, sessionKey, chatType })
+    await httpPost(`http://127.0.0.1:${port}/enqueue`, {
+      content, sessionKey, chatType,
+      channelId: opts?.channelId,
+      model: opts?.model,
+      modelParams: opts?.modelParams,
+    })
     return { ok: true }
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) }

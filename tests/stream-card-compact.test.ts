@@ -5,6 +5,7 @@ type Segment =
   | { type: "thinking"; text: string; title?: string; expanded?: boolean }
   | { type: "tools"; title?: string; expanded?: boolean; steps: Array<{ title: string; status: string; detail?: string; icon?: string }> }
   | { type: "reply"; text: string }
+  | { type: "todos"; items: Array<{ content: string; status: string }> }
 
 const mkTools = (n: number, tag: string): Segment => ({
   type: "tools",
@@ -12,6 +13,10 @@ const mkTools = (n: number, tag: string): Segment => ({
 })
 const mkThink = (tag: string): Segment => ({ type: "thinking", text: `思考内容 ${tag} `.repeat(20) })
 const mkReply = (tag: string): Segment => ({ type: "reply", text: `send_text 正文 ${tag}` })
+const mkTodos = (tag: string): Segment => ({
+  type: "todos",
+  items: [{ content: `任务 ${tag}`, status: "todo" }],
+})
 
 function buildCard(segments: Segment[], showThinking = true): { json: string; count: number } {
   const card = LarkSender.buildStreamingCardJson({ status: "streaming", showThinking, segments }) as {
@@ -20,37 +25,60 @@ function buildCard(segments: Segment[], showThinking = true): { json: string; co
   return { json: JSON.stringify(card), count: LarkSender.countCardElements(card.body.elements) }
 }
 
-describe("流式卡超限收敛（越新精度越高）", () => {
-  it("不超限时原样保留：detail 不剥、无省略占位", () => {
+describe("流式卡压缩（各类型留最近 N，无省略占位）", () => {
+  it("不超限且未超 N 时原样保留：detail 不剥、无省略占位", () => {
     const { json, count } = buildCard([mkThink("s"), mkTools(5, "S"), mkReply("s")])
     expect(count).toBeLessThanOrEqual(LarkSender.STREAM_ELEMENT_BUDGET)
     expect(json).toContain("detail-S-4")
     expect(json).not.toContain("已省略")
   })
 
-  it("超限时从最早段剔除；reply 全保留；最新工具块完整精度", () => {
+  it("思考/工具各只留最近 5；reply 与 todos 全保留；无省略文案", () => {
     const segments: Segment[] = []
     for (let i = 0; i < 12; i++) {
       segments.push(mkThink(`t${i}`))
-      segments.push(mkTools(8, `g${i}`))
-      if (i % 4 === 1) segments.push(mkReply(`r${i}`))
+      segments.push(mkTools(3, `g${i}`))
+      if (i % 3 === 0) segments.push(mkReply(`r${i}`))
+      if (i === 2) segments.push(mkTodos("mid"))
     }
     segments.push(mkThink("latest"))
-    segments.push(mkTools(30, "LATEST"))
+    segments.push(mkTools(8, "LATEST"))
     segments.push(mkReply("final"))
+    segments.push(mkTodos("end"))
 
     const { json, count } = buildCard(segments)
     expect(count).toBeLessThanOrEqual(LarkSender.STREAM_ELEMENT_BUDGET)
-    // send_* 正文一条不丢
-    for (const r of ["r1", "r5", "r9", "final"]) {
+    expect(json).not.toContain("已省略")
+
+    // 正文与任务清单全保留
+    for (const r of ["r0", "r3", "r6", "r9", "final"]) {
       expect(json).toContain(`send_text 正文 ${r}`)
     }
-    // 最新工具块 30 步全在、detail 保留
-    for (let i = 0; i < 30; i++) expect(json).toContain(`LATEST-step${i}`)
-    expect(json).toContain("detail-LATEST-29")
-    // 最早的段被剔除并留占位
+    expect(json).toContain("任务 mid")
+    expect(json).toContain("任务 end")
+
+    // 最早的思考/工具被丢掉；最近的保留
+    expect(json).not.toContain("思考内容 t0 ")
     expect(json).not.toContain("g0-step0")
-    expect(json).toContain("已省略更早的")
+    expect(json).toContain("思考内容 latest ")
+    expect(json).toContain("LATEST-step0")
+  })
+
+  it("keepRecentStreamSegments 精确保留各类型最近 N 个", () => {
+    const segments: Segment[] = []
+    for (let i = 0; i < 8; i++) {
+      segments.push(mkThink(`t${i}`))
+      segments.push(mkTools(1, `g${i}`))
+    }
+    segments.push(mkReply("keep"))
+    segments.push(mkTodos("keep"))
+    const kept = LarkSender.keepRecentStreamSegments(segments, 5, true)
+    expect(kept.filter((s) => s.type === "thinking")).toHaveLength(5)
+    expect(kept.filter((s) => s.type === "tools")).toHaveLength(5)
+    expect(kept.filter((s) => s.type === "reply")).toHaveLength(1)
+    expect(kept.filter((s) => s.type === "todos")).toHaveLength(1)
+    expect(kept.some((s) => s.type === "thinking" && (s as Extract<Segment, { type: "thinking" }>).text.includes("t3"))).toBe(true)
+    expect(kept.some((s) => s.type === "thinking" && (s as Extract<Segment, { type: "thinking" }>).text.includes("t2"))).toBe(false)
   })
 
   it("单个超大工具块兜底：从头截步、尾部保留", () => {
@@ -60,9 +88,10 @@ describe("流式卡超限收敛（越新精度越高）", () => {
     expect(json).not.toContain("\"BIG-step0\"")
     expect(json).toContain("send_text 正文 head")
     expect(json).toContain("send_text 正文 tail")
+    expect(json).not.toContain("已省略")
   })
 
-  it("showThinking=false 时 thinking 不渲染也不计入省略", () => {
+  it("showThinking=false 时 thinking 不渲染", () => {
     const segments: Segment[] = []
     for (let i = 0; i < 30; i++) {
       segments.push(mkThink(`t${i}`))
@@ -73,5 +102,6 @@ describe("流式卡超限收敛（越新精度越高）", () => {
     expect(count).toBeLessThanOrEqual(LarkSender.STREAM_ELEMENT_BUDGET)
     expect(json).not.toContain("思考内容")
     expect(json).toContain("send_text 正文 final")
+    expect(json).not.toContain("已省略")
   })
 })

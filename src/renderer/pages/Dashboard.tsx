@@ -18,6 +18,7 @@ import {
   Circle,
   ChevronRight,
   ChevronDown,
+  ChevronUp,
   FolderOpen,
   Package,
   Rocket,
@@ -253,6 +254,8 @@ export default function Dashboard({ onSettings, active }: Props) {
 
   const [sessionList, setSessionList] = useState<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string; workspaceDir?: string; source?: "cli" | "sdk"; model?: string; modelParams?: string }[]>([])
   const [sessionDiag, setSessionDiag] = useState<Record<string, { running: boolean; resumeAgentId?: string; resumeUpdatedAt?: number; lastRun?: { status: string; endedAt: number; durationMs?: number; error?: string }; lastReplyAt: number | null }>>({})
+  /** 切模后短暂锁住高亮，避免旧 sessionList 把 UI 刷回上一模型 */
+  const modelPickHoldRef = useRef<{ sk: string; model: string; modelParams?: string; until: number } | null>(null)
 
   /** 首页切模型：只认 UI 选中页签或主用户页签当前项，禁止跨通道「猜最近」 */
   const resolveModelTargetSession = useCallback(async (): Promise<string | null> => {
@@ -281,6 +284,7 @@ export default function Dashboard({ onSettings, active }: Props) {
         return
       }
       setActionError("")
+      modelPickHoldRef.current = { sk, model: m.model, modelParams: m.modelParams, until: Date.now() + 12_000 }
       setActiveSessionModel({ model: m.model, modelParams: m.modelParams })
       await refreshModelTabs()
     } finally {
@@ -380,6 +384,16 @@ export default function Dashboard({ onSettings, active }: Props) {
   }
 
   useEffect(() => {
+    const hold = modelPickHoldRef.current
+    if (hold && Date.now() < hold.until && (!activeSessionKey || activeSessionKey === hold.sk)) {
+      setActiveSessionModel({ model: hold.model, modelParams: hold.modelParams })
+      const live = sessionList.find((s) => s.sessionKey === hold.sk)
+      if (live?.model === hold.model && (live.modelParams ?? "") === (hold.modelParams ?? "")) {
+        modelPickHoldRef.current = null
+      }
+      return
+    }
+    if (hold && Date.now() >= hold.until) modelPickHoldRef.current = null
     const hit = (activeSessionKey && sessionList.find((s) => s.sessionKey === activeSessionKey && s.model))
       || [...sessionList.filter((s) => s.model)].sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0))[0]
     if (hit?.model) setActiveSessionModel({ model: hit.model, modelParams: hit.modelParams })
@@ -392,6 +406,7 @@ export default function Dashboard({ onSettings, active }: Props) {
   const [exportingDiag, setExportingDiag] = useState(false)
   const [logFilter, setLogFilter] = useState("")
   const [logAtBottom, setLogAtBottom] = useState(true)
+  const [logMatchCursor, setLogMatchCursor] = useState(0)
   const logRef = useRef<HTMLDivElement>(null)
   /** 是否贴底跟随：用户上翻后暂停自动滚动，回到底部（或点击按钮）后恢复 */
   const logStickRef = useRef(true)
@@ -478,9 +493,33 @@ export default function Dashboard({ onSettings, active }: Props) {
     }
   }, [])
 
-  const filteredLogLines = logFilter.trim()
-    ? logLines.filter((l) => l.toLowerCase().includes(logFilter.trim().toLowerCase()))
-    : logLines
+  const logQuery = logFilter.trim()
+  const logMatchIndexes = useMemo(() => {
+    const q = logQuery.toLowerCase()
+    if (!q) return [] as number[]
+    const out: number[] = []
+    for (let i = 0; i < logLines.length; i++) {
+      if (logLines[i].toLowerCase().includes(q)) out.push(i)
+    }
+    return out
+  }, [logLines, logQuery])
+
+  useEffect(() => {
+    setLogMatchCursor(0)
+  }, [logQuery])
+
+  const jumpToLogMatch = (dir: -1 | 1) => {
+    if (logMatchIndexes.length === 0) return
+    const next = (logMatchCursor + dir + logMatchIndexes.length) % logMatchIndexes.length
+    setLogMatchCursor(next)
+    const lineIdx = logMatchIndexes[next]
+    const el = logRef.current?.querySelector(`[data-log-idx="${lineIdx}"]`)
+    if (!el) return
+    logStickRef.current = false
+    programmaticScrollRef.current = true
+    setLogAtBottom(false)
+    el.scrollIntoView({ block: "center" })
+  }
 
   useEffect(() => {
     if (!logStickRef.current) return
@@ -1354,8 +1393,32 @@ export default function Dashboard({ onSettings, active }: Props) {
                 </button>
               )}
             </div>
-            {logFilter.trim() && (
-              <span className="shrink-0 text-[10px] text-gray-600">{filteredLogLines.length}/{logLines.length} 条</span>
+            {logQuery && (
+              <>
+                <span className="shrink-0 text-[10px] text-gray-600">
+                  {logMatchIndexes.length > 0
+                    ? `${logMatchCursor + 1}/${logMatchIndexes.length}`
+                    : "0 条命中"}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => jumpToLogMatch(-1)}
+                  disabled={logMatchIndexes.length === 0}
+                  className="rounded p-0.5 text-gray-500 transition hover:bg-gray-800 hover:text-gray-300 disabled:opacity-40"
+                  title="上一条命中"
+                >
+                  <ChevronUp size={14} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => jumpToLogMatch(1)}
+                  disabled={logMatchIndexes.length === 0}
+                  className="rounded p-0.5 text-gray-500 transition hover:bg-gray-800 hover:text-gray-300 disabled:opacity-40"
+                  title="下一条命中"
+                >
+                  <ChevronDown size={14} />
+                </button>
+              </>
             )}
           </div>
           <div className="flex shrink-0 gap-2">
@@ -1369,9 +1432,9 @@ export default function Dashboard({ onSettings, active }: Props) {
             </button>
             {logLines.length > 0 && (
               <button
-                onClick={() => { navigator.clipboard.writeText(filteredLogLines.join("\n")) }}
+                onClick={() => { navigator.clipboard.writeText(logLines.join("\n")) }}
                 className="rounded px-2 py-0.5 text-xs text-gray-500 transition hover:bg-gray-800 hover:text-gray-300"
-                title={logFilter.trim() ? "复制当前过滤结果" : "复制全部日志"}
+                title="复制全部日志"
               >
                 复制
               </button>
@@ -1393,9 +1456,21 @@ export default function Dashboard({ onSettings, active }: Props) {
             onWheel={handleLogWheel}
             className="h-full overflow-auto rounded-lg border border-gray-800 bg-gray-900/50 p-3 font-mono text-xs leading-5"
           >
-            {filteredLogLines.length > 0
-              ? filteredLogLines.map((line, i) => <LogLine key={i} line={line} highlight={logFilter.trim()} resolveLabel={resolveLogSessionLabel} />)
-              : <span className="text-gray-600">{logFilter.trim() ? "无匹配日志" : "暂无日志"}</span>}
+            {logLines.length > 0
+              ? logLines.map((line, i) => (
+                  <div
+                    key={i}
+                    data-log-idx={i}
+                    className={logMatchIndexes[logMatchCursor] === i ? "rounded bg-yellow-500/10" : undefined}
+                  >
+                    <LogLine
+                      line={line}
+                      highlight={logQuery}
+                      resolveLabel={resolveLogSessionLabel}
+                    />
+                  </div>
+                ))
+              : <span className="text-gray-600">暂无日志</span>}
           </div>
           {!logAtBottom && (
             <button

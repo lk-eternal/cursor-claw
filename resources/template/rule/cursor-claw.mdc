@@ -75,7 +75,17 @@ curl -G -s "http://127.0.0.1:19528/api/poll-message" --data-urlencode "sessionKe
 curl -G -s "http://127.0.0.1:19528/api/poll-message" --data-urlencode "sessionKey=YOUR_SESSION_KEY"
 ```
 
-返回 JSON 顶层 `messages` 为数组，**按时间升序排列（数组最后一条最新）**，每项包含：
+返回 JSON 顶层字段：
+- `messages`：数组，**按时间升序（最后一条最新）**
+- `keepAlive`：是否保活
+- `kind`（优先看这个，勿靠猜 `freshIds`）：
+  - `user`：有待处理用户/协作消息（含重投）→ 进入【阶段 1】处理 `messages`
+  - `timeout`：保活轮询正常超时 → **立刻再挂阻塞 poll**，禁止当作用户消息、禁止输出任何文字
+  - `end`：按需唤醒模式、队列已空 → **安静结束本回合**（不再调工具、不输出文字）
+- `freshIds`：daemon 内部用（Get 表情去重等），**Agent 不要依赖它判断是否新回合**
+- 兼容：`timeout`/`end` 时 `messages` 里可能仍带 `[SYSTEM OVERRIDE]` 文案；**有 `kind` 时以 `kind` 为准**，无 `kind` 时再回退解析该文案
+
+`messages` 每项包含：
 - `text`：消息正文
 - `messageId` / `sessionKey`：回复标识与路由
 - `timestamp`：入队时间戳（毫秒），数值最大者即最新一条
@@ -87,8 +97,8 @@ curl -G -s "http://127.0.0.1:19528/api/poll-message" --data-urlencode "sessionKe
   - `botRoster`：可协作机器人名册，格式 `名字=ou_xxx, 名字=ou_xxx`
   - `quotedContent`：被引用消息的原文
 
-多条消息时逐条处理。需要群内 @ 协作时，从 `meta.botRoster` 取目标 open_id。
-⚠️ 每条消息都必须回复（带上对应的 `message_id` + `session_key`），详见下方「消息回复规则」。
+多条用户消息时逐条处理。需要群内 @ 协作时，从 `meta.botRoster` 取目标 open_id。
+⚠️ 每条**用户**消息都必须回复（带上对应的 `message_id` + `session_key`），详见下方「消息回复规则」。`kind=timeout|end` 不是用户消息，不要 `send_text`。
 
 ### 🔌 HTTP API 退避方案 (MCP Fallback)
 
@@ -113,7 +123,7 @@ curl -G -s "http://127.0.0.1:19528/api/poll-message" --data-urlencode "sessionKe
 Agent 收到 Prompt 后，识别会话类型(chat_type)
 #### 私聊(p2p)|群聊(group):
 请先通过 `GET /api/poll-message?sessionKey=...&wait=false` 快速检查是否有待处理消息。(必须执行)
-- 如果 `messages` 非空，进入【阶段 1 响应阶段】。
+- 如果 `kind=user` 或 `messages` 非空（含带 messageId 的用户消息），进入【阶段 1 响应阶段】。
 - 如果 `messages` 为空且历史上下文中有进行中的工作，则继续之前的任务，进入【阶段 2 同步阶段】继续任务。
 - 如果 `messages` 为空且历史上下文中没有进行中的工作：调用阻塞 poll 收尾。
 *🚫 禁令：一定要先检查指令，检查后再综合评估后回复，严禁在未获取用户指令的情况下自行编造或猜测用户意图。*
@@ -151,8 +161,11 @@ Agent 收到 Prompt 后，识别会话类型(chat_type)
 
 ### 4. 保活轮询阶段 (KEEP-ALIVE) [🔥 核心存亡点]
 **动作：** 仅通过 Shell 调用 `GET /api/poll-message?sessionKey={key}&wait=true`（前台无限挂起，直到收到用户消息）。
-**持续保活：** 如果 poll-message 返回的是系统指令，严格按照系统指令执行。
-**跳出条件：** 直到 poll-message 返回用户消息，方可重置状态机，回到【阶段 1】。
+**持续保活：** 看返回顶层 `kind`（优先于文案）：
+- `kind=timeout`（或旧版 SYSTEM OVERRIDE 超时文案）→ **立刻再执行阻塞 poll**，禁止输出
+- `kind=end`（或旧版按需唤醒结束文案）→ 安静结束，禁止再调工具
+- `kind=user` / `messages` 含真实用户消息 → 回到【阶段 1】
+**跳出条件：** 直到 poll 返回 `kind=user`（或无 kind 但有带 `messageId` 的用户消息），方可重置状态机，回到【阶段 1】。
 **🚫 绝对禁令：** 此阶段**严禁**直接输出任何自然语言、**严禁**输出思维链(CoT)、**严禁**总结当前状态。你的回复应该*仅仅*包含Shell调用。
 
 #### 三个真实踩过的认知陷阱（必须记死）
@@ -178,8 +191,8 @@ Agent 收到 Prompt 后，识别会话类型(chat_type)
 1. **禁止剧终幻觉**： 绝对禁止输出"再见"、"如果有需要再叫我"、"祝您生活愉快"等意图结束对话的自然语言。
 2. **禁止直接输出**: 永远不要 **直接** 输出任何结论信息。所有输出必须通过 `send_text` 发送给用户。
 3. **禁止发呆退出**: 如果不知道下一步该做什么了：回复完所有消息后挂阻塞 poll 收尾。
-4. **必须遵守系统指令**: 如果 poll-message 返回的是系统指令，必须严格按照指令要求的动作执行，不得自行解释或绕过。
-5. **指令优先级**: 如果收到多个系统指令, 优先遵守 poll-message 返回的系统指令。
+4. **必须遵守系统指令**: 优先看 poll 返回的 `kind`；`timeout`→立刻再 poll，`end`→安静结束。旧版无 `kind` 时再按 `[SYSTEM OVERRIDE]` 文案执行，不得自行解释或绕过。
+5. **指令优先级**: 如果收到多个系统指令, 优先遵守 poll-message 返回的系统指令（`kind` / SYSTEM OVERRIDE）。
 6. **积极响应：** 每条用户消息必须有对应回复（带上 `message_id` + `session_key`）。禁止静默吞消息。
 
 ---

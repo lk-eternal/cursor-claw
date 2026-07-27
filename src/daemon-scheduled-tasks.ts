@@ -127,11 +127,8 @@ function runWatchdogTick(cb: SchedulerCallbacks): void {
       const nowStr = fireAt.toLocaleString("zh-CN");
       const message = `[定时任务: ${task.name}] (触发时间: ${nowStr})\n\n${task.content}`;
       log(`触发: ${task.name}${task.independent ? " [独立运行]" : ""}`);
-      if (task.independent && cb.launchIndependent) {
-        cb.launchIndependent(task, message);
-      } else {
-        cb.enqueue(task, message);
-      }
+      // 独立/非独立统一入队：失败重试走同一套队列调度，不再直塞 Prompt
+      cb.enqueue(task, message);
     }
   }
 }
