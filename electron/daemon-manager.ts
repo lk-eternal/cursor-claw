@@ -1061,6 +1061,22 @@ async function resolveCommandSessionKey(chatId?: string, chatType?: string): Pro
   return chatId
 }
 
+/** daemon routing 里该 chat 绑定的 project_ 会话（store 未命中时的兜底） */
+async function resolveRoutingProjectSession(port: number, chatId?: string): Promise<string | undefined> {
+  if (!chatId) return undefined
+  try {
+    const res = (await httpGet(`http://127.0.0.1:${port}/api/active-sessions`)) as { sessions?: Record<string, string> }
+    const map = res?.sessions ?? {}
+    const direct = map[chatId]
+    if (direct && projectIdFromSessionKey(direct)) return direct
+    const raw = parseChatKey(chatId).chatId
+    for (const [k, v] of Object.entries(map)) {
+      if (projectIdFromSessionKey(v) && (k === chatId || parseChatKey(k).chatId === raw)) return v
+    }
+  } catch { /* daemon 未就绪 */ }
+  return undefined
+}
+
 function resolveResetWorkspaceDir(sessionKey?: string, chatId?: string, chatType?: string): string | undefined {
   if (!sessionKey) return undefined
   if (chatType === "p2p" && isMainUser(chatId, chatType)) {
@@ -1094,14 +1110,22 @@ async function checkAndExecutePendingCommands(): Promise<void> {
     const rawCmd = claimed.command.trim()
     const cmdTokens = rawCmd.split(/\s+/).filter((t) => t.length > 0)
     const head = (cmdTokens[0] ?? "").toLowerCase()
+    initProjectStore(app.getPath("userData"))
     const isAdmin = isMainUser(claimed.chatId, claimed.chatType)
     const cmdSessionKey = await resolveCommandSessionKey(claimed.chatId, claimed.chatType)
-    // 独立群：群内 /p、/m 不应要求主用户私聊管理员；会话已绑 project_ 时同样放行
-    const isProjectGroup = !!findProjectByGroupChat(claimed.chatId)
+    const findProj = findProjectByGroupChat(claimed.chatId)
+    const routingSession = await resolveRoutingProjectSession(lock.port, claimed.chatId)
+    // 独立群：群内 /p、/m 不应要求主用户私聊管理员；store / cmdSession / routing 任一命中即放行
+    const isProjectGroup = !!findProj
       || !!(cmdSessionKey && projectIdFromSessionKey(cmdSessionKey))
+      || !!(routingSession && projectIdFromSessionKey(routingSession))
     const reply = (ok: boolean, msg: string, buttons?: { label: string; cmd: string; section?: string }[]) =>
       reportCommandResult(lock.port, claimed!.messageId, ok, msg, claimed!.chatId, buttons, patchTarget ? { patchMessageId: patchTarget } : undefined)
-    const denyNonAdmin = () => reply(false, "🔒 该指令仅管理员可用")
+    const denyNonAdmin = () => {
+      pushUiLog("Electron", "WARN",
+        `[指令] DENY admin cmd=${rawCmd} chatId=${claimed!.chatId ?? "?"} chatType=${claimed!.chatType ?? "?"} findProject=${findProj?.id ?? "none"} cmdSession=${cmdSessionKey ?? "none"} routingSession=${routingSession ?? "none"}`)
+      return reply(false, "🔒 该指令仅管理员可用")
+    }
     // 原卡更新目标：仅按钮点击来源才 patch（手输指令的 messageId 是用户消息，不可 patch）
     const patchTarget = claimed.fromCard ? claimed.messageId : undefined
 

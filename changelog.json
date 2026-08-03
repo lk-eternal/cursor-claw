@@ -1,5 +1,13 @@
 [
   {
+    "version": "1.8.2",
+    "date": "2026-08-03",
+    "changes": [
+      "加固项目群 /p /m 鉴权：store + routing 双兜底，避免重启后 isProjectGroup 漏判",
+      "误拦「仅管理员」时写入 DENY admin 诊断日志（chatId/findProject/routingSession）"
+    ]
+  },
+  {
     "version": "1.8.1",
     "date": "2026-08-03",
     "changes": [
