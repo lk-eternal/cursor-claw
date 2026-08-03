@@ -2,6 +2,7 @@ import type { ProjectWorkspaceType } from "./project-types.js"
 
 export interface FlowHubSettings {
   flowHubUrl?: string
+  flowHubToken?: string
   flowHubAuthor?: string
 }
 
@@ -30,6 +31,12 @@ export interface FlowHubCatalogNode {
   updatedAt: string
   contentHash: string
   sourceGroupName?: string
+}
+
+/** 节点浏览列表项：独立节点 + 流程组内节点 */
+export interface FlowHubBrowsableNode extends FlowHubCatalogNode {
+  /** 来自流程组时填写，导入/预览走 groups/{groupHubId}.json */
+  groupHubId?: string
 }
 
 export interface FlowHubNodePayload {

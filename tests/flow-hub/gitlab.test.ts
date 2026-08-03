@@ -41,4 +41,19 @@ describe("GitLabFlowHubClient", () => {
       globalThis.fetch = orig
     }
   })
+
+  it("commitFiles surfaces friendly 403 message", async () => {
+    const orig = globalThis.fetch
+    globalThis.fetch = async () => new Response(
+      JSON.stringify({ message: "403 Forbidden - You are not allowed to push into this branch" }),
+      { status: 403 },
+    )
+    try {
+      const client = new GitLabFlowHubClient("https://gitlab.example.com", "token")
+      await expect(client.commitFiles(1, "msg", [{ path: "a.json", content: "{}", exists: false }]))
+        .rejects.toThrow("无权限推送到 main 分支")
+    } finally {
+      globalThis.fetch = orig
+    }
+  })
 })

@@ -48,6 +48,8 @@ export interface AppConfig {
 
   /** Flow Hub 共享仓库地址 */
   flowHubUrl: string
+  /** Flow Hub 专用 GitLab Token（与项目 Token 分离） */
+  flowHubToken: string
   /** Flow Hub 上传作者昵称 */
   flowHubAuthor: string
 
@@ -98,6 +100,7 @@ const defaults: AppConfig = {
   worktreeRoot: "",
 
   flowHubUrl: "",
+  flowHubToken: "",
   flowHubAuthor: "",
 
   allowOthers: false,
@@ -180,6 +183,7 @@ function openConfigSecrets(cfg: AppConfig): AppConfig {
     channels: mapChannelSecrets(cfg.channels, openSecret) ?? [],
     agentResources: mapResourceSecrets(cfg.agentResources, openSecret) ?? [],
     gitlabToken: openSecret(cfg.gitlabToken) ?? "",
+    flowHubToken: openSecret(cfg.flowHubToken) ?? "",
     larkAppSecret: openSecret(cfg.larkAppSecret) ?? "",
     wechatToken: openSecret(cfg.wechatToken) ?? "",
     cursorApiKey: openSecret(cfg.cursorApiKey) ?? "",
@@ -192,6 +196,7 @@ function sealPartialSecrets(partial: Partial<AppConfig>): Partial<AppConfig> {
   if (out.channels) out.channels = mapChannelSecrets(out.channels, sealSecret)!
   if (out.agentResources) out.agentResources = mapResourceSecrets(out.agentResources, sealSecret)!
   if (out.gitlabToken !== undefined) out.gitlabToken = sealSecret(out.gitlabToken) ?? ""
+  if (out.flowHubToken !== undefined) out.flowHubToken = sealSecret(out.flowHubToken) ?? ""
   if (out.larkAppSecret !== undefined) out.larkAppSecret = sealSecret(out.larkAppSecret) ?? ""
   if (out.wechatToken !== undefined) out.wechatToken = sealSecret(out.wechatToken) ?? ""
   if (out.cursorApiKey !== undefined) out.cursorApiKey = sealSecret(out.cursorApiKey) ?? ""
@@ -205,12 +210,13 @@ export function migrateSecretsToSafeStorage(): void {
   const plain = (v?: string) => !!v && !v.startsWith(SECRET_PREFIX)
   const dirty = (raw.channels ?? []).some((c) => plain(c.larkAppSecret) || plain(c.wechatToken))
     || (raw.agentResources ?? []).some((r) => plain(r.apiKey))
-    || plain(raw.gitlabToken) || plain(raw.larkAppSecret) || plain(raw.wechatToken) || plain(raw.cursorApiKey)
+    || plain(raw.gitlabToken) || plain(raw.flowHubToken) || plain(raw.larkAppSecret) || plain(raw.wechatToken) || plain(raw.cursorApiKey)
   if (!dirty) return
   getStore().set(sealPartialSecrets({
     channels: raw.channels,
     agentResources: raw.agentResources,
     gitlabToken: raw.gitlabToken,
+    flowHubToken: raw.flowHubToken,
     larkAppSecret: raw.larkAppSecret,
     wechatToken: raw.wechatToken,
     cursorApiKey: raw.cursorApiKey,

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { Plus, RefreshCw, X } from "lucide-react"
-import type { FlowHubCatalog, FlowHubCatalogGroup, FlowHubCatalogNode, FlowHubSyncStatus } from "../../shared/flow-hub-types"
+import type { FlowHubBrowsableNode, FlowHubCatalog, FlowHubCatalogGroup, FlowHubSyncStatus } from "../../shared/flow-hub-types"
 
 type BrowserKind = "group" | "node"
 
@@ -17,38 +17,59 @@ const PAGE = 20
 
 export function FlowHubBrowser({ kind, targetGroupId, onClose, onImported, showAlert, showConfirm }: FlowHubBrowserProps) {
   const [catalog, setCatalog] = useState<FlowHubCatalog | null>(null)
+  const [hubNodes, setHubNodes] = useState<FlowHubBrowsableNode[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
   const [query, setQuery] = useState("")
   const [visible, setVisible] = useState(PAGE)
   const [statusMap, setStatusMap] = useState<Record<string, FlowHubSyncStatus>>({})
   const [busyId, setBusyId] = useState("")
-  const [hoverPrompt, setHoverPrompt] = useState("")
+  const [tooltip, setTooltip] = useState<{ text: string; x: number; y: number } | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
     setError("")
-    const r = await window.electronAPI.flowHub.getCatalog(true)
-    if (!r.ok) {
-      setError(r.error ?? "加载失败")
+    if (kind === "node") {
+      const r = await window.electronAPI.flowHub.listNodes()
+      if (!r.ok) {
+        setError(r.error ?? "加载失败")
+        setHubNodes([])
+      } else {
+        setHubNodes(r.nodes)
+      }
       setCatalog(null)
     } else {
-      setCatalog(r.catalog)
+      const r = await window.electronAPI.flowHub.getCatalog(true)
+      if (!r.ok) {
+        setError(r.error ?? "加载失败")
+        setCatalog(null)
+      } else {
+        setCatalog(r.catalog)
+      }
+      setHubNodes([])
     }
     setLoading(false)
-  }, [])
+  }, [kind])
 
   useEffect(() => { void load() }, [load])
 
   const filtered = useMemo(() => {
-    if (!catalog) return { groups: [], nodes: [] }
     const q = query.trim().toLowerCase()
     const match = (s: string) => !q || s.toLowerCase().includes(q)
+    if (kind === "node") {
+      return {
+        groups: [] as FlowHubCatalogGroup[],
+        nodes: hubNodes.filter((n) =>
+          match(n.label) || match(n.localId) || match(n.author) || (n.sourceGroupName ? match(n.sourceGroupName) : false),
+        ),
+      }
+    }
+    if (!catalog) return { groups: [], nodes: [] as FlowHubBrowsableNode[] }
     return {
       groups: catalog.groups.filter((g) => match(g.name) || match(g.author) || g.nodeLabels.some(match)),
-      nodes: catalog.nodes.filter((n) => match(n.label) || match(n.localId) || match(n.author)),
+      nodes: [],
     }
-  }, [catalog, query])
+  }, [catalog, hubNodes, kind, query])
 
   const groupSlice = useMemo(
     () => (kind === "group" ? filtered.groups.slice(0, visible) : []),
@@ -61,30 +82,39 @@ export function FlowHubBrowser({ kind, targetGroupId, onClose, onImported, showA
   const totalItems = kind === "group" ? filtered.groups.length : filtered.nodes.length
 
   useEffect(() => {
-    if (!catalog) return
+    if (loading) return
     void (async () => {
       const map: Record<string, FlowHubSyncStatus> = {}
-      for (const g of catalog.groups) {
-        map[g.hubId] = await window.electronAPI.flowHub.getSyncStatus("group", g.hubId, g.contentHash)
-      }
-      for (const n of catalog.nodes) {
-        map[n.hubId] = await window.electronAPI.flowHub.getSyncStatus("node", n.hubId, n.contentHash)
+      if (kind === "group" && catalog) {
+        for (const g of catalog.groups) {
+          map[g.hubId] = await window.electronAPI.flowHub.getSyncStatus("group", g.hubId, g.contentHash)
+        }
+      } else if (kind === "node") {
+        for (const n of hubNodes) {
+          map[n.hubId] = await window.electronAPI.flowHub.getSyncStatus("node", n.hubId, n.contentHash)
+        }
       }
       setStatusMap(map)
     })()
-  }, [catalog])
+  }, [catalog, hubNodes, kind, loading])
 
-  const handleImport = async (hubId: string) => {
+  const nodeRef = (n: FlowHubBrowsableNode) => (
+    n.groupHubId && n.localId ? { groupHubId: n.groupHubId, nodeLocalId: n.localId } : undefined
+  )
+
+  const handleImport = async (item: FlowHubCatalogGroup | FlowHubBrowsableNode) => {
+    const hubId = item.hubId
     setBusyId(hubId)
     const r = kind === "group"
       ? await window.electronAPI.flowHub.importGroup(hubId)
-      : await window.electronAPI.flowHub.importNode(hubId, targetGroupId ?? "")
+      : await window.electronAPI.flowHub.importNode(hubId, targetGroupId ?? "", nodeRef(item as FlowHubBrowsableNode))
     setBusyId("")
     if (!r.ok) void showAlert("导入失败", r.error ?? "未知错误")
     else { onImported(); void load() }
   }
 
-  const handleSync = async (hubId: string) => {
+  const handleSync = async (item: FlowHubCatalogGroup | FlowHubBrowsableNode) => {
+    const hubId = item.hubId
     const st = statusMap[hubId]
     if (st === "local_modified") {
       if (!(await showConfirm("同步确认", "本地已修改，用 Hub 覆盖本地内容？"))) return
@@ -92,15 +122,25 @@ export function FlowHubBrowser({ kind, targetGroupId, onClose, onImported, showA
     setBusyId(hubId)
     const r = kind === "group"
       ? await window.electronAPI.flowHub.syncGroup(hubId, "overwrite")
-      : await window.electronAPI.flowHub.syncNode(hubId, targetGroupId ?? "", "overwrite")
+      : await window.electronAPI.flowHub.syncNode(hubId, targetGroupId ?? "", "overwrite", nodeRef(item as FlowHubBrowsableNode))
     setBusyId("")
     if (!r.ok) void showAlert("同步失败", r.error ?? "未知错误")
     else { onImported(); void load() }
   }
 
-  const previewNode = async (hubId: string, nodeLocalId?: string) => {
-    const r = await window.electronAPI.flowHub.preview(kind, hubId, nodeLocalId)
-    setHoverPrompt(r.ok ? (r.prompt?.slice(0, 400) ?? "（无自定义提示词）") : "")
+  const moveTooltip = (e: React.MouseEvent) => {
+    setTooltip((t) => t ? { ...t, x: e.clientX + 12, y: e.clientY + 12 } : null)
+  }
+
+  const hideTooltip = () => setTooltip(null)
+
+  const previewNode = async (e: React.MouseEvent, hubId: string, nodeLocalId?: string, groupHubId?: string) => {
+    const pos = { x: e.clientX + 12, y: e.clientY + 12 }
+    const r = groupHubId && nodeLocalId
+      ? await window.electronAPI.flowHub.preview("group", groupHubId, nodeLocalId)
+      : await window.electronAPI.flowHub.preview(kind, hubId, nodeLocalId)
+    const text = r.ok ? (r.prompt?.slice(0, 400) ?? "") : ""
+    if (text) setTooltip({ text, ...pos })
   }
 
   return (
@@ -138,43 +178,53 @@ export function FlowHubBrowser({ kind, targetGroupId, onClose, onImported, showA
                     <div className="text-sm font-medium text-gray-100">{g.name}</div>
                     <div className="text-[10px] text-gray-500">by {g.author || "未知"} · {g.updatedAt.slice(0, 10)}</div>
                   </div>
-                  <ActionBtn st={st} busy={busyId === g.hubId} onAdd={() => void handleImport(g.hubId)} onSync={() => void handleSync(g.hubId)} />
+                  <ActionBtn st={st} busy={busyId === g.hubId} onAdd={() => void handleImport(g)} onSync={() => void handleSync(g)} />
                 </div>
                 <div className="mt-2 flex flex-wrap gap-1">
                   {g.nodeLabels.map((label, i) => (
                     <span
                       key={`${g.hubId}-${g.nodeIds[i] ?? i}`}
                       className="cursor-default rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-400"
-                      onMouseEnter={() => void previewNode(g.hubId, g.nodeIds[i])}
-                      onMouseLeave={() => setHoverPrompt("")}
+                      onMouseEnter={(e) => void previewNode(e, g.hubId, g.nodeIds[i])}
+                      onMouseMove={moveTooltip}
+                      onMouseLeave={hideTooltip}
                     >{label}</span>
                   ))}
                 </div>
               </div>
             )
           })}
-          {kind === "node" && nodeSlice.map((n: FlowHubCatalogNode) => {
+          {kind === "node" && nodeSlice.map((n: FlowHubBrowsableNode) => {
             const st = statusMap[n.hubId] ?? "missing"
             return (
               <div
                 key={n.hubId}
                 className="flex items-center justify-between rounded-lg border border-gray-800 p-3"
-                onMouseEnter={() => void previewNode(n.hubId)}
-                onMouseLeave={() => setHoverPrompt("")}
+                onMouseEnter={(e) => void previewNode(e, n.hubId, n.localId, n.groupHubId)}
+                onMouseMove={moveTooltip}
+                onMouseLeave={hideTooltip}
               >
                 <div>
                   <div className="text-sm text-gray-100">{n.label} <span className="font-mono text-xs text-gray-500">/p {n.localId}</span></div>
                   <div className="text-[10px] text-gray-500">by {n.author}{n.sourceGroupName ? ` · 来自 ${n.sourceGroupName}` : ""}</div>
                 </div>
-                <ActionBtn st={st} busy={busyId === n.hubId} onAdd={() => void handleImport(n.hubId)} onSync={() => void handleSync(n.hubId)} />
+                <ActionBtn st={st} busy={busyId === n.hubId} onAdd={() => void handleImport(n)} onSync={() => void handleSync(n)} />
               </div>
             )
           })}
         </div>
-        {hoverPrompt && (
-          <div className="border-t border-gray-800 px-4 py-2 text-[10px] text-gray-400 whitespace-pre-wrap max-h-24 overflow-y-auto">{hoverPrompt}</div>
-        )}
       </div>
+      {tooltip && (
+        <div
+          className="pointer-events-none fixed z-[60] max-w-xs rounded-md border border-gray-600 bg-gray-900/95 px-3 py-2 text-[10px] leading-relaxed text-gray-300 shadow-xl whitespace-pre-wrap"
+          style={{
+            left: Math.min(tooltip.x, window.innerWidth - 280),
+            top: Math.min(tooltip.y, window.innerHeight - 120),
+          }}
+        >
+          {tooltip.text}
+        </div>
+      )}
     </div>
   )
 }

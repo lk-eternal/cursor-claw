@@ -2,8 +2,13 @@ import { describe, expect, it } from "vitest"
 import { resolveSyncStatus } from "../../src/shared/flow-hub-sync.js"
 
 describe("resolveSyncStatus", () => {
-  it("returns missing without hubId", () => {
+  it("returns missing without hub link", () => {
     expect(resolveSyncStatus(undefined, "h")).toBe("missing")
+    expect(resolveSyncStatus({ hubContentHash: "other" }, "h")).toBe("missing")
+  })
+
+  it("returns synced when hash matches without hubId", () => {
+    expect(resolveSyncStatus({ hubContentHash: "same" }, "same")).toBe("synced")
   })
 
   it("returns synced when hash matches", () => {

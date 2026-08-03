@@ -2,9 +2,9 @@ import { useState, useEffect, useCallback, useRef } from "react"
 import {
   Plus, Pencil, Trash2, X, Loader2, CheckCircle2, ShieldAlert, Eye, EyeOff,
   LogIn, MessageSquare, Bird, FolderOpen, RefreshCw, ChevronDown, ChevronRight, ExternalLink,
-  GripVertical,
 } from "lucide-react"
 import SearchableSelect from "./SearchableSelect"
+import SortableList from "./SortableList"
 import useInlineModal from "./useInlineModal"
 import { modelSlug } from "../model-utils"
 
@@ -46,10 +46,6 @@ export default function ChannelPanel() {
   const [editing, setEditing] = useState<ChannelConfig | null>(null)
   const [isNew, setIsNew] = useState(false)
   const [showAddMenu, setShowAddMenu] = useState(false)
-  const [dragId, setDragId] = useState<string | null>(null)
-  const [overId, setOverId] = useState<string | null>(null)
-  /** 仅按住把手时才允许拖拽，避免整行拖拽干扰行内按钮与文本选择 */
-  const [dragArmed, setDragArmed] = useState(false)
   const { showAlert, showConfirm, ModalPortal } = useInlineModal()
 
   const reload = useCallback(async () => {
@@ -108,20 +104,6 @@ export default function ChannelPanel() {
   }
 
   // 数组顺序即首页通道树顺序；仅重排不触发 Daemon 重启
-  const sortable = channels.length > 1
-  const resetDrag = () => { setDragId(null); setOverId(null); setDragArmed(false) }
-
-  const handleDrop = async (targetId: string) => {
-    const from = channels.findIndex((c) => c.id === dragId)
-    const to = channels.findIndex((c) => c.id === targetId)
-    resetDrag()
-    if (from < 0 || to < 0 || from === to) return
-    const next = [...channels]
-    const [moved] = next.splice(from, 1)
-    next.splice(to, 0, moved)
-    await persistChannels(next)
-  }
-
   return (
     <>
       <section className="space-y-3">
@@ -144,43 +126,19 @@ export default function ChannelPanel() {
           {channels.length > 1 && "拖动左侧把手可调整顺序，首页通道树同步生效（仅排序不重启）。"}
         </p>
 
-        <div className="space-y-2">
-          {channels.map((c) => {
+        <SortableList
+          items={channels}
+          getId={(c) => c.id}
+          onReorder={persistChannels}
+          renderItem={(c, { grip }) => {
             const st = statusMap[c.id]
             const resource = resources.find((r) => r.id === c.agentResourceId)
             const credMissing = c.type === "feishu" ? !(c.larkAppId && c.larkAppSecret) : !c.wechatToken
             return (
-              <div
-                key={c.id}
-                draggable={sortable && dragArmed}
-                onDragStart={(e) => { setDragId(c.id); e.dataTransfer.effectAllowed = "move" }}
-                onDragOver={(e) => {
-                  if (!dragId || dragId === c.id) return
-                  e.preventDefault()
-                  e.dataTransfer.dropEffect = "move"
-                  if (overId !== c.id) setOverId(c.id)
-                }}
-                onDragLeave={() => setOverId((v) => v === c.id ? null : v)}
-                onDrop={(e) => { e.preventDefault(); void handleDrop(c.id) }}
-                onDragEnd={resetDrag}
-                className={`rounded-lg border px-4 py-3 transition ${
-                  dragId === c.id
-                    ? "border-gray-700 opacity-40"
-                    : overId === c.id
-                      ? "border-blue-500 bg-blue-950/20"
-                      : "border-gray-700"
-                }`}
-              >
+              <div className="rounded-lg border border-gray-700 px-4 py-3 transition hover:border-gray-600">
                 <div className="flex items-center justify-between">
                   <div className="flex min-w-0 items-center gap-3">
-                    {sortable && (
-                      <GripVertical
-                        size={14}
-                        onMouseDown={() => setDragArmed(true)}
-                        onMouseUp={() => setDragArmed(false)}
-                        className="shrink-0 cursor-grab text-gray-600 transition hover:text-gray-300 active:cursor-grabbing"
-                      />
-                    )}
+                    {grip}
                     {c.type === "feishu" ? <Bird size={16} className="shrink-0 text-blue-400" /> : <MessageSquare size={16} className="shrink-0 text-green-400" />}
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
@@ -202,7 +160,6 @@ export default function ChannelPanel() {
                               href={`https://open.feishu.cn/app/${c.larkAppId}`}
                               target="_blank"
                               rel="noreferrer"
-                              draggable={false}
                               title={`打开飞书开发者后台 (${c.larkAppId})`}
                               className="inline-flex shrink-0 items-center gap-0.5 text-blue-400/80 hover:text-blue-300 hover:underline"
                               onClick={(e) => e.stopPropagation()}
@@ -230,8 +187,9 @@ export default function ChannelPanel() {
                 </div>
               </div>
             )
-          })}
-          {channels.length === 0 && (
+          }}
+        />
+        {channels.length === 0 && (
             <div className="grid grid-cols-2 gap-3 py-2">
               <button
                 onClick={() => openAdd("feishu")}
@@ -253,7 +211,6 @@ export default function ChannelPanel() {
               </button>
             </div>
           )}
-        </div>
       </section>
 
       {editing && (

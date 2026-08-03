@@ -11,6 +11,23 @@ export function parseHubRepoUrl(url: string): { host: string; projectPath: strin
   }
 }
 
+function formatCommitError(status: number, body: string): string {
+  if (status === 403) {
+    try {
+      const msg = JSON.parse(body).message as string | undefined
+      if (msg?.includes("not allowed to push")) {
+        return "无权限推送到 main 分支。请填写 Flow Hub 专用 Token（需 Maintainer 及以上权限），或联系管理员调整分支保护规则"
+      }
+    } catch { /* ignore */ }
+    return `提交失败 (${status})：无权限，请检查 Hub Token 权限`
+  }
+  if (status === 404) {
+    return `提交失败 (${status})：GitLab API 不存在，请更新到最新版本`
+  }
+  const snippet = body ? `: ${body.slice(0, 200)}` : ""
+  return `提交失败 (${status})${snippet}`
+}
+
 export class GitLabFlowHubClient {
   defaultBranch = "main"
 
@@ -63,7 +80,7 @@ export class GitLabFlowHubClient {
     })
     if (!res.ok) {
       const body = await res.text().catch(() => "")
-      throw new Error(`提交失败 (${res.status})${body ? `: ${body.slice(0, 200)}` : ""}`)
+      throw new Error(formatCommitError(res.status, body))
     }
   }
 

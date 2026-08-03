@@ -268,20 +268,22 @@ const api = {
   flowHub: {
     getCatalog: (force?: boolean): Promise<{ ok: true; catalog: import("../src/shared/flow-hub-types").FlowHubCatalog } | { ok: false; error: string }> =>
       ipcRenderer.invoke("flow-hub:get-catalog", force),
+    listNodes: (): Promise<{ ok: true; nodes: import("../src/shared/flow-hub-types").FlowHubBrowsableNode[] } | { ok: false; error: string }> =>
+      ipcRenderer.invoke("flow-hub:list-nodes"),
     getSyncStatus: (kind: "group" | "node", hubId: string, contentHash: string): Promise<import("../src/shared/flow-hub-types").FlowHubSyncStatus> =>
       ipcRenderer.invoke("flow-hub:get-sync-status", { kind, hubId, contentHash }),
     importGroup: (hubId: string): Promise<{ ok: true; group: unknown } | { ok: false; error: string }> =>
       ipcRenderer.invoke("flow-hub:import-group", hubId),
-    importNode: (hubId: string, targetGroupId: string): Promise<{ ok: true; node: unknown } | { ok: false; error: string }> =>
-      ipcRenderer.invoke("flow-hub:import-node", { hubId, targetGroupId }),
+    importNode: (hubId: string, targetGroupId: string, opts?: { groupHubId?: string; nodeLocalId?: string }): Promise<{ ok: true; node: unknown } | { ok: false; error: string }> =>
+      ipcRenderer.invoke("flow-hub:import-node", { hubId, targetGroupId, ...opts }),
     uploadGroup: (groupId: string): Promise<{ ok: true } | { ok: false; error: string }> =>
       ipcRenderer.invoke("flow-hub:upload-group", groupId),
     uploadNode: (groupId: string, nodeId: string): Promise<{ ok: true } | { ok: false; error: string }> =>
       ipcRenderer.invoke("flow-hub:upload-node", { groupId, nodeId }),
     syncGroup: (hubId: string, mode: "overwrite" | "keep"): Promise<{ ok: true } | { ok: false; error: string }> =>
       ipcRenderer.invoke("flow-hub:sync-group", { hubId, mode }),
-    syncNode: (hubId: string, targetGroupId: string, mode: "overwrite" | "keep"): Promise<{ ok: true } | { ok: false; error: string }> =>
-      ipcRenderer.invoke("flow-hub:sync-node", { hubId, targetGroupId, mode }),
+    syncNode: (hubId: string, targetGroupId: string, mode: "overwrite" | "keep", opts?: { groupHubId?: string; nodeLocalId?: string }): Promise<{ ok: true } | { ok: false; error: string }> =>
+      ipcRenderer.invoke("flow-hub:sync-node", { hubId, targetGroupId, mode, ...opts }),
     preview: (kind: "group" | "node", hubId: string, nodeLocalId?: string): Promise<{ ok: true; name: string; prompt?: string } | { ok: false; error: string }> =>
       ipcRenderer.invoke("flow-hub:preview", { kind, hubId, nodeLocalId }),
   },

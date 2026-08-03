@@ -24,6 +24,7 @@ const baseCfg = (): AppConfig => ({
   repoProfiles: [],
   worktreeRoot: "",
   flowHubUrl: "https://gitlab.wukongedu.net/internal-shared/cursor-claw-flow-hub",
+  flowHubToken: "glpat-hub",
   flowHubAuthor: "测试",
   allowOthers: false,
   digitalIdentity: "",
@@ -58,12 +59,21 @@ describe("loadFlowHubContext", () => {
 
   it("rejects missing token", () => {
     const cfg = baseCfg()
+    cfg.flowHubToken = ""
     cfg.gitlabToken = ""
-    expect(loadFlowHubContext(cfg)).toEqual({ error: "请先配置 GitLab Token" })
+    expect(loadFlowHubContext(cfg)).toEqual({ error: "请先配置 Hub Token" })
   })
 
-  it("rejects host mismatch", () => {
+  it("prefers flowHubToken over gitlabToken", () => {
     const cfg = baseCfg()
+    cfg.gitlabHost = "https://gitlab.com"
+    const ctx = loadFlowHubContext(cfg)
+    expect("error" in ctx).toBe(false)
+  })
+
+  it("rejects host mismatch when using gitlabToken fallback", () => {
+    const cfg = baseCfg()
+    cfg.flowHubToken = ""
     cfg.gitlabHost = "https://gitlab.com"
     expect(loadFlowHubContext(cfg)).toEqual({ error: "Hub 地址与 GitLab Host 不一致" })
   })

@@ -47,6 +47,7 @@ import {
   getSyncStatusForCatalogEntry,
   importGroupFromHub,
   importNodeFromHub,
+  listHubNodes,
   previewHubItem,
   syncGroupFromHub,
   syncNodeFromHub,
@@ -2170,15 +2171,21 @@ export function initDaemonManager(): void {
   })
 
   ipcMain.handle("flow-hub:get-catalog", async (_e, force?: boolean) => fetchCatalog(!!force))
-  ipcMain.handle("flow-hub:get-sync-status", (_e, payload: { kind: "group" | "node"; hubId: string; contentHash: string; hubRevision?: number }) =>
-    getSyncStatusForCatalogEntry(payload.kind, payload.hubId, payload.contentHash, payload.hubRevision))
+  ipcMain.handle("flow-hub:list-nodes", async () => listHubNodes())
+  ipcMain.handle("flow-hub:get-sync-status", (_e, payload: { kind: "group" | "node"; hubId: string; contentHash: string; hubRevision?: number }) => {
+    initProjectStore(app.getPath("userData"))
+    return getSyncStatusForCatalogEntry(payload.kind, payload.hubId, payload.contentHash, payload.hubRevision)
+  })
   ipcMain.handle("flow-hub:import-group", async (_e, hubId: string) => {
     initProjectStore(app.getPath("userData"))
     return importGroupFromHub(hubId)
   })
-  ipcMain.handle("flow-hub:import-node", async (_e, payload: { hubId: string; targetGroupId: string }) => {
+  ipcMain.handle("flow-hub:import-node", async (_e, payload: { hubId: string; targetGroupId: string; groupHubId?: string; nodeLocalId?: string }) => {
     initProjectStore(app.getPath("userData"))
-    return importNodeFromHub(payload.hubId, payload.targetGroupId)
+    return importNodeFromHub(payload.hubId, payload.targetGroupId, undefined, {
+      groupHubId: payload.groupHubId,
+      nodeLocalId: payload.nodeLocalId,
+    })
   })
   ipcMain.handle("flow-hub:upload-group", async (_e, groupId: string) => {
     initProjectStore(app.getPath("userData"))
@@ -2192,9 +2199,12 @@ export function initDaemonManager(): void {
     initProjectStore(app.getPath("userData"))
     return syncGroupFromHub(payload.hubId, payload.mode)
   })
-  ipcMain.handle("flow-hub:sync-node", async (_e, payload: { hubId: string; targetGroupId: string; mode: "overwrite" | "keep" }) => {
+  ipcMain.handle("flow-hub:sync-node", async (_e, payload: { hubId: string; targetGroupId: string; mode: "overwrite" | "keep"; groupHubId?: string; nodeLocalId?: string }) => {
     initProjectStore(app.getPath("userData"))
-    return syncNodeFromHub(payload.hubId, payload.targetGroupId, payload.mode)
+    return syncNodeFromHub(payload.hubId, payload.targetGroupId, payload.mode, undefined, {
+      groupHubId: payload.groupHubId,
+      nodeLocalId: payload.nodeLocalId,
+    })
   })
   ipcMain.handle("flow-hub:preview", async (_e, payload: { kind: "group" | "node"; hubId: string; nodeLocalId?: string }) =>
     previewHubItem(payload.kind, payload.hubId, payload.nodeLocalId))

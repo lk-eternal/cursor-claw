@@ -20,13 +20,14 @@ import {
 import { GitLabFlowHubClient, parseHubRepoUrl } from "../src/shared/flow-hub-gitlab.js"
 import { computeNodeContentHash } from "../src/shared/flow-hub-hash.js"
 import { resolveSyncStatus } from "../src/shared/flow-hub-sync.js"
-import type { FlowHubCatalog, FlowHubSyncStatus } from "../src/shared/flow-hub-types.js"
+import type { FlowHubBrowsableNode, FlowHubCatalog, FlowHubNodePayload, FlowHubSyncStatus } from "../src/shared/flow-hub-types.js"
 import {
   getNodeGroups,
   resolveUniqueNodeGroupId,
   saveNodeGroups,
 } from "../src/shared/project-store.js"
 import type { ProjectNodeDef, ProjectNodeGroupDef } from "../src/shared/project-types.js"
+import { getDefaultNodeGuide } from "./project-prompts.js"
 
 export interface FlowHubContext {
   hubUrl: string
@@ -60,13 +61,17 @@ export function loadFlowHubContext(cfg?: AppConfig): FlowHubContext | { error: s
   const config = cfg ?? getConfig()
   const hubUrl = config.flowHubUrl?.trim() ?? ""
   const author = config.flowHubAuthor?.trim() ?? ""
-  const token = config.gitlabToken?.trim() ?? ""
+  const hubToken = config.flowHubToken?.trim() ?? ""
+  const fallbackToken = config.gitlabToken?.trim() ?? ""
+  const token = hubToken || fallbackToken
   const parsed = parseHubRepoUrl(hubUrl)
   if (!parsed) return { error: "Hub 地址无效" }
-  if (!token) return { error: "请先配置 GitLab Token" }
-  const cfgHost = (config.gitlabHost?.trim() || parsed.host).replace(/\/+$/, "")
-  if (cfgHost !== parsed.host.replace(/\/+$/, "")) {
-    return { error: "Hub 地址与 GitLab Host 不一致" }
+  if (!token) return { error: "请先配置 Hub Token" }
+  if (!hubToken) {
+    const cfgHost = (config.gitlabHost?.trim() || parsed.host).replace(/\/+$/, "")
+    if (cfgHost !== parsed.host.replace(/\/+$/, "")) {
+      return { error: "Hub 地址与 GitLab Host 不一致" }
+    }
   }
   return {
     hubUrl,
@@ -114,13 +119,84 @@ export function getSyncStatusForCatalogEntry(
 ): FlowHubSyncStatus {
   if (kind === "group") {
     const g = getNodeGroups().find((x) => x.hubId === hubId)
+      ?? getNodeGroups().find((x) => x.hubContentHash === contentHash)
     return resolveSyncStatus(g, contentHash, hubRevision)
   }
   for (const g of getNodeGroups()) {
     const n = g.nodes.find((x) => x.hubId === hubId)
+      ?? g.nodes.find((x) => x.hubContentHash === contentHash)
     if (n) return resolveSyncStatus(n, contentHash, hubRevision)
   }
   return "missing"
+}
+
+type HubNodeRef = { hubId: string; groupHubId?: string; nodeLocalId?: string }
+
+async function loadHubNodePayload(
+  ctx: FlowHubContext,
+  ref: HubNodeRef,
+): Promise<{ payload: FlowHubNodePayload; hubId: string; hubRevision: number; contentHash: string } | { error: string }> {
+  if (ref.groupHubId && ref.nodeLocalId) {
+    const raw = await ctx.client.readRawFile(ctx.projectId, `groups/${ref.groupHubId}.json`)
+    if (!raw) return { error: "Hub 上找不到该流程组" }
+    const env = parseGroupEnvelope(JSON.parse(raw))
+    if (!env) return { error: "无效的流程组文件" }
+    const payload = env.group.nodes.find((n) => n.id === ref.nodeLocalId)
+    if (!payload) return { error: "组内找不到该节点" }
+    return {
+      payload,
+      hubId: payload.hubId,
+      hubRevision: env.hubRevision,
+      contentHash: computeNodeContentHash(payload),
+    }
+  }
+  const raw = await ctx.client.readRawFile(ctx.projectId, `nodes/${ref.hubId}.json`)
+  if (!raw) return { error: "Hub 上找不到该节点" }
+  const env = parseNodeEnvelope(JSON.parse(raw))
+  if (!env) return { error: "无效的节点文件" }
+  return {
+    payload: env.node,
+    hubId: env.hubId,
+    hubRevision: env.hubRevision,
+    contentHash: env.contentHash,
+  }
+}
+
+export async function listHubNodes(cfg?: AppConfig): Promise<{ ok: true; nodes: FlowHubBrowsableNode[] } | { ok: false; error: string }> {
+  const cat = await fetchCatalog(false, cfg)
+  if (!cat.ok) return cat
+  const ctx = await resolveCtx(cfg)
+  if ("error" in ctx) return { ok: false, error: ctx.error }
+  const nodes: FlowHubBrowsableNode[] = cat.catalog.nodes.map((n) => ({ ...n }))
+  for (const g of cat.catalog.groups) {
+    try {
+      const raw = await ctx.client.readRawFile(ctx.projectId, `groups/${g.hubId}.json`)
+      if (!raw) continue
+      const env = parseGroupEnvelope(JSON.parse(raw))
+      if (!env) continue
+      for (const n of env.group.nodes) {
+        nodes.push({
+          hubId: n.hubId,
+          label: n.label,
+          localId: n.id,
+          author: g.author,
+          updatedAt: g.updatedAt,
+          contentHash: computeNodeContentHash(n),
+          sourceGroupName: g.name,
+          groupHubId: g.hubId,
+        })
+      }
+    } catch { /* skip broken group */ }
+  }
+  const seen = new Set<string>()
+  const deduped = nodes
+    .filter((n) => {
+      if (seen.has(n.hubId)) return false
+      seen.add(n.hubId)
+      return true
+    })
+    .sort((a, b) => (b.updatedAt > a.updatedAt ? 1 : b.updatedAt < a.updatedAt ? -1 : 0))
+  return { ok: true, nodes: deduped }
 }
 
 async function persistCatalog(ctx: FlowHubContext, catalog: FlowHubCatalog, batch?: { path: string; content: string }[]): Promise<void> {
@@ -170,25 +246,24 @@ export async function importNodeFromHub(
   hubId: string,
   targetGroupId: string,
   cfg?: AppConfig,
+  ref?: Pick<HubNodeRef, "groupHubId" | "nodeLocalId">,
 ): Promise<{ ok: true; node: ProjectNodeDef } | { ok: false; error: string }> {
   const ctx = await resolveCtx(cfg)
   if ("error" in ctx) return { ok: false, error: ctx.error }
   try {
-    const raw = await ctx.client.readRawFile(ctx.projectId, `nodes/${hubId}.json`)
-    if (!raw) return { ok: false, error: "Hub 上找不到该节点" }
-    const env = parseNodeEnvelope(JSON.parse(raw))
-    if (!env) return { ok: false, error: "无效的节点文件" }
+    const loaded = await loadHubNodePayload(ctx, { hubId, ...ref })
+    if ("error" in loaded) return { ok: false, error: loaded.error }
     const groups = getNodeGroups()
     const group = groups.find((g) => g.id === targetGroupId)
     if (!group) return { ok: false, error: "目标流程组不存在" }
-    if (group.nodes.some((n) => n.hubId === hubId)) return { ok: false, error: "已添加，请使用同步" }
+    if (group.nodes.some((n) => n.hubId === loaded.hubId)) return { ok: false, error: "已添加，请使用同步" }
     const node: ProjectNodeDef = {
-      id: resolveNodeId(group.nodes, env.node.id),
-      label: env.node.label,
-      ...(env.node.prompt ? { prompt: env.node.prompt } : {}),
-      hubId: env.hubId,
-      hubRevision: env.hubRevision,
-      hubContentHash: env.contentHash,
+      id: resolveNodeId(group.nodes, loaded.payload.id),
+      label: loaded.payload.label,
+      ...(loaded.payload.prompt ? { prompt: loaded.payload.prompt } : {}),
+      hubId: loaded.hubId,
+      hubRevision: loaded.hubRevision,
+      hubContentHash: loaded.contentHash,
       localRevision: 0,
     }
     saveNodeGroups(groups.map((g) => g.id === targetGroupId ? { ...g, nodes: [...g.nodes, node] } : g))
@@ -305,6 +380,12 @@ export async function previewHubItem(
 ): Promise<{ ok: true; prompt?: string; name: string } | { ok: false; error: string }> {
   const ctx = await resolveCtx(cfg)
   if ("error" in ctx) return { ok: false, error: ctx.error }
+  const resolvePrompt = (nodeId: string, custom?: string) => {
+    const c = custom?.trim()
+    if (c) return c
+    const def = getDefaultNodeGuide(nodeId).trim()
+    return def || undefined
+  }
   try {
     const path = kind === "group" ? `groups/${hubId}.json` : `nodes/${hubId}.json`
     const raw = await ctx.client.readRawFile(ctx.projectId, path)
@@ -312,13 +393,13 @@ export async function previewHubItem(
     if (kind === "node") {
       const env = parseNodeEnvelope(JSON.parse(raw))
       if (!env) return { ok: false, error: "无效" }
-      return { ok: true, name: env.node.label, prompt: env.node.prompt }
+      return { ok: true, name: env.node.label, prompt: resolvePrompt(env.node.id, env.node.prompt) }
     }
     const env = parseGroupEnvelope(JSON.parse(raw))
     if (!env) return { ok: false, error: "无效" }
     if (nodeLocalId) {
       const node = env.group.nodes.find((n) => n.id === nodeLocalId)
-      return { ok: true, name: node?.label ?? nodeLocalId, prompt: node?.prompt }
+      return { ok: true, name: node?.label ?? nodeLocalId, prompt: resolvePrompt(nodeLocalId, node?.prompt) }
     }
     return { ok: true, name: env.group.name }
   } catch (e) {
@@ -356,27 +437,26 @@ export async function syncNodeFromHub(
   targetGroupId: string,
   mode: "overwrite" | "keep",
   cfg?: AppConfig,
+  ref?: Pick<HubNodeRef, "groupHubId" | "nodeLocalId">,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   if (mode === "keep") return { ok: true }
   const ctx = await resolveCtx(cfg)
   if ("error" in ctx) return { ok: false, error: ctx.error }
   try {
-    const raw = await ctx.client.readRawFile(ctx.projectId, `nodes/${hubId}.json`)
-    if (!raw) return { ok: false, error: "Hub 上找不到该节点" }
-    const env = parseNodeEnvelope(JSON.parse(raw))
-    if (!env) return { ok: false, error: "无效文件" }
+    const loaded = await loadHubNodePayload(ctx, { hubId, ...ref })
+    if ("error" in loaded) return { ok: false, error: loaded.error }
     const groups = getNodeGroups()
     const group = groups.find((g) => g.id === targetGroupId)
     if (!group) return { ok: false, error: "流程组不存在" }
-    const ni = group.nodes.findIndex((n) => n.hubId === hubId)
+    const ni = group.nodes.findIndex((n) => n.hubId === loaded.hubId)
     if (ni < 0) return { ok: false, error: "本地未添加该节点" }
     const node: ProjectNodeDef = {
       id: group.nodes[ni].id,
-      label: env.node.label,
-      ...(env.node.prompt ? { prompt: env.node.prompt } : {}),
-      hubId: env.hubId,
-      hubRevision: env.hubRevision,
-      hubContentHash: computeNodeContentHash(env.node),
+      label: loaded.payload.label,
+      ...(loaded.payload.prompt ? { prompt: loaded.payload.prompt } : {}),
+      hubId: loaded.hubId,
+      hubRevision: loaded.hubRevision,
+      hubContentHash: loaded.contentHash,
       localRevision: 0,
     }
     saveNodeGroups(groups.map((g) => g.id === targetGroupId ? {

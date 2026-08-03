@@ -38,6 +38,7 @@ import {
   Upload,
 } from "lucide-react"
 import SearchableSelect from "../components/SearchableSelect"
+import SortableList from "../components/SortableList"
 import { FlowHubBrowser } from "../components/FlowHubBrowser"
 import ToolboxPanel from "../components/ToolboxPanel"
 import AgentPanel from "../components/AgentPanel"
@@ -125,14 +126,15 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
   const [gitlabToken, setGitlabToken] = useState("")
   const [gitlabHost, setGitlabHost] = useState("")
   const [repoProfiles, setRepoProfiles] = useState<{ path: string; baseBranch: string; testBranch?: string; developBranch?: string }[]>([])
-  type ProjectNodeItem = { id: string; label: string; prompt?: string; defaultPrompt?: string }
-  type ProjectNodeGroup = { id: string; name: string; nodes: ProjectNodeItem[]; workspace?: "worktree" | "plain" }
+  type ProjectNodeItem = { id: string; label: string; prompt?: string; defaultPrompt?: string; hubId?: string; hubRevision?: number; hubContentHash?: string; localRevision?: number }
+  type ProjectNodeGroup = { id: string; name: string; nodes: ProjectNodeItem[]; workspace?: "worktree" | "plain"; hubId?: string; hubRevision?: number; hubContentHash?: string; localRevision?: number }
   const [nodeGroups, setNodeGroups] = useState<ProjectNodeGroup[]>([])
   const [activeGroupId, setActiveGroupId] = useState("")
   const [nodeEditing, setNodeEditing] = useState<(ProjectNodeItem & { index: number }) | null>(null)
   const [groupEditing, setGroupEditing] = useState<{ id: string; name: string; index: number } | null>(null)
   const [worktreeRoot, setWorktreeRoot] = useState("")
   const [flowHubUrl, setFlowHubUrl] = useState("")
+  const [flowHubToken, setFlowHubToken] = useState("")
   const [flowHubAuthor, setFlowHubAuthor] = useState("")
   const [hubBrowser, setHubBrowser] = useState<{ kind: "group" | "node" } | null>(null)
   const [projectsSubTab, setProjectsSubTab] = useState<ProjectsSubTab>("list")
@@ -346,6 +348,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
         setRepoProfiles(profiles)
         setWorktreeRoot(config.worktreeRoot ?? "")
         setFlowHubUrl(config.flowHubUrl ?? "")
+        setFlowHubToken(config.flowHubToken ?? "")
         setFlowHubAuthor(config.flowHubAuthor ?? "")
         projectsLoaded.current = true
       })
@@ -403,14 +406,15 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
         repoRoots: profiles.map((p) => p.path),
         worktreeRoot: worktreeRoot.trim(),
         flowHubUrl: flowHubUrl.trim(),
+        flowHubToken: flowHubToken.trim(),
         flowHubAuthor: flowHubAuthor.trim(),
       })
       setSaved(true)
       setTimeout(() => setSaved(false), 1500)
     }, 500)
-  }, [tab, gitlabToken, gitlabHost, repoProfiles, worktreeRoot, flowHubUrl, flowHubAuthor])
+  }, [tab, gitlabToken, gitlabHost, repoProfiles, worktreeRoot, flowHubUrl, flowHubToken, flowHubAuthor])
 
-  const hubConfigured = flowHubUrl.trim().length > 0 && gitlabToken.trim().length > 0
+  const hubConfigured = flowHubUrl.trim().length > 0 && (flowHubToken.trim().length > 0 || gitlabToken.trim().length > 0)
 
   const refreshNodeGroups = useCallback(async () => {
     const gs = await window.electronAPI.getProjectNodeGroups()
@@ -728,21 +732,16 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
   const activeGroup = nodeGroups.find((g) => g.id === activeGroupId) ?? nodeGroups[0]
 
   const persistNodeGroups = async (groups: ProjectNodeGroup[]) => {
-    await window.electronAPI.saveProjectNodeGroups(groups.map((g) => ({ id: g.id, name: g.name, workspace: g.workspace, nodes: g.nodes.map(({ defaultPrompt: _d, ...n }) => n) })))
+    await window.electronAPI.saveProjectNodeGroups(groups.map((g) => ({
+      ...g,
+      nodes: g.nodes.map(({ defaultPrompt: _d, ...n }) => n),
+    })))
     const fresh = await window.electronAPI.getProjectNodeGroups()
     setNodeGroups(fresh)
   }
   const saveActiveGroupNodes = async (nodes: ProjectNodeItem[]) => {
     if (!activeGroup) return
     await persistNodeGroups(nodeGroups.map((g) => g.id === activeGroup.id ? { ...g, nodes } : g))
-  }
-  const handleNodeMove = async (i: number, delta: number) => {
-    if (!activeGroup) return
-    const j = i + delta
-    if (j < 0 || j >= activeGroup.nodes.length) return
-    const nodes = [...activeGroup.nodes]
-    ;[nodes[i], nodes[j]] = [nodes[j], nodes[i]]
-    await saveActiveGroupNodes(nodes)
   }
   const handleGroupExport = async () => {
     if (!activeGroup) return
@@ -1320,7 +1319,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
               {projectsSubTab === "groups" && (
               <section className="space-y-4">
                 <h3 className="text-sm font-medium text-gray-300">流程组</h3>
-                <p className="text-xs text-gray-500">建项可多选（不选默认「开发」）；推进节点按所选组分组展示；点击节点编辑提示词。</p>
+                <p className="text-xs text-gray-500">建项可多选（不选默认「开发」）；推进节点按所选组分组展示；点击节点编辑提示词；拖动左侧把手调整顺序。</p>
                 <div className="rounded-lg border border-gray-800 p-3 space-y-2">
                   <h4 className="text-xs font-medium text-gray-400">共享空间</h4>
                   <div>
@@ -1329,11 +1328,16 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                       placeholder="https://gitlab.example.com/group/cursor-claw-flow-hub" className={inputCls} />
                   </div>
                   <div>
+                    <label className="mb-1 block text-xs text-gray-500">Hub Token（Flow Hub 项目专用）</label>
+                    <input type="password" value={flowHubToken} onChange={(e) => setFlowHubToken(e.target.value)}
+                      placeholder="glpat-...（需 Maintainer 及以上权限）" className={inputCls} />
+                  </div>
+                  <div>
                     <label className="mb-1 block text-xs text-gray-500">作者昵称（上传时展示）</label>
                     <input type="text" value={flowHubAuthor} onChange={(e) => setFlowHubAuthor(e.target.value)}
                       placeholder="你的名字" className={inputCls} />
                   </div>
-                  <p className="text-[10px] text-gray-600">上传/获取使用上方 GitLab Token；未填 Hub 地址时隐藏共享按钮。</p>
+                  <p className="text-[10px] text-gray-600">Hub Token 与上方项目 Token 独立；未填 Hub Token 时回退使用项目 Token。</p>
                 </div>
                 <div className="flex flex-wrap items-center gap-1.5">
                   {nodeGroups.map((g) => (
@@ -1382,23 +1386,24 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                         <button type="button" className="text-red-400 hover:text-red-300" onClick={handleGroupDelete}>删除组</button>
                       )}
                     </div>
-                    {activeGroup.nodes.map((n, i) => (
-                      <div key={n.id || i} className="flex items-center gap-1">
-                        <button type="button"
-                          onClick={() => setNodeEditing({ ...n, index: i })}
-                          className="flex min-w-0 flex-1 items-center gap-3 rounded-lg border border-gray-800 px-3 py-2 text-left transition hover:border-gray-600 hover:bg-gray-900">
-                          <span className="text-sm text-gray-200">{n.label}</span>
-                          <span className="font-mono text-xs text-gray-500">/p {n.id}</span>
-                          {(n.prompt ?? "").trim() !== "" && <span className="ml-auto shrink-0 text-[10px] text-gray-500">已自定义提示词</span>}
-                        </button>
-                        <button type="button" title="上移" disabled={i === 0}
-                          onClick={() => handleNodeMove(i, -1)}
-                          className="shrink-0 rounded p-1 text-xs text-gray-500 hover:bg-gray-800 hover:text-white disabled:opacity-30">↑</button>
-                        <button type="button" title="下移" disabled={i === activeGroup.nodes.length - 1}
-                          onClick={() => handleNodeMove(i, 1)}
-                          className="shrink-0 rounded p-1 text-xs text-gray-500 hover:bg-gray-800 hover:text-white disabled:opacity-30">↓</button>
-                      </div>
-                    ))}
+                    <SortableList
+                      items={activeGroup.nodes}
+                      getId={(n) => n.id}
+                      onReorder={saveActiveGroupNodes}
+                      gapClass="space-y-1"
+                      renderItem={(n, { grip }) => (
+                        <div className="flex items-center gap-3 rounded-lg border border-gray-800 px-3 py-2 transition hover:border-gray-600 hover:bg-gray-900">
+                          {grip}
+                          <button type="button"
+                            onClick={() => setNodeEditing({ ...n, index: activeGroup.nodes.findIndex((x) => x.id === n.id) })}
+                            className="flex min-w-0 flex-1 items-center gap-3 text-left">
+                            <span className="text-sm text-gray-200">{n.label}</span>
+                            <span className="font-mono text-xs text-gray-500">/p {n.id}</span>
+                            {(n.prompt ?? "").trim() !== "" && <span className="ml-auto shrink-0 text-[10px] text-gray-500">已自定义提示词</span>}
+                          </button>
+                        </div>
+                      )}
+                    />
                     <button
                       type="button"
                       onClick={() => setNodeEditing({ id: "", label: "", index: -1 })}

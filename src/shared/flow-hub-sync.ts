@@ -5,7 +5,9 @@ export function resolveSyncStatus(
   remoteHash: string,
   remoteRevision?: number,
 ): FlowHubSyncStatus {
-  if (!local?.hubId) return "missing"
+  if (!local) return "missing"
+  const linked = !!local.hubId?.trim() || local.hubContentHash === remoteHash
+  if (!linked) return "missing"
   if ((local.localRevision ?? 0) > 0 && local.hubContentHash !== remoteHash) return "local_modified"
   if (local.hubContentHash === remoteHash) return "synced"
   if (remoteRevision != null && (local.hubRevision ?? 0) < remoteRevision) return "outdated"
