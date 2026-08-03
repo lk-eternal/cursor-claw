@@ -1,7 +1,7 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { randomBytes, randomUUID } from "node:crypto"
-import { DEFAULT_NODE_GROUPS, DEFAULT_NODE_GROUP_ID, type Project, type ProjectNodeDef, type ProjectNodeGroupDef } from "./project-types.js"
+import { DEFAULT_NODE_GROUPS, DEFAULT_NODE_GROUP_ID, projectGroupChatMatches, type Project, type ProjectNodeDef, type ProjectNodeGroupDef } from "./project-types.js"
 import type { FlowHubHubTrack } from "./flow-hub-types.js"
 
 let baseDir = ""
@@ -326,6 +326,12 @@ export function listProjects(): Project[] {
     .filter((p): p is Project => !!p && typeof p.id === "string")
     .map(normalizeProject)
     .sort((a, b) => b.updatedAt - a.updatedAt)
+}
+
+/** 当前 chat 是否为某活跃项目的专属群（chatKey / 裸 chatId 皆可） */
+export function findProjectByGroupChat(chatKey?: string): Project | undefined {
+  if (!chatKey) return undefined
+  return listProjects().find((p) => p.status !== "done" && projectGroupChatMatches(p, chatKey))
 }
 
 export function getProject(id: string): Project | undefined {

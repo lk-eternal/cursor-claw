@@ -54,7 +54,7 @@ import {
   uploadGroup,
   uploadNode,
 } from "./flow-hub-service"
-import { initProjectStore, getProject, getCurrentProject, listProjects, getNodeGroups, saveNodeGroups, saveProject, projectGroupIds, parseNodeGroupExport, resolveUniqueNodeGroupId } from "../src/shared/project-store.js"
+import { initProjectStore, getProject, getCurrentProject, listProjects, findProjectByGroupChat, getNodeGroups, saveNodeGroups, saveProject, projectGroupIds, parseNodeGroupExport, resolveUniqueNodeGroupId } from "../src/shared/project-store.js"
 import { projectIdFromSessionKey, projectSessionKey, DEFAULT_NODE_GROUP_ID, canEnterProjectFromChat } from "../src/shared/project-types.js"
 import {
   readGitBranch,
@@ -1095,12 +1095,10 @@ async function checkAndExecutePendingCommands(): Promise<void> {
     const cmdTokens = rawCmd.split(/\s+/).filter((t) => t.length > 0)
     const head = (cmdTokens[0] ?? "").toLowerCase()
     const isAdmin = isMainUser(claimed.chatId, claimed.chatType)
-    // 独立群：群本身已绑定项目，群内点 /p 节点不应再要求「主用户私聊管理员」
-    const isProjectGroup = !!claimed.chatId && listProjects().some((p) => {
-      if (p.status === "done" || !p.groupChatId) return false
-      const raw = parseChatKey(claimed.chatId!).chatId
-      return p.groupChatId === claimed.chatId || parseChatKey(p.groupChatId).chatId === raw
-    })
+    const cmdSessionKey = await resolveCommandSessionKey(claimed.chatId, claimed.chatType)
+    // 独立群：群内 /p、/m 不应要求主用户私聊管理员；会话已绑 project_ 时同样放行
+    const isProjectGroup = !!findProjectByGroupChat(claimed.chatId)
+      || !!(cmdSessionKey && projectIdFromSessionKey(cmdSessionKey))
     const reply = (ok: boolean, msg: string, buttons?: { label: string; cmd: string; section?: string }[]) =>
       reportCommandResult(lock.port, claimed!.messageId, ok, msg, claimed!.chatId, buttons, patchTarget ? { patchMessageId: patchTarget } : undefined)
     const denyNonAdmin = () => reply(false, "🔒 该指令仅管理员可用")

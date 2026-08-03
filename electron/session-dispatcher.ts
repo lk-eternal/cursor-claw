@@ -30,7 +30,7 @@ import {
 import { injectWorkspaceToDir } from "./workspace-injector"
 import { buildSessionCardTitle, readGitBranch, dirBaseName } from "../src/shared/session-label.js"
 import { disambiguatePathLabel } from "../src/shared/path-label.js"
-import { getProject, listProjects, getCurrentProjectId, setCurrentProjectId, saveProject } from "../src/shared/project-store.js"
+import { getProject, findProjectByGroupChat, listProjects, getCurrentProjectId, setCurrentProjectId, saveProject } from "../src/shared/project-store.js"
 import { projectIdFromSessionKey, projectSessionKey, projectRepoRefs, isPlainProject, canEnterProjectFromChat, projectGroupChatMatches } from "../src/shared/project-types.js"
 import { ensureCheckouts } from "./project-worktree"
 import { buildProjectSessionPrompt } from "./project-prompts"
@@ -416,20 +416,16 @@ function findBoundProject(sessionKey: string, chatId?: string) {
     if (p && p.status !== "done") return p
   }
   const key = chatId || extractChatId(sessionKey)
-  if (!key) return undefined
-  const raw = parseChatKey(key).chatId
-  return listProjects().find((p) => {
-    if (p.status === "done" || !p.groupChatId) return false
-    return p.groupChatId === key || parseChatKey(p.groupChatId).chatId === raw
-  })
+  return key ? findProjectByGroupChat(key) : undefined
 }
 
 async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?: string }> {
   const { sessionKey, chatType, meta, senderOpenId, chatName, taskMessage } = p
   const useMain = p.useMainWorkspace ?? (chatType === "p2p")
-  const boundProject = findBoundProject(sessionKey, meta?.chatId)
+  const chatRef = meta?.chatId || extractChatId(sessionKey)
+  const boundProject = findBoundProject(sessionKey, chatRef)
   // 项目会话 / 独立群：不算「其他人使用」，不注入数字身份，用主模型
-  const projectOwned = chatType === "project" || !!boundProject
+  const projectOwned = chatType === "project" || !!boundProject || (chatType === "group" && !!findProjectByGroupChat(chatRef))
 
   // 通道与 Agent 资源解析（temp/task 的 sessionKey 无 ch_ 前缀时，从 meta.chatId 兜底）
   const channel: MessageChannel | undefined = getChannel(p.channelId)

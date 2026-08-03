@@ -139,6 +139,7 @@ export function pushToFileQueue(text: string, messageId?: string, source?: strin
 }
 
 export interface QueueMessageMeta {
+  chatId?: string;
   chatType?: string;
   senderOpenId?: string;
   senderType?: string;

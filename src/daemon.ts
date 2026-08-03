@@ -48,7 +48,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { registerAdminTools } from "./server-admin.js";
 import { registerProjectAgentTools } from "./server-project.js";
-import { initProjectStore, hasProjectNewDraft, getProject, getNodeGroups, listProjects } from "./shared/project-store.js";
+import { initProjectStore, hasProjectNewDraft, getProject, getNodeGroups, listProjects, findProjectByGroupChat } from "./shared/project-store.js";
 import { projectIdFromSessionKey, decodeRepoPairOption, splitRepoPairValues, isRemoteRepoRef, DEFAULT_NODE_GROUP_ID, formFieldStr, coerceFormMultiSelect } from "./shared/project-types.js";
 import { buildSessionCardTitle, isSpecialSessionSuffix, resolveWorkspaceFromSessionKey, sessionHeaderTemplate } from "./shared/session-label.js";
 
@@ -1002,11 +1002,7 @@ function pushMessage(content: string, messageId?: string, chatId?: string, chatT
   }
   // 项目专属群：命中 groupChatId 的消息强制路由到该项目会话（无视 active 指针，永不串台）
   if (!resolved.viaReply && chatId && chatType === "group") {
-    const rawChat = parseChatKey(chatId).chatId;
-    const grp = listProjects().find((p) => {
-      if (p.status === "done" || !p.groupChatId || !p.sessionKey) return false;
-      return p.groupChatId === chatId || parseChatKey(p.groupChatId).chatId === rawChat;
-    });
+    const grp = findProjectByGroupChat(chatId);
     if (grp?.sessionKey && routedId !== grp.sessionKey) {
       setActiveSession(chatId, grp.sessionKey);
       routedId = grp.sessionKey;
@@ -1028,6 +1024,7 @@ function pushMessage(content: string, messageId?: string, chatId?: string, chatT
   }
   if (chatId && chatType) rememberChatType(chatId, chatType);
   const fullMeta: QueueMessageMeta = { ...(meta || {}) };
+  if (chatId) fullMeta.chatId = chatId;
   if (chatType) fullMeta.chatType = chatType;
   if (senderOpenId) fullMeta.senderOpenId = senderOpenId;
   const written = pushToFileQueue(content, messageId, `daemon-${process.pid}`, routedId, false, Object.keys(fullMeta).length > 0 ? fullMeta : undefined);

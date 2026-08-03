@@ -1,5 +1,13 @@
 [
   {
+    "version": "1.8.1",
+    "date": "2026-08-03",
+    "changes": [
+      "修复项目专属群误限制：统一 findProjectByGroupChat 识别，群内 /p、/m 不再要求主用户 admin",
+      "修复项目群发消息偶发「未开启其他人使用」：launch 时项目群豁免 allowOthers，队列 meta 携带 chatId"
+    ]
+  },
+  {
     "version": "1.8.0",
     "date": "2026-08-03",
     "changes": [

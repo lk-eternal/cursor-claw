@@ -4,6 +4,7 @@ import * as path from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import {
   createProject,
+  findProjectByGroupChat,
   getCurrentProject,
   getNodeGroups,
   getProject,
@@ -243,6 +244,18 @@ describe("project-store", () => {
     })
     expect(p.groupIds).toEqual(["develop", "test"])
     expect(p.groupId).toBe("develop")
+  })
+
+  it("findProjectByGroupChat resolves by chatKey or bare chatId", () => {
+    const groupKey = "ch_feishu|oc_group123"
+    const p = createProject({
+      name: "grp-proj", goal: "g", repoPath: "/r", baseBranch: "main",
+      featureBranch: "f1", worktreePath: "/w1", groupChatId: groupKey,
+    })
+    expect(findProjectByGroupChat(groupKey)?.id).toBe(p.id)
+    expect(findProjectByGroupChat("oc_group123")?.id).toBe(p.id)
+    expect(findProjectByGroupChat("ch_other|oc_group123")?.id).toBe(p.id)
+    expect(findProjectByGroupChat("oc_other")).toBeUndefined()
   })
 
   it("projectGroupChatMatches and canEnterProjectFromChat enforce independent group isolation", () => {
