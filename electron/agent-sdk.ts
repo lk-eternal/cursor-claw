@@ -100,6 +100,8 @@ interface SdkSessionAgent {
   todoSnapshot: StreamTodoItem[] | null
   /** 最近一次 status 事件（含 RUNNING/ERROR 等），结束诊断与断线挂起判定用 */
   lastStatus?: { status: string; message?: string }
+  /** poll 已见 messageId：非阻塞 poll 区分新消息 vs 重投 */
+  seenMessageIds: Set<string>
 }
 
 const sdkSessions = new Map<string, SdkSessionAgent>()
@@ -235,7 +237,27 @@ function buildWakePrompt(session: SdkSessionAgent, rulesUpdated = false, taskMes
 
 let sdkIdleHandler: ((sessionKey: string) => void) | null = null
 /** sessionKey → 连续失败次数与最近失败时间（冷却判定在调度器层，对所有叫醒源生效） */
-const sdkFailStreak = new Map<string, { count: number; lastFailAt: number; network?: boolean }>()
+const sdkFailStreak = new Map<string, {
+  count: number
+  lastFailAt: number
+  network?: boolean
+  /** 鉴权/配额类永久错误：重试再多也不会自愈，必须退避否则死循环刷屏 */
+  permanent?: boolean
+}>()
+
+/** 永久性错误退避阶梯（毫秒）：5s → 10s → 30s → 1min → 5min 封顶 */
+const PERMANENT_FAIL_BACKOFF_MS = [5_000, 10_000, 30_000, 60_000, 300_000]
+
+/** 同一错误文本连续重复时的日志折叠：只打第 1 次及每 10 次 */
+const lastFailLogSignature = new Map<string, string>()
+const FAIL_LOG_FOLD_EVERY = 10
+
+function shouldLogRepeatedFailure(sessionKey: string, errorDetail: string | undefined, count: number): boolean {
+  const signature = (errorDetail || "unknown").slice(0, 200)
+  const repeated = lastFailLogSignature.get(sessionKey) === signature
+  lastFailLogSignature.set(sessionKey, signature)
+  return !repeated || count % FAIL_LOG_FOLD_EVERY === 0
+}
 
 /** run 收口释放后回调（调度器借此立即消费运行期间积压的消息，含异常结束） */
 export function setSdkIdleHandler(fn: (sessionKey: string) => void): void {
@@ -244,6 +266,7 @@ export function setSdkIdleHandler(fn: (sessionKey: string) => void): void {
 
 export function clearSdkFailStreak(sessionKey: string): void {
   sdkFailStreak.delete(sessionKey)
+  lastFailLogSignature.delete(sessionKey)
 }
 
 // SDK socket 深处的网络错误只会抛到主进程全局兜底，无法关联到具体 run；
@@ -263,9 +286,16 @@ function recentGlobalErrorHint(withinMs: number): string {
   return ""
 }
 
-/** 失败不再退避：始终 0，调度器可立即重试（无限） */
-export function sdkFailCooldownRemaining(_sessionKey: string): number {
-  return 0
+/**
+ * 瞬时故障（网络/断连）不退避，立即重试；
+ * 鉴权/配额这类永久错误按阶梯退避——否则每轮不到 1s 的重试会把日志刷爆。
+ */
+export function sdkFailCooldownRemaining(sessionKey: string): number {
+  const st = sdkFailStreak.get(sessionKey)
+  if (!st?.permanent) return 0
+  const idx = Math.min(st.count - 1, PERMANENT_FAIL_BACKOFF_MS.length - 1)
+  const wait = PERMANENT_FAIL_BACKOFF_MS[Math.max(idx, 0)]
+  return Math.max(0, st.lastFailAt + wait - Date.now())
 }
 
 /** pack/异常退出后 force 重发偶发挂死；超时后丢 resume，下次全新会话 */
@@ -284,16 +314,18 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 /** 换模期间抑制 idle 自动拉起，避免旧模型抢先占坑 */
 const modelSwitchHold = new Set<string>()
 
-function scheduleSdkIdle(sessionKey: string, errored: boolean, opts?: { network?: boolean; silent?: boolean }): void {
+function scheduleSdkIdle(sessionKey: string, errored: boolean, opts?: { network?: boolean; silent?: boolean; permanent?: boolean }): void {
   if (errored) {
     const st = sdkFailStreak.get(sessionKey) ?? { count: 0, lastFailAt: 0, network: false }
     st.count += 1
     st.lastFailAt = Date.now()
     st.network = !!opts?.network
+    st.permanent = !!opts?.permanent
     sdkFailStreak.set(sessionKey, st)
     if (!opts?.silent) {
+      const waitMs = sdkFailCooldownRemaining(sessionKey)
       pushUiLog("SDK", st.count > 8 ? "ERROR" : "WARN",
-        `[${sessionKey}] 异常结束×${st.count}，立即重试`)
+        `[${sessionKey}] 异常结束×${st.count}，${waitMs > 0 ? `${Math.round(waitMs / 1000)}s 后重试` : "立即重试"}`)
     }
   } else {
     const prev = sdkFailStreak.get(sessionKey)
@@ -494,7 +526,7 @@ function shouldSuspendStreamCard(session: SdkSessionAgent, status: string): bool
 
 function isFeishuStreamEnabled(sessionKey: string): boolean {
   const ch = resolveChannelForSession(sessionKey)
-  return !!ch && ch.type === "feishu"
+  return !!ch && ch.type === "feishu" && ch.showThinking !== false
 }
 
 interface StreamCardPayload {
@@ -760,13 +792,21 @@ async function postStreamCard(
   }
 }
 
-/** daemon 判定本队列已随旧卡收口（gone）：丢弃旧时间线，换新空队列——后续新内容走新卡 */
-function dropStaleStreamQueue(session: SdkSessionAgent, agg: StreamAgg): void {
+/** daemon 判定本队列已随旧卡收口（gone）：迁移段落到新队列并重刷，防思考丢失 */
+function rotateStaleStreamQueue(session: SdkSessionAgent, agg: StreamAgg): void {
+  const migrated = agg.segments.length > 0
   agg.finished = true
-  pushUiLog("SDK", "DEBUG", `[${session.sessionKey}] 流式卡队列已随收口作废，丢弃旧时间线`)
-  if (session.streamAgg === agg) {
-    session.streamAgg = isFeishuStreamEnabled(session.sessionKey) ? newStreamAgg(true) : null
+  pushUiLog("SDK", "DEBUG",
+    `[${session.sessionKey}] 流式卡队列已随收口作废，${migrated ? "迁移段落后" : ""}换新队列`)
+  if (session.streamAgg !== agg) return
+  const next = isFeishuStreamEnabled(session.sessionKey) ? newStreamAgg(true) : null
+  if (next && migrated) {
+    next.segments = JSON.parse(JSON.stringify(agg.segments)) as StreamSegment[]
+    next.dirty = true
+    next.gateOpen = true
   }
+  session.streamAgg = next
+  if (next?.dirty) scheduleFlushStreamCard(session, true)
 }
 
 function scheduleFlushStreamCard(session: SdkSessionAgent, immediate = false): void {
@@ -822,7 +862,7 @@ async function flushStreamCard(session: SdkSessionAgent, finish: boolean): Promi
     if (!agg.ensured) {
       const ensured = await postStreamCard(session.sessionKey, "ensure", payload, { queueBornAt: agg.bornAt })
       if (ensured?.gone) {
-        dropStaleStreamQueue(session, agg)
+        rotateStaleStreamQueue(session, agg)
         return
       }
       agg.ensured = true
@@ -833,7 +873,7 @@ async function flushStreamCard(session: SdkSessionAgent, finish: boolean): Promi
       // Resume 复用 Daemon 已有卡时，ensure 本身不写内容，再补一帧 update
       const updated = await postStreamCard(session.sessionKey, "update", payload, { cardId: agg.cardId, queueBornAt: agg.bornAt })
       if (updated?.gone) {
-        dropStaleStreamQueue(session, agg)
+        rotateStaleStreamQueue(session, agg)
         return
       }
       if (!agg.cardId && updated?.cardId) {
@@ -844,7 +884,7 @@ async function flushStreamCard(session: SdkSessionAgent, finish: boolean): Promi
     }
     const updated = await postStreamCard(session.sessionKey, "update", payload, { cardId: agg.cardId, queueBornAt: agg.bornAt })
     if (updated?.gone) {
-      dropStaleStreamQueue(session, agg)
+      rotateStaleStreamQueue(session, agg)
       return
     }
     if (!agg.cardId && updated?.cardId) {
@@ -889,11 +929,9 @@ const OUTBOUND_MCP_RE = /^(?:send_(?:text|question|image|file)|project_\w+)$/i
 const MEDIA_MCP_RE = /^send_(?:file|image)$/i
 
 function isPollMessageInvocation(name: string, summary: string, args?: unknown): boolean {
-  // MCP 调用（含 send_*）绝不可能是 poll 的 curl 命令；text 参数里聊到 poll-message 不算
-  if (mcpToolName(args)) return false
   const cmd = shellCommandText(args)
-  if (cmd) return /poll-message/i.test(cmd)
-  // args 缺失（部分事件只有摘要）：summary 对 shell 是 command 截断，可兜底
+  if (cmd && /poll-message/i.test(cmd)) return true
+  if (mcpToolName(args)) return false
   return /poll-message/i.test(summary)
 }
 
@@ -954,6 +992,9 @@ function resolveToolDisplayName(name: string, args: unknown): string {
 }
 
 
+const POLL_DIRECTIVE_END_MARK = "安静退出"
+const POLL_DIRECTIVE_TIMEOUT_MARK = "轮询正常超时"
+
 function extractToolResultText(result: unknown): string {
   if (result == null) return ""
   if (typeof result === "string") return result
@@ -966,25 +1007,166 @@ function extractToolResultText(result: unknown): string {
   try { return JSON.stringify(rec) } catch { return "" }
 }
 
-/** poll 结果投递语义（优先读 daemon 的 kind；旧响应回退文案/freshIds） */
-type PollDeliveryKind = "user" | "timeout" | "end" | "unknown"
+interface PollPayload {
+  messages?: Array<{ messageId?: string; text?: string }>
+  keepAlive?: boolean
+  directive?: string
+  kind?: string
+}
 
-function parsePollDelivery(result: unknown): {
-  kind: PollDeliveryKind
-  fresh: boolean
-  hasUserMsgs: boolean
-} {
-  const raw = extractToolResultText(result)
-  const kindMatch = /"kind"\s*:\s*"(user|timeout|end)"/.exec(raw)
-  let kind: PollDeliveryKind = kindMatch ? (kindMatch[1] as PollDeliveryKind) : "unknown"
-  if (kind === "unknown" && /\[SYSTEM OVERRIDE/.test(raw)) {
-    kind = /按需唤醒|安静结束/.test(raw) ? "end" : "timeout"
+function parsePollJson(result: unknown): PollPayload | null {
+  const raw = extractToolResultText(result).trim()
+  if (!raw) return null
+  try {
+    return JSON.parse(raw) as PollPayload
+  } catch {
+    const start = raw.indexOf("{")
+    const end = raw.lastIndexOf("}")
+    if (start < 0 || end <= start) return null
+    try { return JSON.parse(raw.slice(start, end + 1)) as PollPayload } catch { return null }
   }
-  const fresh = /"freshIds"\s*:\s*\[\s*"/.test(raw)
-  // 有带 messageId 的对象 ≈ 用户消息（系统指令 messageId 为空）
-  const hasUserMsgs = /"messageId"\s*:\s*"(?!internal_)[^"]+"/.test(raw)
-  if (kind === "unknown" && hasUserMsgs) kind = "user"
-  return { kind, fresh, hasUserMsgs }
+}
+
+function parsePollDelivery(session: SdkSessionAgent, result: unknown): {
+  hasUserMsgs: boolean
+  hasNewUserMsgs: boolean
+  isEnd: boolean
+  isTimeout: boolean
+} {
+  const empty = { hasUserMsgs: false, hasNewUserMsgs: false, isEnd: false, isTimeout: false }
+  const p = parsePollJson(result)
+  if (!p) return empty
+
+  const msgs = p.messages ?? []
+  const userMsgs = msgs.filter((m) => m.messageId && !m.messageId.startsWith("internal_"))
+  let hasNewUserMsgs = false
+  for (const m of userMsgs) {
+    const id = m.messageId!
+    if (!session.seenMessageIds.has(id)) {
+      hasNewUserMsgs = true
+      session.seenMessageIds.add(id)
+    }
+  }
+  const hasUserMsgs = userMsgs.length > 0
+
+  if (p.directive) {
+    if (hasUserMsgs) return { hasUserMsgs, hasNewUserMsgs, isEnd: false, isTimeout: false }
+    const d = p.directive
+    if (d.includes(POLL_DIRECTIVE_END_MARK)) return { hasUserMsgs: false, hasNewUserMsgs: false, isEnd: true, isTimeout: false }
+    if (d.includes(POLL_DIRECTIVE_TIMEOUT_MARK)) return { hasUserMsgs: false, hasNewUserMsgs: false, isEnd: false, isTimeout: true }
+    return empty
+  }
+
+  if (p.kind === "end") return { hasUserMsgs: false, hasNewUserMsgs: false, isEnd: true, isTimeout: false }
+  if (p.kind === "timeout") return { hasUserMsgs: false, hasNewUserMsgs: false, isEnd: false, isTimeout: true }
+  const override = msgs.find((m) => !m.messageId && /SYSTEM OVERRIDE/.test(m.text ?? ""))
+  if (override) {
+    const isEnd = /按需唤醒|安静结束/.test(override.text ?? "")
+    return { hasUserMsgs: false, hasNewUserMsgs: false, isEnd, isTimeout: !isEnd }
+  }
+
+  return { hasUserMsgs, hasNewUserMsgs, isEnd: false, isTimeout: false }
+}
+
+/** 按需唤醒收到 end directive 后必须终止 run，否则僵尸态挡新消息 */
+async function terminateRunAfterPollEnd(session: SdkSessionAgent): Promise<void> {
+  pushUiLog("SDK", "INFO", `[${session.sessionKey}] 按需唤醒 directive=end，宿主终止 run`)
+  const run = session.run
+  if (run) {
+    try { await run.cancel() } catch { /* best-effort */ }
+  }
+  session.abortController.abort()
+}
+
+export interface PollPhaseEventPayload {
+  blocking?: boolean
+  reason?: string
+  messageIds?: string[]
+  directive?: string
+}
+
+/** daemon poll HTTP 生命周期 → 流式卡状态（唯一真值，不解析 command） */
+export function handlePollPhaseEvent(
+  sessionKey: string,
+  phase: "start" | "end",
+  payload: PollPhaseEventPayload,
+): void {
+  const session = findSdkSessionLoose(sessionKey)
+  if (!session) return
+
+  if (phase === "start") {
+    const blocking = payload.blocking === true
+    const stream = session.streamAgg
+    if (!stream || stream.finished) return
+    if (blocking) {
+      if (stream.pendingBlockingPoll) return
+      endStreamRound(session)
+      const next = session.streamAgg
+      if (next) {
+        next.gateOpen = false
+        next.pendingBlockingPoll = true
+      }
+    } else {
+      stream.pendingNonBlockingPoll = true
+    }
+    pushUiLog("SDK", "DEBUG", `[${session.sessionKey}] poll-phase start blocking=${blocking}`)
+    return
+  }
+
+  const stream = session.streamAgg
+  const blocking = payload.blocking === true
+  const wasNonBlocking = stream?.pendingNonBlockingPoll ?? false
+  const wasBlocking = stream?.pendingBlockingPoll ?? false
+  if (stream && !stream.finished) {
+    stream.pendingNonBlockingPoll = false
+    stream.pendingBlockingPoll = false
+  }
+
+  const userIds = (payload.messageIds ?? []).filter((id) => id && !id.startsWith("internal_"))
+  let hasNewUserMsgs = false
+  for (const id of userIds) {
+    if (!session.seenMessageIds.has(id)) {
+      hasNewUserMsgs = true
+      session.seenMessageIds.add(id)
+    }
+  }
+  const hasUserMsgs = userIds.length > 0
+  const directive = payload.directive ?? ""
+  const isEnd = payload.reason === "end" || directive.includes(POLL_DIRECTIVE_END_MARK)
+  const isTimeout = payload.reason === "timeout" || directive.includes(POLL_DIRECTIVE_TIMEOUT_MARK)
+
+  if (isEnd && (wasBlocking || blocking)) {
+    void terminateRunAfterPollEnd(session)
+  }
+
+  if (!stream || stream.finished) {
+    pushUiLog("SDK", "DEBUG",
+      `[${session.sessionKey}] poll-phase end blocking=${blocking} reason=${payload.reason ?? "?"} newUser=${hasNewUserMsgs} (no stream)`)
+    return
+  }
+
+  pushUiLog("SDK", "DEBUG",
+    `[${session.sessionKey}] poll-phase end blocking=${blocking} reason=${payload.reason ?? "?"} newUser=${hasNewUserMsgs} bornAt=${stream.bornAt}`)
+
+  if (wasNonBlocking && stream.gateOpen && hasNewUserMsgs) {
+    endStreamRound(session)
+    return
+  }
+
+  if (wasBlocking || blocking) {
+    if (isTimeout || isEnd) {
+      stream.gateOpen = false
+      return
+    }
+    if (hasUserMsgs) {
+      session.streamAgg = isFeishuStreamEnabled(session.sessionKey) ? newStreamAgg(true) : null
+      pushUiLog("SDK", "DEBUG",
+        `[${session.sessionKey}] 阻塞poll换新队列 bornAt=${session.streamAgg?.bornAt ?? "null"}`)
+      return
+    }
+  }
+
+  if (wasNonBlocking) stream.gateOpen = true
 }
 
 /**
@@ -1147,76 +1329,10 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
       const detectSummary = summary || summarizeToolArgs(event.args) || ""
       pushUiLog("SDK", "INFO", `[${session.sessionKey}] [tool] ${event.name}: ${event.status}${summary ? ` · ${summary}` : ""}`)
       if (stream && !stream.finished) {
-        const argsSayPoll = isPollMessageInvocation(event.name, detectSummary, event.args)
-        // poll 的 completed/error 事件不携带 args（识别必失败）：改用状态位判定——
-        // 挂 poll 时 running 已正确识别并置位，此后同类 shell 工具的终态即为 poll 返回。
-        // 挂起期间 Agent 无并发 shell，误判风险极低；此前识别失败导致换队列从未执行、新回合思考整段被丢
-        const pollReturnByState = event.status !== "running"
-          && !argsSayPoll
-          && (stream.pendingBlockingPoll || stream.pendingNonBlockingPoll)
-          && /shell|bash|terminal|command/i.test(event.name)
-        if (argsSayPoll || pollReturnByState) {
-          const blocking = isBlockingPollMessage(event.name, detectSummary, event.args)
-          if (event.status === "running") {
-            if (blocking) {
-              // 已在等第一条阻塞 poll：忽略重复 running，防再 endStreamRound 刷卡
-              if (stream.pendingBlockingPoll) break
-              // 挂阻塞 poll = 本回合结束：收口当前卡；新队列关门，挂起期间不刷思考卡
-              endStreamRound(session)
-              const next = session.streamAgg
-              if (next) {
-                next.gateOpen = false
-                next.pendingBlockingPoll = true
-              }
-            } else {
-              stream.pendingNonBlockingPoll = true
-            }
-            break
-          }
-          // poll 返回
-          const wasNonBlocking = stream.pendingNonBlockingPoll
-          const wasBlocking = stream.pendingBlockingPoll
-          stream.pendingNonBlockingPoll = false
-          stream.pendingBlockingPoll = false
-          const delivery = parsePollDelivery(event.result)
-          if (wasBlocking || wasNonBlocking) {
-            pushUiLog("SDK", "DEBUG",
-              `[${session.sessionKey}] poll返回诊断 blocking=${wasBlocking} nonBlocking=${wasNonBlocking} kind=${delivery.kind} fresh=${delivery.fresh} hasUserMsgs=${delivery.hasUserMsgs} bornAt=${stream.bornAt}`)
-          }
-          if (wasNonBlocking && stream.gateOpen && delivery.fresh) {
-            // 干活途中拉到新消息：回合边界（重投是当前回合的活，不换卡）
-            endStreamRound(session)
-            break
-          }
-          if (wasNonBlocking && !stream.gateOpen) {
-            // 冷启动预热：丢弃 poll 前的推理噪音，保留已入队工具
-            stream.segments = stream.segments.filter((s) => s.type === "tools" && s.tools.length > 0)
-            stream.dirty = stream.segments.length > 0
-          }
-          // 阻塞 poll：timeout/end 保持关门；user（含重投）换新队列
-          if (wasBlocking) {
-            if (delivery.kind === "timeout" || delivery.kind === "end") {
-              stream.gateOpen = false
-              break
-            }
-            if (delivery.kind === "user" || delivery.hasUserMsgs) {
-              session.streamAgg = isFeishuStreamEnabled(session.sessionKey) ? newStreamAgg(true) : null
-              pushUiLog("SDK", "DEBUG",
-                `[${session.sessionKey}] 阻塞poll换新队列 kind=${delivery.kind} bornAt=${session.streamAgg?.bornAt ?? "null"}`)
-              break
-            }
-            stream.gateOpen = false
-            break
-          }
-          stream.gateOpen = true
+        if (stream.pendingBlockingPoll || stream.pendingNonBlockingPoll) {
           break
         }
-        // 非 poll 工具 = 真实工作开始：开门；poll completed 事件若丢失（工具桥中断）
-        // pendingBlockingPoll 会残留，这里顺手复位，避免本回合思考永久不进卡
         stream.gateOpen = true
-        stream.pendingBlockingPoll = false
-        // updateTodos：独立任务清单面板（原地实时刷新），不进普通工具步。
-        // running/completed 都应用一次（幂等）：running 的 args 偶见缺失/截断，completed 兜底
         if (isTodoUpdateInvocation(event.name)) {
           applyTodoUpdate(session, stream, event.args)
           scheduleFlushStreamCard(session, true)
@@ -1365,19 +1481,21 @@ export interface SdkLaunchOptions {
   persistentPoll?: boolean
   /** 主用户每次新会话：跳过 Resume，直接新建（上下文清零） */
   newSession?: boolean
+  /** 调度拉起时已知的队列 messageId（bootstrap poll 不应因此换卡） */
+  pendingMessageIds?: string[]
 }
 
 /** run 生命周期托管：结束即释放 agent 进程（上下文靠持久化的 agentId Resume 恢复） */
 function startRunLifecycle(session: SdkSessionAgent, run: Run): void {
   session.run = run
   session.lastActivityAt = Date.now()
-  // 新 run 已启动：清掉上一轮的终态记录，避免 UI 持续展示已恢复会话的旧错误
   lastRunResults.delete(session.sessionKey)
 
   streamRunEvents(session, run).then(async () => {
     const sessionKey = session.sessionKey
     let errorDetail: string | undefined
     let networkFail = false
+    let permanentFail = false
     if (run.status === "error") {
       // wait() 返回 RunResult 对象（出错时也不抛），真实原因藏在 RunResult.result / 终态状态事件里
       const wr = await run.wait().catch((e: unknown) => e)
@@ -1398,6 +1516,8 @@ function startRunLifecycle(session: SdkSessionAgent, run: Run): void {
       const netHint = recentGlobalErrorHint(120_000)
       errorDetail = `${lastStr}${detail}${netHint ? ` | net=${netHint}` : ""}`.slice(0, 500)
       networkFail = /API key exchange|exchange_user_api_key|fetch failed|unauthenticated|ECONNRESET|socket hang up|GOAWAY|疑似底层网络/i.test(errorDetail)
+      // 鉴权/配额/模型不可用：重试不会自愈，必须退避（网络类优先，仍走零退避快速重连）
+      permanentFail = !networkFail && /Authentication error|invalid[_ ]api[_ ]key|api key not valid|401|403|forbidden|quota|rate limit|insufficient|model .*not (found|available)/i.test(errorDetail)
       // 不清 Resume：agentId 仍在，下次 Agent.resume 换新本地句柄，云端上下文保留
     }
 
@@ -1414,13 +1534,17 @@ function startRunLifecycle(session: SdkSessionAgent, run: Run): void {
     broadcastSdkSessionStatus()
 
     if (errored) {
-      // 记账失败次数后立即叫醒调度器重试（无退避）
-      scheduleSdkIdle(sessionKey, true, { network: networkFail, silent: true })
+      // 记账失败次数后叫醒调度器；永久错误由 sdkFailCooldownRemaining 压住重试节奏
+      scheduleSdkIdle(sessionKey, true, { network: networkFail, silent: true, permanent: permanentFail })
       const st = sdkFailStreak.get(sessionKey)
       const dur = run.durationMs != null ? `${run.durationMs}ms` : "?"
       const tip = networkFail ? "将Resume重建连接" : ""
-      pushUiLog("SDK", (st?.count ?? 0) > 8 ? "ERROR" : "WARN",
-        `[${sessionKey}] 运行失败×${st?.count ?? 1} ${dur}${tip ? ` ${tip}` : ""} → 立即重试 | ${errorDetail || "unknown"}`)
+      const waitMs = sdkFailCooldownRemaining(sessionKey)
+      const retryTip = waitMs > 0 ? `→ ${Math.round(waitMs / 1000)}s 后重试` : "→ 立即重试"
+      if (shouldLogRepeatedFailure(sessionKey, errorDetail, st?.count ?? 1)) {
+        pushUiLog("SDK", (st?.count ?? 0) > 8 ? "ERROR" : "WARN",
+          `[${sessionKey}] 运行失败×${st?.count ?? 1} ${dur}${tip ? ` ${tip}` : ""} ${retryTip} | ${errorDetail || "unknown"}`)
+      }
     } else {
       const summary = [
         run.result && `result=${run.result}`,
@@ -1441,6 +1565,9 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       s.lastActivityAt = Date.now()
       // 异常重启等路径可能丢失用户标识，随新消息自愈回填（否则会话名永远兜底为「通道名·访客」）
       if (!s.senderOpenId && senderOpenId) s.senderOpenId = senderOpenId
+      for (const id of opts.pendingMessageIds ?? []) {
+        if (id) s.seenMessageIds.add(id)
+      }
     }
     return { ok: true }
   }
@@ -1547,9 +1674,13 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       logAgg: { kind: null, buf: "" },
       streamAgg: isFeishuStreamEnabled(sessionKey) ? newStreamAgg() : null,
       todoSnapshot: null,
+      seenMessageIds: new Set((opts.pendingMessageIds ?? []).filter(Boolean)),
     }
 
     sdkSessions.set(sessionKey, session)
+    if (session.seenMessageIds.size > 0) {
+      pushUiLog("SDK", "DEBUG", `[${sessionKey}] 预登记 ${session.seenMessageIds.size} 条队列 messageId（bootstrap poll 不换卡）`)
+    }
     broadcastLog(`[SDK] 会话 ${sessionKey} 已${resumed ? "恢复" : "创建"}, agentId=${agent.agentId}, model=${JSON.stringify(modelSelection)}`)
     broadcastSdkSessionStatus()
     pushRecentModel({ model: modelId, modelParams })

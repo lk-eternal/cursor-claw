@@ -672,7 +672,7 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
               <div className="flex items-center justify-between border-t border-gray-800 pt-3">
                 <div>
                   <p className="text-xs text-gray-400">展示思考过程</p>
-                  <p className="text-xs text-gray-600">流式进度卡中显示 Thought 折叠面板；关闭后只展示工具步骤与回复</p>
+                  <p className="text-xs text-gray-600">开启：显示 AI 工作过程中的思考与步骤；关闭：静默处理，只收到最终回复</p>
                 </div>
                 <button onClick={() => set({ showThinking: !(draft.showThinking ?? true) })}
                   className={`relative h-5 w-9 shrink-0 rounded-full transition ${(draft.showThinking ?? true) ? "bg-blue-600" : "bg-gray-600"}`}>

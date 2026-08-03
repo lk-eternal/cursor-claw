@@ -208,13 +208,14 @@ const api = {
   listProjects: (): Promise<{
     id: string; name: string; goal?: string; storyUrl?: string; productDocUrl?: string; techDocUrl?: string
     featureBranch: string; status: string; groupId?: string; groupIds?: string[]; worktreePath?: string; repoPath?: string; workspaceType?: string
+    metadata?: Record<string, string>
   }[]> =>
     ipcRenderer.invoke("project:list"),
   deleteProject: (projectId: string): Promise<{ ok: boolean; name?: string; error?: string }> =>
     ipcRenderer.invoke("project:delete", projectId),
   updateProject: (patch: {
     id: string; name?: string; goal?: string; storyUrl?: string; productDocUrl?: string; techDocUrl?: string
-    status?: string; groupId?: string; groupIds?: string[]
+    status?: string; groupId?: string; groupIds?: string[]; metadata?: Record<string, string>
   }): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke("project:update", patch),
   switchProject: (projectId: string): Promise<{ ok: boolean; error?: string }> =>

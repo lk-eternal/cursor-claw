@@ -33,8 +33,8 @@ export function formatLogLineForUi(
   line: string,
   resolveLabel?: (sessionKey: string) => string | undefined,
 ): string {
-  // 飞书 oc_/ou_/on_；微信 wxid_/wx_/@im.wechat/@chatroom
-  const re = /(?:ch_[a-zA-Z0-9]+\|)?(?:(?:oc_|ou_|on_)[a-zA-Z0-9]+|(?:wxid_|wx_)[a-zA-Z0-9_-]+|[a-zA-Z0-9_-]+@(?:im\.wechat|chatroom))(?:::project_[a-f0-9]+|::[^\s\]]+)/gi
+  // 飞书 oc_/ou_/on_（≥10 字符 id，避免误匹配 session_key/on_key/ON_RESUME）；微信 wxid_/wx_；:: 后缀可选
+  const re = /(?:ch_[a-zA-Z0-9]+\|)?(?:(?:oc_|ou_|on_)[a-zA-Z0-9]{10,}|(?:wxid_|wx_)[a-zA-Z0-9_-]+|[a-zA-Z0-9_-]+@(?:im\.wechat|chatroom))(?:::(?:project_[a-f0-9]+|[^\s\]]+))?/g
   return line.replace(re, (sk) => resolveLabel?.(sk) || shortenSessionKeyForUi(sk))
 }
 

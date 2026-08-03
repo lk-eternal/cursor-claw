@@ -43,6 +43,7 @@ export const DEFAULT_NODE_GROUPS: ProjectNodeGroupDef[] = [
       { id: "build", label: "实现" },
       { id: "review", label: "审查" },
       { id: "deploy", label: "部署" },
+      { id: "mr", label: "MR" },
       { id: "submit-test", label: "提测" },
       { id: "analyze-bug", label: "分析缺陷" },
       { id: "fix-bug", label: "修复缺陷" },
@@ -129,6 +130,8 @@ export interface Project {
   notifyChatId?: string
   /** 独立群模式：项目专属群 chatKey（ch_xxx|oc_yyy）；命中该群的消息强制路由到本项目 */
   groupChatId?: string
+  /** 项目级 KV 配置，AI 可通过 project_update 持久化（空字符串 value 表示删 key） */
+  metadata?: Record<string, string>
   createdAt: number
   updatedAt: number
 }
@@ -232,6 +235,51 @@ export function decodeRepoPair(value: string): {
   const testBranch = (parts[2] || "").trim() || undefined
   const developBranch = (parts[3] || "").trim() || undefined
   return { path: pathPart, baseBranch, testBranch, developBranch }
+}
+
+const REPO_PAIR_OPT_PREFIX = "b64:"
+
+/** 飞书 multi_select option value 会吞 `||`，表单选项用 base64 包装 */
+export function encodeRepoPairOption(
+  repoPath: string,
+  baseBranch: string,
+  testBranch?: string,
+  developBranch?: string,
+): string {
+  const raw = encodeRepoPair(repoPath, baseBranch, testBranch, developBranch)
+  return REPO_PAIR_OPT_PREFIX + Buffer.from(raw, "utf8").toString("base64url")
+}
+
+export function decodeRepoPairOption(value: string): ReturnType<typeof decodeRepoPair> {
+  const t = (value || "").trim()
+  if (t.startsWith(REPO_PAIR_OPT_PREFIX)) {
+    try {
+      const raw = Buffer.from(t.slice(REPO_PAIR_OPT_PREFIX.length), "base64url").toString("utf8")
+      return decodeRepoPair(raw)
+    } catch { /* fall through */ }
+  }
+  return decodeRepoPair(t)
+}
+
+/** 表单标量字段（input/select） */
+export function formFieldStr(v: unknown): string {
+  if (Array.isArray(v)) return String(v[0] ?? "").trim()
+  return String(v ?? "").trim()
+}
+
+/** 飞书 multi_select：保留数组；字符串按逗号拆（含 String([]) 后的 "a,b"） */
+export function coerceFormMultiSelect(v: unknown): string[] {
+  if (v == null) return []
+  if (Array.isArray(v)) return v.flatMap((x) => coerceFormMultiSelect(x))
+  const s = String(v).trim()
+  if (!s) return []
+  if (s.startsWith("[") && s.endsWith("]")) {
+    try {
+      const parsed = JSON.parse(s)
+      if (Array.isArray(parsed)) return coerceFormMultiSelect(parsed)
+    } catch { /* ignore */ }
+  }
+  return s.split(",").map((x) => x.trim()).filter(Boolean)
 }
 
 /** 飞书 multi_select 有时把多个 encodeRepoPair 逗号拼成一条；按完整四段 pair 拆回 */

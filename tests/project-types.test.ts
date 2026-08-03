@@ -1,12 +1,57 @@
 import * as path from "node:path"
 import { describe, expect, it } from "vitest"
 import {
+  coerceFormMultiSelect,
   decodeRepoPair,
+  decodeRepoPairOption,
   encodeRepoPair,
+  encodeRepoPairOption,
+  formFieldStr,
   projectRootDir,
   splitRepoPairValues,
   type Project,
 } from "../src/shared/project-types.js"
+
+describe("encodeRepoPairOption", () => {
+  const repo = "https://gitlab.wukongedu.net/wukong/wk-knowledgebase"
+
+  it("roundtrips branch info through base64 option value", () => {
+    const opt = encodeRepoPairOption(repo, "release/1.0", "test/1.0", "develop")
+    expect(opt.startsWith("b64:")).toBe(true)
+    expect(decodeRepoPairOption(opt)).toMatchObject({
+      path: repo,
+      baseBranch: "release/1.0",
+      testBranch: "test/1.0",
+      developBranch: "develop",
+    })
+  })
+
+  it("still decodes legacy plain encodeRepoPair values", () => {
+    const legacy = encodeRepoPair(repo, "release/1.0")
+    expect(decodeRepoPairOption(legacy).baseBranch).toBe("release/1.0")
+  })
+})
+
+describe("coerceFormMultiSelect", () => {
+  it("passes through array", () => {
+    expect(coerceFormMultiSelect(["wukong-dev"])).toEqual(["wukong-dev"])
+    expect(coerceFormMultiSelect(["develop", "wukong-dev"])).toEqual(["develop", "wukong-dev"])
+  })
+
+  it("splits comma-glued string from String(array)", () => {
+    expect(coerceFormMultiSelect("develop,wukong-dev")).toEqual(["develop", "wukong-dev"])
+  })
+
+  it("parses JSON array string", () => {
+    expect(coerceFormMultiSelect('["wukong-dev"]')).toEqual(["wukong-dev"])
+  })
+})
+
+describe("formFieldStr", () => {
+  it("takes first element from array", () => {
+    expect(formFieldStr(["inline", "group"])).toBe("inline")
+  })
+})
 
 describe("splitRepoPairValues", () => {
   const repo1 = "https://gitlab.wukongedu.net/wukong/cp-scheduling"

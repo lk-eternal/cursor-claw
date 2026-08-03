@@ -47,7 +47,7 @@ export interface MessageChannel {
   keepSession?: boolean;
   /** 保持长连接：无限 poll 保活，次数套餐推荐（默认 true；false = 回答完收回合按需唤醒） */
   persistentPoll?: boolean;
-  /** 流式卡是否展示思考过程（默认 true；关闭后不输出 Thought 面板） */
+  /** 是否展示流式进度卡（默认 true；关闭后仅推送最终回复消息） */
   showThinking?: boolean;
 }
 
@@ -66,7 +66,7 @@ export interface DaemonChannelConfig {
   workspaceDir: string;
   /** 合成开关（keepSession && persistentPoll）：poll 响应随路下发，作为 Agent 收尾方式的权威来源 */
   keepAlive?: boolean;
-  /** 流式卡是否展示思考过程（默认 true） */
+  /** 是否展示流式进度卡（默认 true） */
   showThinking?: boolean;
 }
 

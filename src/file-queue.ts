@@ -142,9 +142,6 @@ export interface QueueMessageMeta {
   chatType?: string;
   senderOpenId?: string;
   senderType?: string;
-  botOpenId?: string;
-  botName?: string;
-  botRoster?: string;
   quotedContent?: string;
 }
 
@@ -154,7 +151,7 @@ export interface QueueMessage {
   sessionKey: string;
   /** 入队时间戳（毫秒），按此升序投递；Agent 合并回复时取最大者确认整批 */
   timestamp: number;
-  /** 消息上下文：会话类型、发送者、机器人身份/名册、引用原文 */
+  /** 消息上下文：会话类型、发送者、引用原文 */
   meta?: QueueMessageMeta;
 }
 
@@ -429,6 +426,7 @@ export interface QueueMessageView {
   /** pending = 排队待投递（.qmsg）；processing = 已投递给 Agent 待回复确认（.claimed） */
   status?: "pending" | "processing";
   sessionKey?: string;
+  messageId?: string;
   chatType?: string;
   timestamp?: number;
   senderOpenId?: string;
@@ -452,6 +450,7 @@ export function getQueueMessages(filterSessionKey?: string): QueueMessageView[] 
             index: result.length, fileId: f, status,
             preview: (parsed.text ?? "").slice(0, 200),
             sessionKey: parsed.sessionKey || parsed.chatId || undefined,
+            messageId: parsed.messageId || undefined,
             chatType: parsed.meta?.chatType || parsed.chatType || undefined,
             timestamp: Math.round(ts),
             senderOpenId: parsed.meta?.senderOpenId || parsed.senderOpenId || undefined,

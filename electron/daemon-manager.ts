@@ -23,7 +23,7 @@ import {
   getAgentChildPid, getSessionAgentCount as _getCliSessionCount, getIndependentTaskStatuses as _getCliTaskStatuses,
   type ChatType,
 } from "./agent-launcher"
-import { stopAllSdkSessions, resetSdkSessionContext, getSdkSessionCount, getSdkSessionList, checkSdkApiKey, listSdkModels, getSdkSessionDiagnostics, getResumableSummary, switchSdkSessionModel } from "./agent-sdk"
+import { stopAllSdkSessions, resetSdkSessionContext, getSdkSessionCount, getSdkSessionList, checkSdkApiKey, listSdkModels, getSdkSessionDiagnostics, getResumableSummary, switchSdkSessionModel, handlePollPhaseEvent } from "./agent-sdk"
 import { initSessionModelStore, listQuickModels, getSessionOverride, removeRecentModel } from "../src/shared/session-model-store.js"
 import { registerFeishuApp } from "./feishu-register"
 import {
@@ -61,7 +61,7 @@ import {
   fetchChatNames, fetchUserNames, initSessionDispatcher, previousActiveSessionMap,
 } from "./session-dispatcher"
 
-export { applyProxyEnv, syncMainProcessProxyEnv, checkCliInstalled, installCli, execAgentSync, execAgentAsync, type ExecAgentOptions as ExecAgentSyncOptions } from "./agent-cli"
+export { applyProxyEnv, syncMainProcessProxyEnv, bootstrapProxyEnv, checkCliInstalled, installCli, execAgentSync, execAgentAsync, type ExecAgentOptions as ExecAgentSyncOptions } from "./agent-cli"
 export { checkAgentLoggedIn, loginCli } from "./agent-launcher"
 export { getLogBuffer } from "./ui-logger"
 export { checkSdkApiKey, listSdkModels, noteGlobalSdkError } from "./agent-sdk"
@@ -585,25 +585,7 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
       for (const raw of parts) {
         const line = raw.trim()
         if (!line || line.startsWith("[info]:")) continue
-        if (line.startsWith("__IND_LAUNCH__:")) {
-          try {
-            const payload = JSON.parse(line.slice("__IND_LAUNCH__:".length))
-            const chatType = payload.chatType ?? "task"
-            const chatId = payload.chatId as string | undefined
-            void launchIndependentAgent(
-              payload.taskId, payload.taskName, payload.content, chatType, chatId,
-              payload.channelId, payload.model, payload.modelParams,
-            ).then(async (result) => {
-              if (result.ok && chatId && cachedPort) {
-                const currentActive = await getCurrentActiveSession(cachedPort, chatId)
-                if (currentActive && currentActive !== payload.taskId) previousActiveSessionMap.set(payload.taskId, currentActive)
-                await syncActiveSession(cachedPort, chatId, payload.taskId)
-              }
-            })
-          } catch { /* ignore malformed */ }
-          continue
-        }
-                                if (line.startsWith("__PROJECT_NOTIFY__:")) {
+        if (line.startsWith("__PROJECT_NOTIFY__:")) {
           try {
             const { chatId, text, buttons, footer, filePath, sessionKey } = JSON.parse(line.slice("__PROJECT_NOTIFY__:".length)) as {
               chatId: string; text: string; buttons?: { label: string; cmd: string; section?: string }[]; footer?: string; filePath?: string; sessionKey?: string
@@ -926,6 +908,8 @@ function connectSseQueueEvents(): void {
             sseDispatchDebounce = setTimeout(() => dispatchSessionAgents().catch(() => {}), 300)
           } else if (ev.type === "command-update") {
             void checkAndExecutePendingCommands().catch(() => {})
+          } else if (ev.type === "poll-phase" && ev.sessionKey && ev.phase) {
+            handlePollPhaseEvent(ev.sessionKey, ev.phase, ev)
           }
         } catch { /* ignore */ }
       }
@@ -1854,6 +1838,7 @@ export function initDaemonManager(): void {
       worktreePath: p.worktreePath,
       repoPath: p.repoPath,
       workspaceType: p.workspaceType,
+      metadata: p.metadata,
     }))
   })
   ipcMain.handle("project:delete", async (_e, projectId: string) => {
@@ -1885,6 +1870,7 @@ export function initDaemonManager(): void {
     status?: string
     groupId?: string
     groupIds?: string[]
+    metadata?: Record<string, string>
   }) => {
     initProjectStore(app.getPath("userData"))
     const p = getProject(String(patch?.id || "").trim())
@@ -1898,6 +1884,19 @@ export function initDaemonManager(): void {
     if (typeof patch.storyUrl === "string") p.storyUrl = patch.storyUrl.trim() || undefined
     if (typeof patch.productDocUrl === "string") p.productDocUrl = patch.productDocUrl.trim() || undefined
     if (typeof patch.techDocUrl === "string") p.techDocUrl = patch.techDocUrl.trim() || undefined
+    if (patch.metadata !== undefined) {
+      if (patch.metadata && typeof patch.metadata === "object") {
+        const meta: Record<string, string> = {}
+        for (const [k, v] of Object.entries(patch.metadata)) {
+          if (!k.trim()) continue
+          meta[k] = String(v ?? "")
+        }
+        if (Object.keys(meta).length) p.metadata = meta
+        else delete p.metadata
+      } else {
+        delete p.metadata
+      }
+    }
     if (typeof patch.status === "string") {
       const st = patch.status.trim()
       if (st === "active" || st === "paused" || st === "done") p.status = st

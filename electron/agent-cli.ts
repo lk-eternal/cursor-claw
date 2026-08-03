@@ -124,6 +124,17 @@ export function syncMainProcessProxyEnv(config: { httpProxy?: string; httpsProxy
   else delete env.NODE_USE_ENV_PROXY
 }
 
+/**
+ * 进程启动最早期注入代理环变量。
+ * Node 读 `NODE_USE_ENV_PROXY` 是一次性的：发出首个请求后再改 process.env 不再生效，
+ * 所以不能等到 initDaemonManager。读配置失败时静默跳过，不能阻断启动。
+ */
+export function bootstrapProxyEnv(): void {
+  try {
+    syncMainProcessProxyEnv(getConfig())
+  } catch { /* 配置尚未就绪：后续 initDaemonManager 会再同步一次 */ }
+}
+
 export function createAgentEnv(extras?: Record<string, string>): Record<string, string> {
   const config = getConfig()
   const env: Record<string, string> = {

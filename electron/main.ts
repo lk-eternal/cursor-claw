@@ -16,6 +16,7 @@ import {
   clearMessageQueue,
   execAgentAsync,
   applyProxyEnv,
+  bootstrapProxyEnv,
   initDaemonManager,
   shutdownDaemonManager,
   saveAppConfigFromRenderer,
@@ -46,6 +47,10 @@ if (profileName) {
   const baseDir = path.dirname(app.getPath("userData"))
   app.setPath("userData", path.join(baseDir, `cursor-claw-${profileName}`))
 }
+
+// NODE_USE_ENV_PROXY 必须在 Node 发出首个请求前就在环境里（initDaemonManager 里再赋已晚）。
+// 这里只管提前注入；后续代理变更仍走 syncMainProcessProxyEnv。
+bootstrapProxyEnv()
 
 let mainWindow: BrowserWindow | null = null
 let closeConfirmDialogOpen = false

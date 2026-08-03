@@ -1,4 +1,4 @@
-import { DEFAULT_NODE_GROUP_ID, encodeRepoPair } from "./project-types.js";
+import { DEFAULT_NODE_GROUP_ID, encodeRepoPairOption } from "./project-types.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -394,7 +394,7 @@ export class LarkSender {
       },
     ]
 
-    const encode = encodeRepoPair
+    const encode = encodeRepoPairOption
     const labelOf = (rp: string, b: string, t?: string, d?: string) => {
       const remote = /^(https?:\/\/|ssh:\/\/|git@)/i.test(rp.trim())
       const norm = rp.replace(/\\/g, "/").replace(/\/+$/, "")
@@ -1707,7 +1707,12 @@ export class LarkSender {
         try {
           const rawForm = data?.action?.form_value;
           const formValue = rawForm && typeof rawForm === "object" && !Array.isArray(rawForm)
-            ? Object.fromEntries(Object.entries(rawForm).map(([k, v]) => [k, String(v ?? "").trim()]))
+            ? Object.fromEntries(Object.entries(rawForm).map(([k, v]) => {
+              if (Array.isArray(v)) {
+                return [k, v.map((x) => String(x ?? "").trim()).filter(Boolean)]
+              }
+              return [k, String(v ?? "").trim()]
+            }))
             : undefined;
           const evt: LarkCardActionEvent = {
             messageId: data?.context?.open_message_id ?? data?.open_message_id ?? "",
@@ -1794,8 +1799,8 @@ export interface LarkCardActionEvent {
   value: unknown;
   /** 输入框组件提交的文本（tag=input 时返回） */
   inputValue?: string;
-  /** 表单提交时各字段 name → value */
-  formValue?: Record<string, string>;
+  /** 表单提交时各字段 name → value（multi_select 为 string[]） */
+  formValue?: Record<string, string | string[]>;
 }
 
 export interface LarkMessageEvent {

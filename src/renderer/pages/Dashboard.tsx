@@ -133,25 +133,6 @@ export default function Dashboard({ onSettings, active }: Props) {
     return m
   }, [sessionTabs])
 
-  const resolveLogSessionLabel = useCallback((sk: string) => {
-    const direct = sessionLogLabelByKey.get(sk)
-    if (direct) return direct
-    const norm = sk.replace(/\\/g, "/").toLowerCase()
-    for (const [k, v] of sessionLogLabelByKey) {
-      if (k.replace(/\\/g, "/").toLowerCase() === norm) return v
-    }
-    const pid = sk.match(/::project_([a-f0-9]+)/i)?.[1]
-    if (pid) {
-      for (const [k, v] of sessionLogLabelByKey) {
-        if (k.includes(`project_${pid}`)) return v
-      }
-      // 独立群项目可能不在当前 chat 的页签里，用项目表兜底，避免日志只显示 id 前缀
-      const name = projectNameById.get(pid)
-      if (name) return `📦 ${name}`
-    }
-    return undefined
-  }, [sessionLogLabelByKey, projectNameById])
-
   const [activeSessionKey, setActiveSessionKey] = useState("")
   const [sessionSwitching, setSessionSwitching] = useState("")
   const [modelTabs, setModelTabs] = useState<{ model: string; modelParams?: string; label?: string }[]>([])
@@ -169,6 +150,29 @@ export default function Dashboard({ onSettings, active }: Props) {
   const sessionListRef = useRef(sessionList)
   sessionListRef.current = sessionList
   const treeBusyRef = useRef(false)
+
+  const resolveLogSessionLabel = useCallback((sk: string) => {
+    const direct = sessionLogLabelByKey.get(sk)
+    if (direct) return direct
+    const norm = sk.replace(/\\/g, "/").toLowerCase()
+    for (const [k, v] of sessionLogLabelByKey) {
+      if (k.replace(/\\/g, "/").toLowerCase() === norm) return v
+    }
+    const running = sessionListRef.current.find((s) =>
+      s.sessionKey === sk || s.sessionKey.replace(/\\/g, "/").toLowerCase() === norm)
+    if (running?.chatName) return running.chatName
+    const pid = sk.match(/::project_([a-f0-9]+)/i)?.[1]
+    if (pid) {
+      for (const [k, v] of sessionLogLabelByKey) {
+        if (k.includes(`project_${pid}`)) return v
+      }
+      const name = projectNameById.get(pid)
+      if (name) return `📦 ${name}`
+    }
+    return undefined
+  }, [sessionLogLabelByKey, projectNameById])
+  const resolveLogSessionLabelRef = useRef(resolveLogSessionLabel)
+  resolveLogSessionLabelRef.current = resolveLogSessionLabel
 
   useEffect(() => {
     if (!actionError) return
@@ -243,7 +247,11 @@ export default function Dashboard({ onSettings, active }: Props) {
       const running = runningSrc.map((s) => ({
         sessionKey: s.sessionKey,
         chatType: s.chatType,
-        label: labelByKey.get(s.sessionKey) || s.chatName || s.sessionKey,
+        // 与日志同一套标签（📦/📂/⏳），chatName 只当兜底——否则专属群项目会显示成「P: 名」
+        label: labelByKey.get(s.sessionKey)
+          || resolveLogSessionLabelRef.current(s.sessionKey)
+          || s.chatName
+          || s.sessionKey,
         model: s.model,
         modelParams: s.modelParams,
         workspaceDir: s.workspaceDir,

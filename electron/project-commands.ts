@@ -169,13 +169,21 @@ function formatProjectCard(p: Project, index?: number): string {
           })
         : [`base=${p.baseBranch}`]),
     ]
+  const groupLine = projectGroupIds(p)
+    .map((id) => resolveNodeGroup(id).name)
+    .filter(Boolean)
+    .join("、")
   const lines = [
     index != null ? `📦 项目 #${index} · ${p.name}` : `📦 项目 · ${p.name}`,
     `🆔 ${p.id}`,
+    groupLine ? `🏷 流程组: ${groupLine}` : "",
     `📝 ${p.goal}`,
     p.storyUrl ? `🔗 飞书项目 · ${p.storyUrl}` : "",
     p.productDocUrl ? `📘 产品文档 · ${p.productDocUrl}` : "",
     p.techDocUrl ? `📗 技术文档 · ${p.techDocUrl}` : "",
+    ...(p.metadata && Object.keys(p.metadata).length
+      ? ["📋 metadata", ...Object.entries(p.metadata).map(([k, v]) => `   ${k}: ${v}`)]
+      : []),
     ...gitLines,
     `💠 ${p.status}`,
     p.lastArtifactPath ? `📄 artifact · ${p.lastArtifactPath}` : "📄 尚无产物",

@@ -20,6 +20,7 @@ import {
   setCurrentProjectId,
   registerArtifact,
   projectGroupIds,
+  mergeProjectMetadata,
 } from "../src/shared/project-store.js"
 import {
   canEnterProjectFromChat,
@@ -119,7 +120,7 @@ describe("project-store", () => {
     const groups = getNodeGroups()
     expect(groups.map((g) => g.id)).toEqual(["develop", "test"])
     const develop = resolveNodeGroup("develop")
-    expect(develop.nodes.map((n) => n.id)).toEqual(["plan", "build", "review", "deploy", "submit-test", "analyze-bug", "fix-bug", "fill-release-doc"])
+    expect(develop.nodes.map((n) => n.id)).toEqual(["plan", "build", "review", "deploy", "mr", "submit-test", "analyze-bug", "fix-bug", "fill-release-doc"])
     expect(develop.workspace).toBe("worktree")
     expect(resolveNodeGroup("test").nodes).toHaveLength(7)
     expect(resolveNodeGroup("test").workspace).toBe("plain")
@@ -260,6 +261,23 @@ describe("project-store", () => {
     expect(resolveProjectRef(hexId)?.id).toBe(hexId)
     expect(resolveProjectRef(hexId)?.name).toBe("digit-prefix-id")
     expect(resolveProjectRef("1")?.id).toBe(first.id)
+  })
+
+  it("mergeProjectMetadata merges and deletes empty values", () => {
+    const p = createProject({
+      name: "meta",
+      goal: "g",
+      repoPath: "D:/r",
+      baseBranch: "main",
+      featureBranch: "f",
+      worktreePath: "D:/w",
+    })
+    mergeProjectMetadata(p, { deploy_url: "https://x", env: "test" })
+    expect(p.metadata).toEqual({ deploy_url: "https://x", env: "test" })
+    mergeProjectMetadata(p, { env: "", token: "abc" })
+    expect(p.metadata).toEqual({ deploy_url: "https://x", token: "abc" })
+    mergeProjectMetadata(p, { deploy_url: "", token: "" })
+    expect(p.metadata).toBeUndefined()
   })
 
 })

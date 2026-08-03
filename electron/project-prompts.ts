@@ -41,11 +41,27 @@ const ACTION_GUIDES: Record<string, string[]> = {
     "- 禁止 force push",
     "- 产物写部署摘要：推送分支、关键 commit、部署后验证方式",
   ],
+  mr: [
+    "提测：推送代码、创建指向测试分支的 MR：",
+    "- 推送 feature 到 origin 同名分支",
+    "- 创建 feature → 测试分支的 MR：在 AI 工作目录执行 git push origin HEAD -o merge_request.create -o merge_request.target=<测试分支全名> -o merge_request.title=\"Draft: <项目名>\"，命令输出中会返回 MR 链接",
+    "- push option 建不出 MR 时改用 glab CLI；仍不行则给出 GitLab 新建 MR 页面链接引导用户手动创建，拿到 MR 链接后继续",
+    "- 建完 MR 必查冲突（glab/API 看 has_conflicts / merge_status，detected_merge_conflicts 即有冲突），有冲突时用临时合流分支解决，feature 必须保持纯净：",
+    "  1. git fetch origin && git checkout -b <feature名>-mr origin/<测试分支全名>",
+    "  2. git merge <feature分支全名>（在临时分支上解决冲突并提交）",
+    "  3. git push origin <feature名>-mr 并改建「<feature名>-mr → 测试分支」的 MR（关闭原冲突 MR），后续提测信息用新 MR 链接",
+    "  4. git checkout 回 feature 分支；严禁把测试分支 merge/rebase 进 feature",
+    "- 将 MR 信息（链接 / 源分支 / 目标分支 / 变更摘要）发送出来",
+    "- 禁止勾选删除源分支，说明 feature 要保留",
+    "- push option 不加 merge_request.remove_source_branch；默认仍勾选时用 glab/API 改 false",
+    "- glab 必须带 --remove-source-branch=false",
+  ],
   "submit-test": [
     "提测：推送代码、创建指向测试分支的 MR，并让测试同学在飞书项目里看到完整提测信息：",
     "- 推送 feature 到 origin 同名分支",
     "- 创建 feature → 测试分支的 MR：在 AI 工作目录执行 git push origin HEAD -o merge_request.create -o merge_request.target=<测试分支全名> -o merge_request.title=\"Draft: <项目名>\"，命令输出中会返回 MR 链接",
-    "- push option 建不出 MR 时改用 glab CLI；仍不行则给出 GitLab 新建 MR 页面链接引导用户手动创建，拿到 MR 链接后继续",
+    "- **禁止勾选「删除源分支」**：feature 需保留供后续修复缺陷/迭代；push option 不要加 merge_request.remove_source_branch；若 GitLab 项目默认仍勾选，建完后执行 glab mr update --remove-source-branch=false（或 API 设 remove_source_branch=false）",
+    "- push option 建不出 MR 时改用 glab CLI（必须带 --remove-source-branch=false）；仍不行则给出 GitLab 新建 MR 页面链接引导用户手动创建（手动创建时也取消勾选删除源分支），拿到 MR 链接后继续",
     "- 建完 MR 必查冲突（glab/API 看 has_conflicts / merge_status，detected_merge_conflicts 即有冲突），有冲突时用临时合流分支解决，feature 必须保持纯净：",
     "  1. git fetch origin && git checkout -b <feature名>-mr origin/<测试分支全名>",
     "  2. git merge <feature分支全名>（在临时分支上解决冲突并提交）",
@@ -65,7 +81,7 @@ const ACTION_GUIDES: Record<string, string[]> = {
     "分析缺陷。用户点击时测试已提了缺陷、指派给了自己，缺陷内容在飞书项目里不在本会话中：",
     "- 从本项目关联的飞书项目空间拉取缺陷类工作项，筛选：指派人为当前用户、状态未完成；拉不到或为空时如实说明，禁止编造",
     "- 读每个缺陷的描述 / 复现步骤 / 附件截图，结合代码定位根因，评估影响面与修复思路",
-    "- 产物写缺陷分析报告：缺陷清单（标题/链接/级别）、根因分析、修复方案、风险与依赖",
+    "- 产物写缺陷分析报告：缺陷清单（标题/链接(格式: https://project.feishu.cn/wk-dm/bug/detail/xxxxxxx)/级别）、根因分析、修复方案、风险与依赖",
   ],
   "fix-bug": [
     "修复缺陷（以最近一次通过的缺陷分析报告为准；无报告时先拉取指派给自己的待解决缺陷，拉不到则如实说明）：",
@@ -75,7 +91,7 @@ const ACTION_GUIDES: Record<string, string[]> = {
     "【MR——只认「合并到测试分支」这一条】",
     "- 评论/产物里允许出现的 MR 有且仅有：源分支=本项目 feature、目标=配置的测试分支、且状态为 open（未合并）",
     "- 获取方式：project_get 查 lastMrUrl → 用 glab/API 核对 target 与 state；对不上或已 merged 一律作废",
-    "- 没有合格 open MR 时必须新建：git push origin HEAD -o merge_request.create -o merge_request.target=<测试分支全名> …（与提测节点相同）；建不出再用 glab；禁止开往生产基线/release",
+    "- 没有合格 open MR 时必须新建：git push origin HEAD -o merge_request.create -o merge_request.target=<测试分支全名> …（与提测节点相同，禁止 merge_request.remove_source_branch）；建不出再用 glab --remove-source-branch=false；禁止开往生产基线/release",
     "- 建完 MR 必查冲突（has_conflicts / merge_status）：有冲突时按提测节点的临时合流分支方案处理（从测试分支拉临时分支合入 feature 解决，改建临时分支 → 测试分支的 MR）；严禁把测试分支 merge/rebase 进 feature",
     "- 严禁：贴已 merged 的旧 MR、贴合到 release/基线的 MR、贴其它需求/其它分支的 MR、把「曾经合过」的 MR 当本次修复凭证",
     "",
@@ -134,7 +150,7 @@ const ACTION_GUIDES: Record<string, string[]> = {
   "file-bug": [
     "提缺陷。用户点击时有两种场景，先判断输入来源，禁止信息不全就直接建缺陷：",
     "- 场景A 刚跑完测试：读最近测试报告产物的未通过项，列出来让用户确认要提交哪些",
-    "- 场景B 用户新发现的问题：主动引导用户提供——现象、环境/入口、复现步骤、实际结果、期望结果、优先级，并提醒「相关截图直接发到本会话」",
+    "- 场景B 用户新发现的问题：主动引导用户提供——现象、环境/入口、复现步骤、实际结果、期望结果、优先级（没有填写可根据描述定义P0/P1/P2/P3），并提醒「相关截图直接发到本会话」",
     "- 建缺陷前先查清结构，禁止猜字段：解析需求工作项链接得到空间，查缺陷类型的创建字段（meegle workitem meta-types / meta-create-fields）",
     "- 每条缺陷必须做到：",
     "  1. 描述按 环境入口/复现步骤/实际结果/期望结果 结构化填写",
@@ -142,7 +158,7 @@ const ACTION_GUIDES: Record<string, string[]> = {
     "  3. 指派人按前后端归属识别；候选多人时问用户",
     "  4. 用户发来的截图（本地路径）上传为附件挂到缺陷（upload_file / meegle attachment），禁止只在文字里写「见截图」",
     "  5. 关联到本项目的需求工作项（关联产品/技术需求字段或 relation，按空间字段定义）",
-    "- 产物写缺陷清单：标题、级别、报告人、指派人、工作项链接、附件与关联情况",
+    "- 产物写缺陷清单：标题、级别、报告人、指派人、工作项链接、附件与关联情况(缺陷链接统一用: https://project.feishu.cn/wk-dm/bug/detail/{id})",
   ],
   retest: [
     "复测。开发在缺陷下评论修复说明；仅当代码已合入测试环境后才会把缺陷转到待验证：",
@@ -160,43 +176,9 @@ const ACTION_GUIDES: Record<string, string[]> = {
   ],
 }
 
-/** 飞书项目操作公共规范（随节点任务附带，模型按需使用） */
-const MEEGLE_RULES = [
-  "飞书项目操作规范:",
-  "- 优先用 meegle CLI（先 meegle url decode 解析链接、--help / inspect 确认参数再调用），feishu-project-mcp 作兜底",
-  "- 涉及人员字段（报告人/指派人/@）必须解析真实 id（meegle user search / search_user_info），报告人缺省为当前用户，禁止留空或猜测",
-  "- 用户消息中的图片已保存在本地路径：涉及工作项时应上传为附件，禁止只在文字里引用",
-  "- 信息不足时先向用户提问再操作，禁止臆测编造",
-]
-
 /** 默认节点提示词全文（设置页展示/恢复默认用） */
 export function getDefaultNodeGuide(id: string): string {
   return (ACTION_GUIDES[id] ?? []).join("\n")
-}
-
-/** 部署节点附加的分支红线（内部约束，模型遵守即可，不向用户复述） */
-function deployConstraints(p: Project): string[] {
-  const devB = p.repos?.[0]?.developBranch
-  return [
-    "",
-    "deploy 内部约束（遵守即可，勿向用户复述）:",
-    `- 禁止向生产基线 ${p.baseBranch} 推送或开 MR`,
-    `- 部署目标只能是配置的开发分支${devB ? `(${devB})` : "(未配置)"}，分支名必须原样使用，禁止猜测或纠正拼写`,
-    "- 缺分支时 project_get 查字段，再用 project_update 补齐 developBranch",
-  ]
-}
-
-/** 提测节点附加的分支红线 */
-function submitTestConstraints(p: Project): string[] {
-  const testB = p.repos?.[0]?.testBranch
-  return [
-    "",
-    "submit-test 内部约束（遵守即可，勿向用户复述）:",
-    `- 禁止向生产基线 ${p.baseBranch} 推送或开 MR`,
-    `- MR 目标只能是配置的测试分支${testB ? `(${testB})` : "(未配置)"}，分支名必须原样使用，禁止猜测或纠正拼写`,
-    "- 缺分支时 project_get 查字段，再用 project_update 补齐 testBranch",
-    "- 需要时可用 project_register_artifact 登记产物并附带 mr_url，供后续节点注入",
-  ]
 }
 
 /** 单仓分支行（会话/节点上下文共用，名称必须原样使用） */
@@ -231,13 +213,17 @@ function contextBlock(p: Project): string[] {
     p.productDocUrl ? `产品文档: ${p.productDocUrl}` : "",
     p.techDocUrl ? `技术文档: ${p.techDocUrl}` : "",
   ]
+  const meta = p.metadata && Object.keys(p.metadata).length
+    ? ["", "项目 metadata:", ...Object.entries(p.metadata).map(([k, v]) => `- ${k}: ${v}`)]
+    : []
   const root = projectRootDir(p)
   if (isPlainProject(p)) {
-    return [...head, `项目目录: ${root || p.worktreePath}（纯会话型项目，无代码仓）`].filter(Boolean)
+    return [...head, ...meta, `项目目录: ${root || p.worktreePath}（纯会话型项目，无代码仓）`].filter(Boolean)
   }
   const repos = projectRepos(p)
   return [
     ...head,
+    ...meta,
     root ? `项目目录: ${root}` : "",
     `feature 分支: ${p.featureBranch}`,
     "",
@@ -261,8 +247,8 @@ export function buildProjectSessionPrompt(p: Project): string {
     "工作方式:",
     "1. 用户直接发消息 → 正常对话：答疑、讨论方案、小修小改",
     `2. 用户点击 ${nodeLabels || "流程节点"} 按钮 → 会收到带明确要求的节点任务，直接执行`,
-    "3. 轻量化节点：节点按钮注入任务提示词后直接执行；产物可写入 .cursor-claw/artifacts/，需要时用 project_register_artifact 登记最近产物供后续节点注入；用 send_text / send_file 正常交付用户——宿主不再自动发产物菜单",
-    "4. 查项目字段用 project_get，补分支等配置用 project_update",
+    "3. 节点任务轻量化：点击节点按钮仅注入该节点工作要求；需要分支/metadata/文档等完整信息时调用 project_get；产物可写入 .cursor-claw/artifacts/，需要时用 project_register_artifact 登记；用 send_text / send_file 交付——宿主不再自动发产物菜单",
+    "4. 查项目字段用 project_get，补分支/metadata 等配置用 project_update（metadata 为 KV merge，空值删 key）",
     "",
     "边界:",
     ...(plain ? [] : [
@@ -273,27 +259,22 @@ export function buildProjectSessionPrompt(p: Project): string {
   ].join("\n")
 }
 
-/** 节点任务提示词（节点表驱动：自定义节点用配置提示词，默认节点缺省用上方模板） */
+/** 节点任务提示词（轻量化：仅节点工作要求 + project_get 指引；完整上下文见 buildProjectSessionPrompt） */
 export function buildActionPrompt(p: Project, type: ProjectActionType): string {
   const node = getProjectNode(type, p.groupId)
   const label = projectNodeLabel(type, p.groupId)
   const guide = node?.prompt?.trim()
     ? node.prompt.trim().split(/\r?\n/)
     : (ACTION_GUIDES[type] ?? [`完成 ${label} 工作`])
-  const lines = [
+  return [
     `[PROJECT_ACTION] ${label}节点`,
     "本任务由用户点击按钮主动发起：直接开始执行，禁止向用户二次确认。",
     "",
-    ...contextBlock(p),
-    p.lastArtifactPath ? `最近产物: ${p.lastArtifactPath}` : "",
-    p.lastArtifactSummary ? `最近产物摘要: ${p.lastArtifactSummary}` : "",
-    p.lastMrUrl ? `最近 MR: ${p.lastMrUrl}` : "",
-    p.lastFeishuDocUrl ? `最近飞书文档: ${p.lastFeishuDocUrl}` : "",
+    `项目: ${p.name}（project_id=${p.id}）`,
+    `如需分支、metadata、文档链接、最近产物等完整信息，调用 project_get(project_id=${p.id})`,
     "",
-    `本节点要求:`,
+    "本节点要求:",
     ...guide,
-    "",
-    ...MEEGLE_RULES,
     "",
     "交付方式:",
     "- 按节点要求完成工作；产物可写入 .cursor-claw/artifacts/",
@@ -301,8 +282,5 @@ export function buildActionPrompt(p: Project, type: ProjectActionType): string {
     "- 用 send_text / send_file 向用户交付结果与文件；宿主不会自动发产物菜单",
     "",
     "边界: 内部字段不向用户复述。",
-  ]
-  if (type === "deploy") lines.push(...deployConstraints(p))
-  if (type === "submit-test") lines.push(...submitTestConstraints(p))
-  return lines.filter(Boolean).join("\n")
+  ].join("\n")
 }

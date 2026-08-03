@@ -182,11 +182,12 @@ declare global {
     listProjects(): Promise<{
       id: string; name: string; goal?: string; storyUrl?: string; productDocUrl?: string; techDocUrl?: string
       featureBranch: string; status: string; groupId?: string; groupIds?: string[]; worktreePath?: string; repoPath?: string; workspaceType?: string
+      metadata?: Record<string, string>
     }[]>
     deleteProject(projectId: string): Promise<{ ok: boolean; name?: string; error?: string }>
     updateProject(patch: {
       id: string; name?: string; goal?: string; storyUrl?: string; productDocUrl?: string; techDocUrl?: string
-      status?: string; groupId?: string; groupIds?: string[]
+      status?: string; groupId?: string; groupIds?: string[]; metadata?: Record<string, string>
     }): Promise<{ ok: boolean; error?: string }>
     switchProject(projectId: string): Promise<{ ok: boolean; error?: string }>
     listQuickModels(): Promise<{ ok: boolean; models: { model: string; modelParams?: string; label?: string }[] }>

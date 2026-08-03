@@ -73,8 +73,9 @@ interface ProjectListItem {
   worktreePath?: string
   repoPath?: string
   workspaceType?: string
+  metadata?: Record<string, string>
 }
-type ProjectsSubTab = "list" | "settings"
+type ProjectsSubTab = "list" | "settings" | "groups"
 const PROJECT_STATUS_LABEL: Record<string, string> = { active: "进行中", paused: "已暂停", done: "已完成" }
 
 const MCP_TEMPLATE = JSON.stringify({
@@ -132,6 +133,8 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
   const [projectsSubTab, setProjectsSubTab] = useState<ProjectsSubTab>("list")
   const [projectList, setProjectList] = useState<ProjectListItem[]>([])
   const [projectEditing, setProjectEditing] = useState<ProjectListItem | null>(null)
+  const [metadataEditText, setMetadataEditText] = useState("{}")
+  const [metadataExpanded, setMetadataExpanded] = useState<Record<string, boolean>>({})
   const [updateBusy, setUpdateBusy] = useState(false)
   const [updateCheck, setUpdateCheck] = useState<Awaited<ReturnType<typeof window.electronAPI.checkAppUpdate>> | null>(null)
   const [updateMsg, setUpdateMsg] = useState<string | null>(null)
@@ -789,6 +792,24 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
   }
   const handleProjectSave = async () => {
     if (!projectEditing || !projectEditing.name.trim()) return
+    let metadata: Record<string, string> | undefined
+    try {
+      const parsed = JSON.parse(metadataEditText || "{}") as unknown
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+        metadata = {}
+        for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+          if (!k.trim()) continue
+          metadata[k] = String(v ?? "")
+        }
+        if (!Object.keys(metadata).length) metadata = undefined
+      } else {
+        void showAlert("错误", "metadata 必须是 JSON 对象")
+        return
+      }
+    } catch {
+      void showAlert("错误", "metadata JSON 格式无效")
+      return
+    }
     const r = await window.electronAPI.updateProject({
       id: projectEditing.id,
       name: projectEditing.name.trim(),
@@ -797,8 +818,8 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
       productDocUrl: projectEditing.productDocUrl?.trim() || "",
       techDocUrl: projectEditing.techDocUrl?.trim() || "",
       status: projectEditing.status,
-      // 全不勾传空数组：后端回落默认组（undefined 会静默保留旧值）
       groupIds: projectEditing.groupIds ?? [],
+      metadata,
     })
     if (!r.ok) { void showAlert("错误", r.error ?? "保存失败"); return }
     setProjectEditing(null)
@@ -1151,6 +1172,10 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                   onClick={() => setProjectsSubTab("settings")}
                   className={`rounded-md border px-3 py-1.5 text-xs transition ${projectsSubTab === "settings" ? "border-blue-500 bg-blue-500/10 font-medium text-white" : "border-gray-700 text-gray-400 hover:bg-gray-800 hover:text-gray-200"}`}
                 >项目设置</button>
+                <button type="button"
+                  onClick={() => setProjectsSubTab("groups")}
+                  className={`rounded-md border px-3 py-1.5 text-xs transition ${projectsSubTab === "groups" ? "border-blue-500 bg-blue-500/10 font-medium text-white" : "border-gray-700 text-gray-400 hover:bg-gray-800 hover:text-gray-200"}`}
+                >流程组</button>
               </div>
 
               {projectsSubTab === "list" && (
@@ -1171,11 +1196,30 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                             </span>
                           </div>
                           {p.storyUrl && <p className="truncate text-xs text-gray-500">{p.storyUrl}</p>}
+                          {p.metadata && Object.keys(p.metadata).length > 0 && (
+                            <div className="mt-1">
+                              <button
+                                type="button"
+                                onClick={() => setMetadataExpanded((s) => ({ ...s, [p.id]: !s[p.id] }))}
+                                className="text-xs text-gray-500 transition hover:text-gray-300"
+                              >
+                                metadata ({Object.keys(p.metadata).length}) {metadataExpanded[p.id] ? "▾" : "▸"}
+                              </button>
+                              {metadataExpanded[p.id] && (
+                                <div className="mt-1 space-y-0.5 font-mono text-[10px] text-gray-500">
+                                  {Object.entries(p.metadata).map(([k, v]) => (
+                                    <p key={k} className="truncate" title={`${k}: ${v}`}>{k}: {v}</p>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </div>
                         <div className="ml-3 flex shrink-0 items-center gap-1.5">
                           <button type="button" onClick={() => handleProjectSwitch(p.id)}
                             className="rounded px-2 py-0.5 text-xs text-blue-400 transition hover:bg-blue-600/20">切换至</button>
-                          <button type="button" onClick={() => setProjectEditing({
+                          <button type="button" onClick={() => {
+                            setProjectEditing({
                             ...p,
                             goal: p.goal ?? "",
                             storyUrl: p.storyUrl ?? "",
@@ -1184,7 +1228,9 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                             groupIds: p.groupIds?.length
                               ? p.groupIds
                               : (p.groupId ? [p.groupId] : nodeGroups[0]?.id ? [nodeGroups[0].id] : []),
-                          })}
+                          })
+                            setMetadataEditText(JSON.stringify(p.metadata ?? {}, null, 2))
+                          }}
                             className="rounded px-2 py-0.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white">修改</button>
                           <button type="button" onClick={() => handleProjectDelete(p)}
                             className="rounded px-2 py-0.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-red-400">删除</button>
@@ -1252,8 +1298,10 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                   </div>
                 </div>
               </section>
+              </>)}
 
-              <section className="space-y-4 border-t border-gray-800 pt-4">
+              {projectsSubTab === "groups" && (
+              <section className="space-y-4">
                 <h3 className="text-sm font-medium text-gray-300">流程组</h3>
                 <p className="text-xs text-gray-500">建项可多选（不选默认「开发」）；推进节点按所选组分组展示；点击节点编辑提示词。</p>
                 <div className="flex flex-wrap items-center gap-1.5">
@@ -1311,7 +1359,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                   </div>
                 )}
               </section>
-              </>)}
+              )}
             </>)}
 
             {/* ═══ Toolbox ═══ */}
@@ -1689,6 +1737,10 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                 <input type="text" value={projectEditing.techDocUrl ?? ""}
                   onChange={(e) => setProjectEditing({ ...projectEditing, techDocUrl: e.target.value })}
                   className={inputCls} placeholder="https://..." /></div>
+              <div><label className="mb-1 block text-xs text-gray-500">metadata（JSON 对象，value 均为字符串）</label>
+                <textarea value={metadataEditText}
+                  onChange={(e) => setMetadataEditText(e.target.value)}
+                  rows={6} className={`${inputCls} font-mono text-xs`} placeholder='{"deploy_url":"https://..."}' /></div>
               <div className="rounded-lg border border-gray-800 bg-gray-950/50 px-3 py-2 text-[11px] text-gray-500">
                 <p className="mb-1 text-gray-400">只读（改这些请重建项目）</p>
                 <p className="truncate">🌿 {projectEditing.featureBranch || "—"}</p>

@@ -399,6 +399,19 @@ export function createProject(input: Omit<Project, "id" | "status" | "createdAt"
   return project
 }
 
+/** merge metadata KV；空字符串 value 删 key */
+export function mergeProjectMetadata(project: Project, patch: Record<string, string>): void {
+  if (!patch || !Object.keys(patch).length) return
+  const meta = { ...(project.metadata ?? {}) }
+  for (const [k, v] of Object.entries(patch)) {
+    if (!k.trim()) continue
+    if (v === "") delete meta[k]
+    else meta[k] = v
+  }
+  if (Object.keys(meta).length) project.metadata = meta
+  else delete project.metadata
+}
+
 /** 登记最近产物（供后续节点注入上下文）；不发消息、不推进流程 */
 export function registerArtifact(
   projectId: string,

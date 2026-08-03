@@ -12,6 +12,8 @@ import {
 
   registerArtifact,
 
+  mergeProjectMetadata,
+
 } from "./shared/project-store.js"
 
 import { projectIdFromSessionKey } from "./shared/project-types.js"
@@ -132,7 +134,7 @@ export function registerProjectAgentTools(mcpServer: McpServer): void {
 
     "project_update",
 
-    "更新项目元数据。字段红线：baseBranch=生产基线，只作切 feature 起点，禁止默认作为 ship 推送/MR 目标；testBranch=测试环境；developBranch=开发环境。可补齐 repos[].testBranch/developBranch、goal、文档链接等。",
+    "更新项目元数据。字段红线：baseBranch=生产基线，只作切 feature 起点，禁止默认作为 ship 推送/MR 目标；testBranch=测试环境；developBranch=开发环境。可补齐 repos[].testBranch/developBranch、goal、文档链接、metadata（KV merge，空值删 key）等。",
 
     {
 
@@ -157,6 +159,8 @@ export function registerProjectAgentTools(mcpServer: McpServer): void {
       develop_branch: z.string().optional().describe("主仓开发分支"),
 
       repo_index: z.number().int().min(0).optional().describe("改第几个仓的分支，默认 0"),
+
+      metadata: z.record(z.string(), z.string()).optional().describe("项目 KV 配置 merge 写入；value 传空字符串删 key"),
 
     },
 
@@ -208,6 +212,8 @@ export function registerProjectAgentTools(mcpServer: McpServer): void {
 
       p.repos = repos
 
+      if (args.metadata) mergeProjectMetadata(p, args.metadata)
+
       if (idx === 0) {
 
         p.repoPath = repos[0].repoPath
@@ -243,6 +249,8 @@ export function registerProjectAgentTools(mcpServer: McpServer): void {
         baseBranch: p.baseBranch,
 
         repos: p.repos,
+
+        metadata: p.metadata,
 
       }, null, 2)}`)
 

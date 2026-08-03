@@ -9,7 +9,7 @@ import {
 } from "./config-store"
 import { parseChatKey, workspaceDirFromSessionKey, normalizeSessionKey, makeChatKey } from "../src/shared/channel-types"
 import { broadcastLog } from "./ui-logger"
-import { readLockFile, httpGet, httpPost, syncActiveSession, getCurrentActiveSession, drainSessionMessages, resolveMainChatId } from "./daemon-client"
+import { readLockFile, httpGet, httpPost, syncActiveSession, getCurrentActiveSession, drainSessionMessages, resolveMainChatId, enqueueToSession } from "./daemon-client"
 import { reportCommandResult } from "./command-handler"
 import {
   launchAgent as _launchCliAgent,
@@ -271,6 +271,7 @@ export interface QueueMessageItem {
   /** pending = 排队待投递；processing = 已投递给 Agent 待回复确认 */
   status?: "pending" | "processing"
   sessionKey?: string
+  messageId?: string
   chatType?: string
   timestamp?: number
   senderOpenId?: string
@@ -403,6 +404,8 @@ interface LaunchAgentParams {
   modelOverride?: string
   modelParamsOverride?: string
   workingDirectory?: string
+  /** 调度时已知的队列 messageId（SDK bootstrap poll 预登记，防误换卡） */
+  pendingMessageIds?: string[]
 }
 
 /** 解析项目绑定：sessionKey 带 project_，或 chatId 命中独立群 groupChatId */
@@ -496,6 +499,7 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
       senderOpenId, chatName, taskMessage,
       apiKey: resource.apiKey ?? "", model, modelParams,
       keepSession, persistentPoll,
+      pendingMessageIds: p.pendingMessageIds,
     })
   }
 
@@ -514,19 +518,21 @@ export async function launchSessionAgent(
   sessionKey: string, chatType: ChatType,
   meta?: import("./agent-launcher").LaunchMeta,
   useMainWorkspace?: boolean, senderOpenId?: string,
+  pendingMessageIds?: string[],
 ): Promise<{ ok: boolean; error?: string }> {
-  return launchAgent({ sessionKey, chatType, meta, useMainWorkspace, senderOpenId })
+  return launchAgent({ sessionKey, chatType, meta, useMainWorkspace, senderOpenId, pendingMessageIds })
 }
 
 export async function launchIndependentAgent(
-  taskId: string, taskName: string, message: string, type: ChatType = "task",
-  chatId?: string, channelId?: string, model?: string, modelParams?: string,
+  taskId: string, _taskName: string, message: string, type: ChatType = "task",
+  _chatId?: string, channelId?: string, model?: string, modelParams?: string,
 ): Promise<{ ok: boolean; error?: string }> {
-  return launchAgent({
-    sessionKey: taskId, chatType: type, chatName: taskName, taskMessage: message,
-    meta: { chatId: chatId ?? taskName, chatType: type },
-    channelId, modelOverride: model, modelParamsOverride: modelParams,
-  })
+  const lock = cachedLock()
+  if (!lock?.port) return { ok: false, error: "daemon 未就绪" }
+  const r = await enqueueToSession(lock.port, taskId, message, type, { channelId, model, modelParams })
+  if (!r.ok) return r
+  await dispatchSessionAgents()
+  return { ok: true }
 }
 
 export async function notifyChatFallback(chatId: string, text: string): Promise<void> {
@@ -1216,15 +1222,25 @@ export async function dispatchSessionAgents(): Promise<void> {
 async function _planSessionLaunches(): Promise<Promise<void>[]> {
   const config = getConfig()
   const sessions = await getQueueSessions()
+  const queueMsgs = await getQueueMessages()
+  const pendingIdsBySession = new Map<string, string[]>()
+  for (const m of queueMsgs) {
+    if (!m.sessionKey || !m.messageId) continue
+    const ids = pendingIdsBySession.get(m.sessionKey) ?? []
+    ids.push(m.messageId)
+    pendingIdsBySession.set(m.sessionKey, ids)
+  }
+  const pendingFor = (sessionKey: string) => pendingIdsBySession.get(sessionKey)
   const launches: Promise<void>[] = []
 
   const feishuOn = (config.channels ?? []).some((c) => c.enabled && c.type === "feishu")
   const groupKeys = sessions.filter((s) => s.chatType === "group").map((s) => extractChatId(s.sessionKey))
   if (groupKeys.length > 0 && feishuOn) await fetchChatNames(groupKeys)
 
-  for (const { sessionKey, chatType, senderOpenId, hasPending } of sessions) {
-    // 失败无退避（sdkFailCooldownRemaining 恒为 0）；保留调用以便日后若恢复冷却仍生效
-    if (!hasPending && sdkFailCooldownRemaining(sessionKey) > 0) continue
+  for (const { sessionKey, chatType, senderOpenId } of sessions) {
+    // 瞬时故障恒为 0（立即重试）；鉴权/配额类永久错误返回退避剩余时间——
+    // 此时即使有待处理消息也必须等，否则每轮不到 1s 的重拉会把日志刷爆
+    if (sdkFailCooldownRemaining(sessionKey) > 0) continue
     if (isSessionAgentRunning(sessionKey)) {
       if (await isZombieAgent(sessionKey)) {
         broadcastLog(`[Agent] ${sessionKey} 疑似僵尸(队列有消息且 ${ZOMBIE_REPLY_SILENCE_MS / 60_000}min 无回复消息)，强制终止并重启`, "WARN")
@@ -1260,6 +1276,7 @@ async function _planSessionLaunches(): Promise<Promise<void>[]> {
           channelId,
           modelOverride: task?.model,
           modelParamsOverride: task?.modelParams,
+          pendingMessageIds: pendingFor(sessionKey),
         })
         if (!r.ok) broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${r.error}`, "WARN")
       })())
@@ -1308,6 +1325,7 @@ async function _planSessionLaunches(): Promise<Promise<void>[]> {
           meta: { chatId, chatType: "project" },
           channelId: parseChatKey(chatId).channelId,
           taskMessage: resumableP ? undefined : buildProjectSessionPrompt(proj),
+          pendingMessageIds: pendingFor(sessionKey),
         })
         if (!r.ok) {
           broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${r.error}`)
@@ -1334,7 +1352,7 @@ async function _planSessionLaunches(): Promise<Promise<void>[]> {
 
     const meta: import("./agent-launcher").LaunchMeta = { chatId, chatType: chatType as "p2p" | "group" }
     launches.push((async () => {
-      const result = await launchSessionAgent(sessionKey, chatType as "p2p" | "group", meta, mainUser, senderOpenId)
+      const result = await launchSessionAgent(sessionKey, chatType as "p2p" | "group", meta, mainUser, senderOpenId, pendingFor(sessionKey))
       if (result.ok && chatId !== sessionKey) {
         // 被动拉起（处理残留消息）不得抢占用户已选路由：重启后主会话恢复曾把用户从项目会话踢回主会话。
         // 仅在该 chat 尚无具体 active 路由（无记录/裸 chatKey 兜底态）时才登记
