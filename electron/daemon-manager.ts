@@ -42,6 +42,17 @@ import { FileCommand, reportCommandResult, handleFeishuModelCommand, handleFeish
 import { handleFeishuProjectCommand, handleProjectSyncSignal, fillProjectNewFromText, handleProjectNewSubmit, replySetupHub, executeProjectDelete, archiveProjectGroup } from "./project-commands"
 import { isGitRepoRoot } from "./project-worktree"
 import { getDefaultNodeGuide } from "./project-prompts"
+import {
+  fetchCatalog,
+  getSyncStatusForCatalogEntry,
+  importGroupFromHub,
+  importNodeFromHub,
+  previewHubItem,
+  syncGroupFromHub,
+  syncNodeFromHub,
+  uploadGroup,
+  uploadNode,
+} from "./flow-hub-service"
 import { initProjectStore, getProject, getCurrentProject, listProjects, getNodeGroups, saveNodeGroups, saveProject, projectGroupIds, parseNodeGroupExport, resolveUniqueNodeGroupId } from "../src/shared/project-store.js"
 import { projectIdFromSessionKey, projectSessionKey, DEFAULT_NODE_GROUP_ID, canEnterProjectFromChat } from "../src/shared/project-types.js"
 import {
@@ -2157,6 +2168,36 @@ export function initDaemonManager(): void {
     saveNodeGroups([...groups, imported])
     return { ok: true, group: imported }
   })
+
+  ipcMain.handle("flow-hub:get-catalog", async (_e, force?: boolean) => fetchCatalog(!!force))
+  ipcMain.handle("flow-hub:get-sync-status", (_e, payload: { kind: "group" | "node"; hubId: string; contentHash: string; hubRevision?: number }) =>
+    getSyncStatusForCatalogEntry(payload.kind, payload.hubId, payload.contentHash, payload.hubRevision))
+  ipcMain.handle("flow-hub:import-group", async (_e, hubId: string) => {
+    initProjectStore(app.getPath("userData"))
+    return importGroupFromHub(hubId)
+  })
+  ipcMain.handle("flow-hub:import-node", async (_e, payload: { hubId: string; targetGroupId: string }) => {
+    initProjectStore(app.getPath("userData"))
+    return importNodeFromHub(payload.hubId, payload.targetGroupId)
+  })
+  ipcMain.handle("flow-hub:upload-group", async (_e, groupId: string) => {
+    initProjectStore(app.getPath("userData"))
+    return uploadGroup(groupId)
+  })
+  ipcMain.handle("flow-hub:upload-node", async (_e, payload: { groupId: string; nodeId: string }) => {
+    initProjectStore(app.getPath("userData"))
+    return uploadNode(payload.groupId, payload.nodeId)
+  })
+  ipcMain.handle("flow-hub:sync-group", async (_e, payload: { hubId: string; mode: "overwrite" | "keep" }) => {
+    initProjectStore(app.getPath("userData"))
+    return syncGroupFromHub(payload.hubId, payload.mode)
+  })
+  ipcMain.handle("flow-hub:sync-node", async (_e, payload: { hubId: string; targetGroupId: string; mode: "overwrite" | "keep" }) => {
+    initProjectStore(app.getPath("userData"))
+    return syncNodeFromHub(payload.hubId, payload.targetGroupId, payload.mode)
+  })
+  ipcMain.handle("flow-hub:preview", async (_e, payload: { kind: "group" | "node"; hubId: string; nodeLocalId?: string }) =>
+    previewHubItem(payload.kind, payload.hubId, payload.nodeLocalId))
 
   void autoStartDaemonOnLaunch()
 }

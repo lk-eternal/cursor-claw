@@ -1,5 +1,6 @@
 import * as path from "node:path"
 import { parseChatKey } from "./channel-types.js"
+import type { FlowHubHubTrack } from "./flow-hub-types.js"
 
 export type ProjectStatus = "active" | "paused" | "done"
 /** 节点 id：流程组节点 slug，或用户自定义 */
@@ -13,7 +14,7 @@ export type ProjectActionStatus =
   | "failed"
 
 /** 项目流程节点定义（推进按钮/命令/提示词的唯一来源；无内置/自定义之分，均可增删改） */
-export interface ProjectNodeDef {
+export interface ProjectNodeDef extends FlowHubHubTrack {
   id: string
   label: string
   /** 节点工作要求；留空且 id 命中默认模板时用代码里的模板 */
@@ -24,7 +25,7 @@ export interface ProjectNodeDef {
 export type ProjectWorkspaceType = "worktree" | "plain"
 
 /** 流程组：建项可多选；推进按钮/命令按所选组分组展示节点 */
-export interface ProjectNodeGroupDef {
+export interface ProjectNodeGroupDef extends FlowHubHubTrack {
   id: string
   name: string
   nodes: ProjectNodeDef[]

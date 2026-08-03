@@ -264,6 +264,27 @@ const api = {
     ipcRenderer.invoke("project-node-groups:export", groupId),
   importProjectNodeGroup: (): Promise<{ ok: boolean; group?: { id: string; name: string; workspace?: "worktree" | "plain"; nodes: { id: string; label: string; prompt?: string }[] }; error?: string }> =>
     ipcRenderer.invoke("project-node-groups:import"),
+
+  flowHub: {
+    getCatalog: (force?: boolean): Promise<{ ok: true; catalog: import("../src/shared/flow-hub-types").FlowHubCatalog } | { ok: false; error: string }> =>
+      ipcRenderer.invoke("flow-hub:get-catalog", force),
+    getSyncStatus: (kind: "group" | "node", hubId: string, contentHash: string): Promise<import("../src/shared/flow-hub-types").FlowHubSyncStatus> =>
+      ipcRenderer.invoke("flow-hub:get-sync-status", { kind, hubId, contentHash }),
+    importGroup: (hubId: string): Promise<{ ok: true; group: unknown } | { ok: false; error: string }> =>
+      ipcRenderer.invoke("flow-hub:import-group", hubId),
+    importNode: (hubId: string, targetGroupId: string): Promise<{ ok: true; node: unknown } | { ok: false; error: string }> =>
+      ipcRenderer.invoke("flow-hub:import-node", { hubId, targetGroupId }),
+    uploadGroup: (groupId: string): Promise<{ ok: true } | { ok: false; error: string }> =>
+      ipcRenderer.invoke("flow-hub:upload-group", groupId),
+    uploadNode: (groupId: string, nodeId: string): Promise<{ ok: true } | { ok: false; error: string }> =>
+      ipcRenderer.invoke("flow-hub:upload-node", { groupId, nodeId }),
+    syncGroup: (hubId: string, mode: "overwrite" | "keep"): Promise<{ ok: true } | { ok: false; error: string }> =>
+      ipcRenderer.invoke("flow-hub:sync-group", { hubId, mode }),
+    syncNode: (hubId: string, targetGroupId: string, mode: "overwrite" | "keep"): Promise<{ ok: true } | { ok: false; error: string }> =>
+      ipcRenderer.invoke("flow-hub:sync-node", { hubId, targetGroupId, mode }),
+    preview: (kind: "group" | "node", hubId: string, nodeLocalId?: string): Promise<{ ok: true; name: string; prompt?: string } | { ok: false; error: string }> =>
+      ipcRenderer.invoke("flow-hub:preview", { kind, hubId, nodeLocalId }),
+  },
   onScheduledTaskStatus: (cb: (statuses: Record<string, { running: boolean; pid?: number; startedAt?: number }>) => void) => {
     const handler = (_: unknown, statuses: Record<string, { running: boolean; pid?: number; startedAt?: number }>) => cb(statuses)
     ipcRenderer.on("scheduled-tasks:status", handler)

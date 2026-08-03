@@ -35,8 +35,10 @@ import {
   Info,
   Github,
   MessageSquare,
+  Upload,
 } from "lucide-react"
 import SearchableSelect from "../components/SearchableSelect"
+import { FlowHubBrowser } from "../components/FlowHubBrowser"
 import ToolboxPanel from "../components/ToolboxPanel"
 import AgentPanel from "../components/AgentPanel"
 import ChannelPanel from "../components/ChannelPanel"
@@ -130,6 +132,9 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
   const [nodeEditing, setNodeEditing] = useState<(ProjectNodeItem & { index: number }) | null>(null)
   const [groupEditing, setGroupEditing] = useState<{ id: string; name: string; index: number } | null>(null)
   const [worktreeRoot, setWorktreeRoot] = useState("")
+  const [flowHubUrl, setFlowHubUrl] = useState("")
+  const [flowHubAuthor, setFlowHubAuthor] = useState("")
+  const [hubBrowser, setHubBrowser] = useState<{ kind: "group" | "node" } | null>(null)
   const [projectsSubTab, setProjectsSubTab] = useState<ProjectsSubTab>("list")
   const [projectList, setProjectList] = useState<ProjectListItem[]>([])
   const [projectEditing, setProjectEditing] = useState<ProjectListItem | null>(null)
@@ -340,6 +345,8 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
           : (config.repoRoots ?? []).map((p) => ({ path: p, baseBranch: "" }))
         setRepoProfiles(profiles)
         setWorktreeRoot(config.worktreeRoot ?? "")
+        setFlowHubUrl(config.flowHubUrl ?? "")
+        setFlowHubAuthor(config.flowHubAuthor ?? "")
         projectsLoaded.current = true
       })
       window.electronAPI.getProjectNodeGroups().then((gs) => {
@@ -395,11 +402,21 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
         repoProfiles: profiles,
         repoRoots: profiles.map((p) => p.path),
         worktreeRoot: worktreeRoot.trim(),
+        flowHubUrl: flowHubUrl.trim(),
+        flowHubAuthor: flowHubAuthor.trim(),
       })
       setSaved(true)
       setTimeout(() => setSaved(false), 1500)
     }, 500)
-  }, [tab, gitlabToken, gitlabHost, repoProfiles, worktreeRoot])
+  }, [tab, gitlabToken, gitlabHost, repoProfiles, worktreeRoot, flowHubUrl, flowHubAuthor])
+
+  const hubConfigured = flowHubUrl.trim().length > 0 && gitlabToken.trim().length > 0
+
+  const refreshNodeGroups = useCallback(async () => {
+    const gs = await window.electronAPI.getProjectNodeGroups()
+    setNodeGroups(gs)
+    setActiveGroupId((prev) => gs.some((g) => g.id === prev) ? prev : (gs[0]?.id ?? ""))
+  }, [])
 
   useEffect(() => { autoSaveProjects() }, [autoSaveProjects])
 
@@ -1304,6 +1321,20 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
               <section className="space-y-4">
                 <h3 className="text-sm font-medium text-gray-300">流程组</h3>
                 <p className="text-xs text-gray-500">建项可多选（不选默认「开发」）；推进节点按所选组分组展示；点击节点编辑提示词。</p>
+                <div className="rounded-lg border border-gray-800 p-3 space-y-2">
+                  <h4 className="text-xs font-medium text-gray-400">共享空间</h4>
+                  <div>
+                    <label className="mb-1 block text-xs text-gray-500">Hub 地址</label>
+                    <input type="text" value={flowHubUrl} onChange={(e) => setFlowHubUrl(e.target.value)}
+                      placeholder="https://gitlab.example.com/group/cursor-claw-flow-hub" className={inputCls} />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs text-gray-500">作者昵称（上传时展示）</label>
+                    <input type="text" value={flowHubAuthor} onChange={(e) => setFlowHubAuthor(e.target.value)}
+                      placeholder="你的名字" className={inputCls} />
+                  </div>
+                  <p className="text-[10px] text-gray-600">上传/获取使用上方 GitLab Token；未填 Hub 地址时隐藏共享按钮。</p>
+                </div>
                 <div className="flex flex-wrap items-center gap-1.5">
                   {nodeGroups.map((g) => (
                     <button key={g.id} type="button"
@@ -1316,6 +1347,13 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                     onClick={() => setGroupEditing({ id: "", name: "", index: -1 })}
                     className="rounded-md border border-dashed border-gray-700 px-3 py-1.5 text-xs text-gray-400 hover:bg-gray-800"
                   >+ 新增组</button>
+                  {hubConfigured && (
+                    <button
+                      type="button"
+                      onClick={() => setHubBrowser({ kind: "group" })}
+                      className="inline-flex items-center gap-1 rounded-md border border-gray-700 px-3 py-1.5 text-xs text-blue-400 hover:bg-gray-800"
+                    ><Download className="h-3 w-3" />从共享空间获取组</button>
+                  )}
                 </div>
                 {activeGroup && (
                   <div className="space-y-1.5">
@@ -1330,6 +1368,16 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                       <button type="button" className="inline-flex items-center gap-1 text-blue-400 hover:text-blue-300" onClick={() => void handleGroupImport()}>
                         <FilePlus className="h-3 w-3" />导入
                       </button>
+                      {hubConfigured && (
+                        <button type="button" className="inline-flex items-center gap-1 text-blue-400 hover:text-blue-300"
+                          onClick={async () => {
+                            const r = await window.electronAPI.flowHub.uploadGroup(activeGroup.id)
+                            if (r.ok) { void showAlert("上传成功", `流程组「${activeGroup.name}」已上传到共享空间`); void refreshNodeGroups() }
+                            else void showAlert("上传失败", r.error ?? "未知错误")
+                          }}>
+                          <Upload className="h-3 w-3" />上传
+                        </button>
+                      )}
                       {nodeGroups.length > 1 && (
                         <button type="button" className="text-red-400 hover:text-red-300" onClick={handleGroupDelete}>删除组</button>
                       )}
@@ -1356,6 +1404,13 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                       onClick={() => setNodeEditing({ id: "", label: "", index: -1 })}
                       className="w-full rounded-md border border-dashed border-gray-700 px-3 py-2 text-xs text-gray-400 hover:bg-gray-800"
                     >+ 新增节点</button>
+                    {hubConfigured && (
+                      <button
+                        type="button"
+                        onClick={() => setHubBrowser({ kind: "node" })}
+                        className="w-full rounded-md border border-dashed border-gray-700 px-3 py-2 text-xs text-blue-400 hover:bg-gray-800"
+                      >从共享空间获取节点</button>
+                    )}
                   </div>
                 )}
               </section>
@@ -1632,6 +1687,17 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
             </div>
             <div className="flex items-center justify-between border-t border-gray-800 px-6 py-4">
               <div>
+                {nodeEditing.index >= 0 && hubConfigured && activeGroup && (
+                  <button
+                    type="button"
+                    className="mr-2 inline-flex items-center gap-1 rounded-md px-4 py-1.5 text-xs text-blue-400 transition hover:bg-gray-800"
+                    onClick={async () => {
+                      const r = await window.electronAPI.flowHub.uploadNode(activeGroup.id, nodeEditing.id)
+                      if (r.ok) void showAlert("上传成功", `节点「${nodeEditing.label}」已上传`)
+                      else void showAlert("上传失败", r.error ?? "未知错误")
+                    }}
+                  ><Upload className="h-3 w-3" />上传此节点</button>
+                )}
                 {nodeEditing.index >= 0 && (
                   <button
                     onClick={async () => {
@@ -1987,6 +2053,17 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
             </div>
           </div>
         </div>
+      )}
+
+      {hubBrowser && activeGroup && (
+        <FlowHubBrowser
+          kind={hubBrowser.kind}
+          targetGroupId={activeGroup.id}
+          onClose={() => setHubBrowser(null)}
+          onImported={() => { void refreshNodeGroups(); setHubBrowser(null) }}
+          showAlert={showAlert}
+          showConfirm={showConfirm}
+        />
       )}
 
       {ModalPortal}

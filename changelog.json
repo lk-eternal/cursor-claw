@@ -1,5 +1,15 @@
 [
   {
+    "version": "1.8.0",
+    "date": "2026-08-03",
+    "changes": [
+      "流程组共享 Hub：设置页配置 GitLab 仓库地址与作者昵称，支持流程组/独立节点上传、从共享空间浏览导入、hubId 识别已添加与同步",
+      "Hub 浏览弹窗：搜索、分页卡片、hover 预览节点 prompt、已添加/可同步状态",
+      "上传原子 commit：实体 JSON 与 catalog.json 同一 commit，避免索引与文件不一致",
+      "流程组/节点持久化扩展 hubId、hubRevision、hubContentHash、localRevision 追踪字段"
+    ]
+  },
+  {
     "version": "1.7.0",
     "date": "2026-07-27",
     "changes": [

@@ -46,6 +46,11 @@ export interface AppConfig {
   /** 新建 worktree 的父目录 */
   worktreeRoot: string
 
+  /** Flow Hub 共享仓库地址 */
+  flowHubUrl: string
+  /** Flow Hub 上传作者昵称 */
+  flowHubAuthor: string
+
   // ── 旧字段（仅用于迁移，新代码不应再读取）──
   allowOthers: boolean
   digitalIdentity: string
@@ -91,6 +96,9 @@ const defaults: AppConfig = {
   repoRoots: [],
   repoProfiles: [],
   worktreeRoot: "",
+
+  flowHubUrl: "",
+  flowHubAuthor: "",
 
   allowOthers: false,
   digitalIdentity: "",

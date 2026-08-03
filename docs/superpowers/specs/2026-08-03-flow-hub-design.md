@@ -1,7 +1,7 @@
 # 流程组共享 Hub 设计
 
 > 日期: 2026-08-03  
-> 状态: Draft（待评审）  
+> 状态: Approved（2026-08-03）  
 > 关联: 设置页「项目 → 流程组」、`project-node-groups.json`、现有导入/导出 envelope
 
 ---

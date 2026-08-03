@@ -2,6 +2,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { randomBytes, randomUUID } from "node:crypto"
 import { DEFAULT_NODE_GROUPS, DEFAULT_NODE_GROUP_ID, type Project, type ProjectNodeDef, type ProjectNodeGroupDef } from "./project-types.js"
+import type { FlowHubHubTrack } from "./flow-hub-types.js"
 
 let baseDir = ""
 
@@ -27,6 +28,15 @@ function legacyNodesPath(): string {
 
 const NODE_GROUP_ID_RE = /^[a-z][a-z0-9-]*$/
 
+function pickHubTrack(item: FlowHubHubTrack): FlowHubHubTrack {
+  const out: FlowHubHubTrack = {}
+  if (item.hubId?.trim()) out.hubId = item.hubId.trim()
+  if (typeof item.hubRevision === "number") out.hubRevision = item.hubRevision
+  if (item.hubContentHash?.trim()) out.hubContentHash = item.hubContentHash.trim()
+  if (typeof item.localRevision === "number") out.localRevision = item.localRevision
+  return out
+}
+
 function sanitizeGroups(groups: ProjectNodeGroupDef[] | null | undefined): ProjectNodeGroupDef[] {
   return (groups ?? [])
     .filter((g) => g?.id?.trim() && g?.name?.trim())
@@ -34,8 +44,14 @@ function sanitizeGroups(groups: ProjectNodeGroupDef[] | null | undefined): Proje
       id: g.id.trim(),
       name: g.name.trim(),
       ...(g.workspace === "plain" || g.workspace === "worktree" ? { workspace: g.workspace } : {}),
+      ...pickHubTrack(g),
       nodes: (g.nodes ?? []).filter((n) => n?.id?.trim() && n?.label?.trim())
-        .map((n) => ({ id: n.id.trim(), label: n.label.trim(), ...(n.prompt?.trim() ? { prompt: n.prompt } : {}) })),
+        .map((n) => ({
+          id: n.id.trim(),
+          label: n.label.trim(),
+          ...(n.prompt?.trim() ? { prompt: n.prompt } : {}),
+          ...pickHubTrack(n),
+        })),
     }))
 }
 

@@ -162,6 +162,29 @@ describe("project-store", () => {
     expect(projectNodeLabel("check", "qa")).toBe("检查")
   })
 
+  it("roundtrips hub tracking fields on groups and nodes", () => {
+    saveNodeGroups([{
+      id: "develop",
+      name: "开发",
+      hubId: "group-uuid-1",
+      hubRevision: 2,
+      hubContentHash: "ghash",
+      localRevision: 0,
+      nodes: [{
+        id: "plan",
+        label: "规划",
+        hubId: "node-uuid-1",
+        hubRevision: 1,
+        hubContentHash: "nhash",
+        localRevision: 1,
+      }],
+    }])
+    const g = resolveNodeGroup("develop")
+    expect(g.hubId).toBe("group-uuid-1")
+    expect(g.nodes[0].hubId).toBe("node-uuid-1")
+    expect(g.nodes[0].localRevision).toBe(1)
+  })
+
   it("parses node group export envelope and loose format", () => {
     const envelope = parseNodeGroupExport({
       kind: "cursor-claw-node-group",

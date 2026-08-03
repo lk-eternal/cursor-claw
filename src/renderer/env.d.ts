@@ -38,6 +38,8 @@ declare global {
     cursorApiKey: string
     gitlabToken?: string
     gitlabHost?: string
+    flowHubUrl?: string
+    flowHubAuthor?: string
     repoRoots?: string[]
     repoProfiles?: { path: string; baseBranch: string; testBranch?: string; developBranch?: string }[]
     worktreeRoot?: string
@@ -146,6 +148,17 @@ declare global {
     getProjectNodeGroupUsage(): Promise<Record<string, number>>
     exportProjectNodeGroup(groupId: string): Promise<{ ok: boolean; path?: string; error?: string }>
     importProjectNodeGroup(): Promise<{ ok: boolean; group?: { id: string; name: string; workspace?: "worktree" | "plain"; nodes: { id: string; label: string; prompt?: string }[] }; error?: string }>
+    flowHub: {
+      getCatalog(force?: boolean): Promise<{ ok: true; catalog: import("../shared/flow-hub-types").FlowHubCatalog } | { ok: false; error: string }>
+      getSyncStatus(kind: "group" | "node", hubId: string, contentHash: string): Promise<import("../shared/flow-hub-types").FlowHubSyncStatus>
+      importGroup(hubId: string): Promise<{ ok: true; group: unknown } | { ok: false; error: string }>
+      importNode(hubId: string, targetGroupId: string): Promise<{ ok: true; node: unknown } | { ok: false; error: string }>
+      uploadGroup(groupId: string): Promise<{ ok: true } | { ok: false; error: string }>
+      uploadNode(groupId: string, nodeId: string): Promise<{ ok: true } | { ok: false; error: string }>
+      syncGroup(hubId: string, mode: "overwrite" | "keep"): Promise<{ ok: true } | { ok: false; error: string }>
+      syncNode(hubId: string, targetGroupId: string, mode: "overwrite" | "keep"): Promise<{ ok: true } | { ok: false; error: string }>
+      preview(kind: "group" | "node", hubId: string, nodeLocalId?: string): Promise<{ ok: true; name: string; prompt?: string } | { ok: false; error: string }>
+    }
     saveConfig(config: Partial<AppConfig>): Promise<ConfigSaveResult>
     setAutoStart(enabled: boolean): Promise<{ ok: boolean }>
     applyWorkspaceSwitch(workspaceDir: string, stopOldSessions: boolean, notifyMain?: boolean): Promise<{ ok: boolean; error?: string }>
