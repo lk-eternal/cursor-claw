@@ -485,6 +485,18 @@ function newStreamAgg(gateOpen = false): StreamAgg {
   }
 }
 
+/** 保活 poll 超时/安静退出：保持静默标记并丢弃保活回合积累的段落 */
+function enterSilentPollPhase(stream: StreamAgg): void {
+  stream.segments = []
+  stream.dirty = false
+  if (stream.timer) {
+    clearTimeout(stream.timer)
+    stream.timer = null
+  }
+  stream.gateOpen = false
+  stream.pendingBlockingPoll = true
+}
+
 /** 已结束的 thinking 段写入固定 ms，避免后续 flush 继续涨表 */
 function sealClosedThinking(agg: StreamAgg): void {
   const last = agg.segments.length - 1
@@ -1119,7 +1131,6 @@ export function handlePollPhaseEvent(
   const wasBlocking = stream?.pendingBlockingPoll ?? false
   if (stream && !stream.finished) {
     stream.pendingNonBlockingPoll = false
-    stream.pendingBlockingPoll = false
   }
 
   const userIds = (payload.messageIds ?? []).filter((id) => id && !id.startsWith("internal_"))
@@ -1155,10 +1166,11 @@ export function handlePollPhaseEvent(
 
   if (wasBlocking || blocking) {
     if (isTimeout || isEnd) {
-      stream.gateOpen = false
+      enterSilentPollPhase(stream)
       return
     }
     if (hasUserMsgs) {
+      stream.pendingBlockingPoll = false
       session.streamAgg = isFeishuStreamEnabled(session.sessionKey) ? newStreamAgg(true) : null
       pushUiLog("SDK", "DEBUG",
         `[${session.sessionKey}] 阻塞poll换新队列 bornAt=${session.streamAgg?.bornAt ?? "null"}`)

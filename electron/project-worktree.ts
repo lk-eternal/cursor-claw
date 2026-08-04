@@ -182,11 +182,28 @@ async function ensureFeatureUpstream(cloneDir: string, featureBranch: string): P
   }
 }
 
+/** 确保工作目录检出 feature：独立 clone 无分支互斥；目录存在但分支缺失时从基线新建 */
+async function ensureFeatureInClone(worktreePath: string, featureBranch: string, baseBranch: string): Promise<WorktreeResult> {
+  if (!fs.existsSync(worktreePath)) {
+    return { ok: false, error: `AI 工作目录不存在: ${worktreePath}` }
+  }
+  const cur = await runGit(worktreePath, ["rev-parse", "--abbrev-ref", "HEAD"])
+  if (cur.ok && cur.stdout === featureBranch) return { ok: true }
+  const co = await runGit(worktreePath, ["checkout", featureBranch])
+  if (co.ok) return { ok: true }
+  // 目录已存在但 feature 不在本地/远程：fetch 后从基线 checkout -b，保留 clone 不删目录
+  await runGit(worktreePath, ["fetch", "origin", "--prune"], 60_000)
+  const created = await checkoutOrCreateFeature(worktreePath, featureBranch, baseBranch)
+  if (!created.ok) return created
+  await ensureClawExcluded(worktreePath)
+  return { ok: true }
+}
+
 /** 确保各 AI 工作目录存在且检出 feature：缺失时自动重建（建项失败/被手动删除的懒修复） */
 export async function ensureCheckouts(repos: WorktreeRepoRef[], featureBranch: string): Promise<WorktreeResult> {
   for (const r of repos) {
     const res = fs.existsSync(r.worktreePath)
-      ? await checkoutFeature(r.worktreePath, featureBranch)
+      ? await ensureFeatureInClone(r.worktreePath, featureBranch, r.baseBranch)
       : await addProjectClone({ repoPath: r.repoPath, worktreePath: r.worktreePath, featureBranch, baseBranch: r.baseBranch })
     if (!res.ok) return { ok: false, error: `${path.basename(r.worktreePath)}: ${res.error}` }
   }

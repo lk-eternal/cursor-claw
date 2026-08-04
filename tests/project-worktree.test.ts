@@ -95,6 +95,23 @@ describe("project-worktree (independent checkout)", () => {
     expect(git(wt, ["rev-parse", "--abbrev-ref", "HEAD"])).toBe("feature/r")
   })
 
+  it("ensureCheckouts creates missing feature branch when clone dir already exists", async () => {
+    const wt = path.join(wtRoot, "existing")
+    expect((await addProjectClone({
+      repoPath: repo,
+      worktreePath: wt,
+      featureBranch: "feature/old",
+      baseBranch: "main",
+    })).ok).toBe(true)
+    git(wt, ["checkout", "main"])
+    git(wt, ["branch", "-D", "feature/old"])
+    const refs = [{ repoPath: repo, worktreePath: wt, baseBranch: "main" }]
+    const r = await ensureCheckouts(refs, "feature/new")
+    expect(r.ok).toBe(true)
+    expect(git(wt, ["rev-parse", "--abbrev-ref", "HEAD"])).toBe("feature/new")
+    expect(fs.existsSync(path.join(wt, "README.md"))).toBe(true)
+  })
+
   it("syncCheckout fast-forwards when remote feature advances", async () => {
     git(repo, ["checkout", "-b", "feature/sync"])
     fs.writeFileSync(path.join(repo, "a.txt"), "1\n")
