@@ -716,6 +716,9 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
               groupId?: string
               groupIds?: string[]
               workspaceType?: string
+              chatMode?: string
+              existingGroupChatId?: string
+              operatorOpenId?: string
               repos?: { repoPath: string; baseBranch: string; testBranch?: string; developBranch?: string }[]
             }
             const port = cachedPort ?? readLockFile()?.port

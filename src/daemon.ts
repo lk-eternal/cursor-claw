@@ -2223,7 +2223,12 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
     const storyUrl = formFieldStr(f.storyUrl);
     const productDocUrl = formFieldStr(f.productDocUrl);
     const techDocUrl = formFieldStr(f.techDocUrl);
-    const chatMode = formFieldStr(f.chatMode) === "inline" ? "inline" : "group";
+    const chatModeRaw = formFieldStr(f.chatMode);
+    const chatMode = chatModeRaw === "inline" ? "inline" : chatModeRaw === "bind" ? "bind" : "group";
+    const existingGroupChatId = formFieldStr(f.existingGroupChatId);
+    if (chatMode === "bind" && !existingGroupChatId) {
+      return { toast: { type: "error", content: "绑定已有群时请填写群 chat_id（oc_…）" } };
+    }
     const workspaceType = cbv?.workspaceType === "plain" ? "plain" : "worktree";
 
     const groupIdsList = coerceFormMultiSelect(f.group_ids);
@@ -2246,6 +2251,7 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
         groupId, groupIds,
         workspaceType,
         chatMode,
+        existingGroupChatId,
         operatorOpenId: evt.operatorOpenId || "",
         repos: [],
         repoPath: "",
@@ -2308,6 +2314,7 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
       groupId, groupIds,
       workspaceType,
       chatMode,
+      existingGroupChatId,
       operatorOpenId: evt.operatorOpenId || "",
       repos,
       repoPath: primary?.repoPath || "",

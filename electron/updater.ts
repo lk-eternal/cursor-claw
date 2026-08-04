@@ -326,9 +326,16 @@ async function fetchViaGithubApi(): Promise<LatestRelease | null> {
   return parseGithubReleaseJson(api.text)
 }
 
-/** jsdelivr data API 返回全部 git tag（实时性远好于其文件 CDN 的 12h 缓存），取语义化最大版本 */
+/** jsdelivr CDN 边缘缓存可滞后数小时；加时间戳参数强制回源 */
+function jsdelivrCacheBust(): string {
+  return `?t=${Date.now()}`
+}
+
+/** jsdelivr data API 返回全部 git tag，取语义化最大版本 */
 async function fetchViaJsdelivrTags(): Promise<LatestRelease | null> {
-  const r = await httpGetText(`https://data.jsdelivr.com/v1/packages/gh/${GITHUB_OWNER}/${GITHUB_REPO}`)
+  const r = await httpGetText(
+    `https://data.jsdelivr.com/v1/packages/gh/${GITHUB_OWNER}/${GITHUB_REPO}${jsdelivrCacheBust()}`,
+  )
   if (r?.status !== 200) return null
   try {
     const json = JSON.parse(r.text) as { versions?: Array<{ version?: string }> }
@@ -346,10 +353,26 @@ async function fetchViaJsdelivrTags(): Promise<LatestRelease | null> {
   }
 }
 
+async function fetchViaRawGitHubPackageJson(): Promise<LatestRelease | null> {
+  const urls = [
+    `https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}/main/package.json`,
+    `https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}/master/package.json`,
+  ]
+  for (const url of urls) {
+    const r = await httpGetText(url)
+    if (r?.status === 200) {
+      const rel = parsePackageJsonVersion(r.text)
+      if (rel) return rel
+    }
+  }
+  return null
+}
+
 async function fetchViaJsdelivrPackageJson(): Promise<LatestRelease | null> {
+  const bust = jsdelivrCacheBust()
   const mirrors = [
-    `https://cdn.jsdelivr.net/gh/${GITHUB_OWNER}/${GITHUB_REPO}@main/package.json`,
-    `https://cdn.jsdelivr.net/gh/${GITHUB_OWNER}/${GITHUB_REPO}@master/package.json`,
+    `https://cdn.jsdelivr.net/gh/${GITHUB_OWNER}/${GITHUB_REPO}@main/package.json${bust}`,
+    `https://cdn.jsdelivr.net/gh/${GITHUB_OWNER}/${GITHUB_REPO}@master/package.json${bust}`,
   ]
   for (const url of mirrors) {
     const r = await httpGetText(url)
@@ -363,13 +386,14 @@ async function fetchViaJsdelivrPackageJson(): Promise<LatestRelease | null> {
 
 /**
  * 多源并发取版本最大者。单源不可靠：api.github.com 直连常被墙，
- * jsdelivr 文件 CDN 有边缘缓存（曾拿到滞后数个版本的 package.json 造成「最新是旧版」）。
+ * jsdelivr 有 CDN 边缘缓存（不加 ?t= 可能滞后数小时）；raw GitHub 直读 main 作备用。
  */
 export async function fetchLatestRelease(): Promise<LatestRelease | null> {
   const results = await Promise.all([
     fetchViaGithubApi(),
     fetchViaJsdelivrTags(),
     fetchViaJsdelivrPackageJson(),
+    fetchViaRawGitHubPackageJson(),
   ])
   const candidates = results.filter((r): r is LatestRelease => r !== null)
   if (candidates.length === 0) return null
@@ -416,7 +440,7 @@ function readBundledChangelog(): ChangelogEntry[] {
 function fetchChangelogFromRawGitHub(): Promise<ChangelogEntry[]> {
   const urls = [
     `https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}/main/changelog.json`,
-    `https://cdn.jsdelivr.net/gh/${GITHUB_OWNER}/${GITHUB_REPO}@main/changelog.json`,
+    `https://cdn.jsdelivr.net/gh/${GITHUB_OWNER}/${GITHUB_REPO}@main/changelog.json${jsdelivrCacheBust()}`,
   ]
   return (async () => {
     for (const url of urls) {

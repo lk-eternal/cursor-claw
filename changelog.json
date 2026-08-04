@@ -1,5 +1,13 @@
 [
   {
+    "version": "1.8.3",
+    "date": "2026-08-04",
+    "changes": [
+      "建项新增「绑定已有群」：手动填 oc_ chat_id，自行拉机器人入群即可协作（无需 im:chat:create）",
+      "修复检查更新 jsdelivr CDN 缓存滞后：cache bust 时间戳 + raw.githubusercontent.com 第四源兜底"
+    ]
+  },
+  {
     "version": "1.8.2",
     "date": "2026-08-03",
     "changes": [

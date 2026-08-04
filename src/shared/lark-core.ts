@@ -389,9 +389,11 @@ export class LarkSender {
         placeholder: { tag: "plain_text", content: "默认「独立群」：自动建群并在群里协作" },
         options: [
           { text: { tag: "plain_text", content: "独立群（推荐）：自动建项目群" }, value: "group" },
+          { text: { tag: "plain_text", content: "绑定已有群：手动填 oc_ 并拉机器人入群" }, value: "bind" },
           { text: { tag: "plain_text", content: "当前会话：沿用现有单聊模式" }, value: "inline" },
         ],
       },
+      field("existingGroupChatId", null, "绑定已有群时填写群 chat_id（oc_… 或 ch_|oc_）", false),
     ]
 
     const encode = encodeRepoPairOption

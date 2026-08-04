@@ -1,5 +1,5 @@
 import * as path from "node:path"
-import { parseChatKey } from "./channel-types.js"
+import { makeChatKey, parseChatKey } from "./channel-types.js"
 import type { FlowHubHubTrack } from "./flow-hub-types.js"
 
 export type ProjectStatus = "active" | "paused" | "done"
@@ -188,6 +188,44 @@ export function projectGroupChatMatches(project: Pick<Project, "groupChatId">, c
 export function canEnterProjectFromChat(project: Pick<Project, "groupChatId">, chatKey?: string): boolean {
   if (!project.groupChatId) return true
   return projectGroupChatMatches(project, chatKey)
+}
+
+const FEISHU_GROUP_CHAT_ID = /^oc_[a-z0-9]+$/i
+
+/** 建项「绑定已有群」：解析 oc_… 或 ch_…|oc_… 为 chatKey */
+export function parseExistingGroupChatBinding(
+  input: string,
+  channelId: string,
+): { chatKey: string; rawChatId: string } | { error: string } {
+  const raw = (input || "").trim()
+  if (!raw) return { error: "请填写群 chat_id（oc_…）" }
+  if (!channelId) return { error: "无法解析飞书通道（请从飞书私聊建项）" }
+
+  let chatKey: string
+  let rawChatId: string
+  if (raw.includes("|")) {
+    const parsed = parseChatKey(raw)
+    rawChatId = parsed.chatId
+    if (!FEISHU_GROUP_CHAT_ID.test(rawChatId)) {
+      return { error: "群 chat_id 须以 oc_ 开头，示例：oc_aa2192cfececee92d57dccd0b59980fd" }
+    }
+    chatKey = parsed.channelId ? raw : makeChatKey(channelId, rawChatId)
+  } else {
+    if (!FEISHU_GROUP_CHAT_ID.test(raw)) {
+      return { error: "群 chat_id 格式无效，示例：oc_aa2192cfececee92d57dccd0b59980fd" }
+    }
+    rawChatId = raw
+    chatKey = makeChatKey(channelId, rawChatId)
+  }
+  return { chatKey, rawChatId }
+}
+
+export type ProjectChatMode = "group" | "inline" | "bind"
+
+export function normalizeProjectChatMode(raw?: string): ProjectChatMode {
+  if (raw === "inline") return "inline"
+  if (raw === "bind") return "bind"
+  return "group"
 }
 
 /** 远程仓库地址（http(s)/ssh/git@…）而非本地路径 */

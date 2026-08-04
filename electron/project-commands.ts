@@ -22,6 +22,7 @@ import {
   resolveNodeGroup,
   projectNodeLabel,
   projectGroupIds,
+  findProjectByGroupChat,
   type ProjectNewDraft,
 } from "../src/shared/project-store.js"
 import { repoShortName,
@@ -32,9 +33,12 @@ import { repoShortName,
   isPlainProject,
   canEnterProjectFromChat,
   projectGroupChatMatches,
+  parseExistingGroupChatBinding,
+  normalizeProjectChatMode,
   PROJECT_RESERVED_SUBCOMMANDS,
   type Project,
   type ProjectActionType,
+  type ProjectChatMode,
   type ProjectWorkspaceType,
 } from "../src/shared/project-types.js"
 import {
@@ -324,8 +328,10 @@ interface NewProjectInput {
   groupId?: string
   groupIds?: string[]
   workspaceType?: ProjectWorkspaceType
-  /** 会话模式：group=独立群（默认）；inline=沿用当前会话 */
-  chatMode?: "group" | "inline"
+  /** 会话模式：group=独立群（默认）；inline=沿用当前会话；bind=绑定已有群 */
+  chatMode?: ProjectChatMode
+  /** bind 模式：已有群 chat_id（oc_… 或 ch_|oc_） */
+  existingGroupChatId?: string
   /** 表单提交人 open_id：独立群模式建群时设为群主并拉入群 */
   operatorOpenId?: string
   repos?: { repoPath: string; baseBranch: string; testBranch?: string; developBranch?: string }[]
@@ -377,6 +383,80 @@ async function setupProjectGroup(
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) }
   }
+}
+
+/** 绑定已有飞书群为项目专属群（用户需自行将机器人拉入群） */
+function bindProjectGroup(
+  project: Project,
+  operatorChatId: string,
+  existingInput: string,
+): { ok: boolean; chatKey?: string; rawChatId?: string; error?: string } {
+  const channelId = parseChatKey(operatorChatId).channelId
+  const parsed = parseExistingGroupChatBinding(existingInput, channelId || "")
+  if ("error" in parsed) return { ok: false, error: parsed.error }
+  const taken = findProjectByGroupChat(parsed.chatKey)
+  if (taken && taken.id !== project.id) {
+    return { ok: false, error: `该群已绑定项目「${taken.name}」(${taken.id})` }
+  }
+  project.groupChatId = parsed.chatKey
+  project.notifyChatId = parsed.chatKey
+  project.sessionKey = projectSessionKey(parsed.chatKey, project.id)
+  return { ok: true, chatKey: parsed.chatKey, rawChatId: parsed.rawChatId }
+}
+
+async function persistBoundProjectGroup(project: Project): Promise<void> {
+  const { saveProject } = await import("../src/shared/project-store.js")
+  saveProject(project)
+  setCurrentProjectId(null)
+}
+
+/** 绑定已有群模式：写入 groupChatId 并通知群/私聊 */
+async function finishBindGroupModeCreate(
+  port: number,
+  messageId: string,
+  chatId: string,
+  project: Project,
+  existingGroupChatId: string,
+  extraNote?: string,
+): Promise<{ ok: true; rawChatId: string } | { ok: false; error: string }> {
+  const bound = bindProjectGroup(project, chatId, existingGroupChatId)
+  if (!bound.ok || !bound.chatKey || !bound.rawChatId) {
+    const error = bound.error || "绑定群失败"
+    pushUiLog("Electron", "WARN", `[Project] 绑定已有群失败: ${error}`)
+    return { ok: false, error }
+  }
+  await persistBoundProjectGroup(project)
+  const groupHint = "请确认已将机器人拉入该群，否则群内无法收发消息"
+  try {
+    await reportCommandResult(
+      port,
+      "",
+      true,
+      withChatFooter(
+        [`✅ 项目已绑定本群${extraNote ? `\n\n${extraNote}` : ""}`, "", formatProjectCard(project)].join("\n"),
+        "在本群 @ 我发消息即可协作；推进用下方按钮",
+      ),
+      bound.chatKey,
+      projectButtonsCreate(project),
+      { cardTitle: projectCardTitle(project), sessionKey: project.sessionKey },
+    )
+  } catch (e) {
+    pushUiLog("Electron", "WARN", `[Project] 绑定群通知发送失败（可能机器人未入群）: ${e}`)
+  }
+  await leaveProjectSession(port, chatId)
+  await reportCommandResult(
+    port,
+    messageId,
+    true,
+    [
+      `✅ 项目「${project.name}」已创建`,
+      `🔗 已绑定群 \`${bound.rawChatId}\``,
+      `📣 ${groupHint}`,
+    ].join("\n"),
+    chatId,
+    [{ label: "项目菜单", cmd: "/p" }],
+  )
+  return { ok: true, rawChatId: bound.rawChatId }
 }
 
 /** 群模式建项收尾：项目卡发进群 + 主会话回执；失败时带回错误原因供回退提示 */
@@ -462,7 +542,15 @@ async function finalizePlainProject(
     await ensureArtifactDir(workDir)
     if (draft.chatKey) clearProjectNewDraft(draft.chatKey)
     let fallbackNote = ""
-    if (draft.chatMode !== "inline" && chatId) {
+    if (draft.chatMode === "bind" && chatId) {
+      if (!draft.existingGroupChatId?.trim()) {
+        await reportCommandResult(port, messageId, false, "❌ 绑定已有群时请填写群 chat_id（oc_…）", chatId)
+        return
+      }
+      const bindResult = await finishBindGroupModeCreate(port, messageId, chatId, project, draft.existingGroupChatId)
+      if (bindResult.ok) return
+      fallbackNote = `\n⚠️ 绑定已有群失败，已回退当前会话模式\n原因：${bindResult.error}`
+    } else if (draft.chatMode !== "inline" && chatId) {
       const groupResult = await finishGroupModeCreate(port, messageId, chatId, project, draft.operatorOpenId)
       if (groupResult.ok) return
       fallbackNote = `\n⚠️ 独立群创建失败，已回退当前会话模式\n原因：${groupResult.error}`
@@ -605,7 +693,15 @@ async function finalizeNewProject(
       ? ["⚠️ AI 工作目录初始化未完成：", ...wtErrors.map((e) => `· ${e}`), "排除故障后推进节点即自动重建。"].join("\n")
       : undefined
     let fallbackNote = ""
-    if (draft.chatMode !== "inline" && chatId) {
+    if (draft.chatMode === "bind" && chatId) {
+      if (!draft.existingGroupChatId?.trim()) {
+        await reportCommandResult(port, messageId, false, "❌ 绑定已有群时请填写群 chat_id（oc_…）", chatId)
+        return
+      }
+      const bindResult = await finishBindGroupModeCreate(port, messageId, chatId, project, draft.existingGroupChatId, wtWarn)
+      if (bindResult.ok) return
+      fallbackNote = `\n⚠️ 绑定已有群失败，已回退当前会话模式\n原因：${bindResult.error}`
+    } else if (draft.chatMode !== "inline" && chatId) {
       const groupResult = await finishGroupModeCreate(port, messageId, chatId, project, draft.operatorOpenId, wtWarn)
       if (groupResult.ok) return
       fallbackNote = `\n⚠️ 独立群创建失败，已回退当前会话模式\n原因：${groupResult.error}`
@@ -1105,6 +1201,7 @@ export async function handleProjectNewSubmit(
     groupIds?: string[]
     workspaceType?: string
     chatMode?: string
+    existingGroupChatId?: string
     operatorOpenId?: string
     repos?: { repoPath: string; baseBranch: string; testBranch?: string; developBranch?: string }[]
   },
@@ -1124,7 +1221,8 @@ export async function handleProjectNewSubmit(
     groupId: fields.groupId,
     groupIds: fields.groupIds,
     workspaceType: fields.workspaceType === "plain" ? "plain" : undefined,
-    chatMode: fields.chatMode === "inline" ? "inline" : "group",
+    chatMode: normalizeProjectChatMode(fields.chatMode),
+    existingGroupChatId: fields.existingGroupChatId || undefined,
     operatorOpenId: fields.operatorOpenId || undefined,
     repos: fields.repos,
   })

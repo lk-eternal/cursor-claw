@@ -7,6 +7,8 @@ import {
   encodeRepoPair,
   encodeRepoPairOption,
   formFieldStr,
+  normalizeProjectChatMode,
+  parseExistingGroupChatBinding,
   projectRootDir,
   splitRepoPairValues,
   type Project,
@@ -50,6 +52,38 @@ describe("coerceFormMultiSelect", () => {
 describe("formFieldStr", () => {
   it("takes first element from array", () => {
     expect(formFieldStr(["inline", "group"])).toBe("inline")
+  })
+})
+
+describe("normalizeProjectChatMode", () => {
+  it("maps bind and inline", () => {
+    expect(normalizeProjectChatMode("bind")).toBe("bind")
+    expect(normalizeProjectChatMode("inline")).toBe("inline")
+    expect(normalizeProjectChatMode(undefined)).toBe("group")
+    expect(normalizeProjectChatMode("other")).toBe("group")
+  })
+})
+
+describe("parseExistingGroupChatBinding", () => {
+  const channelId = "ch_c0130dd0"
+  const oc = "oc_aa2192cfececee92d57dccd0b59980fd"
+
+  it("accepts bare oc_ id", () => {
+    expect(parseExistingGroupChatBinding(oc, channelId)).toEqual({
+      chatKey: `${channelId}|${oc}`,
+      rawChatId: oc,
+    })
+  })
+
+  it("accepts full chatKey", () => {
+    const full = `${channelId}|${oc}`
+    expect(parseExistingGroupChatBinding(full, channelId)).toEqual({ chatKey: full, rawChatId: oc })
+  })
+
+  it("rejects empty or invalid", () => {
+    expect(parseExistingGroupChatBinding("", channelId)).toEqual({ error: expect.any(String) })
+    expect(parseExistingGroupChatBinding("ou_userxxx", channelId)).toEqual({ error: expect.any(String) })
+    expect(parseExistingGroupChatBinding(oc, "")).toEqual({ error: expect.any(String) })
   })
 })
 
