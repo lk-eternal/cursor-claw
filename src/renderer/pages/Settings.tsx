@@ -116,6 +116,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
   const [noProxy, setNoProxy] = useState("localhost,127.0.0.1,feishu.cn")
   const [closeWindowAction, setCloseWindowAction] = useState<CloseWindowAction>("ask")
   const [autoLaunch, setAutoLaunch] = useState(false)
+  const [autoUpgradePrompt, setAutoUpgradePrompt] = useState(true)
   /** 帮助引导页飞书控制台链接用 */
   const [firstFeishuAppId, setFirstFeishuAppId] = useState("")
   const [taskChannels, setTaskChannels] = useState<ChannelConfig[]>([])
@@ -336,6 +337,11 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
         setAgentResources(cfg.agentResources ?? [])
       })
     }
+    if (tab === "about") {
+      window.electronAPI.getConfig().then((config) => {
+        setAutoUpgradePrompt(config.autoUpgradePrompt !== false)
+      })
+    }
     if (tab === "projects") {
       projectsLoaded.current = false
       refreshProjectList()
@@ -548,6 +554,12 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
     const next = !autoLaunch
     setAutoLaunch(next)
     await window.electronAPI.setAutoStart(next)
+  }
+
+  const handleAutoUpgradePromptToggle = async () => {
+    const next = !autoUpgradePrompt
+    setAutoUpgradePrompt(next)
+    await window.electronAPI.saveConfig({ autoUpgradePrompt: next })
   }
 
   // ── MCP ──
@@ -1541,6 +1553,21 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
             {tab === "about" && (<>
               <section className="space-y-3">
                 <h3 className="text-sm font-medium text-gray-300">应用更新</h3>
+                <div className="flex items-center justify-between rounded-lg border border-gray-700 px-4 py-3">
+                  <div className="min-w-0 pr-3">
+                    <p className="text-sm font-medium">启动时自动提示升级</p>
+                    <p className="text-xs text-gray-500">关闭后不再弹窗打扰；仍可在下方手动「检查更新」</p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={autoUpgradePrompt}
+                    onClick={() => void handleAutoUpgradePromptToggle()}
+                    className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors duration-200 ${autoUpgradePrompt ? "bg-green-500" : "bg-gray-600"}`}
+                  >
+                    <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform duration-200 ${autoUpgradePrompt ? "translate-x-[18px]" : "translate-x-[3px]"}`} />
+                  </button>
+                </div>
                 <p className="text-xs text-gray-600">
                   当前 <span className="font-mono text-gray-400">v{appVersion || "…"}</span>
                   ，可检查是否有新版本。

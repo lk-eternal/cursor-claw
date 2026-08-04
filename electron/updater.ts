@@ -143,7 +143,14 @@ async function buildAvailableOrReadyResult(
   return { status: "available", ...base }
 }
 
+function isAutoUpgradePromptEnabled(): boolean {
+  return getConfig().autoUpgradePrompt !== false
+}
+
 function promptInstallDownloaded(version: string): void {
+  if (!isAutoUpgradePromptEnabled()) {
+    return
+  }
   void showAppModal({
     variant: "info",
     title: "更新已就绪",
@@ -659,6 +666,12 @@ function applyHintForPlatform(): string {
 
 async function runStartupUpdateCheck(): Promise<void> {
   if (!app.isPackaged && !isDevSimulateUpdate()) {
+    return
+  }
+  if (!isAutoUpgradePromptEnabled()) {
+    if (!isDevSimulateUpdate()) {
+      lastKnownRemote = await fetchLatestRelease()
+    }
     return
   }
 

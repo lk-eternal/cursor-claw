@@ -1,5 +1,13 @@
 [
   {
+    "version": "1.8.4",
+    "date": "2026-08-04",
+    "changes": [
+      "新增配置 autoUpgradePrompt：关闭启动时自动升级弹窗（设置 → 关于 → 开关）",
+      "配置文件 cursor-claw-config.json 支持 \"autoUpgradePrompt\": false 批量预装"
+    ]
+  },
+  {
     "version": "1.8.3",
     "date": "2026-08-04",
     "changes": [

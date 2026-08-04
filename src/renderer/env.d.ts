@@ -20,6 +20,7 @@ declare global {
     httpsProxy: string
     noProxy: string
     closeWindowAction: "ask" | "minimize" | "quit"
+    autoUpgradePrompt?: boolean
     allowOthers: boolean
     digitalIdentity: string
     // 旧字段（Setup 向导兼容）

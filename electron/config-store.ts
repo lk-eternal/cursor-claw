@@ -30,6 +30,8 @@ export interface AppConfig {
   noProxy: string
   /** 点关闭主窗口时：ask=弹窗选择；minimize=隐藏到托盘；quit=直接退出应用 */
   closeWindowAction: "ask" | "minimize" | "quit"
+  /** 启动时自动弹出升级提示；false=静默，用户仍可在「关于」手动检查更新 */
+  autoUpgradePrompt: boolean
   /** 主会话 chatId 映射（`channelId:workspaceDir` → chatId），用于 --resume 恢复上下文 */
   mainChatIds: Record<string, string>
   /** Daemon 固定端口（0 = 随机） */
@@ -90,6 +92,7 @@ const defaults: AppConfig = {
   httpsProxy: "",
   noProxy: "localhost,127.0.0.1,feishu.cn",
   closeWindowAction: "ask",
+  autoUpgradePrompt: true,
   mainChatIds: {},
   daemonPort: 19528,
 
