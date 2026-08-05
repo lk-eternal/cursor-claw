@@ -185,8 +185,17 @@ export function importConfigBundle(zipPath: string): { ok: boolean; error?: stri
 
     initProjectStore(app.getPath("userData"))
 
+    const localCfg = getConfig()
+    const importedWs = manifest.general.workspaceDir?.trim() ?? ""
+    const workspaceDir =
+      importedWs && fs.existsSync(importedWs) ? importedWs : (localCfg.workspaceDir?.trim() ?? "")
+    if (importedWs && !fs.existsSync(importedWs)) {
+      warnings.push(`导出机工作目录不存在：${importedWs}，已保留本机工作目录`)
+    }
+
     saveConfig({
       ...manifest.general,
+      workspaceDir,
       httpProxy: manifest.proxy.httpProxy,
       httpsProxy: manifest.proxy.httpsProxy,
       noProxy: manifest.proxy.noProxy,
@@ -214,19 +223,35 @@ export function importConfigBundle(zipPath: string): { ok: boolean; error?: stri
     writeTasksToFile(manifest.tasks ?? [])
 
     const sd = skillsDir()
-    if (fs.existsSync(sd)) fs.rmSync(sd, { recursive: true, force: true })
-    if (fs.existsSync(path.join(staging, "skills"))) copyDirSync(path.join(staging, "skills"), sd)
-
-    const ws = getConfig().workspaceDir?.trim()
-    const rd = ws ? path.join(ws, ".cursor", "rules") : ""
-    if (rd) {
-      if (fs.existsSync(rd)) fs.rmSync(rd, { recursive: true, force: true })
-      if (fs.existsSync(path.join(staging, "rules"))) {
-        fs.mkdirSync(path.dirname(rd), { recursive: true })
-        copyDirSync(path.join(staging, "rules"), rd)
+    const stagingSkills = path.join(staging, "skills")
+    if (fs.existsSync(stagingSkills)) {
+      try {
+        if (fs.existsSync(sd)) fs.rmSync(sd, { recursive: true, force: true })
+        copyDirSync(stagingSkills, sd)
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        warnings.push(`skills 导入失败：${msg}`)
       }
-    } else if (fs.existsSync(path.join(staging, "rules"))) {
-      warnings.push("未设置工作目录，rules 未导入；请先配置工作目录后重新导入 rules")
+    }
+
+    const ws = workspaceDir
+    const rd = ws ? path.join(ws, ".cursor", "rules") : ""
+    const stagingRules = path.join(staging, "rules")
+    if (fs.existsSync(stagingRules)) {
+      if (!ws) {
+        warnings.push("未设置工作目录，rules 未导入；请先配置工作目录后重新导入 rules")
+      } else if (!fs.existsSync(ws)) {
+        warnings.push(`工作目录不存在：${ws}，rules 未导入；请在设置中修改工作目录后重新导入 rules`)
+      } else {
+        try {
+          if (fs.existsSync(rd)) fs.rmSync(rd, { recursive: true, force: true })
+          fs.mkdirSync(path.dirname(rd), { recursive: true })
+          copyDirSync(stagingRules, rd)
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e)
+          warnings.push(`rules 导入失败：${msg}`)
+        }
+      }
     }
 
     if (ws && !fs.existsSync(ws)) {
