@@ -291,16 +291,33 @@ async function httpGetText(
   }
 }
 
+async function httpHead(url: string): Promise<{ status: number } | null> {
+  await applyAppNetworkProxy()
+  try {
+    const res = await net.fetch(url, {
+      method: "HEAD",
+      headers: { "User-Agent": "cursor-claw-desktop-updater" },
+      signal: AbortSignal.timeout(12_000),
+      redirect: "follow",
+    })
+    return { status: res.status }
+  } catch {
+    return null
+  }
+}
+
 function parseGithubReleaseJson(text: string): LatestRelease | null {
   try {
     const json = JSON.parse(text) as {
       tag_name?: string
       html_url?: string
       body?: string | null
+      assets?: unknown[]
     }
     const tag = json.tag_name
     const htmlUrl = json.html_url
     if (typeof tag !== "string" || typeof htmlUrl !== "string") return null
+    if (json.assets && json.assets.length === 0) return null
     const version = normalizeReleaseVersion(tag)
     if (!semver.valid(version)) return null
     const releaseBody = typeof json.body === "string" ? json.body.trim() : undefined
@@ -333,31 +350,53 @@ async function fetchViaGithubApi(): Promise<LatestRelease | null> {
   return parseGithubReleaseJson(api.text)
 }
 
+/** 取已发布 Release 列表中最新一条（含 assets），排除 draft */
+async function fetchViaGithubReleasesList(): Promise<LatestRelease | null> {
+  const api = await httpGetText(
+    `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases?per_page=15`,
+    { Accept: "application/vnd.github+json" },
+  )
+  if (api?.status !== 200) return null
+  try {
+    const list = JSON.parse(api.text) as Array<{
+      tag_name?: string
+      html_url?: string
+      body?: string | null
+      draft?: boolean
+      assets?: unknown[]
+    }>
+    for (const item of list) {
+      if (item.draft || !item.assets?.length) continue
+      const rel = parseGithubReleaseJson(JSON.stringify(item))
+      if (rel) return rel
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+async function releaseHasDownloadAssets(version: string): Promise<boolean> {
+  const probes = [
+    manualUpdateUrl(version),
+    `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/download/v${version}/latest-mac.yml`,
+    `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/download/v${version}/latest-linux.yml`,
+  ]
+  const results = await Promise.all(probes.map((url) => httpHead(url)))
+  return results.some((r) => r?.status === 200)
+}
+
 /** jsdelivr CDN 边缘缓存可滞后数小时；加时间戳参数强制回源 */
 function jsdelivrCacheBust(): string {
   return `?t=${Date.now()}`
 }
 
-/** jsdelivr data API 返回全部 git tag，取语义化最大版本 */
-async function fetchViaJsdelivrTags(): Promise<LatestRelease | null> {
-  const r = await httpGetText(
-    `https://data.jsdelivr.com/v1/packages/gh/${GITHUB_OWNER}/${GITHUB_REPO}${jsdelivrCacheBust()}`,
-  )
-  if (r?.status !== 200) return null
-  try {
-    const json = JSON.parse(r.text) as { versions?: Array<{ version?: string }> }
-    const versions = (json.versions ?? [])
-      .map((v) => normalizeReleaseVersion(v.version ?? ""))
-      .filter((v) => semver.valid(v))
-    if (versions.length === 0) return null
-    const max = versions.sort(semver.rcompare)[0]
-    return {
-      version: max,
-      htmlUrl: `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/tag/v${max}`,
-    }
-  } catch {
-    return null
-  }
+async function fetchPackageJsonRelease(
+  fetcher: () => Promise<LatestRelease | null>,
+): Promise<LatestRelease | null> {
+  const rel = await fetcher()
+  if (!rel || !(await releaseHasDownloadAssets(rel.version))) return null
+  return rel
 }
 
 async function fetchViaRawGitHubPackageJson(): Promise<LatestRelease | null> {
@@ -392,24 +431,28 @@ async function fetchViaJsdelivrPackageJson(): Promise<LatestRelease | null> {
 }
 
 /**
- * 多源并发取版本最大者。单源不可靠：api.github.com 直连常被墙，
- * jsdelivr 有 CDN 边缘缓存（不加 ?t= 可能滞后数小时）；raw GitHub 直读 main 作备用。
+ * 只认 GitHub Releases（已发布且含安装包），不用 git tag。
+ * api.github.com 被墙时，package.json 兜底须通过安装包 HEAD 探测。
  */
 export async function fetchLatestRelease(): Promise<LatestRelease | null> {
-  const results = await Promise.all([
-    fetchViaGithubApi(),
-    fetchViaJsdelivrTags(),
-    fetchViaJsdelivrPackageJson(),
-    fetchViaRawGitHubPackageJson(),
+  const releaseResults = await Promise.all([fetchViaGithubApi(), fetchViaGithubReleasesList()])
+  const fromReleases = releaseResults.filter((r): r is LatestRelease => r !== null)
+  if (fromReleases.length > 0) {
+    fromReleases.sort((a, b) => semver.rcompare(a.version, b.version))
+    const best = fromReleases[0]
+    const githubLatest = releaseResults[0]
+    if (githubLatest && semver.eq(githubLatest.version, best.version)) return githubLatest
+    return best
+  }
+
+  const fallbackResults = await Promise.all([
+    fetchPackageJsonRelease(fetchViaJsdelivrPackageJson),
+    fetchPackageJsonRelease(fetchViaRawGitHubPackageJson),
   ])
-  const candidates = results.filter((r): r is LatestRelease => r !== null)
-  if (candidates.length === 0) return null
-  candidates.sort((a, b) => semver.rcompare(a.version, b.version))
-  const best = candidates[0]
-  // GitHub API 的结果带 release notes，同版本时优先用它
-  const github = results[0]
-  if (github && semver.eq(github.version, best.version)) return github
-  return best
+  const fallbacks = fallbackResults.filter((r): r is LatestRelease => r !== null)
+  if (fallbacks.length === 0) return null
+  fallbacks.sort((a, b) => semver.rcompare(a.version, b.version))
+  return fallbacks[0]
 }
 
 function parseChangelogJson(text: string): ChangelogEntry[] {
