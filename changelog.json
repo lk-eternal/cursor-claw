@@ -1,5 +1,14 @@
 [
   {
+    "version": "1.8.7",
+    "date": "2026-08-05",
+    "changes": [
+      "修复检查更新：只认 GitHub Releases（含安装包），tag 推送后 Actions 还在跑时不再误提醒",
+      "修复配置导入：不覆盖本机 workspaceDir；工作目录不存在时跳过 rules 导入，其余配置正常导入",
+      "修复 MCP 开关：纯 SDK 用户无需安装 CLI 即可启用/禁用 MCP 服务器（直接读写 mcp.json）"
+    ]
+  },
+  {
     "version": "1.8.6",
     "date": "2026-08-05",
     "changes": [
