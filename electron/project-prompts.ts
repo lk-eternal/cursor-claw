@@ -209,9 +209,10 @@ function contextBlock(p: Project): string[] {
     `项目: ${p.name}`,
     `项目ID: ${p.id}`,
     `目标: ${p.goal || "（未填写，可在对话中与用户澄清）"}`,
-    p.storyUrl ? `飞书项目: ${p.storyUrl}` : "",
-    p.productDocUrl ? `产品文档: ${p.productDocUrl}` : "",
-    p.techDocUrl ? `技术文档: ${p.techDocUrl}` : "",
+    p.storyUrl ? `项目链接: ${p.storyUrl}` : "",
+    p.relatedDocs ? `相关文档: ${p.relatedDocs}` : "",
+    !p.relatedDocs && p.productDocUrl ? `产品文档: ${p.productDocUrl}` : "",
+    !p.relatedDocs && p.techDocUrl ? `技术文档: ${p.techDocUrl}` : "",
   ]
   const meta = p.metadata && Object.keys(p.metadata).length
     ? ["", "项目 metadata:", ...Object.entries(p.metadata).map(([k, v]) => `- ${k}: ${v}`)]

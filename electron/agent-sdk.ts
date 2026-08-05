@@ -63,6 +63,8 @@ interface StreamAgg {
   pendingNonBlockingPoll: boolean
   /** 已挂阻塞 poll：期间关门，防思考刷新卡；重复 poll 不再 endStreamRound */
   pendingBlockingPoll: boolean
+  /** send_question 后暂停写 segments，直到用户作答/关题投递 */
+  pendingQuestionPause: boolean
   /** send_* 正文边界：下一段思考必须新开，禁止并进 send 前的思考块 */
   forceNewThinking: boolean
   /** 断线挂起：不 finish 收口，Resume 后继续同一张卡 */
@@ -300,6 +302,85 @@ export function sdkFailCooldownRemaining(sessionKey: string): number {
 
 /** pack/异常退出后 force 重发偶发挂死；超时后丢 resume，下次全新会话 */
 const FORCE_SEND_TIMEOUT_MS = 30_000
+const REATTACH_PROBE_MS = 1500
+
+async function tryReattachActiveRun(
+  agent: SDKAgent,
+  workspaceDir: string,
+  sessionKey: string,
+): Promise<Run | null> {
+  try {
+    const { items } = await Agent.listRuns(agent.agentId, { runtime: "local", cwd: workspaceDir, limit: 10 })
+    const active = items.find((r) => r.status === "running")
+    if (!active) return null
+    const run = await Agent.getRun(active.id, { runtime: "local", cwd: workspaceDir })
+    if (run.status !== "running") return null
+    pushUiLog("SDK", "INFO", `[${sessionKey}] 挂接残留 active run ${active.id}`)
+    return run
+  } catch (e: unknown) {
+    pushUiLog("SDK", "DEBUG", `[${sessionKey}] getRun 挂接失败: ${e instanceof Error ? e.message : String(e)}`)
+    return null
+  }
+}
+
+function probeRunStillLive(run: Run, ms = REATTACH_PROBE_MS): Promise<boolean> {
+  if (run.status !== "running") return Promise.resolve(false)
+  return new Promise((resolve) => {
+    let settled = false
+    const done = (live: boolean) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      off()
+      resolve(live)
+    }
+    const timer = setTimeout(() => done(true), ms)
+    const off = run.onDidChangeStatus((s) => { if (s !== "running") done(false) })
+  })
+}
+
+async function cancelActiveRun(
+  agent: SDKAgent,
+  workspaceDir: string,
+  sessionKey: string,
+): Promise<boolean> {
+  try {
+    const { items } = await Agent.listRuns(agent.agentId, { runtime: "local", cwd: workspaceDir, limit: 10 })
+    const active = items.find((r) => r.status === "running")
+    if (!active) return false
+    pushUiLog("SDK", "WARN", `[${sessionKey}] cancel 残留 active run ${active.id}`)
+    await Agent.cancelRun(active.id, { runtime: "local", cwd: workspaceDir })
+    return true
+  } catch (e: unknown) {
+    pushUiLog("SDK", "DEBUG", `[${sessionKey}] cancel 残留 run 失败: ${e instanceof Error ? e.message : String(e)}`)
+    return false
+  }
+}
+
+/** 挂接续听时不 send(prompt)（必撞 active run）；唤醒指令入队由 run poll 消费 */
+async function enqueueInternalWake(sessionKey: string, chatType: ChatType, prompt: string): Promise<void> {
+  const lock = readLockFile()
+  if (!lock?.port || !prompt.trim()) return
+  try {
+    await httpPost(`http://127.0.0.1:${lock.port}/enqueue`, { content: prompt, sessionKey, chatType })
+    pushUiLog("SDK", "INFO", `[${sessionKey}] 唤醒 prompt 已入队（挂接续听，跳过 send）`)
+  } catch { /* best-effort */ }
+}
+
+function finishLiveReattach(
+  session: SdkSessionAgent,
+  reattached: Run,
+  prompt: string,
+  resetGenAtStart: number,
+  sessionKey: string,
+): Promise<{ ok: true }> {
+  return enqueueInternalWake(sessionKey, session.chatType, prompt).then(() => {
+    pushUiLog("SDK", "INFO", `[${sessionKey}] 挂接成功，续听残留 run`)
+    startRunLifecycle(session, reattached)
+    if ((sessionResetGen.get(sessionKey) ?? 0) === resetGenAtStart) rememberResumable(session)
+    return { ok: true as const }
+  })
+}
 
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -479,6 +560,7 @@ function newStreamAgg(gateOpen = false): StreamAgg {
     gateOpen,
     pendingNonBlockingPoll: false,
     pendingBlockingPoll: false,
+    pendingQuestionPause: false,
     forceNewThinking: false,
     suspended: false,
     bornAt: Date.now(),
@@ -804,21 +886,12 @@ async function postStreamCard(
   }
 }
 
-/** daemon 判定本队列已随旧卡收口（gone）：迁移段落到新队列并重刷，防思考丢失 */
+/** daemon 判定本队列已随旧卡收口（gone）：换空队列，不迁移 segments（旧卡已 seal，迁移会复制整卡） */
 function rotateStaleStreamQueue(session: SdkSessionAgent, agg: StreamAgg): void {
-  const migrated = agg.segments.length > 0
   agg.finished = true
-  pushUiLog("SDK", "DEBUG",
-    `[${session.sessionKey}] 流式卡队列已随收口作废，${migrated ? "迁移段落后" : ""}换新队列`)
+  pushUiLog("SDK", "DEBUG", `[${session.sessionKey}] 流式卡队列已随收口作废，换新空队列`)
   if (session.streamAgg !== agg) return
-  const next = isFeishuStreamEnabled(session.sessionKey) ? newStreamAgg(true) : null
-  if (next && migrated) {
-    next.segments = JSON.parse(JSON.stringify(agg.segments)) as StreamSegment[]
-    next.dirty = true
-    next.gateOpen = true
-  }
-  session.streamAgg = next
-  if (next?.dirty) scheduleFlushStreamCard(session, true)
+  session.streamAgg = isFeishuStreamEnabled(session.sessionKey) ? newStreamAgg(true) : null
 }
 
 function scheduleFlushStreamCard(session: SdkSessionAgent, immediate = false): void {
@@ -977,6 +1050,14 @@ function isMediaSendInvocation(name: string, summary: string, args?: unknown): b
   return !!cmd && /\/api\/send-(?:file|image)/i.test(cmd)
 }
 
+function isSendQuestionInvocation(name: string, summary: string, args?: unknown): boolean {
+  const mcp = mcpToolName(args)
+  if (mcp) return /^send_question$/i.test(mcp)
+  if (/^send_question$/i.test(name.trim())) return true
+  const cmd = shellCommandText(args)
+  return !!cmd && /\/api\/send-question/i.test(cmd)
+}
+
 /** MCP 工具展示名：优先 args.toolName / tool_name；Task/subagent 加可见标记 */
 function resolveToolDisplayName(name: string, args: unknown): string {
   const raw = name.trim()
@@ -1112,12 +1193,9 @@ export function handlePollPhaseEvent(
     if (!stream || stream.finished) return
     if (blocking) {
       if (stream.pendingBlockingPoll) return
-      endStreamRound(session)
-      const next = session.streamAgg
-      if (next) {
-        next.gateOpen = false
-        next.pendingBlockingPoll = true
-      }
+      // 不换卡：保活 poll 只是静默等待，finish 由 run 终态或下轮新消息 seal 负责
+      stream.gateOpen = false
+      stream.pendingBlockingPoll = true
     } else {
       stream.pendingNonBlockingPoll = true
     }
@@ -1133,15 +1211,17 @@ export function handlePollPhaseEvent(
     stream.pendingNonBlockingPoll = false
   }
 
-  const userIds = (payload.messageIds ?? []).filter((id) => id && !id.startsWith("internal_"))
+  const deliveredIds = (payload.messageIds ?? []).filter((id): id is string => !!id)
   let hasNewUserMsgs = false
-  for (const id of userIds) {
+  let hasFreshDelivery = false
+  for (const id of deliveredIds) {
     if (!session.seenMessageIds.has(id)) {
-      hasNewUserMsgs = true
+      hasFreshDelivery = true
+      if (!id.startsWith("internal_")) hasNewUserMsgs = true
       session.seenMessageIds.add(id)
     }
   }
-  const hasUserMsgs = userIds.length > 0
+  const hasWorkMsgs = deliveredIds.length > 0
   const directive = payload.directive ?? ""
   const isEnd = payload.reason === "end" || directive.includes(POLL_DIRECTIVE_END_MARK)
   const isTimeout = payload.reason === "timeout" || directive.includes(POLL_DIRECTIVE_TIMEOUT_MARK)
@@ -1157,28 +1237,43 @@ export function handlePollPhaseEvent(
   }
 
   pushUiLog("SDK", "DEBUG",
-    `[${session.sessionKey}] poll-phase end blocking=${blocking} reason=${payload.reason ?? "?"} newUser=${hasNewUserMsgs} bornAt=${stream.bornAt}`)
+    `[${session.sessionKey}] poll-phase end blocking=${blocking} reason=${payload.reason ?? "?"} newUser=${hasNewUserMsgs} work=${hasWorkMsgs} bornAt=${stream.bornAt}`)
 
-  if (wasNonBlocking && stream.gateOpen && hasNewUserMsgs) {
-    endStreamRound(session)
-    return
-  }
+  if (hasFreshDelivery) stream.pendingQuestionPause = false
 
+  // 非阻塞 poll 拉到新消息：不换卡（同 run 继续刷当前卡；换回合由 blocking poll / send_* 负责）
   if (wasBlocking || blocking) {
     if (isTimeout || isEnd) {
       enterSilentPollPhase(stream)
       return
     }
-    if (hasUserMsgs) {
+    if (hasWorkMsgs) {
       stream.pendingBlockingPoll = false
       session.streamAgg = isFeishuStreamEnabled(session.sessionKey) ? newStreamAgg(true) : null
       pushUiLog("SDK", "DEBUG",
         `[${session.sessionKey}] 阻塞poll换新队列 bornAt=${session.streamAgg?.bornAt ?? "null"}`)
+      if (session.streamAgg) scheduleFlushStreamCard(session, true)
       return
     }
   }
 
-  if (wasNonBlocking) stream.gateOpen = true
+  if (wasNonBlocking && !hasNewUserMsgs && hasWorkMsgs) {
+    if (!stream.ensured) {
+      stream.segments = []
+      stream.dirty = false
+      pushUiLog("SDK", "DEBUG", `[${session.sessionKey}] 非阻塞 poll 重复投递，清预热队列`)
+    } else {
+      pushUiLog("SDK", "DEBUG", `[${session.sessionKey}] 非阻塞 poll 重复投递，保留已刷内容`)
+    }
+    stream.gateOpen = true
+    scheduleFlushStreamCard(session, true)
+    return
+  }
+
+  if (wasNonBlocking) {
+    stream.gateOpen = true
+    scheduleFlushStreamCard(session, true)
+  }
 }
 
 /**
@@ -1316,7 +1411,7 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
         if (block.type === "text" && block.text) {
           appendSdkLog(session, "text", block.text)
           // 阻塞 poll 挂起期间不刷卡（避免重复 poll 思考落成新卡）
-          if (stream?.pendingBlockingPoll) continue
+          if (stream?.pendingBlockingPoll || stream?.pendingQuestionPause) continue
           // SDK 正文视作思考，不进用户可见正文区
           if (stream && !stream.finished && isShowThinkingEnabled(session.sessionKey)) {
             enqueueThinking(stream, block.text)
@@ -1328,7 +1423,7 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
     case "thinking":
       if (event.text) {
         appendSdkLog(session, "thinking", event.text)
-        if (stream?.pendingBlockingPoll) break
+        if (stream?.pendingBlockingPoll || stream?.pendingQuestionPause) break
         if (stream && !stream.finished && isShowThinkingEnabled(session.sessionKey)) {
           enqueueThinking(stream, event.text)
           scheduleFlushStreamCard(session)
@@ -1341,17 +1436,18 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
       const detectSummary = summary || summarizeToolArgs(event.args) || ""
       pushUiLog("SDK", "INFO", `[${session.sessionKey}] [tool] ${event.name}: ${event.status}${summary ? ` · ${summary}` : ""}`)
       if (stream && !stream.finished) {
-        if (stream.pendingBlockingPoll || stream.pendingNonBlockingPoll) {
+        if (stream.pendingBlockingPoll || stream.pendingNonBlockingPoll || stream.pendingQuestionPause) {
           break
         }
-        stream.gateOpen = true
         if (isTodoUpdateInvocation(event.name)) {
+          stream.gateOpen = true
           applyTodoUpdate(session, stream, event.args)
           scheduleFlushStreamCard(session, true)
           break
         }
         if (shouldOmitFromStreamCard(event.name, detectSummary, event.args)) {
           if (isMediaSendInvocation(event.name, detectSummary, event.args)) {
+            stream.gateOpen = true
             if (event.status === "running") {
               sealLastThinking(stream)
               stream.forceNewThinking = true
@@ -1362,14 +1458,20 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
             }
             break
           }
-          if (event.status === "running") {
-            // send_* 是正文边界：封存当前思考块，后续思考强制新开
+          if (isSendQuestionInvocation(event.name, detectSummary, event.args) && event.status === "running") {
+            stream.pendingQuestionPause = true
+            pushUiLog("SDK", "DEBUG", `[${session.sessionKey}] send_question 开始，暂停写 segments`)
+          }
+          // poll / send_text 等协议工具：不 gateOpen、不刷首卡，等 poll-phase 结束统一开门
+          if (event.status === "running" && !isPollMessageInvocation(event.name, detectSummary, event.args)) {
+            stream.gateOpen = true
             sealLastThinking(stream)
             stream.forceNewThinking = true
             scheduleFlushStreamCard(session, true)
           }
           break
         }
+        stream.gateOpen = true
         enqueueTool(stream, event, summary)
         scheduleFlushStreamCard(session, event.status === "running")
       }
@@ -1736,22 +1838,35 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     try {
       run = await agent.send(prompt)
     } catch (e: unknown) {
-      // 上次进程异常退出未落终态的 wedged run 会卡死会话（already has active run）；
-      // SDK 官方恢复路径：force 过期残留 run 后重发（必须限时：曾挂死 10min+ 堵死全局调度）
       const msg = e instanceof Error ? e.message : String(e)
       if (!msg.includes("already has active run")) throw e
-      pushUiLog("SDK", "WARN", `[${sessionKey}] 检测到残留 active run，force 恢复重发`)
+
+      pushUiLog("SDK", "WARN", `[${sessionKey}] 检测到残留 active run，先 cancel 清 store`)
+      await cancelActiveRun(agent, workspaceDir, sessionKey)
+
       try {
-        run = await withTimeout(
-          agent.send(prompt, { local: { force: true } }),
-          FORCE_SEND_TIMEOUT_MS,
-          "force send",
-        )
-      } catch (forceErr: unknown) {
-        const forceMsg = forceErr instanceof Error ? forceErr.message : String(forceErr)
-        pushUiLog("SDK", "WARN", `[${sessionKey}] force 恢复失败，丢弃 resume 映射下次全新会话: ${forceMsg}`)
-        forgetResumable(sessionKey)
-        throw forceErr instanceof Error ? forceErr : new Error(forceMsg)
+        run = await withTimeout(agent.send(prompt), FORCE_SEND_TIMEOUT_MS, "send after cancel")
+      } catch (retryErr: unknown) {
+        const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr)
+        if (!retryMsg.includes("already has active run")) throw retryErr
+        // 非 pack 场景：进程可能仍在，尝试挂接续听（不 send）
+        const reattached = await tryReattachActiveRun(agent, workspaceDir, sessionKey)
+        if (reattached && await probeRunStillLive(reattached)) {
+          return finishLiveReattach(session, reattached, prompt, resetGenAtStart, sessionKey)
+        }
+        pushUiLog("SDK", "WARN", `[${sessionKey}] cancel/挂接均失败，force 恢复重发`)
+        try {
+          run = await withTimeout(
+            agent.send(prompt, { local: { force: true } }),
+            FORCE_SEND_TIMEOUT_MS,
+            "force send",
+          )
+        } catch (forceErr: unknown) {
+          const forceMsg = forceErr instanceof Error ? forceErr.message : String(forceErr)
+          pushUiLog("SDK", "WARN", `[${sessionKey}] force 恢复失败，丢弃 resume 映射下次全新会话: ${forceMsg}`)
+          forgetResumable(sessionKey)
+          throw forceErr instanceof Error ? forceErr : new Error(forceMsg)
+        }
       }
     }
     startRunLifecycle(session, run)

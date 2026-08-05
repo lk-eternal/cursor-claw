@@ -104,6 +104,7 @@ export interface Project {
   name: string
   goal: string
   storyUrl?: string
+  relatedDocs?: string
   productDocUrl?: string
   techDocUrl?: string
   repoPath: string

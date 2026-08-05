@@ -54,6 +54,7 @@ import {
   uploadGroup,
   uploadNode,
 } from "./flow-hub-service"
+import { exportConfigBundle, importConfigBundle } from "./config-backup"
 import { initProjectStore, getProject, getCurrentProject, listProjects, findProjectByGroupChat, getNodeGroups, saveNodeGroups, saveProject, projectGroupIds, parseNodeGroupExport, resolveUniqueNodeGroupId } from "../src/shared/project-store.js"
 import { projectIdFromSessionKey, projectSessionKey, DEFAULT_NODE_GROUP_ID, canEnterProjectFromChat } from "../src/shared/project-types.js"
 import {
@@ -94,7 +95,7 @@ function getSessionAgentCount(): number {
 }
 
 async function stopAgent(): Promise<void> {
-  const timeout = new Promise<void>((r) => setTimeout(r, 5000))
+  const timeout = new Promise<void>((r) => setTimeout(r, 12_000))
   await Promise.race([stopAllSdkSessions(), timeout])
   _stopCliAgent()
 }
@@ -712,7 +713,7 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
               chatId: string; messageId: string
               name: string; goal: string; repoPath: string; worktreeRoot: string
               baseBranch: string; featureBranch?: string
-              storyUrl?: string; productDocUrl?: string; techDocUrl?: string
+              storyUrl?: string; relatedDocs?: string; productDocUrl?: string; techDocUrl?: string
               groupId?: string
               groupIds?: string[]
               workspaceType?: string
@@ -2193,6 +2194,41 @@ export function initDaemonManager(): void {
     const imported = { ...parsed, id: newId }
     saveNodeGroups([...groups, imported])
     return { ok: true, group: imported }
+  })
+
+  ipcMain.handle("config:export", async () => {
+    const win = BrowserWindow.getAllWindows()[0]
+    if (!win) return { ok: false, error: "窗口不可用" }
+    const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "")
+    const result = await dialog.showSaveDialog(win, {
+      title: "导出 Cursor Claw 配置",
+      defaultPath: `cursor-claw-config-${stamp}.zip`,
+      filters: [{ name: "ZIP", extensions: ["zip"] }],
+    })
+    if (result.canceled || !result.filePath) return { ok: false, error: "已取消" }
+    const r = exportConfigBundle(result.filePath)
+    if (!r.ok) return r
+    return { ok: true, path: result.filePath }
+  })
+
+  ipcMain.handle("config:import", async () => {
+    const win = BrowserWindow.getAllWindows()[0]
+    if (!win) return { ok: false, error: "窗口不可用" }
+    const result = await dialog.showOpenDialog(win, {
+      title: "导入 Cursor Claw 配置",
+      properties: ["openFile"],
+      filters: [{ name: "ZIP", extensions: ["zip"] }],
+    })
+    if (result.canceled || !result.filePaths[0]) return { ok: false, error: "已取消" }
+    const r = importConfigBundle(result.filePaths[0])
+    if (!r.ok) return r
+    broadcastLog("[Config] 配置已导入，正在重启 Daemon...")
+    await stopDaemon()
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    const started = await startDaemon()
+    if (!started.ok) broadcastLog(`[Config] Daemon 重启失败: ${started.error}`, "ERROR")
+    broadcastStatus(await getDaemonStatus())
+    return r
   })
 
   ipcMain.handle("flow-hub:get-catalog", async (_e, force?: boolean) => fetchCatalog(!!force))

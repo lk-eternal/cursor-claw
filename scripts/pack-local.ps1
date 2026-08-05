@@ -41,12 +41,30 @@ try {
   }
 
   Write-Log "2/4 stop Cursor Claw"
-  Get-Process -Name "Cursor Claw" -ErrorAction SilentlyContinue | ForEach-Object {
-    Write-Log "  stop pid=$($_.Id)"
-    Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+  # CloseMainWindow 在 closeWindowAction=ask 时只弹窗不退出；用 --graceful-quit 第二实例触发 before-quit
+  $procs = @(Get-Process -Name "Cursor Claw" -ErrorAction SilentlyContinue)
+  if ($procs.Count -gt 0) {
+    $exePath = $procs[0].Path
+    Write-Log "  graceful-quit pid=$($procs[0].Id) exe=$exePath"
+    try {
+      Start-Process -FilePath $exePath -ArgumentList "--graceful-quit" -WindowStyle Hidden -ErrorAction Stop
+    } catch {
+      Write-Log "  graceful-quit spawn failed: $($_.Exception.Message)"
+    }
   }
-  Start-Sleep -Seconds 2
-  # retry if still alive
+  $graceDeadline = (Get-Date).AddSeconds(25)
+  while ((Get-Date) -lt $graceDeadline) {
+    if (-not (Get-Process -Name "Cursor Claw" -ErrorAction SilentlyContinue)) { break }
+    Start-Sleep -Milliseconds 500
+  }
+  $remaining = @(Get-Process -Name "Cursor Claw" -ErrorAction SilentlyContinue)
+  if ($remaining.Count -gt 0) {
+    Write-Log "  soft stop ($($remaining.Count) proc)"
+    foreach ($p in $remaining) {
+      Stop-Process -Id $p.Id -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Seconds 5
+  }
   Get-Process -Name "Cursor Claw" -ErrorAction SilentlyContinue | ForEach-Object {
     Write-Log "  force-kill pid=$($_.Id)"
     Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue

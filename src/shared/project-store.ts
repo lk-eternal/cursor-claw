@@ -394,6 +394,7 @@ export function createProject(input: Omit<Project, "id" | "status" | "createdAt"
     name: input.name,
     goal: input.goal,
     storyUrl: input.storyUrl,
+    relatedDocs: input.relatedDocs,
     productDocUrl: input.productDocUrl,
     techDocUrl: input.techDocUrl,
     repoPath: input.repoPath,
@@ -465,6 +466,7 @@ export function resolveProjectRef(token: string | undefined, projects?: Project[
 
 /** /p new 交互向导草稿（按 chatKey） */
 export type ProjectNewStep =
+  | "form"
   | "setup_worktree"
   | "setup_add_path"
   | "setup_add_base"
@@ -484,6 +486,11 @@ export interface ProjectNewDraft {
   featureBranch?: string
   goal?: string
   storyUrl?: string
+  /** 创建项目卡片：settings 快照 + 会话内追加 */
+  formMode?: "main" | "add_repo"
+  formRepoProfiles?: { path: string; baseBranch: string; testBranch?: string; developBranch?: string }[]
+  formExtraRepos?: { path: string; baseBranch: string; testBranch?: string; developBranch?: string }[]
+  formCache?: Record<string, string>
   /** 仅 /p setup，完成后不进入创建 */
   setupOnly?: boolean
   /** setup 子流程结束后回到 setup 总览 */
@@ -518,6 +525,7 @@ export function clearProjectNewDraft(chatKey: string): void {
 }
 
 export function hasProjectNewDraft(chatKey: string): boolean {
-  return !!getProjectNewDraft(chatKey)
+  const d = getProjectNewDraft(chatKey)
+  return !!d && d.step !== "form"
 }
 

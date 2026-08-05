@@ -265,6 +265,9 @@ const api = {
   importProjectNodeGroup: (): Promise<{ ok: boolean; group?: { id: string; name: string; workspace?: "worktree" | "plain"; nodes: { id: string; label: string; prompt?: string }[] }; error?: string }> =>
     ipcRenderer.invoke("project-node-groups:import"),
 
+  exportConfig: (): Promise<{ ok: boolean; path?: string; error?: string }> => ipcRenderer.invoke("config:export"),
+  importConfig: (): Promise<{ ok: boolean; error?: string; warnings?: string[] }> => ipcRenderer.invoke("config:import"),
+
   flowHub: {
     getCatalog: (force?: boolean): Promise<{ ok: true; catalog: import("../src/shared/flow-hub-types").FlowHubCatalog } | { ok: false; error: string }> =>
       ipcRenderer.invoke("flow-hub:get-catalog", force),

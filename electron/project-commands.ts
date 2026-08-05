@@ -182,9 +182,10 @@ function formatProjectCard(p: Project, index?: number): string {
     `🆔 ${p.id}`,
     groupLine ? `🏷 流程组: ${groupLine}` : "",
     `📝 ${p.goal}`,
-    p.storyUrl ? `🔗 飞书项目 · ${p.storyUrl}` : "",
-    p.productDocUrl ? `📘 产品文档 · ${p.productDocUrl}` : "",
-    p.techDocUrl ? `📗 技术文档 · ${p.techDocUrl}` : "",
+    p.storyUrl ? `🔗 项目链接 · ${p.storyUrl}` : "",
+    p.relatedDocs ? `📄 相关文档 · ${p.relatedDocs}` : "",
+    !p.relatedDocs && p.productDocUrl ? `📘 产品文档 · ${p.productDocUrl}` : "",
+    !p.relatedDocs && p.techDocUrl ? `📗 技术文档 · ${p.techDocUrl}` : "",
     ...(p.metadata && Object.keys(p.metadata).length
       ? ["📋 metadata", ...Object.entries(p.metadata).map(([k, v]) => `   ${k}: ${v}`)]
       : []),
@@ -322,6 +323,7 @@ interface NewProjectInput {
   baseBranch?: string
   featureBranch?: string
   storyUrl?: string
+  relatedDocs?: string
   productDocUrl?: string
   techDocUrl?: string
   worktreeRootOverride?: string
@@ -523,6 +525,7 @@ async function finalizePlainProject(
       name: draft.name,
       goal: draft.goal || "",
       storyUrl: draft.storyUrl,
+      relatedDocs: draft.relatedDocs,
       productDocUrl: draft.productDocUrl,
       techDocUrl: draft.techDocUrl,
       repoPath: "",
@@ -666,6 +669,7 @@ async function finalizeNewProject(
       name: draft.name,
       goal: draft.goal,
       storyUrl: draft.storyUrl,
+      relatedDocs: draft.relatedDocs,
       productDocUrl: draft.productDocUrl,
       techDocUrl: draft.techDocUrl,
       repoPath: primary.repoPath,
@@ -1031,6 +1035,7 @@ export async function fillProjectNewFromText(
   ensureStore()
   const draft = getProjectNewDraft(chatId)
   if (!draft) return false
+  if (draft.step === "form") return false
   const value = text.trim().replace(/^["']|["']$/g, "")
   if (!value) return true
 
@@ -1195,6 +1200,7 @@ export async function handleProjectNewSubmit(
     baseBranch: string
     featureBranch?: string
     storyUrl?: string
+    relatedDocs?: string
     productDocUrl?: string
     techDocUrl?: string
     groupId?: string
@@ -1215,6 +1221,7 @@ export async function handleProjectNewSubmit(
     baseBranch: fields.baseBranch || "main",
     featureBranch: fields.featureBranch,
     storyUrl: fields.storyUrl || undefined,
+    relatedDocs: fields.relatedDocs || undefined,
     productDocUrl: fields.productDocUrl || undefined,
     techDocUrl: fields.techDocUrl || undefined,
     worktreeRootOverride: fields.worktreeRoot,

@@ -481,6 +481,34 @@ export function deleteQueueMessage(fileId: string, filterSessionKey?: string): b
   return false;
 }
 
+/** 按飞书 message_id 删除队列中 pending/processing 项（.qmsg / .claimed） */
+export function deleteQueueMessagesByMessageId(messageId: string): { removed: number; sessionKeys: string[] } {
+  if (!queueDir || !messageId) return { removed: 0, sessionKeys: [] };
+  const safeId = messageId.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const sessionKeys = new Set<string>();
+  let removed = 0;
+  for (const dir of [queueDir, ...listSessionDirs()]) {
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        if (!f.endsWith(".qmsg") && !f.endsWith(".claimed")) continue;
+        const filePath = path.join(dir, f);
+        let sk = "";
+        try {
+          const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+          if (parsed.messageId !== messageId && !matchesSafeId(f, safeId)) continue;
+          sk = parsed.sessionKey || parsed.chatId || "";
+        } catch { continue; }
+        try {
+          fs.unlinkSync(filePath);
+          removed++;
+          if (sk) sessionKeys.add(sk);
+        } catch { /* ignore */ }
+      }
+    } catch { /* ignore */ }
+  }
+  return { removed, sessionKeys: [...sessionKeys] };
+}
+
 export interface QueueSessionInfo {
   sessionKey: string;
   chatType: string;

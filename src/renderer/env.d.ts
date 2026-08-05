@@ -150,6 +150,8 @@ declare global {
     getProjectNodeGroupUsage(): Promise<Record<string, number>>
     exportProjectNodeGroup(groupId: string): Promise<{ ok: boolean; path?: string; error?: string }>
     importProjectNodeGroup(): Promise<{ ok: boolean; group?: { id: string; name: string; workspace?: "worktree" | "plain"; nodes: { id: string; label: string; prompt?: string }[] }; error?: string }>
+    exportConfig(): Promise<{ ok: boolean; path?: string; error?: string }>
+    importConfig(): Promise<{ ok: boolean; error?: string; warnings?: string[] }>
     flowHub: {
       getCatalog(force?: boolean): Promise<{ ok: true; catalog: import("../shared/flow-hub-types").FlowHubCatalog } | { ok: false; error: string }>
       listNodes(): Promise<{ ok: true; nodes: import("../shared/flow-hub-types").FlowHubBrowsableNode[] } | { ok: false; error: string }>

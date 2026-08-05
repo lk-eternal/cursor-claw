@@ -32,6 +32,8 @@ import {
   BookOpen,
   ExternalLink,
   Copy,
+  Eye,
+  EyeOff,
   Info,
   Github,
   MessageSquare,
@@ -45,7 +47,7 @@ import AgentPanel from "../components/AgentPanel"
 import ChannelPanel from "../components/ChannelPanel"
 import TitleBar from "../components/TitleBar"
 import useInlineModal from "../components/useInlineModal"
-import { REQUIRED_FEISHU_SCOPES, FEISHU_SCOPES_JSON } from "../constants"
+import { REQUIRED_FEISHU_SCOPES, FEISHU_SCOPES_JSON, FEISHU_EVENT_SUBSCRIPTIONS } from "../constants"
 import { modelSlug } from "../model-utils"
 
 interface Props { onBack: () => void; initialTab?: string; onTabConsumed?: () => void; onReenterWizard?: () => void }
@@ -125,6 +127,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
 
   const [appVersion, setAppVersion] = useState("")
   const [gitlabToken, setGitlabToken] = useState("")
+  const [showGitlabToken, setShowGitlabToken] = useState(false)
   const [gitlabHost, setGitlabHost] = useState("")
   const [repoProfiles, setRepoProfiles] = useState<{ path: string; baseBranch: string; testBranch?: string; developBranch?: string }[]>([])
   type ProjectNodeItem = { id: string; label: string; prompt?: string; defaultPrompt?: string; hubId?: string; hubRevision?: number; hubContentHash?: string; localRevision?: number }
@@ -136,6 +139,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
   const [worktreeRoot, setWorktreeRoot] = useState("")
   const [flowHubUrl, setFlowHubUrl] = useState("")
   const [flowHubToken, setFlowHubToken] = useState("")
+  const [showFlowHubToken, setShowFlowHubToken] = useState(false)
   const [flowHubAuthor, setFlowHubAuthor] = useState("")
   const [hubBrowser, setHubBrowser] = useState<{ kind: "group" | "node" } | null>(null)
   const [projectsSubTab, setProjectsSubTab] = useState<ProjectsSubTab>("list")
@@ -936,6 +940,49 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                   ))}
                 </div>
               </section>
+              <section className="space-y-3">
+                <h3 className="text-sm font-medium text-gray-300">配置迁移</h3>
+                <p className="text-xs text-gray-600">导出全部设置（含密钥、通道、MCP、rules、skills 脚本等）到新电脑一键导入。导出文件含明文密钥，请妥善保管。</p>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const r = await window.electronAPI.exportConfig()
+                      if (r.ok && r.path) void showAlert("导出成功", r.path)
+                      else if (!r.ok && r.error !== "已取消") void showAlert("导出失败", r.error ?? "未知错误")
+                    }}
+                    className="flex items-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm transition hover:border-blue-500"
+                  >
+                    <Download size={16} /> 导出配置
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (!(await showConfirm(
+                        "导入配置",
+                        "将覆盖 SDK 资源、消息通道、MCP、rules、skills、定时任务、项目设置与流程组。确定继续？",
+                        "导入",
+                        "取消",
+                      ))) return
+                      const r = await window.electronAPI.importConfig()
+                      if (!r.ok) {
+                        if (r.error !== "已取消") void showAlert("导入失败", r.error ?? "未知错误")
+                        return
+                      }
+                      const warn = r.warnings?.length ? `\n\n注意：\n${r.warnings.join("\n")}` : ""
+                      void showAlert("导入成功", `配置已应用，Daemon 已重启。${warn}`)
+                      window.electronAPI.getConfig().then((config) => {
+                        setWorkspaceDir(config.workspaceDir ?? "")
+                        setAutoLaunch(!!config.autoStart)
+                        setCloseWindowAction(config.closeWindowAction ?? "ask")
+                      })
+                    }}
+                    className="flex items-center gap-2 rounded-lg border border-gray-700 px-4 py-2 text-sm transition hover:border-blue-500"
+                  >
+                    <Upload size={16} /> 导入配置
+                  </button>
+                </div>
+              </section>
               <p className="text-xs text-gray-500">关闭窗口相关选项保存后立即生效。其余设置自动保存，部分项需重启 Daemon 后生效。</p>
             </>)}
 
@@ -1275,7 +1322,13 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                 <h3 className="text-sm font-medium text-gray-300">项目配置</h3>
                 <div>
                   <label className="mb-1 block text-xs text-gray-500">GitLab Token</label>
-                  <input type="password" value={gitlabToken} onChange={(e) => setGitlabToken(e.target.value)} placeholder="glpat-..." className={inputCls} />
+                  <div className="relative">
+                    <input type={showGitlabToken ? "text" : "password"} value={gitlabToken} onChange={(e) => setGitlabToken(e.target.value)} placeholder="glpat-..." className={inputCls + " pr-16"} />
+                    <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
+                      <button type="button" title="复制" disabled={!gitlabToken.trim()} onClick={() => void navigator.clipboard.writeText(gitlabToken)} className="text-gray-500 hover:text-gray-300 disabled:opacity-40"><Copy size={13} /></button>
+                      <button type="button" title={showGitlabToken ? "隐藏" : "显示"} onClick={() => setShowGitlabToken(!showGitlabToken)} className="text-gray-500 hover:text-gray-300">{showGitlabToken ? <EyeOff size={13} /> : <Eye size={13} />}</button>
+                    </div>
+                  </div>
                 </div>
                 <div>
                   <label className="mb-1 block text-xs text-gray-500">GitLab Host（可空，默认从 origin 推断）</label>
@@ -1341,8 +1394,14 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                   </div>
                   <div>
                     <label className="mb-1 block text-xs text-gray-500">Hub Token（Flow Hub 项目专用）</label>
-                    <input type="password" value={flowHubToken} onChange={(e) => setFlowHubToken(e.target.value)}
-                      placeholder="glpat-...（需 Maintainer 及以上权限）" className={inputCls} />
+                    <div className="relative">
+                      <input type={showFlowHubToken ? "text" : "password"} value={flowHubToken} onChange={(e) => setFlowHubToken(e.target.value)}
+                        placeholder="glpat-...（需 Maintainer 及以上权限）" className={inputCls + " pr-16"} />
+                      <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
+                        <button type="button" title="复制" disabled={!flowHubToken.trim()} onClick={() => void navigator.clipboard.writeText(flowHubToken)} className="text-gray-500 hover:text-gray-300 disabled:opacity-40"><Copy size={13} /></button>
+                        <button type="button" title={showFlowHubToken ? "隐藏" : "显示"} onClick={() => setShowFlowHubToken(!showFlowHubToken)} className="text-gray-500 hover:text-gray-300">{showFlowHubToken ? <EyeOff size={13} /> : <Eye size={13} />}</button>
+                      </div>
+                    </div>
                   </div>
                   <div>
                     <label className="mb-1 block text-xs text-gray-500">作者昵称（上传时展示）</label>
@@ -1494,10 +1553,12 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                   )}
                 </div>
                 <div className="rounded-lg border border-gray-800 divide-y divide-gray-800">
-                  <div className="px-3 py-2 flex items-center justify-between">
-                    <code className="text-xs text-blue-400">im.message.receive_v1</code>
-                    <span className="text-xs text-gray-500">接收消息 v2.0</span>
-                  </div>
+                  {FEISHU_EVENT_SUBSCRIPTIONS.map((e) => (
+                    <div key={e.event} className="px-3 py-2 flex items-center justify-between">
+                      <code className="text-xs text-blue-400">{e.event}</code>
+                      <span className="text-xs text-gray-500">{e.desc}</span>
+                    </div>
+                  ))}
                   <div className="px-3 py-2 flex items-center justify-between">
                     <span className="text-xs text-gray-300">读取用户发给机器人的单聊消息</span>
                     <span className="text-xs text-emerald-400">需开通</span>

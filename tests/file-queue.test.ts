@@ -14,6 +14,7 @@ import {
   getQueueMessages,
   getDistinctSessions,
   deleteQueueMessage,
+  deleteQueueMessagesByMessageId,
 } from "../src/file-queue.js"
 
 const SESSION_A = "ch_a|oc_111::D:\\ws\\a"
@@ -282,6 +283,17 @@ describe("查询与删除", () => {
     expect(deleteQueueMessage("../" + view.fileId, SESSION_A)).toBe(false)
     expect(deleteQueueMessage("not-qmsg.txt", SESSION_A)).toBe(false)
     expect(deleteQueueMessage(view.fileId, SESSION_A)).toBe(true)
+    expect(getQueueLength(SESSION_A)).toBe(0)
+  })
+
+  it("deleteQueueMessagesByMessageId 按 messageId 删除 pending 与 claimed", () => {
+    const msgId = "om_recall_test_001"
+    pushToFileQueue("待撤回", msgId, "test", SESSION_A)
+    claimSessionMessages(SESSION_A)
+    expect(getQueueLength(SESSION_A)).toBe(1)
+    const { removed, sessionKeys } = deleteQueueMessagesByMessageId(msgId)
+    expect(removed).toBe(1)
+    expect(sessionKeys).toEqual([SESSION_A])
     expect(getQueueLength(SESSION_A)).toBe(0)
   })
 })

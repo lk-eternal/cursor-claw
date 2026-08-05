@@ -22,7 +22,7 @@ export function shortenSessionKeyForUi(sessionKey: string): string {
 
   const chatPart = sk.includes("|") ? sk.slice(sk.indexOf("|") + 1) : sk
   const chat = (chatPart.split("::")[0] || chatPart).slice(0, 14)
-  return `💬 ${chat}`
+  return chat
 }
 
 /**

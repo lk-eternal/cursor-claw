@@ -24,6 +24,7 @@ import {
   getQueueCounts,
   getQueueMessages as getFileQueueMessages,
   deleteQueueMessage as deleteFileQueueMessage,
+  deleteQueueMessagesByMessageId,
   getDistinctSessions,
   hasSessionQueueDir,
   cleanupStaleMessages,
@@ -48,7 +49,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { registerAdminTools } from "./server-admin.js";
 import { registerProjectAgentTools } from "./server-project.js";
-import { initProjectStore, hasProjectNewDraft, getProject, getNodeGroups, listProjects, findProjectByGroupChat } from "./shared/project-store.js";
+import { initProjectStore, hasProjectNewDraft, getProject, getNodeGroups, listProjects, findProjectByGroupChat, getProjectNewDraft, saveProjectNewDraft, clearProjectNewDraft } from "./shared/project-store.js";
 import { projectIdFromSessionKey, decodeRepoPairOption, splitRepoPairValues, isRemoteRepoRef, DEFAULT_NODE_GROUP_ID, formFieldStr, coerceFormMultiSelect } from "./shared/project-types.js";
 import { buildSessionCardTitle, isSpecialSessionSuffix, resolveWorkspaceFromSessionKey, sessionHeaderTemplate } from "./shared/session-label.js";
 
@@ -70,6 +71,37 @@ const APP_DATA_DIR = process.env.APP_DATA_DIR || "";
 function normalizeRepoRef(v: string): string {
   const t = (v || "").trim();
   return isRemoteRepoRef(t) ? t : path.normalize(t);
+}
+
+type RepoProfile = { path: string; baseBranch: string; testBranch?: string; developBranch?: string };
+
+function extractProjectFormCache(f: Record<string, unknown>): Record<string, string> {
+  return {
+    name: formFieldStr(f.name),
+    featureBranch: formFieldStr(f.featureBranch),
+    worktreeRoot: formFieldStr(f.worktreeRoot),
+    storyUrl: formFieldStr(f.storyUrl),
+    relatedDocs: formFieldStr(f.relatedDocs),
+    chatMode: formFieldStr(f.chatMode),
+    existingGroupChatId: formFieldStr(f.existingGroupChatId),
+  };
+}
+
+function mergeRepoProfiles(base: RepoProfile[], extra: RepoProfile[]): RepoProfile[] {
+  const seen = new Set<string>();
+  const out: RepoProfile[] = [];
+  for (const p of [...base, ...extra]) {
+    const key = p.path.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(p);
+  }
+  return out;
+}
+
+function combinedFormRepoProfiles(draft: ReturnType<typeof getProjectNewDraft>): RepoProfile[] {
+  if (!draft) return [];
+  return mergeRepoProfiles(draft.formRepoProfiles || [], draft.formExtraRepos || []);
 }
 
 function parseChannelConfigs(): DaemonChannelConfig[] {
@@ -909,8 +941,7 @@ function logPollDeliveryToAgent(
 /** 阻塞路径：有用户消息就 seal（含重投），保证新回合 bornAt 晚于 sealAt */
 async function sealOnUserDelivery(sessionKey: string, messages: QueueMessage[]): Promise<void> {
   if (!hasUserDeliverableMessages(messages)) return;
-  expireOpenCardQuestionsForSession(sessionKey, "已有新消息，问题已关闭");
-  await sealActiveStreamCardOnDelivery(sessionKey);
+  await closeOpenQuestionsForSession(sessionKey, "已有新消息，问题已关闭");
 }
 
 function addReactionToMessages(messageIds: string[], sessionKey: string, emojiType = "Get"): void {
@@ -1031,9 +1062,9 @@ function pushMessage(content: string, messageId?: string, chatId?: string, chatT
   if (written) {
     // 入队即建立 messageId→会话映射：回复一条尚未被 Agent 领取的消息也能正确路由
     if (messageId && routedId) trackMessageSession(messageId, routedId);
-    // 用户直接发消息（非卡片点击）时仅关闭「本会话」未决问题——同飞书私聊挂多会话时禁止按 chat 误伤
+    // 用户直接发消息（非卡片点击）时仅关闭未决问题卡；不 seal 活流式卡（干活中插话不拆卡，换回合由 blocking poll 投递负责）
     if (messageId && !messageId.startsWith("internal_") && routedId) {
-      expireOpenCardQuestionsForSession(routedId, "问题已关闭");
+      void expireOpenCardQuestionsForSession(routedId, "问题已关闭");
     }
     const preview = content.length > 200 ? `${content.slice(0, 200)} …(+${content.length - 200} chars)` : content;
     log("INFO", `消息已写入共享队列: ${JSON.stringify(preview)} (id=${messageId ?? "none"}, chat=${chatId ?? "none"}${routedId !== chatId ? ` → routed=${routedId}` : ""}${replyMessageId ? `, reply=${replyMessageId}` : ""})`);
@@ -1216,7 +1247,9 @@ async function startFeishuChannel(rt: ChannelRuntime): Promise<void> {
         .then((result) => enqueue(result || cleanText))
         .catch(() => enqueue(cleanText));
     }
-  }, (cardEvt) => handleCardAction(rt, cardEvt), wsLifecycle).then(
+  }, (cardEvt) => handleCardAction(rt, cardEvt), wsLifecycle, (recall) => {
+    handleMessageRecalled(rt, recall.messageId, recall.chatId, recall.recallType);
+  }).then(
     () => { rt.feishuConnected = true; },
     () => { rt.feishuConnected = false; },
   );
@@ -1267,10 +1300,17 @@ interface AgentStreamToolItem {
 }
 
 type AgentStreamSegment =
-  | { type: "thinking"; text: string; ms?: number }
-  | { type: "tools"; tools: AgentStreamToolItem[] }
+  | { type: "thinking"; text: string; ms?: number; panelId?: string }
+  | { type: "tools"; tools: AgentStreamToolItem[]; panelId?: string }
   | { type: "reply"; text: string }
   | { type: "todos"; items: AgentStreamTodoItem[] };
+
+interface StreamPanelState {
+  panelSeq: number;
+  knownPanelIds: Set<string>;
+  /** 应保持展开的面板（尾部 2 + 曾处于尾部 2 的块） */
+  expandedPanelIds: Set<string>;
+}
 
 interface AgentStreamTodoItem {
   content: string;
@@ -1306,8 +1346,14 @@ interface AgentStreamCardState {
   closedFooter?: string;
   /** 建卡时刻：无 cardId 的延迟 finish 用，避免误杀刚建的新卡 */
   createdAt: number;
+  /** 发卡后待补发的 @ 标签（正文已并入流式卡，finish 时单独 reply 触发通知） */
+  pendingAtMentions?: string[];
   /** 串行 CardKit 写操作，避免与 SDK update / MCP merge 撞 sequence */
   inflight: Promise<unknown>;
+  /** 思考/工具块稳定 id 与展开态追踪（splice 后 element_id 不复用） */
+  panelSeq: number;
+  knownPanelIds: Set<string>;
+  expandedPanelIds: Set<string>;
 }
 
 const agentStreamCards = new Map<string, AgentStreamCardState>();
@@ -1456,16 +1502,42 @@ function normalizeAgentStreamPayload(body: {
   return { segments, thinking, thinkingMs: body.thinkingMs, tools, reply };
 }
 
+function ensureSegmentPanelIds(
+  panelState: StreamPanelState,
+  segments: AgentStreamSegment[],
+  prevSegments?: AgentStreamSegment[],
+): void {
+  const prevFold = prevSegments?.filter((s) => s.type === "thinking" || s.type === "tools") ?? [];
+  let fi = 0;
+  for (const seg of segments) {
+    if (seg.type !== "thinking" && seg.type !== "tools") continue;
+    if (seg.panelId) {
+      fi++;
+      continue;
+    }
+    const old = prevFold[fi];
+    if (old?.panelId && old.type === seg.type) {
+      seg.panelId = old.panelId;
+    } else {
+      const prefix = seg.type === "thinking" ? "t" : "o";
+      seg.panelId = `${prefix}${++panelState.panelSeq}`;
+    }
+    fi++;
+  }
+}
+
+type CardBodySegment =
+  | { type: "thinking"; text: string; title?: string; panelId?: string; expanded?: boolean }
+  | { type: "tools"; title?: string; panelId?: string; expanded?: boolean; steps: Array<{ title: string; status: string; detail?: string; icon?: string }> }
+  | { type: "reply"; text: string }
+  | { type: "todos"; items: Array<{ content: string; status: string }> };
+
 function buildCardSegmentsFromPayload(
   payload: AgentStreamCardPayload,
   opts: { finish: boolean; showThinking: boolean },
+  panelState?: StreamPanelState,
 ) {
-  const out: Array<
-    | { type: "thinking"; text: string; title?: string; expanded?: boolean }
-    | { type: "tools"; title?: string; expanded?: boolean; steps: Array<{ title: string; status: string; detail?: string; icon?: string }> }
-    | { type: "reply"; text: string }
-    | { type: "todos"; items: Array<{ content: string; status: string }> }
-  > = [];
+  const out: CardBodySegment[] = [];
   for (const seg of payload.segments) {
     if (seg.type === "thinking") {
       if (!opts.showThinking) continue;
@@ -1474,6 +1546,7 @@ function buildCardSegmentsFromPayload(
         type: "thinking",
         text: seg.text,
         title: formatThinkingDuration(seg.ms, opts.finish || seg.ms != null),
+        panelId: seg.panelId,
         expanded: false,
       });
     } else if (seg.type === "tools") {
@@ -1482,6 +1555,7 @@ function buildCardSegmentsFromPayload(
       out.push({
         type: "tools",
         title: buildToolsPanelTitle(seg.tools),
+        panelId: seg.panelId,
         expanded: false,
         steps,
       });
@@ -1492,7 +1566,7 @@ function buildCardSegmentsFromPayload(
       out.push({ type: "reply", text: seg.text });
     }
   }
-  // 展开最后 2 个折叠块（思考+工具并排可见）；收口后也保持，方便回看
+  // 展开最近 2 个折叠块（思考/工具并排可见）；收口后也保持
   let n = 0;
   for (let i = out.length - 1; i >= 0 && n < 2; i--) {
     const s = out[i];
@@ -1531,7 +1605,7 @@ function foldSdkRepliesIntoThinking(segments: AgentStreamSegment[]): AgentStream
     if (!seg.tools?.length) continue;
     const last = out[out.length - 1];
     if (last?.type === "tools") last.tools.push(...seg.tools);
-    else out.push({ type: "tools", tools: [...seg.tools] });
+    else out.push({ type: "tools", tools: [...seg.tools], panelId: seg.panelId });
   }
   return out;
 }
@@ -1562,7 +1636,7 @@ function coalesceTimeline(segments: AgentStreamSegment[]): AgentStreamSegment[] 
     if (!seg.tools?.length) continue;
     const last = out[out.length - 1];
     if (last?.type === "tools") last.tools.push(...seg.tools);
-    else out.push({ type: "tools", tools: [...seg.tools] });
+    else out.push({ type: "tools", tools: [...seg.tools], panelId: seg.panelId });
   }
   return out;
 }
@@ -1593,7 +1667,6 @@ function overlayMcpOnPayload(state: AgentStreamCardState, sdkSegments: AgentStre
     segs.splice(idx, 0, { type: "reply", text: item.text });
     offset++;
   }
-  // 问题正文放 footer（贴按钮上方），不推进时间线末尾
   return coalesceTimeline(segs);
 }
 
@@ -1606,27 +1679,42 @@ async function refreshAgentStreamCard(
   const run = async (): Promise<boolean> => {
     // 每次刷新读 live 开关，避免创建卡后改设置不生效
     state.showThinking = ch.rt.cfg.showThinking !== false;
+    if (!state.knownPanelIds) state.knownPanelIds = new Set();
+    if (!state.expandedPanelIds) state.expandedPanelIds = new Set();
+    if (state.panelSeq == null) state.panelSeq = 0;
+    ensureSegmentPanelIds(state, state.lastSegments);
     const merged: AgentStreamCardPayload = { segments: overlayMcpOnPayload(state, state.lastSegments) };
-    const cardSegs = buildCardSegmentsFromPayload(merged, { finish: opts.finish, showThinking: state.showThinking });
+    ensureSegmentPanelIds(state, merged.segments, state.lastSegments);
     const q = state.pendingQuestion;
+    let closedReply: string | undefined;
+    if (state.closedFooter) {
+      for (let i = merged.segments.length - 1; i >= 0; i--) {
+        const s = merged.segments[i];
+        if (s.type === "reply" && s.text.trim()) { closedReply = s.text.trim(); break; }
+      }
+    }
+    const questionText = q?.text.trim() || closedReply;
+    if (questionText) {
+      merged.segments = merged.segments.filter((s) => !(s.type === "reply" && s.text.trim() === questionText));
+    }
+    const cardSegs = buildCardSegmentsFromPayload(merged, { finish: opts.finish, showThinking: state.showThinking }, state);
     const buttons = q ? q.options.map((o, i) => ({
       label: `${i + 1}. ${o}`,
       value: { kind: "question", opt: o, sk: sessionKey },
       type: "default" as const,
     })) : undefined;
     const status = (opts.finish || q) ? "completed" as const : "streaming" as const;
-    // 未决：题干+小字提示；已收口：状态行留在 footer（保留分隔线）
-    const qFoot = q
-      ? [`❓ ${q.text.trim()}`, "<font color='grey'>点击选项，或直接回复本条消息作答</font>"].join("\n\n")
-      : state.closedFooter;
+    const qFoot = q ? QUESTION_CARD_HINT : state.closedFooter;
     const cardJson = LarkSender.buildStreamingCardJson({
       status,
       showThinking: state.showThinking,
       sessionTitle: state.sessionTitle,
       sessionTemplate: state.sessionTemplate,
       segments: cardSegs,
+      questionText,
       buttons,
       footer: qFoot,
+      panelState: state,
     });
     const sender = ch.rt.sender!;
     if (status !== "streaming") {
@@ -1650,6 +1738,38 @@ async function refreshAgentStreamCard(
 
 function isStreamCardEnabled(ch: Extract<ResolvedChannel, { type: "feishu" }>): boolean {
   return ch.rt.cfg.showThinking !== false;
+}
+
+function isGroupFeishuChat(ch: Extract<ResolvedChannel, { type: "feishu" }>): boolean {
+  if (!ch.chatId) return false;
+  const chatKey = makeChatKey(ch.rt.cfg.id, ch.chatId);
+  const ct = chatTypeByChatKey.get(chatKey) || chatTypeByChatKey.get(ch.chatId);
+  return ct === "group";
+}
+
+function mergePendingAtMentions(state: AgentStreamCardState, tags: string[]): void {
+  if (!tags.length) return;
+  const existing = state.pendingAtMentions ?? [];
+  const seen = new Set(existing.map((t) => t.match(/user_id="([^"]+)"/)?.[1] ?? t));
+  for (const tag of tags) {
+    const id = tag.match(/user_id="([^"]+)"/)?.[1] ?? tag;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    existing.push(tag);
+  }
+  state.pendingAtMentions = existing;
+}
+
+async function dispatchPendingAtMentions(
+  state: AgentStreamCardState,
+  ch: Extract<ResolvedChannel, { type: "feishu" }>,
+): Promise<void> {
+  const tags = state.pendingAtMentions;
+  if (!tags?.length || !state.messageId || !isGroupFeishuChat(ch)) return;
+  state.pendingAtMentions = undefined;
+  const sentId = await ch.rt.sender!.sendMessage(tags.join(" "), state.messageId);
+  if (sentId) log("INFO", `[AtMention] 已发卡后 @ 通知 reply=${state.messageId} msg=${sentId}`);
+  else log("WARN", `[AtMention] 发卡后 @ 通知失败 reply=${state.messageId}`);
 }
 
 /** 无活跃流式卡时先建卡，供 send_text/send_question 抢先合并（ACK 早于思考/工具）。整体入全序链。 */
@@ -1687,7 +1807,9 @@ async function ensureAgentStreamCard(
   if (existing) {
     // MCP 已建空卡时，SDK ensure 须把当前队列写入，否则会一直只有 send_* 正文
     if (payload.segments.length) {
+      const prev = [...existing.lastSegments];
       existing.lastSegments = payload.segments;
+      ensureSegmentPanelIds(existing, existing.lastSegments, prev);
       // 未决问题等待用户：只记 segments，禁止刷卡（否则清空飞书输入框）
       if (!existing.pendingQuestion) {
         await refreshAgentStreamCard(sessionKey, existing, ch, { finish: false });
@@ -1712,7 +1834,9 @@ async function ensureAgentStreamCard(
     : [];
   const folded: AgentStreamCardPayload = { segments: foldSdkRepliesIntoThinking(payload.segments) };
   if (mcpReplies.length) folded.segments = [...folded.segments, { type: "reply", text: mcpReplies[0].text }];
-  let segments = buildCardSegmentsFromPayload(folded, { finish: false, showThinking });
+  const panelBoot: StreamPanelState = { panelSeq: 0, knownPanelIds: new Set(), expandedPanelIds: new Set() };
+  ensureSegmentPanelIds(panelBoot, folded.segments);
+  let segments = buildCardSegmentsFromPayload(folded, { finish: false, showThinking }, panelBoot);
   // 空卡也能创建（仅会话条）；无 chrome 时放极短占位，避免飞书拒空 body
   if (!segments.length && !chrome.sessionTitle) {
     segments = [{ type: "reply", text: "…" }];
@@ -1738,10 +1862,13 @@ async function ensureAgentStreamCard(
     sessionTitle: chrome.sessionTitle,
     sessionTemplate: chrome.sessionTemplate,
     lastHash: payloadFingerprint(payload, false),
-    lastSegments: [...payload.segments],
+    lastSegments: [...folded.segments],
     mcpReplies,
     createdAt: Date.now(),
     inflight: Promise.resolve(),
+    panelSeq: panelBoot.panelSeq,
+    knownPanelIds: panelBoot.knownPanelIds,
+    expandedPanelIds: panelBoot.expandedPanelIds,
   });
   if (messageId) trackMessageSession(messageId, sessionKey);
   rememberSessionKey(sessionKey);
@@ -1768,7 +1895,11 @@ async function updateAgentStreamCard(
     return { ok: true, gone: true, cardId: state.cardId };
   }
   // 空时间线不覆盖已有内容（队列语义：空的丢弃）
-  if (payload.segments.length) state.lastSegments = payload.segments;
+  if (payload.segments.length) {
+    const prev = [...state.lastSegments];
+    state.lastSegments = payload.segments;
+    ensureSegmentPanelIds(state, state.lastSegments, prev);
+  }
   // 未决问题等待用户：禁止刷卡，避免清空飞书自定义输入
   if (state.pendingQuestion) {
     return { ok: true, cardId: state.cardId, messageId: state.messageId };
@@ -1831,7 +1962,11 @@ async function finishAgentStreamCard(
     }
   }
   // 空时间线不覆盖（队列语义：空的丢弃），避免收口把卡冲短
-  if (payload.segments.length) state.lastSegments = payload.segments;
+  if (payload.segments.length) {
+    const prev = [...state.lastSegments];
+    state.lastSegments = payload.segments;
+    ensureSegmentPanelIds(state, state.lastSegments, prev);
+  }
   // 未决问题：send_question 已 finish+展示输入框，再刷会清空用户正在输入的内容
   if (state.pendingQuestion) {
     log("INFO", `[StreamCard] finish 跳过未决问题卡 session=${sessionKey} card=${state.cardId}`);
@@ -1846,6 +1981,7 @@ async function finishAgentStreamCard(
     await finishOrphanStreamCardById(state.cardId, ch);
     return { ok: false, cardId: state.cardId, messageId: state.messageId, error: "结束流式卡片失败" };
   }
+  await dispatchPendingAtMentions(state, ch);
   const result = { ok: true, cardId: state.cardId, messageId: state.messageId };
   log("INFO", `[StreamCard] 已结束 session=${sessionKey} card=${result.cardId}`);
   return result;
@@ -1856,6 +1992,11 @@ async function finishAgentStreamCard(
  * 投递路径必须 await 完成后再响应 poll——顺序保证「收口时刻早于 Agent 收到消息」，
  * 新回合队列的诞生时间恒晚于收口时间，建卡放行不再依赖毫秒时序。
  */
+async function closeOpenQuestionsForSession(sessionKey: string, note: string): Promise<void> {
+  await sealActiveStreamCardOnDelivery(sessionKey);
+  await expireOpenCardQuestionsForSession(sessionKey, note);
+}
+
 function sealActiveStreamCardOnDelivery(sessionKey: string): Promise<void> {
   return enqueueCardOp(sessionKey, async () => {
     const state = agentStreamCards.get(sessionKey);
@@ -1865,8 +2006,16 @@ function sealActiveStreamCardOnDelivery(sessionKey: string): Promise<void> {
     const q = state.pendingQuestion;
     if (q) {
       state.pendingQuestion = undefined;
-      if (q.text.trim()) enqueueMcpBody(state, questionBrief(q.text));
-      state.closedFooter = "⌛ _已有新消息，问题已关闭_";
+      if (q.text.trim()) {
+        enqueueMcpBody(state, q.text.trim());
+        state.closedFooter = closedQuestionFooter(q.text, "已有新消息，问题已关闭");
+      } else {
+        state.closedFooter = "⌛ _已有新消息，问题已关闭_";
+      }
+      if (state.messageId) {
+        cardQuestionMap.delete(state.messageId);
+        scheduleCardQuestionSave();
+      }
     }
     const ch = resolveChannel(sessionKey, { allowDefault: false });
     if (ch.type !== "feishu") return;
@@ -1874,6 +2023,8 @@ function sealActiveStreamCardOnDelivery(sessionKey: string): Promise<void> {
     if (!ok) {
       log("WARN", `[StreamCard] 消息送达收口失败 session=${sessionKey} card=${state.cardId}`);
       await finishOrphanStreamCardById(state.cardId, ch);
+    } else {
+      await dispatchPendingAtMentions(state, ch);
     }
   });
 }
@@ -1881,9 +2032,10 @@ function sealActiveStreamCardOnDelivery(sessionKey: string): Promise<void> {
 
 // ── 卡片按钮回调 ─────────────────────────────────────────
 
-interface CardQuestionEntry { text: string; options: string[]; sessionKey?: string; chatKey?: string; createdAt: number; title?: CardTitle; template?: string }
+interface CardQuestionEntry { text: string; displayBody?: string; options: string[]; sessionKey?: string; chatKey?: string; createdAt: number; title?: CardTitle; template?: string; isStreamCard?: boolean }
 const cardQuestionMap = new Map<string, CardQuestionEntry>();
 const CARD_QUESTION_MAX = 500;
+const QUESTION_CARD_HINT = "<font color='grey'>请选择上方选项或直接输入</font>";
 const CARD_QUESTION_FILE = path.join(APP_DATA_DIR, "card-questions.json");
 let cardQuestionSaveTimer: NodeJS.Timeout | null = null;
 
@@ -1919,6 +2071,24 @@ function scheduleCardQuestionSave(): void {
   cardQuestionSaveTimer.unref?.();
 }
 
+function handleMessageRecalled(rt: ChannelRuntime, messageId: string, chatId: string, recallType?: string): void {
+  try {
+    const { removed, sessionKeys } = deleteQueueMessagesByMessageId(messageId);
+    if (cardQuestionMap.has(messageId)) {
+      cardQuestionMap.delete(messageId);
+      scheduleCardQuestionSave();
+    }
+    if (removed > 0) {
+      log("INFO", `[${rt.cfg.name}] 消息已撤回，移出队列 ${removed} 条 messageId=${messageId} chat=${chatId} recall=${recallType ?? "?"}`);
+      for (const sk of sessionKeys) broadcastQueueEvent(sk);
+    } else {
+      log("DEBUG", `[${rt.cfg.name}] 消息撤回（队列无匹配）messageId=${messageId} chat=${chatId} recall=${recallType ?? "?"}`);
+    }
+  } catch (e: any) {
+    log("WARN", `[${rt.cfg.name}] 撤回处理失败: ${e?.message ?? e}`);
+  }
+}
+
 function rememberCardQuestion(messageId: string, entry: CardQuestionEntry): void {
   if (cardQuestionMap.size >= CARD_QUESTION_MAX) {
     const oldest = cardQuestionMap.keys().next().value;
@@ -1951,7 +2121,7 @@ function expireOpenCardQuestions(chatKey: string, note: string): void {
   for (const { messageId, entry } of targets) {
     void (async () => {
       const ok = await sealQuestionCardByMessageId(messageId, entry, note)
-        || await sender.patchCard(messageId, questionBrief(entry.text, 120), entry.title, entry.template, `⌛ _${note}_`);
+        || await sender.patchCard(messageId, entry.displayBody ?? questionDisplayBody(entry.text, 120), entry.title, entry.template, `⌛ _${note}_`);
       if (ok) {
         cardQuestionMap.delete(messageId);
         scheduleCardQuestionSave();
@@ -1975,30 +2145,38 @@ async function sealQuestionCardByMessageId(messageId: string, entry: CardQuestio
   return enqueueCardOp(sk, async () => {
     const state = agentStreamCards.get(sk);
     if (!state || state.messageId !== messageId) return false;
+    // 问题已关/已答但 map 残留：不 seal 活卡，让 expire 路径只清 map
+    if (!state.pendingQuestion) return false;
     agentStreamCards.delete(sk);
     markCardSealed(sk);
-    const qText = (state.pendingQuestion?.text ?? entry.text).trim();
+    const qText = (state.pendingQuestion?.text ?? entry.displayBody ?? entry.text ?? "").trim();
     state.pendingQuestion = undefined;
-    if (qText) enqueueMcpBody(state, questionBrief(qText));
-    state.closedFooter = `⌛ _${note}_`;
+    if (qText) enqueueMcpBody(state, qText);
+    state.closedFooter = closedQuestionFooter(qText, note);
     const sch = resolveChannel(sk, { allowDefault: false });
     if (sch.type !== "feishu") return false;
     return refreshAgentStreamCard(sk, state, sch, { finish: true });
   });
 }
 
-/**
- * 问题卡收口题干行。
- * maxLen 缺省=不截断（选完回看要全文）；超时关闭等场景可传短摘要。
- */
+/** 问题卡正文（发题/终态共用）；Agent text 原样上卡，仅 trim / 可选截断 */
+function questionDisplayBody(raw: string, maxLen?: number): string {
+  let t = raw.trim();
+  if (maxLen && maxLen > 0 && t.length > maxLen) t = `${t.slice(0, maxLen)}…`;
+  return t;
+}
+
+/** @deprecated 用 questionDisplayBody；保留别名防漏改 */
 function questionBrief(questionText: string, maxLen?: number): string {
-  const t = questionText.trim().replace(/^\*\*❓\s*/, "").replace(/\*\*$/, "");
-  const brief = maxLen && maxLen > 0 && t.length > maxLen ? `${t.slice(0, maxLen)}…` : t;
-  return `❓ ${brief}`;
+  return questionDisplayBody(questionText, maxLen);
+}
+
+function closedQuestionFooter(_questionText: string, note: string): string {
+  return `⌛ _${note}_`;
 }
 
 /** 按 session 关闭未决问题（禁止按 chat 扩散，避免同私聊多会话误伤） */
-function expireOpenCardQuestionsForSession(sessionKey: string | undefined, note: string): void {
+async function expireOpenCardQuestionsForSession(sessionKey: string | undefined, note: string): Promise<void> {
   if (!sessionKey) return;
   const targets: { messageId: string; entry: CardQuestionEntry }[] = [];
   for (const [messageId, entry] of cardQuestionMap) {
@@ -2009,16 +2187,33 @@ function expireOpenCardQuestionsForSession(sessionKey: string | undefined, note:
   if (ch.type !== "feishu" || !ch.rt.sender) return;
   const sender = ch.rt.sender;
   for (const { messageId, entry } of targets) {
-    void (async () => {
-      const ok = await sealQuestionCardByMessageId(messageId, entry, note)
-        || await sender.patchCard(messageId, questionBrief(entry.text, 120), entry.title, entry.template, `⌛ _${note}_`);
+    try {
+      const ok = await sealQuestionCardByMessageId(messageId, entry, note);
       if (ok) {
         cardQuestionMap.delete(messageId);
         scheduleCardQuestionSave();
+        continue;
       }
-    })().catch((e: any) => log("WARN", `关闭问题卡片失败: ${e?.message ?? e}`));
+      if (entry.isStreamCard) {
+        cardQuestionMap.delete(messageId);
+        scheduleCardQuestionSave();
+        log("INFO", `流式问题卡已收口或不存在，跳过 patchCard: ${messageId}`);
+        continue;
+      }
+      const patched = await sender.patchCard(
+        messageId, entry.displayBody ?? questionDisplayBody(entry.text), entry.title, entry.template, closedQuestionFooter(entry.text, note),
+      );
+      if (patched) {
+        cardQuestionMap.delete(messageId);
+        scheduleCardQuestionSave();
+      } else {
+        log("WARN", `关闭问题卡片未成功，保留登记: ${messageId}`);
+      }
+    } catch (e: any) {
+      log("WARN", `关闭问题卡片失败: ${e?.message ?? e}`);
+    }
   }
-  log("INFO", `已请求关闭 ${targets.length} 张未决问题卡片 (session=${sessionKey})`);
+  log("INFO", `已关闭 ${targets.length} 张未决问题卡片 (session=${sessionKey})`);
 }
 
 /** 已应答过的问题卡 messageId：防连点/重复提交把同一个选项入队多次 */
@@ -2086,6 +2281,21 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
   const value = evt.value as { kind?: string; opt?: string; cmd?: string; sk?: string; approve?: string; dir?: string } | undefined;
   const chatKey = makeChatKey(rt.cfg.id, evt.chatId);
 
+  const panelMatch = evt.elementId?.match(/^(?:think|tool)_(.+)$/);
+  if (panelMatch && !value?.kind) {
+    const panelId = panelMatch[1];
+    const hit = findStreamCardByMessageId(evt.messageId);
+    if (hit?.state) {
+      if (!hit.state.expandedPanelIds) hit.state.expandedPanelIds = new Set();
+      if (evt.expanded === true) hit.state.expandedPanelIds.add(panelId);
+      else if (evt.expanded === false) hit.state.expandedPanelIds.delete(panelId);
+      else if (hit.state.expandedPanelIds.has(panelId)) hit.state.expandedPanelIds.delete(panelId);
+      else hit.state.expandedPanelIds.add(panelId);
+      log("INFO", `[StreamCard] 面板展开态 panel=${panelId} open=${hit.state.expandedPanelIds.has(panelId)} msg=${evt.messageId}`);
+    }
+    return {};
+  }
+
   if (value?.kind === "question") {
     // 按钮点击取 opt；输入框提交取 input_value（自由输入）
     const opt = String(value.opt ?? "").trim() || (evt.inputValue ?? "").trim();
@@ -2127,27 +2337,23 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
         if (!state) return undefined;
         agentStreamCards.delete(sk);
         markCardSealed(sk);
-        // 短收口：题干进正文，状态行走 footer（保留分隔线）
-        const qText = (state.pendingQuestion?.text ?? entry?.text ?? "").trim();
+        // 短收口：题干走 questionText 区块（已回答布局），footer 显示选择结果；回调一次刷齐，避免二次刷新闪烁
+        const qText = (state.pendingQuestion?.text ?? entry?.displayBody ?? entry?.text ?? "").trim();
         state.pendingQuestion = undefined;
-        if (qText) enqueueMcpBody(state, questionBrief(qText));
         state.closedFooter = `✅ 已选择: **${opt}**`;
         const merged: AgentStreamCardPayload = { segments: overlayMcpOnPayload(state, state.lastSegments) };
-        const cardSegs = buildCardSegmentsFromPayload(merged, { finish: true, showThinking: state.showThinking });
-        const json = LarkSender.buildStreamingCardJson({
+        ensureSegmentPanelIds(state, merged.segments, state.lastSegments);
+        const cardSegs = buildCardSegmentsFromPayload(merged, { finish: true, showThinking: state.showThinking }, state);
+        return LarkSender.buildStreamingCardJson({
           status: "completed",
           showThinking: state.showThinking,
           sessionTitle: state.sessionTitle,
           sessionTemplate: state.sessionTemplate,
           segments: cardSegs,
+          questionText: qText || undefined,
           footer: state.closedFooter,
+          panelState: state,
         });
-        const sch = resolveChannel(sk, { allowDefault: false });
-        if (sch.type === "feishu") {
-          void refreshAgentStreamCard(sk, state, sch, { finish: true })
-            .catch((e: any) => log("WARN", `流式问题卡收口失败: ${e?.message ?? e}`));
-        }
-        return json;
       });
       if (cardJson) {
         return {
@@ -2158,12 +2364,12 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
       // 卡已被链上先行收口（如新消息投递抢先 seal）：降级为普通确认卡
     }
 
-    const questionText = entry?.text ?? "问题";
+    const body = entry?.displayBody ?? questionDisplayBody(entry?.text ?? "问题");
     const title = entry?.title;
     const template = entry?.template;
     return {
       toast: { type: "success", content: `已选择: ${opt.slice(0, 30)}` },
-      card: { type: "raw", data: LarkSender.buildCard(questionBrief(questionText), title, undefined, undefined, template, `✅ 已选择: **${opt}**`) },
+      card: { type: "raw", data: LarkSender.buildCard(body, title, undefined, undefined, template, `✅ 已选择: **${opt}**`) },
     };
   }
 
@@ -2212,17 +2418,105 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
     return { toast: { type: "info", content: `已执行 ${cmd}` } };
   }
 
+  if (value?.kind === "project_new_open_add_repo") {
+    const cbv = value as { worktreeRoot?: string };
+    const f = evt.formValue || {};
+    const draft = getProjectNewDraft(chatKey) || {
+      chatKey,
+      step: "form" as const,
+      formMode: "main" as const,
+      formRepoProfiles: [],
+      formExtraRepos: [],
+      updatedAt: Date.now(),
+    };
+    draft.step = "form";
+    draft.formMode = "add_repo";
+    draft.formCache = extractProjectFormCache(f);
+    draft.updatedAt = Date.now();
+    saveProjectNewDraft(draft);
+    const wt = formFieldStr(f.worktreeRoot) || cbv.worktreeRoot || "";
+    return {
+      toast: { type: "info", content: "填写主仓信息" },
+      card: { type: "raw", data: LarkSender.buildProjectNewAddRepoCard({ worktreeRoot: wt }) },
+    };
+  }
+
+  if (value?.kind === "project_new_back_main") {
+    const cbv = value as { worktreeRoot?: string };
+    const draft = getProjectNewDraft(chatKey);
+    if (draft) {
+      draft.formMode = "main";
+      draft.updatedAt = Date.now();
+      saveProjectNewDraft(draft);
+    }
+    const profiles = combinedFormRepoProfiles(draft);
+    const wt = draft?.formCache?.worktreeRoot || cbv.worktreeRoot || "";
+    return {
+      card: {
+        type: "raw",
+        data: LarkSender.buildProjectNewFormCard({
+          repoProfiles: profiles,
+          worktreeRoot: wt,
+          nodeGroups: getNodeGroups().map((g) => ({ id: g.id, name: g.name })),
+          defaults: draft?.formCache,
+        }),
+      },
+    };
+  }
+
+  if (value?.kind === "project_new_add_repo_confirm") {
+    const cbv = value as { worktreeRoot?: string };
+    const f = evt.formValue || {};
+    const repoPathRaw = formFieldStr(f.repoPathCustom);
+    const baseBranch = formFieldStr(f.baseBranchCustom);
+    const testBranch = formFieldStr(f.testBranchCustom) || undefined;
+    const developBranch = formFieldStr(f.developBranchCustom) || undefined;
+    if (!repoPathRaw) return { toast: { type: "error", content: "请填写主仓路径" } };
+    if (!baseBranch) return { toast: { type: "error", content: "请填写生产基线分支" } };
+    const rp = normalizeRepoRef(repoPathRaw);
+    const draft = getProjectNewDraft(chatKey) || {
+      chatKey,
+      step: "form" as const,
+      formMode: "main" as const,
+      formRepoProfiles: [],
+      formExtraRepos: [],
+      updatedAt: Date.now(),
+    };
+    draft.step = "form";
+    draft.formMode = "main";
+    const extras = draft.formExtraRepos || [];
+    if (!extras.some((e) => e.path.toLowerCase() === rp.toLowerCase())) {
+      extras.push({ path: rp, baseBranch, testBranch, developBranch });
+    }
+    draft.formExtraRepos = extras;
+    draft.updatedAt = Date.now();
+    saveProjectNewDraft(draft);
+    const profiles = combinedFormRepoProfiles(draft);
+    const wt = draft.formCache?.worktreeRoot || cbv.worktreeRoot || "";
+    return {
+      toast: { type: "success", content: "主仓已添加" },
+      card: {
+        type: "raw",
+        data: LarkSender.buildProjectNewFormCard({
+          repoProfiles: profiles,
+          worktreeRoot: wt,
+          nodeGroups: getNodeGroups().map((g) => ({ id: g.id, name: g.name })),
+          defaults: draft.formCache,
+        }),
+      },
+    };
+  }
+
   if (value?.kind === "project_new_form") {
     const f = evt.formValue || {};
     const cbv = value as { worktreeRoot?: string; groupId?: string; groupIds?: string[]; workspaceType?: string } | undefined;
     const name = formFieldStr(f.name);
-    const goal = formFieldStr(f.goal);
+    const goal = "";
     const worktreeRaw = formFieldStr(f.worktreeRoot) || formFieldStr(cbv?.worktreeRoot);
     const worktreeRoot = worktreeRaw ? path.normalize(worktreeRaw) : "";
     const featureBranch = formFieldStr(f.featureBranch);
     const storyUrl = formFieldStr(f.storyUrl);
-    const productDocUrl = formFieldStr(f.productDocUrl);
-    const techDocUrl = formFieldStr(f.techDocUrl);
+    const relatedDocs = formFieldStr(f.relatedDocs);
     const chatModeRaw = formFieldStr(f.chatMode);
     const chatMode = chatModeRaw === "inline" ? "inline" : chatModeRaw === "bind" ? "bind" : "group";
     const existingGroupChatId = formFieldStr(f.existingGroupChatId);
@@ -2247,7 +2541,7 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
         chatId: chatKey,
         messageId: evt.messageId,
         name, goal, worktreeRoot, featureBranch: "",
-        storyUrl, productDocUrl, techDocUrl,
+        storyUrl, relatedDocs,
         groupId, groupIds,
         workspaceType,
         chatMode,
@@ -2257,6 +2551,7 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
         repoPath: "",
         baseBranch: "",
       })}\n`);
+      clearProjectNewDraft(chatKey);
       return {
         toast: { type: "info", content: "正在创建项目…" },
         card: { type: "raw", data: LarkSender.buildCard(`📦 正在创建项目 **${name}**…`, "创建项目", undefined, undefined, "orange") },
@@ -2279,38 +2574,13 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
       seen.add(key);
       repos.push({ repoPath: rp, baseBranch, testBranch, developBranch });
     }
-    const customPath = formFieldStr(f.repoPathCustom);
-    const customBase = formFieldStr(f.baseBranchCustom);
-    const customTest = formFieldStr(f.testBranchCustom) || undefined;
-    const customDev = formFieldStr(f.developBranchCustom) || undefined;
-    if (customPath) {
-      if (!customBase) return { toast: { type: "error", content: "手填主仓时请填写生产基线分支" } };
-      const rp = normalizeRepoRef(customPath);
-      const key = rp.toLowerCase();
-      if (!seen.has(key)) {
-        seen.add(key);
-        repos.push({ repoPath: rp, baseBranch: customBase, testBranch: customTest, developBranch: customDev });
-      } else {
-        const hit = repos.find((r) => r.repoPath.toLowerCase() === key);
-        if (hit) {
-          hit.baseBranch = customBase;
-          if (customTest) hit.testBranch = customTest;
-          if (customDev) hit.developBranch = customDev;
-        }
-      }
-    } else if (customBase && repos.length) {
-      const hit = repos[repos.length - 1];
-      hit.baseBranch = customBase;
-      if (customTest) hit.testBranch = customTest;
-      if (customDev) hit.developBranch = customDev;
-    }
 
     const primary = repos[0];
     process.stdout.write(`__PROJECT_NEW_SUBMIT__:${JSON.stringify({
       chatId: chatKey,
       messageId: evt.messageId,
       name, goal, worktreeRoot, featureBranch,
-      storyUrl, productDocUrl, techDocUrl,
+      storyUrl, relatedDocs,
       groupId, groupIds,
       workspaceType,
       chatMode,
@@ -2320,6 +2590,7 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
       repoPath: primary?.repoPath || "",
       baseBranch: primary?.baseBranch || "",
     })}\n`);
+    clearProjectNewDraft(chatKey);
     return {
       toast: { type: "info", content: "正在创建项目…" },
       card: { type: "raw", data: LarkSender.buildCard(`📦 正在创建项目 **${name}**…`, "创建项目", undefined, undefined, "orange") },
@@ -2633,9 +2904,9 @@ function createMcpServer(): McpServer {
 
   s.tool(
     "send_text",
-    "发送文本消息到飞书/微信。飞书群聊中可 @ 其他成员或机器人：在 text 中使用 `<at user_id=\"ou_xxx\">名字</at>` 标签（open_id 可从收到消息的 @名字(open_id=ou_xxx) 内联标注或 [可协作机器人] 名册中获取），被 @ 的机器人会收到事件并响应。",
+    "发送文本消息到飞书/微信。飞书群聊中 @ 其他成员或机器人：在 text 中使用 `<at user_id=\"ou_xxx\">名字</at>`（open_id 从收到消息的 @名字(open_id=ou_xxx) 内联标注获取）。",
     {
-      text: z.string().describe("要发送的消息内容；含 <at user_id=\"ou_xxx\">名字</at> 标签时自动以可触发 @ 通知的文本消息发送"),
+      text: z.string().describe("要发送的消息内容"),
       message_id: z.string().optional().describe("要回复的消息ID，传入后以回复模式发送"),
       session_key: z.string().optional().describe("目标会话的 sessionKey，用于精确投递"),
     },
@@ -2697,18 +2968,18 @@ function createMcpServer(): McpServer {
 
   s.tool(
     "send_question",
-    "向用户提问并给出选项按钮。飞书发交互卡片，用户点击按钮后所选选项会作为一条用户消息进入你的 poll-message 队列；微信降级为文本选项列表（用户直接回复文字）。发出后继续 poll-message 等待用户选择。",
+    "向用户提问并给出选项按钮。飞书发交互卡片；微信降级为文本选项列表。",
     {
       text: z.string().describe("问题内容（支持 markdown）"),
       options: z.array(z.string()).min(1).max(10).describe("选项文本列表（1-10 个）"),
       message_id: z.string().optional().describe("要回复的消息ID，传入后以回复模式发送"),
-      session_key: z.string().describe("目标会话 sessionKey，用户点击的选项按此路由回你的消息队列，不可省略"),
+      session_key: z.string().describe("目标会话 sessionKey，不可省略"),
     },
     async ({ text, options, message_id, session_key }) => {
       try {
         const r = await httpJson<{ ok: boolean; degraded?: boolean }>(localDaemonUrl("/api/send-question"), { text, options, message_id, session_key });
         if (!r?.ok) return { content: [{ type: "text" as const, text: `[send_failed] ${(r as any)?.error?.trim() || "问题发送失败"}` }] };
-        return { content: [{ type: "text" as const, text: r.degraded ? "问题已发送（微信文本降级），用户将直接回复文字" : "问题卡片已发送，用户点击选项后会以普通消息进入队列，请继续 poll-message 等待" }] };
+        return { content: [{ type: "text" as const, text: r.degraded ? "问题已发送（微信文本降级）" : "问题已发送" }] };
       } catch (e: any) {
         log("ERROR", `send_question 异常: ${e?.message ?? e}`);
         return { content: [{ type: "text" as const, text: `[error] ${e?.message ?? "unknown error"}` }] };
@@ -3466,10 +3737,14 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       json(res, { ok: await ch.rt.wechat!.sendText(ch.chatId, text) });
     } else {
       const sender = ch.rt.sender!;
+      const atTags = LarkSender.containsAtTag(text) ? LarkSender.extractAtTags(text) : [];
+      const cardBody = atTags.length ? LarkSender.stripAtTagsForCardDisplay(text) : text;
       // 有活跃卡则正文并入；无卡则建卡即带正文（防空白卡闪现）。
+      // 含 @ 时正文仍落卡，@ 标签暂存 pendingAtMentions，finish 后单独 reply 触发通知。
       // bodyMerged 由串行链内保证（SDK 竞态建卡时并入已有卡）——为 false 必须回退独立消息，严禁静默吞正文
-      if (session_key && !/<at\s+user_id=/i.test(text)) {
-        const r = await ensureStreamCardForMcpMerge(session_key, ch, text);
+      if (session_key) {
+        const r = await ensureStreamCardForMcpMerge(session_key, ch, cardBody);
+        if (atTags.length && r.state) mergePendingAtMentions(r.state, atTags);
         if (r.state && r.bodyMerged) {
           touchSessionLastReply(session_key);
           json(res, { ok: true, message_id: r.state.messageId, merged: true });
@@ -3525,6 +3800,17 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       return true;
     }
     const sender = ch.rt.sender!;
+    const chatKey = ch.chatId ? makeChatKey(ch.rt.cfg.id, ch.chatId) : (session_key || "");
+    if (chatKey) {
+      saveProjectNewDraft({
+        chatKey,
+        step: "form",
+        formMode: "main",
+        formRepoProfiles: repo_profiles || [],
+        formExtraRepos: [],
+        updatedAt: Date.now(),
+      });
+    }
     const card = LarkSender.buildProjectNewFormCard({
       repoProfiles: repo_profiles || [],
       repoRoots: repo_roots || [],
@@ -3612,16 +3898,18 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
           if (!ensured.ok) return undefined;
           const stream = agentStreamCards.get(session_key);
           if (!stream) return undefined;
-          stream.pendingQuestion = { text, options: opts, footer: "❓ 请选择下方选项或直接输入" };
+          const displayBody = questionDisplayBody(text);
+          stream.pendingQuestion = { text: displayBody, options: opts };
           const mergedOk = await refreshAgentStreamCard(session_key, stream, ch, { finish: true });
           if (!mergedOk) { stream.pendingQuestion = undefined; return undefined; }
           if (stream.messageId) {
             rememberCardQuestion(stream.messageId, {
-              text, options: opts, sessionKey: session_key,
+              text, displayBody, options: opts, sessionKey: session_key,
               chatKey: session_key ? chatIdFromSessionKey(session_key) : (ch.chatId ? makeChatKey(ch.rt.cfg.id, ch.chatId) : undefined),
               createdAt: Date.now(),
               title: stream.sessionTitle,
               template: stream.sessionTemplate,
+              isStreamCard: true,
             });
             trackMessageSession(stream.messageId, session_key);
           }
@@ -3640,9 +3928,9 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       );
       const title = resolveReplyTitle(ch, colorKey || session_key);
       // 问题卡与普通回复同色：用会话稳定色，关闭/点选时不变色
-      // 题干不加粗（避免飞书未渲染 md 时露出字面量 **）；不放输入框，小字提示可直接回复
-      const pendingText = `❓ ${text.trim()}`;
-      const pendingFooter = "<font color='grey'>点击选项，或直接回复本条消息作答</font>";
+      const displayBody = questionDisplayBody(text);
+      const pendingText = displayBody;
+      const pendingFooter = QUESTION_CARD_HINT;
       const pendingTemplate = sessionHeaderTemplate(colorKey || session_key) || (title ? "turquoise" : undefined);
       // session_key 打进按钮 value：即使 reply 未返回 message_id 导致 cardQuestionMap 未登记，点击仍能路由回原会话
       const buttons: CardButton[] = opts.map((o, i) => ({ label: `${i + 1}. ${o}`, value: { kind: "question", opt: o, sk: session_key } }));
@@ -3661,7 +3949,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       const ok = sentMsgId !== undefined; // null 也算成功（已回复到原聊天）
       if (typeof sentMsgId === "string" && sentMsgId) {
         rememberCardQuestion(sentMsgId, {
-          text, options: opts, sessionKey: session_key,
+          text, displayBody, options: opts, sessionKey: session_key,
           chatKey: session_key ? chatIdFromSessionKey(session_key) : (ch.chatId ? makeChatKey(ch.rt.cfg.id, ch.chatId) : undefined),
           createdAt: Date.now(), title, template: pendingTemplate,
         });
@@ -3922,10 +4210,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
         log("INFO", `消息已投递(instant): count=${messages.length} session=${sessionKeyFilter}`);
         touchSessionDelivery(sessionKeyFilter);
         addReactionToMessages(freshIds, sessionKeyFilter, "Get");
-        if (freshIds.length > 0) {
-          expireOpenCardQuestionsForSession(sessionKeyFilter, "已有新消息，问题已关闭");
-          // 同 run bootstrap 投递，不收口活卡；换回合由 blocking poll / send_* / session-launched 负责
-        }
+        // instant 投递不关问题卡：expire 会走 sealQuestionCardByMessageId 误 seal 活流式卡（Agent 干活中 poll 拉到新消息）
       }
       logPollDeliveryToAgent(sessionKeyFilter, { blocking: false, messages, keepAlive });
       broadcastPollPhaseEvent(sessionKeyFilter, "end", {

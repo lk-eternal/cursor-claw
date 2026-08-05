@@ -161,6 +161,24 @@ export class LarkSender {
     return /<at\s+user_id=/.test(stripped);
   }
 
+  /** 从正文中提取 `<at user_id="…">` 标签（跳过代码块/行内代码），供发卡后单独 @ 通知 */
+  static extractAtTags(text: string): string[] {
+    const stripped = text.replace(/```[\s\S]*?```/g, "").replace(/`[^`\n]*`/g, "");
+    const tags: string[] = [];
+    const re = /<at\s+user_id="[^"]+"[^>]*>[^<]*<\/at>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(stripped)) !== null) tags.push(m[0]);
+    return tags;
+  }
+
+  /** 流式卡正文展示：`<at>` 转为可读 `@名字`，避免卡内 XML 标签 */
+  static stripAtTagsForCardDisplay(text: string): string {
+    return text.replace(/<at\s+user_id="[^"]+"[^>]*>([^<]*)<\/at>/gi, (_, name: string) => {
+      const n = name.trim();
+      return n ? `@${n}` : "@";
+    });
+  }
+
   private formatForSend(text: string, title?: CardTitle, template?: string): { content: string; msgType: string } {
     const fullText = `${this.messagePrefix}${text}`;
     if (LarkSender.containsAtTag(fullText)) {
@@ -260,6 +278,7 @@ export class LarkSender {
     sections?: { text: string; buttons?: CardButton[] }[],
   ): any {
     const elements: any[] = [];
+    let questionMd = "";
     if (sections && sections.length > 0) {
       for (let i = 0; i < sections.length; i++) {
         const sec = sections[i];
@@ -269,27 +288,36 @@ export class LarkSender {
         if (i < sections.length - 1) elements.push({ tag: "hr" });
       }
     } else {
-      const body = text.replace(/\s+$/u, "");
-      elements.push({ tag: "markdown", content: body });
+      questionMd = text.replace(/\s+$/u, "");
     }
     const btns = sections?.length ? [] : (buttons ?? []);
     const foot = footer?.replace(/^\s+|\s+$/gu, "");
-    if (foot || (input && (btns.length > 0 || sections?.some((s) => s.buttons?.length)))) elements.push({ tag: "hr" });
-    if (foot) elements.push({ tag: "markdown", content: foot });
-    if (btns.length > 0) LarkSender.appendButtonRows(elements, btns, { singleCol: !!input });
-    if (input) {
-      elements.push({
-        tag: "input",
-        name: "custom_input",
-        input_type: "multiline_text",
-        width: "fill",
-        rows: 1,
-        auto_resize: true,
-        max_rows: 8,
-        placeholder: { tag: "plain_text", content: input.placeholder.slice(0, 100) },
-        label_position: "top",
-        behaviors: [{ type: "callback", value: input.value }],
-      });
+    if (sections?.length) {
+      if (foot) elements.push({ tag: "markdown", content: foot });
+    } else if (questionMd || btns.length || foot) {
+      if (questionMd && elements.length > 0) elements.push({ tag: "hr" });
+      if (questionMd) elements.push({ tag: "markdown", content: questionMd });
+      if (btns.length > 0) {
+        LarkSender.appendButtonRows(elements, btns, { singleCol: !!input });
+        if (foot) elements.push({ tag: "hr" });
+      } else if (questionMd && foot) {
+        elements.push({ tag: "hr" });
+      }
+      if (foot) elements.push({ tag: "markdown", content: foot });
+      if (input) {
+        elements.push({
+          tag: "input",
+          name: "custom_input",
+          input_type: "multiline_text",
+          width: "fill",
+          rows: 1,
+          auto_resize: true,
+          max_rows: 8,
+          placeholder: { tag: "plain_text", content: input.placeholder.slice(0, 100) },
+          label_position: "top",
+          behaviors: [{ type: "callback", value: input.value }],
+        });
+      }
     }
     const card: any = {
       schema: "2.0",
@@ -320,6 +348,7 @@ export class LarkSender {
           elements: [{ tag: "markdown", content, text_size: "notation" }],
         }],
       });
+      if (questionMd) elements.splice(1, 0, { tag: "hr" });
     }
     return card;
   }
@@ -332,17 +361,20 @@ export class LarkSender {
     repoRoots?: string[]
     worktreeRoot?: string
     nodeGroups?: { id: string; name: string }[]
+    defaults?: Record<string, string>
   }): any {
     type Profile = { path: string; baseBranch: string; testBranch?: string; developBranch?: string }
     const profiles: Profile[] = (opts.repoProfiles && opts.repoProfiles.length)
       ? opts.repoProfiles
       : (opts.repoRoots || []).map((p) => ({ path: p, baseBranch: "main" }))
+    const def = opts.defaults ?? {}
     const defaultGroupName = opts.nodeGroups?.find((g) => g.id === DEFAULT_NODE_GROUP_ID)?.name
       || opts.nodeGroups?.[0]?.name
       || "开发"
     const elements: any[] = []
 
     const field = (name: string, label: string | null, placeholder: string, required?: boolean, defaultValue?: string) => {
+      const dv = defaultValue ?? def[name]
       const el: any = {
         tag: "input",
         name,
@@ -354,7 +386,7 @@ export class LarkSender {
       if (label) {
         el.label = { tag: "plain_text", content: label }
       }
-      if (defaultValue) el.default_value = defaultValue.replace(/\\/g, "/")
+      if (dv) el.default_value = dv.replace(/\\/g, "/")
       return el
     }
 
@@ -378,7 +410,6 @@ export class LarkSender {
       })
     }
 
-    // 独立群模式：建项后自动建项目专属群，协作在群里进行（不选默认独立群）
     const chatModeSelect = [
       { tag: "markdown", content: "会话模式" },
       {
@@ -405,7 +436,7 @@ export class LarkSender {
     }
 
     if (profiles.length > 0) {
-      formElements.push({ tag: "markdown", content: "主仓·分支（可多选历史项；也可下方追加）" })
+      formElements.push({ tag: "markdown", content: "主仓·分支（可多选）" })
       formElements.push({
         tag: "multi_select_static",
         name: "repoPairs",
@@ -417,20 +448,25 @@ export class LarkSender {
           value: encode(pr.path, pr.baseBranch, pr.testBranch, pr.developBranch),
         })),
       })
+      formElements.push(field("featureBranch", "feature 分支", "可空，默认 feature/yyMMdd-名；已存在则复用"))
+    } else {
+      formElements.push({
+        tag: "button",
+        name: "add_repo",
+        text: { tag: "plain_text", content: "添加主仓" },
+        type: "default",
+        width: "fill",
+        behaviors: [{
+          type: "callback",
+          value: { kind: "project_new_open_add_repo", worktreeRoot: opts.worktreeRoot || "" },
+        }],
+      })
     }
 
-    formElements.push({ tag: "markdown", content: profiles.length ? "追加主仓·分支（可空）" : "主仓·分支（可空）" })
     formElements.push(
-      field("repoPathCustom", null, "主仓本地路径或远程地址（https/git@）", false),
-      field("baseBranchCustom", null, "生产基线分支，例如 main", false),
-      field("testBranchCustom", null, "测试分支，可空，例如 test"),
-      field("developBranchCustom", null, "开发分支，可空，例如 develop"),
-      field("worktreeRoot", "AI 工作目录", "各主仓将独立 checkout 到此目录下；无仓时仅建项目目录", false, opts.worktreeRoot || undefined),
-      field("featureBranch", "feature 分支", "可空，默认 feature/yyMMdd-名；已存在则复用"),
-      field("storyUrl", "飞书项目链接", "可空"),
-      field("productDocUrl", "产品文档", "可空"),
-      field("techDocUrl", "技术文档", "可空"),
-      field("goal", "目标描述", "可空，可后续再定"),
+      field("worktreeRoot", "AI 工作目录（将在此目录下以项目名称新建项目目录）", "各主仓将独立 checkout 到此目录下；无仓时仅建项目目录", false, opts.worktreeRoot || undefined),
+      field("storyUrl", "项目链接", "例如飞书项目链接"),
+      field("relatedDocs", "相关文档", "例如产品文档或技术文档，多个逗号分割"),
       ...chatModeSelect,
       {
         tag: "button",
@@ -459,6 +495,55 @@ export class LarkSender {
       config: { update_multi: true, width_mode: "fill" },
       header: {
         title: { tag: "plain_text", content: opts.title || "创建项目" },
+        template: "orange",
+      },
+      body: { horizontal_align: "left", elements },
+    }
+  }
+
+  /** 创建项目 · 添加主仓子页 */
+  static buildProjectNewAddRepoCard(opts?: { worktreeRoot?: string; defaults?: Record<string, string> }): any {
+    const def = opts?.defaults ?? {}
+    const field = (name: string, label: string, placeholder: string, required?: boolean) => {
+      const el: any = {
+        tag: "input",
+        name,
+        required: !!required,
+        placeholder: { tag: "plain_text", content: placeholder.replace(/\\/g, "/").slice(0, 100) },
+        label: { tag: "plain_text", content: label },
+        label_position: "top",
+        width: "fill",
+      }
+      if (def[name]) el.default_value = def[name].replace(/\\/g, "/")
+      return el
+    }
+    const elements: any[] = [{
+      tag: "form",
+      name: "project_new_add_repo",
+      elements: [
+        field("repoPathCustom", "主仓路径", "本地绝对路径或远程地址（https/git@）", true),
+        field("baseBranchCustom", "生产基线分支", "例如 main", true),
+        field("testBranchCustom", "测试分支", "可空，例如 test"),
+        field("developBranchCustom", "开发分支", "可空，例如 develop"),
+        {
+          tag: "button",
+          name: "confirm_add_repo",
+          text: { tag: "plain_text", content: "确认添加" },
+          type: "primary",
+          form_action_type: "submit",
+          behaviors: [{
+            type: "callback",
+            value: { kind: "project_new_add_repo_confirm", worktreeRoot: opts?.worktreeRoot || "" },
+          }],
+        },
+      ],
+    }]
+    LarkSender.appendButtonRows(elements, [{ label: "← 返回", value: { kind: "project_new_back_main", worktreeRoot: opts?.worktreeRoot || "" }, type: "default" }])
+    return {
+      schema: "2.0",
+      config: { update_multi: true, width_mode: "fill" },
+      header: {
+        title: { tag: "plain_text", content: "添加主仓" },
         template: "orange",
       },
       body: { horizontal_align: "left", elements },
@@ -622,17 +707,19 @@ export class LarkSender {
   static readonly STREAM_TOOL_ID = "tool_panel";
   /** Hermes 流式卡：回复 markdown（仅此组件走 stream content 打字机） */
   static readonly STREAM_REPLY_ID = "reply_md";
+  /** 流式卡：未决问题题干（与 reply_md 分离，避免并卡 Duplicate ID） */
+  static readonly STREAM_QUESTION_ID = "question_md";
   /** @deprecated 使用 STREAM_REPLY_ID */
   static readonly STREAM_ELEMENT_ID = "reply_md";
 
   /** 构建 Thought 折叠面板（对齐 hermes builder.py：plain_text + notation 灰字） */
   static buildThinkPanelElement(
     content: string,
-    opts?: { title?: string; expanded?: boolean },
+    opts?: { title?: string; expanded?: boolean; elementId?: string },
   ): Record<string, unknown> {
-    return {
+    const el: Record<string, unknown> = {
       tag: "collapsible_panel",
-      element_id: LarkSender.STREAM_THINK_ID,
+      element_id: opts?.elementId || LarkSender.STREAM_THINK_ID,
       expanded: opts?.expanded ?? false,
       header: {
         title: {
@@ -655,6 +742,7 @@ export class LarkSender {
         text_size: "notation",
       }],
     };
+    return el;
   }
 
   /** 单步工具行：div + standard_icon + lark_md（对齐 hermes _build_tool_step_*） */
@@ -756,7 +844,7 @@ export class LarkSender {
    */
   static buildToolPanelElement(
     steps: Array<{ title: string; status: string; detail?: string; icon?: string }> | string,
-    opts?: { title?: string; expanded?: boolean },
+    opts?: { title?: string; expanded?: boolean; elementId?: string },
   ): Record<string, unknown> {
     let elements: Record<string, unknown>[];
     if (typeof steps === "string") {
@@ -766,9 +854,9 @@ export class LarkSender {
     } else {
       elements = steps.flatMap((s) => LarkSender.buildToolStepElements(s));
     }
-    return {
+    const el: Record<string, unknown> = {
       tag: "collapsible_panel",
-      element_id: LarkSender.STREAM_TOOL_ID,
+      element_id: opts?.elementId || LarkSender.STREAM_TOOL_ID,
       expanded: opts?.expanded ?? true,
       header: {
         title: {
@@ -787,9 +875,8 @@ export class LarkSender {
       padding: "8px 8px 8px 8px",
       elements,
     };
+    return el;
   }
-
-  /** 流式卡时间线段（按执行顺序交错） */
   /** 流式卡：会话色条（目录/项目 + 分支），与 send 消息同款 */
   static buildSessionBannerElement(title: CardTitle, elementId = "session_bar"): Record<string, unknown> {
     const { title: titleText, subtitle } = LarkSender.normalizeCardTitle(title);
@@ -868,8 +955,8 @@ export class LarkSender {
     sessionTitle?: CardTitle;
     sessionTemplate?: string;
     segments?: Array<
-      | { type: "thinking"; text: string; title?: string; expanded?: boolean }
-      | { type: "tools"; title?: string; expanded?: boolean; steps: Array<{ title: string; status: string; detail?: string; icon?: string }> }
+      | { type: "thinking"; text: string; title?: string; panelId?: string; expanded?: boolean }
+      | { type: "tools"; title?: string; panelId?: string; expanded?: boolean; steps: Array<{ title: string; status: string; detail?: string; icon?: string }> }
       | { type: "reply"; text: string }
       | { type: "todos"; items: Array<{ content: string; status: string }> }
     >;
@@ -884,6 +971,9 @@ export class LarkSender {
     buttons?: CardButton[];
     input?: CardInput;
     footer?: string;
+    /** 问题卡：与 segments 正文分开展示，布局为 正文→hr→问题→按钮→hr→footer */
+    questionText?: string;
+    panelState?: { knownPanelIds: Set<string>; expandedPanelIds?: Set<string> };
   }): Record<string, unknown> {
     const status = opts?.status || "streaming";
     const showThinking = opts?.showThinking !== false;
@@ -923,24 +1013,25 @@ export class LarkSender {
       let todoIdx = 0;
       let replyIdx = 0;
       const replyCount = segs.filter((s) => s.type === "reply" && s.text.trim()).length;
+      const hasQuestion = !!opts?.questionText?.trim();
       for (const seg of segs) {
         if (seg.type === "omitted") {
           els.push({ tag: "markdown", content: seg.text, element_id: "omitted_notice" });
         } else if (seg.type === "thinking") {
           if (!showThinking) continue;
-          const el = LarkSender.buildThinkPanelElement(seg.text || "_（暂无）_", {
+          const thinkEid = seg.panelId ? `think_${seg.panelId}` : `think_${thinkIdx++}`;
+          els.push(LarkSender.buildThinkPanelElement(seg.text || "_（暂无）_", {
             title: seg.title || (status === "streaming" ? "💭 思考中…" : "💭 思考完成"),
             expanded: seg.expanded ?? (status === "streaming"),
-          });
-          el.element_id = `think_${thinkIdx++}`;
-          els.push(el);
+            elementId: thinkEid,
+          }));
         } else if (seg.type === "tools") {
-          const el = LarkSender.buildToolPanelElement(seg.steps || [], {
+          const toolEid = seg.panelId ? `tool_${seg.panelId}` : `tool_${toolIdx++}`;
+          els.push(LarkSender.buildToolPanelElement(seg.steps || [], {
             title: seg.title || `🛠️ 工具执行 · ${(seg.steps || []).length} 步`,
             expanded: seg.expanded ?? true,
-          });
-          el.element_id = `tool_${toolIdx++}`;
-          els.push(el);
+            elementId: toolEid,
+          }));
         } else if (seg.type === "todos") {
           if (!seg.items?.length) continue;
           els.push(LarkSender.buildTodoPanelElement(seg.items, { elementId: `todos_${todoIdx++}` }));
@@ -949,7 +1040,7 @@ export class LarkSender {
           els.push({
             tag: "markdown",
             content: seg.text,
-            element_id: isLastReply ? LarkSender.STREAM_REPLY_ID : `reply_${replyIdx}`,
+            element_id: (isLastReply && !hasQuestion) ? LarkSender.STREAM_REPLY_ID : `reply_${replyIdx}`,
           });
           replyIdx++;
         }
@@ -957,23 +1048,32 @@ export class LarkSender {
       const buttons = opts?.buttons ?? [];
       const input = opts?.input;
       const foot = opts?.footer?.replace(/^\s+|\s+$/gu, "");
-      if (foot || (input && buttons.length > 0)) els.push({ tag: "hr" });
-      if (foot) els.push({ tag: "markdown", content: foot });
-      if (buttons.length > 0) LarkSender.appendButtonRows(els, buttons, { singleCol: !!input });
-      if (input) {
-        els.push({
-          tag: "input",
-          name: "custom_input",
-          input_type: "multiline_text",
-          width: "fill",
-          rows: 1,
-          auto_resize: true,
-          max_rows: 8,
-          placeholder: { tag: "plain_text", content: input.placeholder.slice(0, 100) },
-          label_position: "top",
-          behaviors: [{ type: "callback", value: input.value }],
-        });
+      const qText = opts?.questionText?.replace(/^\s+|\s+$/gu, "");
+      if (qText) {
+        if (els.length > 0) els.push({ tag: "hr" });
+        els.push({ tag: "markdown", content: qText, element_id: LarkSender.STREAM_QUESTION_ID });
       }
+      if (buttons.length > 0 || input) {
+        if (buttons.length > 0) LarkSender.appendButtonRows(els, buttons, { singleCol: !!input });
+        if (input) {
+          els.push({
+            tag: "input",
+            name: "custom_input",
+            input_type: "multiline_text",
+            width: "fill",
+            rows: 1,
+            auto_resize: true,
+            max_rows: 8,
+            placeholder: { tag: "plain_text", content: input.placeholder.slice(0, 100) },
+            label_position: "top",
+            behaviors: [{ type: "callback", value: input.value }],
+          });
+        }
+        if (foot) els.push({ tag: "hr" });
+      } else if (qText && foot) {
+        els.push({ tag: "hr" });
+      }
+      if (foot) els.push({ tag: "markdown", content: foot });
       return els;
     };
 
@@ -984,6 +1084,21 @@ export class LarkSender {
       LarkSender.STREAM_KEEP_PER_KIND,
       showThinking,
     );
+    if (opts?.panelState?.knownPanelIds) {
+      const visible = new Set(
+        segs
+          .filter((s) => (s.type === "thinking" || s.type === "tools") && "panelId" in s && (s as { panelId?: string }).panelId)
+          .map((s) => (s as { panelId: string }).panelId),
+      );
+      for (const id of [...opts.panelState.knownPanelIds]) {
+        if (!visible.has(id)) opts.panelState.knownPanelIds.delete(id);
+      }
+      if (opts.panelState.expandedPanelIds) {
+        for (const id of [...opts.panelState.expandedPanelIds]) {
+          if (!visible.has(id)) opts.panelState.expandedPanelIds.delete(id);
+        }
+      }
+    }
     let elements = buildBodyElements(segs);
     const overBudget = () => LarkSender.countCardElements(elements) > LarkSender.STREAM_ELEMENT_BUDGET;
     if (overBudget()) {
@@ -1682,6 +1797,7 @@ export class LarkSender {
     onMessage: (event: LarkMessageEvent) => void,
     onCardAction?: (event: LarkCardActionEvent) => Promise<unknown> | unknown,
     lifecycle?: LarkWsLifecycle,
+    onMessageRecalled?: (event: LarkMessageRecalledEvent) => void,
   ): Promise<void> {
     const eventDispatcher = new Lark.EventDispatcher({ encryptKey: encryptKey || undefined, logger: SILENT_LOGGER, loggerLevel: Lark.LoggerLevel.error }).register({
       "im.message.receive_v1": (data) => {
@@ -1723,6 +1839,9 @@ export class LarkSender {
             value: data?.action?.value,
             inputValue: typeof data?.action?.input_value === "string" ? data.action.input_value : undefined,
             formValue,
+            elementId: data?.action?.element_id ?? data?.action?.elementId,
+            elementTag: data?.action?.tag,
+            expanded: data?.action?.expanded,
           };
           this.log("INFO", `卡片按钮点击: msg=${evt.messageId} value=${JSON.stringify(evt.value)?.slice(0, 200)}`);
           if (!onCardAction) return {};
@@ -1730,6 +1849,22 @@ export class LarkSender {
         } catch (e: any) {
           this.log("ERROR", `卡片回调处理异常: ${e?.message ?? e}`);
           return {};
+        }
+      },
+      "im.message.recalled_v1": (data) => {
+        try {
+          const ev = (data as any)?.event ?? data;
+          const messageId: string = ev?.message_id ?? "";
+          const chatId: string = ev?.chat_id ?? "";
+          const recallType: string = ev?.recall_type ?? "";
+          if (!messageId) return;
+          try {
+            onMessageRecalled?.({ messageId, chatId, recallType });
+          } catch (e: any) {
+            this.log("WARN", `撤回回调异常: ${e?.message ?? e}`);
+          }
+        } catch (e: any) {
+          this.log("WARN", `撤回事件解析异常: ${e?.message ?? e}`);
         }
       },
     });
@@ -1779,6 +1914,12 @@ export interface LarkWsLifecycle {
   onDisconnected?: () => void;
 }
 
+export interface LarkMessageRecalledEvent {
+  messageId: string;
+  chatId: string;
+  recallType?: string;
+}
+
 // ── 类型导出 ──────────────────────────────────────────────
 
 export interface ParsedMessage {
@@ -1803,6 +1944,9 @@ export interface LarkCardActionEvent {
   inputValue?: string;
   /** 表单提交时各字段 name → value（multi_select 为 string[]） */
   formValue?: Record<string, string | string[]>;
+  elementId?: string;
+  elementTag?: string;
+  expanded?: boolean;
 }
 
 export interface LarkMessageEvent {

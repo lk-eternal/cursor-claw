@@ -379,6 +379,34 @@ function registerIpcHandlers(): void {
 
 let isQuitting = false
 
+function requestGracefulQuit(): void {
+  isQuitting = true
+  const win = mainWindow
+  if (win && !win.isDestroyed()) {
+    win.close()
+  } else {
+    app.quit()
+  }
+}
+
+const gotSingleInstanceLock = app.requestSingleInstanceLock()
+if (!gotSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on("second-instance", (_event, argv) => {
+    if (argv.some((a) => a === "--graceful-quit")) {
+      requestGracefulQuit()
+      return
+    }
+    const win = mainWindow
+    if (win) {
+      if (win.isMinimized()) win.restore()
+      win.show()
+      win.focus()
+    }
+  })
+}
+
 // 第三方 SDK（如 @cursor/sdk）深处的异步 socket 错误无法在调用点捕获，
 // 全局兜底记日志，避免 Electron 默认弹出 "JavaScript error in main process" 并中断运行
 // 网络类抖动（代理/NAT 掐掉闲置长连接等）降为 WARN：会话层已有 Resume 自愈机制
@@ -405,7 +433,7 @@ app.on("before-quit", (e) => {
   // 拦截首次退出：等 SDK run 取消落库再放行，否则会残留 active run 导致下次 Resume 卡死
   e.preventDefault()
   quitCleanupDone = true
-  const forceExit = setTimeout(() => app.exit(0), 8000)
+  const forceExit = setTimeout(() => app.exit(0), 18_000)
   void shutdownDaemonManager().finally(() => {
     clearTimeout(forceExit)
     app.quit()
