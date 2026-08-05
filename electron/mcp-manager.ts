@@ -120,7 +120,11 @@ async function fetchMcpList(force = false): Promise<McpListCache> {
   if (!ws) return empty
   if (!force && mcpListCache && mcpListCache.ws === ws && Date.now() - mcpListCache.ts < MCP_ENABLED_CACHE_TTL_MS) return mcpListCache
 
-  if (!resolveAgentBinary()) return empty
+  if (!resolveAgentBinary()) {
+    const fromJson = fetchMcpListFromJson(ws)
+    mcpListCache = fromJson
+    return fromJson
+  }
   if (mcpListInflight) return mcpListInflight
 
   const p = (async (): Promise<McpListCache> => {
@@ -166,25 +170,57 @@ export function invalidateMcpEnabledCache(): void {
   mcpListCache = null
 }
 
-// ── Public API: Toggle ───────────────────────────────────
+function toggleMcpServerInJson(serverName: string, enabled: boolean): { ok: boolean; output: string } {
+  const server = getMcpServerList().find((s) => s.name === serverName)
+  if (!server) return { ok: false, output: `${serverName} 不存在` }
+
+  const existing = readMcpJson(server.source)
+  if (!existing) return { ok: false, output: "配置文件不存在" }
+
+  const servers = (existing.mcpServers ?? existing.servers ?? {}) as Record<string, Record<string, unknown>>
+  const entry = servers[serverName]
+  if (!entry) return { ok: false, output: `${serverName} 不存在` }
+
+  if (enabled) delete entry.disabled
+  else entry.disabled = true
+
+  servers[serverName] = entry
+  existing.mcpServers = servers
+  if (existing.servers) delete existing.servers
+
+  const success = writeMcpJson(server.source, existing)
+  if (success) invalidateMcpEnabledCache()
+  return success
+    ? { ok: true, output: `${serverName} ${enabled ? "enabled" : "disabled"}` }
+    : { ok: false, output: "写入失败" }
+}
+
+function fetchMcpListFromJson(ws: string): McpListCache {
+  const enabled: Record<string, boolean> = {}
+  const status: Record<string, string> = {}
+  for (const s of getMcpServerList()) {
+    const on = s.enabled !== false
+    enabled[s.name] = on
+    status[s.name] = on ? "ready" : "disabled"
+  }
+  return { enabled, status, ts: Date.now(), ws }
+}
 
 export async function toggleMcpServer(serverName: string, enabled: boolean, workspaceDirOverride?: string): Promise<{ ok: boolean; output: string }> {
   const config = getConfig()
   const ws = (workspaceDirOverride ?? config.workspaceDir ?? "").trim()
   if (!ws) return { ok: false, output: "工作目录未配置" }
-  if (!resolveAgentBinary()) return { ok: false, output: "Cursor CLI 未安装" }
 
-  const env: Record<string, string> = { ...process.env as Record<string, string> }
-  applyProxyEnv(env, config)
+  const jsonResult = toggleMcpServerInJson(serverName, enabled)
+  if (!jsonResult.ok) return jsonResult
 
-  const action = enabled ? "enable" : "disable"
-  const r = await spawnAsync(["mcp", action, serverName], ws, env)
-  const out = (r.stdout + r.stderr).replace(ANSI_RE, "").replace(/\r/g, "").trim()
-
-  if (r.code === 0) {
-    invalidateMcpEnabledCache()
+  if (resolveAgentBinary()) {
+    const env: Record<string, string> = { ...process.env as Record<string, string> }
+    applyProxyEnv(env, config)
+    const action = enabled ? "enable" : "disable"
+    await spawnAsync(["mcp", action, serverName], ws, env)
   }
-  return { ok: r.code === 0, output: out || (r.code === 0 ? `${serverName} ${action}d` : `操作失败`) }
+  return jsonResult
 }
 
 // ── Public API: CRUD ─────────────────────────────────────
