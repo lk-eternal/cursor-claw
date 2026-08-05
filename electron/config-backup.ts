@@ -186,15 +186,11 @@ export function importConfigBundle(zipPath: string): { ok: boolean; error?: stri
     initProjectStore(app.getPath("userData"))
 
     const localCfg = getConfig()
-    const importedWs = manifest.general.workspaceDir?.trim() ?? ""
-    const workspaceDir =
-      importedWs && fs.existsSync(importedWs) ? importedWs : (localCfg.workspaceDir?.trim() ?? "")
-    if (importedWs && !fs.existsSync(importedWs)) {
-      warnings.push(`导出机工作目录不存在：${importedWs}，已保留本机工作目录`)
-    }
+    const workspaceDir = localCfg.workspaceDir?.trim() ?? ""
+    const { workspaceDir: _exportedWs, ...generalRest } = manifest.general
 
     saveConfig({
-      ...manifest.general,
+      ...generalRest,
       workspaceDir,
       httpProxy: manifest.proxy.httpProxy,
       httpsProxy: manifest.proxy.httpsProxy,
@@ -252,10 +248,6 @@ export function importConfigBundle(zipPath: string): { ok: boolean; error?: stri
           warnings.push(`rules 导入失败：${msg}`)
         }
       }
-    }
-
-    if (ws && !fs.existsSync(ws)) {
-      warnings.push(`工作目录不存在：${ws}，请在设置中修改`)
     }
 
     return { ok: true, warnings: warnings.length ? warnings : undefined }
