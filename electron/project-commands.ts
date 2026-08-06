@@ -1,6 +1,6 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { app } from "electron"
+import { app, shell } from "electron"
 import { getConfig, saveConfig, getRepoProfiles, upsertRepoProfiles, removeRepoProfile } from "./config-store"
 import { reportCommandResult, type CommandButton } from "./command-handler"
 import { buildSessionCardTitle } from "../src/shared/session-label.js"
@@ -1518,8 +1518,7 @@ export async function archiveProjectGroup(port: number, project: Project): Promi
   } catch { /* 尽力归档 */ }
 }
 
-/** 删除项目：元数据软删进 trash；AI 工作目录优先挪到 trash-worktrees（可找回），再删记录。
- * 历史同名项目可能共享同一 worktree 目录：被其他项目引用的目录只删记录不删目录。 */
+/** 删除项目：元数据软删进 trash；AI 工作目录整包移入系统回收站。 slug 目录被其他项目引用时只删记录。 */
 export async function executeProjectDelete(projectId: string): Promise<{ ok: boolean; name?: string }> {
   ensureStore()
   if (!/^[a-f0-9]{12}$/i.test(projectId)) {
@@ -1533,27 +1532,40 @@ export async function executeProjectDelete(projectId: string): Promise<{ ok: boo
     "WARN",
     `[Delete] 即将删除项目「${target.name}」id=${target.id} feature=${target.featureBranch} wt=${target.worktreePath}`,
   )
-  const othersWt = new Set<string>()
+  const rootDir = projectRootDir(target).trim()
+  const otherRoots = new Set<string>()
   for (const p of listProjects()) {
     if (p.id === target.id) continue
-    const wts = p.repos?.length ? p.repos.map((r) => r.worktreePath) : [p.worktreePath]
-    for (const wt of wts) { if (wt) othersWt.add(path.resolve(wt).toLowerCase()) }
+    const rd = projectRootDir(p).trim()
+    if (rd) otherRoots.add(path.resolve(rd).toLowerCase())
   }
-  const repos = target.repos?.length
-    ? target.repos
-    : [{ repoPath: target.repoPath, baseBranch: target.baseBranch, worktreePath: target.worktreePath }]
-  const trashWtRoot = path.join(getProjectStoreDir(), "trash-worktrees", `${target.id}-${Date.now()}`)
-  for (const r of repos) {
-    if (!r.worktreePath) continue
-    if (othersWt.has(path.resolve(r.worktreePath).toLowerCase())) continue
-    if (!fs.existsSync(r.worktreePath)) continue
-    try {
-      fs.mkdirSync(trashWtRoot, { recursive: true })
-      const dest = path.join(trashWtRoot, path.basename(r.worktreePath) || "worktree")
-      fs.renameSync(r.worktreePath, dest)
-      pushUiLog("Project", "INFO", `[Delete] 工作目录已软移: ${r.worktreePath} → ${dest}`)
-    } catch {
-      try { await removeProjectWorktree(r.repoPath, r.worktreePath) } catch { /* 尽力清理 */ }
+
+  if (rootDir && fs.existsSync(rootDir)) {
+    const rootKey = path.resolve(rootDir).toLowerCase()
+    if (otherRoots.has(rootKey)) {
+      pushUiLog("Project", "WARN", `[Delete] 目录被其他项目引用，跳过清理: ${rootDir}`)
+    } else {
+      let trashed = false
+      try {
+        await shell.trashItem(rootDir)
+        trashed = true
+        pushUiLog("Project", "INFO", `[Delete] 已移入系统回收站: ${rootDir}`)
+      } catch (e) {
+        pushUiLog("Project", "WARN", `[Delete] 回收站失败 ${rootDir}: ${e instanceof Error ? e.message : String(e)}`)
+      }
+      if (!trashed) {
+        const repos = target.repos?.length
+          ? target.repos
+          : [{ repoPath: target.repoPath, baseBranch: target.baseBranch, worktreePath: target.worktreePath }]
+        for (const r of repos) {
+          if (!r.worktreePath || !fs.existsSync(r.worktreePath)) continue
+          try { await removeProjectWorktree(r.repoPath, r.worktreePath) } catch { /* 尽力清理 */ }
+        }
+        try {
+          if (fs.existsSync(rootDir)) fs.rmSync(rootDir, { recursive: true, force: true })
+          pushUiLog("Project", "INFO", `[Delete] 已强制删除: ${rootDir}`)
+        } catch { /* 尽力清理 */ }
+      }
     }
   }
   deleteProject(target.id)
