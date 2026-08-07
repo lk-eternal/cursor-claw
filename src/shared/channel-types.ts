@@ -49,6 +49,8 @@ export interface MessageChannel {
   persistentPoll?: boolean;
   /** 是否展示流式进度卡（默认 true；关闭后仅推送最终回复消息） */
   showThinking?: boolean;
+  /** 流式卡思考/工具块各保留最近 N 个（默认 5；仅 showThinking 开启时生效） */
+  streamKeepPerKind?: number;
 }
 
 /** 下发给 Daemon 的通道配置（含运行所需的全部字段） */
@@ -68,6 +70,8 @@ export interface DaemonChannelConfig {
   keepAlive?: boolean;
   /** 是否展示流式进度卡（默认 true） */
   showThinking?: boolean;
+  /** 流式卡思考/工具块各保留最近 N 个（默认 5） */
+  streamKeepPerKind?: number;
 }
 
 /** Daemon 上报的通道状态 */

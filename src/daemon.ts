@@ -42,7 +42,7 @@ import {
   type ChannelStatusInfo,
 } from "./shared/channel-types.js";
 import { disambiguatePathLabel } from "./shared/path-label.js";
-import { readScheduledTasksFile, writeScheduledTasksFile, type ScheduledTask } from "./shared/scheduled-task.js";
+import { readScheduledTasksFile, writeScheduledTasksFile, buildNotifySessionKey, type ScheduledTask } from "./shared/scheduled-task.js";
 import { initSessionModelStore, setSessionOverride } from "./shared/session-model-store.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -125,6 +125,8 @@ const channelKeepAlive = new Map<string, boolean>(
 interface ChannelRuntimeFlags {
   id: string;
   keepAlive?: boolean;
+  showThinking?: boolean;
+  streamKeepPerKind?: number;
   name?: string;
   mainUserEnabled?: boolean;
   mainUserChatId?: string;
@@ -136,6 +138,10 @@ function updateChannelFlags(flags: ChannelRuntimeFlags[]): void {
     const rt = channels.get(f.id);
     if (!rt) continue;
     if (typeof f.name === "string" && f.name) rt.cfg.name = f.name;
+    if (typeof f.showThinking === "boolean") rt.cfg.showThinking = f.showThinking;
+    if (typeof f.streamKeepPerKind === "number" && Number.isFinite(f.streamKeepPerKind)) {
+      rt.cfg.streamKeepPerKind = f.streamKeepPerKind;
+    }
     if (typeof f.mainUserEnabled === "boolean") rt.cfg.mainUserEnabled = f.mainUserEnabled;
     if (typeof f.mainUserChatId === "string") rt.cfg.mainUserChatId = f.mainUserChatId;
   }
@@ -1708,6 +1714,7 @@ async function refreshAgentStreamCard(
     const cardJson = LarkSender.buildStreamingCardJson({
       status,
       showThinking: state.showThinking,
+      keepPerKind: LarkSender.normalizeStreamKeepPerKind(ch.rt.cfg.streamKeepPerKind),
       sessionTitle: state.sessionTitle,
       sessionTemplate: state.sessionTemplate,
       segments: cardSegs,
@@ -1826,6 +1833,7 @@ async function ensureAgentStreamCard(
   }
   const sender = ch.rt.sender!;
   const showThinking = ch.rt.cfg.showThinking !== false;
+  const keepPerKind = LarkSender.normalizeStreamKeepPerKind(ch.rt.cfg.streamKeepPerKind);
   const chrome = resolveStreamCardChrome(ch, sessionKey);
   if (!ch.chatId) return { ok: false, error: "无法解析发送目标 chatId" };
   // MCP 首段正文随建卡一次渲染到位（reply 通道，绕过 fold 防降级为思考），避免空白卡闪现
@@ -1843,6 +1851,7 @@ async function ensureAgentStreamCard(
   }
   const cardId = await sender.createStreamingCardEntity({
     showThinking,
+    keepPerKind,
     segments,
     sessionTitle: chrome.sessionTitle,
     sessionTemplate: chrome.sessionTemplate,
@@ -2347,6 +2356,7 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
         return LarkSender.buildStreamingCardJson({
           status: "completed",
           showThinking: state.showThinking,
+          keepPerKind: LarkSender.normalizeStreamKeepPerKind(channels.get(state.channelId)?.cfg.streamKeepPerKind),
           sessionTitle: state.sessionTitle,
           sessionTemplate: state.sessionTemplate,
           segments: cardSegs,
@@ -4452,7 +4462,13 @@ function enqueueScheduledTaskMessage(task: ScheduledTask, content: string): void
   const rt = pickChannel(task.channelId);
   const target = rt ? channelDefaultChatId(rt) : null;
   const notifyChatKey = rt && target ? makeChatKey(rt.cfg.id, target) : undefined;
+  const notifySessionKey = buildNotifySessionKey(task);
   const internalMsgId = `internal_${task.id}_${Date.now()}`;
+
+  if (notifySessionKey) {
+    rememberSessionKey(notifySessionKey);
+    log("INFO", `定时任务「${task.name}」投递目标: ${notifySessionKey}`);
+  }
 
   if (task.independent !== false) {
     if (notifyChatKey) sessionToChatMap.set(task.id, notifyChatKey);

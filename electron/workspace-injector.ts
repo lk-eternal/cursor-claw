@@ -57,29 +57,45 @@ export function getSkillsTemplateDir(): string {
 
 // ── MCP injection ──────────────────────────────────────────────
 
-export function buildMcpServers(): Record<string, unknown> {
+const ADMIN_MCP_KEY = "cursor-claw-admin"
+
+export function buildMcpServers(opts?: { admin?: boolean }): Record<string, unknown> {
   if (!daemonPort) return {}
   const base = `http://127.0.0.1:${daemonPort}`
-  return {
+  const servers: Record<string, unknown> = {
     "cursor-claw": { url: `${base}/mcp` },
-    "cursor-claw-admin": { url: `${base}/mcp-admin` },
   }
+  if (opts?.admin) servers[ADMIN_MCP_KEY] = { url: `${base}/mcp-admin` }
+  return servers
 }
 
+function mergeMcpFile(filePath: string, servers: Record<string, unknown>): void {
+  let mcpConfig: Record<string, unknown> = {}
+  if (fs.existsSync(filePath)) {
+    try { mcpConfig = JSON.parse(fs.readFileSync(filePath, "utf-8")) } catch { mcpConfig = {} }
+  }
+  const existing = (mcpConfig.mcpServers ?? {}) as Record<string, unknown>
+  Object.assign(existing, servers)
+  mcpConfig.mcpServers = existing
+  const dir = path.dirname(filePath)
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(filePath, JSON.stringify(mcpConfig, null, 2), "utf-8")
+}
+
+/** 全局仅注入 cursor-claw（项目会话共用）；admin 只进主工作目录 */
 export async function injectMcpGlobal(): Promise<boolean> {
   try {
     const newServers = buildMcpServers()
     const hash = JSON.stringify(newServers)
     if (lastMcpHash === hash) return true
-
     let mcpConfig: Record<string, unknown> = {}
     if (fs.existsSync(GLOBAL_MCP_PATH)) {
       try { mcpConfig = JSON.parse(fs.readFileSync(GLOBAL_MCP_PATH, "utf-8")) } catch { mcpConfig = {} }
     }
     const existing = (mcpConfig.mcpServers ?? {}) as Record<string, unknown>
+    delete existing[ADMIN_MCP_KEY]
     Object.assign(existing, newServers)
     mcpConfig.mcpServers = existing
-
     const dir = path.dirname(GLOBAL_MCP_PATH)
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
     fs.writeFileSync(GLOBAL_MCP_PATH, JSON.stringify(mcpConfig, null, 2), "utf-8")
@@ -88,6 +104,18 @@ export async function injectMcpGlobal(): Promise<boolean> {
     return true
   } catch (e: unknown) {
     broadcastLog(`MCP 全局注入失败: ${e instanceof Error ? e.message : e}`, "ERROR")
+    return false
+  }
+}
+
+function injectMcpAdminToDir(wsDir: string): boolean {
+  if (!daemonPort || !wsDir.trim()) return false
+  try {
+    mergeMcpFile(path.join(wsDir, ".cursor", "mcp.json"), buildMcpServers({ admin: true }))
+    broadcastLog(`MCP admin 已注入主工作目录: ${wsDir}`)
+    return true
+  } catch (e: unknown) {
+    broadcastLog(`MCP admin 注入失败: ${e instanceof Error ? e.message : e}`, "ERROR")
     return false
   }
 }
@@ -146,14 +174,24 @@ export function injectRulesToDir(wsDir: string, skipIdentity = false, identityOv
 
 // ── Skills injection ───────────────────────────────────────────
 
-export function injectSkillsToDir(wsDir: string): boolean {
+const ADMIN_SKILL_DIR = "cursor-claw-admin"
+
+export function injectSkillsToDir(wsDir: string, skipAdmin = false): boolean {
   try {
     const srcDir = getSkillsTemplateDir()
     if (!fs.existsSync(srcDir)) return false
     const destBase = path.join(wsDir, ".cursor", "skills")
+    if (skipAdmin) {
+      const stale = path.join(destBase, ADMIN_SKILL_DIR)
+      if (fs.existsSync(stale)) {
+        fs.rmSync(stale, { recursive: true, force: true })
+        broadcastLog(`已移除项目目录自管理 Skill: ${stale}`)
+      }
+    }
     const entries = fs.readdirSync(srcDir, { withFileTypes: true })
     for (const entry of entries) {
       if (!entry.isDirectory()) continue
+      if (skipAdmin && entry.name === ADMIN_SKILL_DIR) continue
       const skillSrc = path.join(srcDir, entry.name)
       const skillDest = path.join(destBase, entry.name)
       if (!fs.existsSync(skillDest)) fs.mkdirSync(skillDest, { recursive: true })
@@ -176,9 +214,10 @@ export function injectSkillsToDir(wsDir: string): boolean {
 
 // ── Project-level MCP cleanup ──────────────────────────────────
 
-const CLAW_MCP_KEYS = ["cursor-claw", "cursor-claw-admin"]
+const CLAW_MCP_KEYS = ["cursor-claw", ADMIN_MCP_KEY]
 
-function cleanProjectMcpStale(wsDir: string): void {
+/** 非主工作目录：剥离宿主 MCP，避免项目 Agent 加载自管理工具 */
+function cleanProjectMcpStale(wsDir: string, stripAdminOnly = false): void {
   const projectMcpPath = path.join(wsDir, ".cursor", "mcp.json")
   if (!fs.existsSync(projectMcpPath)) return
   try {
@@ -186,7 +225,8 @@ function cleanProjectMcpStale(wsDir: string): void {
     const servers = cfg.mcpServers as Record<string, unknown> | undefined
     if (!servers) return
     let changed = false
-    for (const key of CLAW_MCP_KEYS) {
+    const keys = stripAdminOnly ? [ADMIN_MCP_KEY] : CLAW_MCP_KEYS
+    for (const key of keys) {
       if (key in servers) { delete servers[key]; changed = true }
     }
     if (!changed) return
@@ -205,8 +245,14 @@ function cleanProjectMcpStale(wsDir: string): void {
 
 // 不做"已注入过就跳过"的短路：模板/身份规则随时可能更新（如 /reset、改身份），
 // 每次拉起都重新对齐；writeFileIfChanged 保证内容一致时零写盘、零日志
-export async function injectWorkspaceToDir(dir: string, skipIdentity = false, identityOverride?: string): Promise<boolean> {
-  injectSkillsToDir(dir)
+export async function injectWorkspaceToDir(
+  dir: string,
+  skipIdentity = false,
+  identityOverride?: string,
+  skipAdmin = false,
+): Promise<boolean> {
+  injectSkillsToDir(dir, skipAdmin)
+  if (skipAdmin) cleanProjectMcpStale(dir, true)
   return injectRulesToDir(dir, skipIdentity, identityOverride)
 }
 
@@ -214,7 +260,7 @@ export async function injectWorkspaceMcpAndRules(): Promise<{ mcpOk: boolean; ru
   const config = getConfig()
   const mcpOk = await injectMcpGlobal()
   if (!config.workspaceDir) return { mcpOk, ruleOk: false, skillOk: false }
-  cleanProjectMcpStale(config.workspaceDir)
+  injectMcpAdminToDir(config.workspaceDir)
   const ruleOk = injectRulesToDir(config.workspaceDir, true)
   const skillOk = injectSkillsToDir(config.workspaceDir)
   return { mcpOk, ruleOk, skillOk }

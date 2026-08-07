@@ -11,6 +11,7 @@ import {
   broadcastLog, pushUiLog, flushAgentStreamChunk, logCursorAgentInvocation, logCursorAgentResponse,
   broadcastSessionStatus as broadcastSessionStatusToUi,
 } from "./ui-logger"
+import { scheduledTaskNotifyPromptLines } from "../src/shared/scheduled-task"
 
 // ── 会话 Agent ──────────────────────────────────────────
 
@@ -144,11 +145,19 @@ export function getIndependentTaskStatuses(): Record<string, { running: boolean;
 
 export interface LaunchMeta { messageIds?: string[]; chatId?: string; chatType?: string }
 
-export function buildPrompt(meta?: LaunchMeta, taskMessage?: string, sessionKey?: string, useMainWorkspace?: boolean): string {
+export function buildPrompt(
+  meta?: LaunchMeta,
+  taskMessage?: string,
+  sessionKey?: string,
+  useMainWorkspace?: boolean,
+  notifySessionKey?: string,
+): string {
   const prompts: string[] = []
-  // 数字身份（拟人人设）只用于普通群聊/非主用户私聊；主工作区、项目会话（含独立群）不注入
+  // 数字身份（拟人人设）只用于普通群聊/非主用户私聊；主工作区、项目、定时/临时任务不注入
   const isProjectSession = meta?.chatType === "project" || !!sessionKey?.includes("::project_")
-  if (useMainWorkspace || isProjectSession) {
+  const skipDigitalIdentity = useMainWorkspace || isProjectSession
+    || meta?.chatType === "task" || meta?.chatType === "temp"
+  if (skipDigitalIdentity) {
     prompts.push("请绝对严格遵守工作流规则cursor-claw开始工作")
   } else {
     prompts.push("请按照digital-identity数字身份定义并绝对严格遵守工作流规则cursor-claw开始工作")
@@ -164,6 +173,9 @@ export function buildPrompt(meta?: LaunchMeta, taskMessage?: string, sessionKey?
   prompts.push("会话元数据:")
   if (sessionKey) {
     prompts.push(`[session_key=${sessionKey}]`)
+  }
+  if (notifySessionKey?.trim()) {
+    prompts.push(...scheduledTaskNotifyPromptLines(notifySessionKey.trim()))
   }
   prompts.push(`[chat_type=${meta?.chatType}]`)
 
@@ -254,6 +266,8 @@ export interface LaunchAgentOptions {
   newSession?: boolean
   /** 长连接保活（无限 poll）；false = 回答完即结束回合 */
   persistentPoll?: boolean
+  /** 定时任务 outbound 投递目标（notify_session_key） */
+  notifySessionKey?: string
 }
 
 export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boolean; error?: string }> {
@@ -275,7 +289,7 @@ export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boole
   if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true })
   if (!resolveAgentBinary()) { pendingLaunches.delete(sessionKey); return { ok: false, error: "Cursor CLI 未安装" } }
 
-  const prompt = buildPrompt(meta, taskMessage, sessionKey, useMainWorkspace)
+  const prompt = buildPrompt(meta, taskMessage, sessionKey, useMainWorkspace, opts.notifySessionKey)
   const spawnEnv = createAgentEnv({ LARK_WORKSPACE_DIR: workDir })
 
   let resumeChatId: string | false = false

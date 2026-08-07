@@ -6,6 +6,7 @@ import { createHash } from "node:crypto"
 import { createRequire } from "node:module"
 import { pushUiLog, broadcastLog, broadcastSessionStatus } from "./ui-logger"
 import { type ChatType, type LaunchMeta, buildPrompt, resolveSessionChatName } from "./agent-launcher"
+import { scheduledTaskNotifyPromptLines } from "../src/shared/scheduled-task"
 import { getAgentResource, resolveChannelForSession } from "./config-store"
 import { readLockFile, httpPost } from "./daemon-client"
 import {
@@ -85,6 +86,8 @@ interface SdkSessionAgent {
   workspaceDir?: string
   senderOpenId?: string
   chatName?: string
+  /** 定时任务 outbound 投递目标 */
+  notifySessionKey?: string
   abortController: AbortController
   /** 通道开关：是否保留会话上下文（run 结束后记录 agentId，新消息 Resume 续上） */
   keepSession: boolean
@@ -234,6 +237,9 @@ function buildWakePrompt(session: SdkSessionAgent, rulesUpdated = false, taskMes
     `[session_key=${session.sessionKey}]`,
     `[chat_type=${session.chatType}]`,
   )
+  if (session.notifySessionKey?.trim()) {
+    lines.push(...scheduledTaskNotifyPromptLines(session.notifySessionKey.trim()))
+  }
   return lines.join("\n")
 }
 
@@ -1597,6 +1603,8 @@ export interface SdkLaunchOptions {
   newSession?: boolean
   /** 调度拉起时已知的队列 messageId（bootstrap poll 不应因此换卡） */
   pendingMessageIds?: string[]
+  /** 定时任务 outbound 投递目标（notify_session_key） */
+  notifySessionKey?: string
 }
 
 /** run 生命周期托管：结束即释放 agent 进程（上下文靠持久化的 agentId Resume 恢复） */
@@ -1677,6 +1685,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     const s = sdkSessions.get(sessionKey)
     if (s) {
       s.lastActivityAt = Date.now()
+      if (opts.notifySessionKey?.trim()) s.notifySessionKey = opts.notifySessionKey.trim()
       // 异常重启等路径可能丢失用户标识，随新消息自愈回填（否则会话名永远兜底为「通道名·访客」）
       if (!s.senderOpenId && senderOpenId) s.senderOpenId = senderOpenId
       for (const id of opts.pendingMessageIds ?? []) {
@@ -1780,6 +1789,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       workspaceDir,
       senderOpenId: senderOpenId ?? resumable?.senderOpenId,
       chatName,
+      notifySessionKey: opts.notifySessionKey?.trim() || undefined,
       abortController,
       keepSession,
       persistentPoll,
@@ -1824,7 +1834,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     }
     const prompt = resumed
       ? buildWakePrompt(session, rulesUpdated, taskMessage)
-      : buildPrompt(meta, effectiveTask, sessionKey, opts.useMainWorkspace)
+      : buildPrompt(meta, effectiveTask, sessionKey, opts.useMainWorkspace, opts.notifySessionKey)
     pushUiLog("SDK", "INFO", `[${sessionKey}] ${resumed ? "恢复" : "启动"} Prompt:\n${prompt}`)
     // pack/进程重启后 daemon 内存无卡，飞书旧流式卡仍在：Resume 前先按持久化 cardId 收口，避免再建一张重复卡
     if (resumed && resumable?.streamCardId && session.streamAgg) {

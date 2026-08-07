@@ -46,6 +46,8 @@ export interface BuildDashboardTreeInput {
     modelParams?: string
     workspaceDir?: string
     chatName?: string
+    /** 独立定时任务等无 chatKey 前缀时的所属通道 */
+    channelId?: string
   }[]
   mainSwitchable: {
     channelId: string
@@ -153,7 +155,7 @@ export function buildDashboardTree(input: BuildDashboardTreeInput): { channels: 
 
   for (const r of input.running) {
     const owner = input.channels.find((c) => c.mainUserChatId && sessionBelongsToChat(r.sessionKey, c.mainUserChatId))
-    const channelId = owner?.id ?? resolveChannelId(r.sessionKey, input.channels)
+    const channelId = r.channelId ?? owner?.id ?? resolveChannelId(r.sessionKey, input.channels)
     const chMeta = channelId ? byId.get(channelId) : undefined
     const mainChat = chMeta?.mainUserChatId || owner?.mainUserChatId
     const group = classifySessionGroup(r.sessionKey, r.chatType, { mainChatId: mainChat })

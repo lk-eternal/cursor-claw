@@ -62,7 +62,7 @@ interface RuleFile { name: string; content: string }
 interface SkillFile { name: string; content: string }
 interface TaskItem {
   id: string; name: string; cron: string; content: string; enabled: boolean; independent?: boolean
-  channelId?: string; model?: string; modelParams?: string
+  channelId?: string; model?: string; modelParams?: string; notifyChatId?: string
 }
 interface ProjectListItem {
   id: string
@@ -79,6 +79,7 @@ interface ProjectListItem {
   repoPath?: string
   workspaceType?: string
   metadata?: Record<string, string>
+  groupChatId?: string
 }
 type ProjectsSubTab = "list" | "settings" | "groups"
 const PROJECT_STATUS_LABEL: Record<string, string> = { active: "进行中", paused: "已暂停", done: "已完成" }
@@ -1136,6 +1137,7 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                           {t.channelId && <span className="shrink-0 rounded bg-blue-900/40 px-1.5 py-0.5 text-[10px] text-blue-400">{taskChannels.find((c) => c.id === t.channelId)?.name ?? "通道已删除"}</span>}
                           {t.model && <span className="shrink-0 rounded bg-purple-900/40 px-1.5 py-0.5 text-[10px] text-purple-400">{modelSlug(t.model, t.modelParams)}</span>}
                           {t.independent !== false && <span className="shrink-0 rounded bg-indigo-900/40 px-1.5 py-0.5 text-[10px] text-indigo-400">独立</span>}
+                          {t.notifyChatId && <span className="shrink-0 rounded bg-amber-900/40 px-1.5 py-0.5 text-[10px] text-amber-400/90" title={t.notifyChatId}>通知群</span>}
                           {isRunning && <span className="inline-flex items-center gap-1 shrink-0 rounded bg-green-900/40 px-1.5 py-0.5 text-[10px] text-green-400"><span className="inline-block h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse" />运行中</span>}
                         </div>
                         <p className="truncate text-xs text-gray-500">{t.content.slice(0, 80)}{t.content.length > 80 ? "..." : ""}</p>
@@ -1269,6 +1271,9 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                             <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] ${p.status === "active" ? "bg-green-900/40 text-green-400" : p.status === "paused" ? "bg-yellow-900/40 text-yellow-400" : "bg-gray-800 text-gray-500"}`}>
                               {PROJECT_STATUS_LABEL[p.status] ?? p.status}
                             </span>
+                            {p.groupChatId && (
+                              <span className="shrink-0 rounded bg-indigo-900/40 px-1.5 py-0.5 text-[10px] text-indigo-300">独立群</span>
+                            )}
                           </div>
                           {p.storyUrl && <p className="truncate text-xs text-gray-500">{p.storyUrl}</p>}
                           {p.metadata && Object.keys(p.metadata).length > 0 && (
@@ -1291,8 +1296,10 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                           )}
                         </div>
                         <div className="ml-3 flex shrink-0 items-center gap-1.5">
-                          <button type="button" onClick={() => handleProjectSwitch(p.id)}
-                            className="rounded px-2 py-0.5 text-xs text-blue-400 transition hover:bg-blue-600/20">切换至</button>
+                          {!p.groupChatId && (
+                            <button type="button" onClick={() => handleProjectSwitch(p.id)}
+                              className="rounded px-2 py-0.5 text-xs text-blue-400 transition hover:bg-blue-600/20">切换至</button>
+                          )}
                           <button type="button" onClick={() => {
                             setProjectEditing({
                             ...p,
@@ -2133,6 +2140,17 @@ export default function Settings({ onBack, initialTab, onTabConsumed, onReenterW
                       />
                     : <input type="text" value={modelSlug(taskEditing.model, taskEditing.modelParams)} onChange={(e) => setTaskEditing({ ...taskEditing, model: e.target.value || undefined, modelParams: undefined })} placeholder="留空跟随通道主模型" className={inputCls} />}
                 </div>
+              </div>
+              <div>
+                <label className="mb-1 block text-xs text-gray-500">结果通知群（可选）</label>
+                <input
+                  type="text"
+                  value={taskEditing.notifyChatId ?? ""}
+                  onChange={(e) => setTaskEditing({ ...taskEditing, notifyChatId: e.target.value.trim() || undefined })}
+                  className={inputCls + " font-mono text-xs"}
+                  placeholder="群 chat_id，如 oc_xxx"
+                />
+                <p className="mt-1 text-[10px] text-gray-600">填了的话，任务跑完后 Agent 会把结果发到这个群；不填则不在群里通知。</p>
               </div>
               <div className="flex items-center gap-4">
                 <label className="flex items-center gap-2 text-xs text-gray-400"><input type="checkbox" checked={taskEditing.enabled} onChange={(e) => setTaskEditing({ ...taskEditing, enabled: e.target.checked })} className="rounded border-gray-600" />启用</label>

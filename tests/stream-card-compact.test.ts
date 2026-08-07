@@ -64,6 +64,19 @@ describe("流式卡压缩（各类型留最近 N，无省略占位）", () => {
     expect(json).toContain("LATEST-step0")
   })
 
+  it("keepPerKind 可配置（非默认 5）", () => {
+    const segments: Segment[] = []
+    for (let i = 0; i < 10; i++) {
+      segments.push(mkThink(`t${i}`))
+      segments.push(mkTools(1, `g${i}`))
+    }
+    const kept = LarkSender.keepRecentStreamSegments(segments, 3, true)
+    expect(kept.filter((s) => s.type === "thinking")).toHaveLength(3)
+    expect(kept.filter((s) => s.type === "tools")).toHaveLength(3)
+    expect(LarkSender.normalizeStreamKeepPerKind(undefined)).toBe(5)
+    expect(LarkSender.normalizeStreamKeepPerKind(99)).toBe(20)
+  })
+
   it("keepRecentStreamSegments 精确保留各类型最近 N 个", () => {
     const segments: Segment[] = []
     for (let i = 0; i < 8; i++) {

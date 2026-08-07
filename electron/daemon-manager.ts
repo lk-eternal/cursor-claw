@@ -519,6 +519,7 @@ function buildDaemonChannelConfigs(): DaemonChannelConfig[] {
     workspaceDir: c.workspaceDir?.trim() ?? "",
     keepAlive: (c.keepSession ?? true) && (c.persistentPoll ?? true),
     showThinking: c.showThinking ?? true,
+    streamKeepPerKind: c.streamKeepPerKind,
   }))
 }
 
@@ -1555,6 +1556,7 @@ function channelRuntimeFlags(channels: MessageChannel[]) {
     id: c.id,
     keepAlive: (c.keepSession ?? true) && (c.persistentPoll ?? true),
     showThinking: c.showThinking ?? true,
+    streamKeepPerKind: c.streamKeepPerKind,
     name: c.name,
     mainUserEnabled: !!c.mainUserEnabled,
     mainUserChatId: c.mainUserEnabled ? (c.mainUserChatId?.trim() ?? "") : "",
@@ -1877,6 +1879,7 @@ export function initDaemonManager(): void {
       repoPath: p.repoPath,
       workspaceType: p.workspaceType,
       metadata: p.metadata,
+      groupChatId: p.groupChatId,
     }))
   })
   ipcMain.handle("project:delete", async (_e, projectId: string) => {

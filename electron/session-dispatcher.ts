@@ -37,6 +37,7 @@ import { buildProjectSessionPrompt } from "./project-prompts"
 import { getSessionOverride } from "../src/shared/session-model-store.js"
 import { resolveModelLabel } from "../src/shared/model-utils.js"
 import { readTasksFromFile } from "./cron-scheduler"
+import { findScheduledTaskBySessionKey, formatScheduledTaskLabel, buildNotifySessionKey } from "../src/shared/scheduled-task"
 
 // ── readLockFile 短 TTL 缓存 ─────────────────────────────
 let _lockCache: { value: ReturnType<typeof readLockFile>; ts: number } | null = null
@@ -406,6 +407,8 @@ interface LaunchAgentParams {
   workingDirectory?: string
   /** 调度时已知的队列 messageId（SDK bootstrap poll 预登记，防误换卡） */
   pendingMessageIds?: string[]
+  /** 定时任务 outbound 投递目标 */
+  notifySessionKey?: string
 }
 
 /** 解析项目绑定：sessionKey 带 project_，或 chatId 命中独立群 groupChatId */
@@ -420,7 +423,11 @@ function findBoundProject(sessionKey: string, chatId?: string) {
 }
 
 async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?: string }> {
-  const { sessionKey, chatType, meta, senderOpenId, chatName, taskMessage } = p
+  const { sessionKey, chatType, meta, senderOpenId, taskMessage } = p
+  const scheduledTask = chatType === "task" ? scheduledTaskForSessionKey(sessionKey) : undefined
+  const chatName = p.chatName || scheduledTask?.name
+  const notifySessionKey = p.notifySessionKey?.trim()
+    || (scheduledTask ? buildNotifySessionKey(scheduledTask) : undefined)
   const useMain = p.useMainWorkspace ?? (chatType === "p2p")
   const chatRef = meta?.chatId || extractChatId(sessionKey)
   const boundProject = findBoundProject(sessionKey, chatRef)
@@ -437,6 +444,8 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
   if (!useMain && !isOwnTask && !channel?.allowOthers) {
     return { ok: false, error: `通道「${channel?.name ?? "未知"}」未启用其他人使用` }
   }
+
+  const skipIdentity = useMain || projectOwned || chatType === "task" || chatType === "temp"
 
   let workDir: string
   if (p.workingDirectory) {
@@ -458,8 +467,8 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
   }
   if (!workDir) return { ok: false, error: "工作目录未配置" }
 
-  // 项目/独立群：删除 digital-identity.mdc，禁止拟人人设
-  await injectWorkspaceToDir(workDir, useMain || projectOwned, channel?.digitalIdentity)
+  // 项目/独立群/定时任务：删 digital-identity、剥离 admin MCP/Skill；主工作区私聊仍保留 admin
+  await injectWorkspaceToDir(workDir, skipIdentity, channel?.digitalIdentity, projectOwned)
 
   // 模型解析：显式覆盖 > 会话 override/pending > 通道场景模型
   let model: string
@@ -491,8 +500,9 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
   if (resource.type === "sdk") {
     return launchSdkAgent({
       sessionKey, chatType: launchChatType, meta: launchMeta, workspaceDir: workDir,
-      useMainWorkspace: useMain || projectOwned,
+      useMainWorkspace: skipIdentity,
       senderOpenId, chatName, taskMessage,
+      notifySessionKey,
       apiKey: resource.apiKey ?? "", model, modelParams,
       keepSession, persistentPoll,
       pendingMessageIds: p.pendingMessageIds,
@@ -502,8 +512,9 @@ async function launchAgent(p: LaunchAgentParams): Promise<{ ok: boolean; error?:
   const needResume = launchChatType === "p2p" || launchChatType === "group"
   return _launchCliAgent({
     sessionKey, chatType: launchChatType, meta: launchMeta,
-    useMainWorkspace: useMain || projectOwned,
+    useMainWorkspace: skipIdentity,
     senderOpenId, chatName, taskMessage,
+    notifySessionKey,
     workspaceDir: workDir, model,
     resumeScope: needResume && channel ? mainChatScopeKey(channel.id, workDir) : undefined,
     persistentPoll,
@@ -631,10 +642,16 @@ function sessionBelongsToChat(sessionKey: string, chatId: string): boolean {
   return sk.startsWith(`${ck}::`)
 }
 
+function scheduledTaskForSessionKey(sessionKey: string) {
+  return findScheduledTaskBySessionKey(sessionKey, readTasksFromFile())
+}
+
 function tabLabelForSession(
   sessionKey: string,
   running?: { workspaceDir?: string; chatName?: string },
 ): string {
+  const task = scheduledTaskForSessionKey(sessionKey)
+  if (task) return formatScheduledTaskLabel(task.name)
   const pid = projectIdFromSessionKey(sessionKey)
   if (pid) {
     const p = getProject(pid)
@@ -657,6 +674,7 @@ function tabLabelForSession(
 }
 
 function sessionTabKind(sessionKey: string): SessionTabItem["kind"] {
+  if (scheduledTaskForSessionKey(sessionKey)) return "task"
   if (projectIdFromSessionKey(sessionKey)) return "project"
   if (sessionKey.startsWith("temp_")) return "temp"
   const ws = workspaceDirFromSessionKey(sessionKey)
@@ -782,7 +800,7 @@ export async function deleteUserSession(
 export type SessionTabItem = {
   sessionKey: string
   label: string
-  kind: "main" | "project" | "dir" | "temp" | "other"
+  kind: "main" | "project" | "dir" | "temp" | "task" | "other"
   running: boolean
   current: boolean
   removable?: boolean
@@ -934,7 +952,17 @@ export async function listDashboardTree(): Promise<{
   return {
     ok: true,
     channels: out,
-    running: lock?.port ? getSessionAgentList() : [],
+    running: lock?.port
+      ? getSessionAgentList().map((s) => {
+          const task = scheduledTaskForSessionKey(s.sessionKey)
+          if (!task) return s
+          return {
+            ...s,
+            chatName: s.chatName || task.name,
+            channelId: task.channelId,
+          }
+        })
+      : [],
     error: lock?.port ? undefined : "服务未运行",
   }
 }

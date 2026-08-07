@@ -5,6 +5,10 @@ import * as os from "node:os"
 import {
   readScheduledTasksFile,
   writeScheduledTasksFile,
+  findScheduledTaskBySessionKey,
+  formatScheduledTaskLabel,
+  buildNotifySessionKey,
+  scheduledTaskNotifyPromptLines,
   type ScheduledTask,
 } from "../src/shared/scheduled-task.js"
 
@@ -75,5 +79,43 @@ describe("writeScheduledTasksFile", () => {
     const tasks = [makeTask(), makeTask({ id: "t2", channelId: "ch_x", model: "composer-2" })]
     writeScheduledTasksFile(file, tasks)
     expect(readScheduledTasksFile(file)).toEqual(tasks)
+  })
+})
+
+describe("findScheduledTaskBySessionKey", () => {
+  it("匹配裸 task.id，忽略带 chatKey/workspace 的 sessionKey", () => {
+    const tasks = [makeTask({ id: "t1", name: "日报" }), makeTask({ id: "t2", name: "周报" })]
+    expect(findScheduledTaskBySessionKey("t1", tasks)?.name).toBe("日报")
+    expect(findScheduledTaskBySessionKey("ch_a|oc_1", tasks)).toBeUndefined()
+    expect(findScheduledTaskBySessionKey("t1::D:\\ws", tasks)).toBeUndefined()
+  })
+})
+
+describe("formatScheduledTaskLabel", () => {
+  it("加定时任务前缀", () => {
+    expect(formatScheduledTaskLabel("英文合班入班追踪")).toBe("⏰ 英文合班入班追踪")
+  })
+})
+
+describe("buildNotifySessionKey", () => {
+  it("用 channelId + 裸群 id 拼 chatKey", () => {
+    expect(buildNotifySessionKey({ channelId: "ch_a", notifyChatId: "oc_group1" })).toBe("ch_a|oc_group1")
+  })
+
+  it("已是完整 chatKey 则原样返回", () => {
+    expect(buildNotifySessionKey({ channelId: "ch_a", notifyChatId: "ch_b|oc_x" })).toBe("ch_b|oc_x")
+  })
+
+  it("缺 notifyChatId 或 channelId 返回 undefined", () => {
+    expect(buildNotifySessionKey({ channelId: "ch_a" })).toBeUndefined()
+    expect(buildNotifySessionKey({ notifyChatId: "oc_x" })).toBeUndefined()
+  })
+})
+
+describe("scheduledTaskNotifyPromptLines", () => {
+  it("包含 notify_session_key 与投递规则", () => {
+    const lines = scheduledTaskNotifyPromptLines("ch_a|oc_g")
+    expect(lines[0]).toBe("[notify_session_key=ch_a|oc_g]")
+    expect(lines.some((l) => l.includes("必须且只能"))).toBe(true)
   })
 })

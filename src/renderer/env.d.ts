@@ -200,7 +200,7 @@ declare global {
     listProjects(): Promise<{
       id: string; name: string; goal?: string; storyUrl?: string; productDocUrl?: string; techDocUrl?: string
       featureBranch: string; status: string; groupId?: string; groupIds?: string[]; worktreePath?: string; repoPath?: string; workspaceType?: string
-      metadata?: Record<string, string>
+      metadata?: Record<string, string>; groupChatId?: string
     }[]>
     deleteProject(projectId: string): Promise<{ ok: boolean; name?: string; error?: string }>
     updateProject(patch: {

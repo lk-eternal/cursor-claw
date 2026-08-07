@@ -1,5 +1,16 @@
 [
   {
+    "version": "1.8.8",
+    "date": "2026-08-07",
+    "changes": [
+      "定时任务：支持配置结果通知群（notifyChatId），触发时自动注入投递目标，无需在任务正文写 session_key",
+      "定时任务：独立会话在 Dashboard / UI 日志中显示任务名（⏰），不再是一串 UUID",
+      "定时任务：task/temp 会话跳过 digital-identity 注入（自动化任务不需要拟人人设）",
+      "修复 Dashboard Prompt 日志中 notify_session_key 被误缩短导致显示错乱",
+      "设置页：通知群字段文案改为用户可读说明"
+    ]
+  },
+  {
     "version": "1.8.7",
     "date": "2026-08-05",
     "changes": [

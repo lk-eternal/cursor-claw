@@ -906,6 +906,11 @@ export class LarkSender {
   /** 思考块 / 工具块各保留最近 N 个；reply 与 todos 永不丢 */
   static readonly STREAM_KEEP_PER_KIND = 5;
 
+  static normalizeStreamKeepPerKind(n?: number): number {
+    const v = typeof n === "number" && Number.isFinite(n) ? Math.floor(n) : LarkSender.STREAM_KEEP_PER_KIND;
+    return Math.min(20, Math.max(1, v));
+  }
+
   /** 递归统计带 tag 的节点数（对齐飞书 300305 限额口径） */
   static countCardElements(node: unknown): number {
     if (node == null || typeof node !== "object") return 0;
@@ -952,6 +957,7 @@ export class LarkSender {
   static buildStreamingCardJson(opts?: {
     status?: "streaming" | "completed" | "error";
     showThinking?: boolean;
+    keepPerKind?: number;
     sessionTitle?: CardTitle;
     sessionTemplate?: string;
     segments?: Array<
@@ -977,6 +983,7 @@ export class LarkSender {
   }): Record<string, unknown> {
     const status = opts?.status || "streaming";
     const showThinking = opts?.showThinking !== false;
+    const keepPerKind = LarkSender.normalizeStreamKeepPerKind(opts?.keepPerKind);
     const sessionTpl = opts?.sessionTemplate || "turquoise";
     const sessionRgb = LarkSender.BANNER_RGB[sessionTpl] ?? LarkSender.BANNER_RGB.turquoise;
 
@@ -1081,7 +1088,7 @@ export class LarkSender {
     // 收敛原则：思考/工具各留最近 N 块；reply 与 todos 永不丢；不插「已省略」占位（避免卡顶跳动）。
     let segs: BodySegment[] = LarkSender.keepRecentStreamSegments(
       segments as BodySegment[],
-      LarkSender.STREAM_KEEP_PER_KIND,
+      keepPerKind,
       showThinking,
     );
     if (opts?.panelState?.knownPanelIds) {
@@ -1170,6 +1177,7 @@ export class LarkSender {
     title?: string;
     template?: string;
     showThinking?: boolean;
+    keepPerKind?: number;
     sessionTitle?: CardTitle;
     sessionTemplate?: string;
     segments?: Array<
@@ -1190,6 +1198,7 @@ export class LarkSender {
     const cardJson = LarkSender.buildStreamingCardJson({
       status: "streaming",
       showThinking: opts?.showThinking,
+      keepPerKind: opts?.keepPerKind,
       sessionTitle: opts?.sessionTitle,
       sessionTemplate: opts?.sessionTemplate,
       segments: opts?.segments,

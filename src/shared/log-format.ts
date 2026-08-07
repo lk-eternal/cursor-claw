@@ -1,9 +1,13 @@
 /**
- * 日志全文落盘排查；UI 仅展示时缩短 sessionKey（对齐飞书卡片标签风格）。
- * 单一入口，避免写入侧分叉维护。
+ * 日志全文落盘；UI 展示时将 sessionKey 替换为友好标签（项目名/会话名）。
+ * 匹配必须带 ch_ 前缀，避免误替换路径中的 oc_ 片段。
  */
 
-/** 从完整 sessionKey 生成 UI 短标签（无项目名时的兜底） */
+/** sessionKey 在日志行中的形态（须 ch_ 开头，避免误匹配路径内 oc_） */
+const SESSION_KEY_IN_LOG_RE =
+  /ch_[a-zA-Z0-9]+\|[^|\s]+(?:::(?:project_[a-f0-9]+|temp_[^\s\]]+|wf_[^\s\]]+|[A-Za-z]:[^\s\]]*))?/g
+
+/** 从完整 sessionKey 生成 UI 短标签（无项目名/页签信息时的兜底） */
 export function shortenSessionKeyForUi(sessionKey: string): string {
   const sk = sessionKey.trim()
   const proj = sk.match(/::project_([a-f0-9]+)/i)
@@ -25,17 +29,30 @@ export function shortenSessionKeyForUi(sessionKey: string): string {
   return chat
 }
 
-/**
- * 把日志正文里的长 sessionKey 收成短标签（其它内容不动）。
- * @param resolveLabel 可选：用会话页签/项目信息解析成「📦 名」等文案
- */
+/** 日志里 `[taskId]` 形态（UUID 或含连字符的 slug，避免误匹配 [SDK]/[Agent]） */
+const BRACKETED_TASK_SESSION_RE =
+  /\[([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[a-z][a-z0-9]*(?:-[a-z0-9-]+)+)\]/gi
+
+/** 日志 UI 展示：sessionKey → 友好标签，其它内容（含完整路径）不动 */
 export function formatLogLineForUi(
   line: string,
   resolveLabel?: (sessionKey: string) => string | undefined,
 ): string {
-  // 飞书 oc_/ou_/on_（≥10 字符 id，避免误匹配 session_key/on_key/ON_RESUME）；微信 wxid_/wx_；:: 后缀可选
-  const re = /(?:ch_[a-zA-Z0-9]+\|)?(?:(?:oc_|ou_|on_)[a-zA-Z0-9]{10,}|(?:wxid_|wx_)[a-zA-Z0-9_-]+|[a-zA-Z0-9_-]+@(?:im\.wechat|chatroom))(?:::(?:project_[a-f0-9]+|[^\s\]]+))?/g
-  return line.replace(re, (sk) => resolveLabel?.(sk) || shortenSessionKeyForUi(sk))
+  const replaceTaskBracket = (s: string) =>
+    s.replace(BRACKETED_TASK_SESSION_RE, (full, id: string) => {
+      const label = resolveLabel?.(id)
+      if (!label) return full
+      return `[${label}]`
+    })
+
+  // Prompt 全文 dump 含 notify_session_key 等元数据，不可对其中的 ch_|oc_ 做缩短替换
+  if (/(?:启动|恢复) Prompt:/.test(line)) return replaceTaskBracket(line)
+
+  const withChatKeys = line.replace(
+    SESSION_KEY_IN_LOG_RE,
+    (sk) => resolveLabel?.(sk) || shortenSessionKeyForUi(sk),
+  )
+  return replaceTaskBracket(withChatKeys)
 }
 
 /** 将 Dashboard sessionTabs 的 label/kind 转成紧凑标签（图标 + 名，不含分支） */
@@ -52,5 +69,6 @@ export function cardLabelFromSessionTab(tab: {
     return `📂 ${name}`
   }
   if (tab.kind === "temp") return `⏳ ${tab.label}`
+  if (tab.kind === "task") return tab.label.startsWith("⏰") ? tab.label : `⏰ ${tab.label}`
   return tab.label
 }

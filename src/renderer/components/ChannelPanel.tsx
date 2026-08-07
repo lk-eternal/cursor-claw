@@ -637,6 +637,25 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
                 </button>
               </div>
             )}
+            {draft.type === "feishu" && (draft.showThinking ?? true) && (
+              <div className="flex items-center justify-between border-t border-gray-800 pt-3 pl-2">
+                <div>
+                  <p className="text-xs text-gray-400">思考/工具块保留数</p>
+                  <p className="text-xs text-gray-600">流式卡各保留最近 N 个思考块与工具块（1–20，默认 5），保存后立即生效</p>
+                </div>
+                <input
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={draft.streamKeepPerKind ?? 5}
+                  onChange={(e) => {
+                    const n = parseInt(e.target.value, 10)
+                    set({ streamKeepPerKind: Number.isFinite(n) ? Math.min(20, Math.max(1, n)) : 5 })
+                  }}
+                  className="w-16 rounded-lg border border-gray-700 bg-gray-900 px-2 py-1 text-center text-sm outline-none focus:border-blue-500"
+                />
+              </div>
+            )}
           </div>
 
           {/* ── 主用户绑定 ── */}

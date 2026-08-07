@@ -108,6 +108,7 @@ export default function Dashboard({ onSettings, active }: Props) {
     return m
   }, [treeChannels])
   const [projectNameById, setProjectNameById] = useState<Map<string, string>>(() => new Map())
+  const [taskNameById, setTaskNameById] = useState<Map<string, string>>(() => new Map())
 
   const refreshProjectNames = useCallback(() => {
     void window.electronAPI.listProjects().then((list) => {
@@ -124,6 +125,22 @@ export default function Dashboard({ onSettings, active }: Props) {
     const t = setInterval(refreshProjectNames, 30_000)
     return () => clearInterval(t)
   }, [refreshProjectNames, active])
+
+  const refreshTaskNames = useCallback(() => {
+    window.electronAPI.getScheduledTasks().then((tasks) => {
+      const m = new Map<string, string>()
+      for (const t of tasks) {
+        if (t.id && t.name) m.set(t.id, t.name)
+      }
+      setTaskNameById(m)
+    }).catch(() => { /* ignore */ })
+  }, [])
+
+  useEffect(() => {
+    refreshTaskNames()
+    const t = setInterval(refreshTaskNames, 30_000)
+    return () => clearInterval(t)
+  }, [refreshTaskNames, active])
 
   const sessionLogLabelByKey = useMemo(() => {
     const m = new Map<string, string>()
@@ -158,9 +175,14 @@ export default function Dashboard({ onSettings, active }: Props) {
     for (const [k, v] of sessionLogLabelByKey) {
       if (k.replace(/\\/g, "/").toLowerCase() === norm) return v
     }
+    const taskName = taskNameById.get(sk)
+    if (taskName) return `⏰ ${taskName}`
     const running = sessionListRef.current.find((s) =>
       s.sessionKey === sk || s.sessionKey.replace(/\\/g, "/").toLowerCase() === norm)
-    if (running?.chatName) return running.chatName
+    if (running?.chatName) {
+      if (running.chatType === "task") return `⏰ ${running.chatName}`
+      return running.chatName
+    }
     const pid = sk.match(/::project_([a-f0-9]+)/i)?.[1]
     if (pid) {
       for (const [k, v] of sessionLogLabelByKey) {
@@ -170,7 +192,7 @@ export default function Dashboard({ onSettings, active }: Props) {
       if (name) return `📦 ${name}`
     }
     return undefined
-  }, [sessionLogLabelByKey, projectNameById])
+  }, [sessionLogLabelByKey, projectNameById, taskNameById])
   const resolveLogSessionLabelRef = useRef(resolveLogSessionLabel)
   resolveLogSessionLabelRef.current = resolveLogSessionLabel
 
@@ -247,10 +269,11 @@ export default function Dashboard({ onSettings, active }: Props) {
       const running = runningSrc.map((s) => ({
         sessionKey: s.sessionKey,
         chatType: s.chatType,
-        // 与日志同一套标签（📦/📂/⏳），chatName 只当兜底——否则专属群项目会显示成「P: 名」
+        channelId: (s as { channelId?: string }).channelId,
+        // 与日志同一套标签（📦/📂/⏰），chatName 只当兜底——否则专属群项目会显示成「P: 名」
         label: labelByKey.get(s.sessionKey)
           || resolveLogSessionLabelRef.current(s.sessionKey)
-          || s.chatName
+          || (s.chatType === "task" && s.chatName ? `⏰ ${s.chatName}` : s.chatName)
           || s.sessionKey,
         model: s.model,
         modelParams: s.modelParams,
@@ -1397,7 +1420,6 @@ function renderHighlighted(text: string, query: string): React.ReactNode {
 }
 
 const LogLine = memo(function LogLine({ line, highlight = "", resolveLabel }: { line: string; highlight?: string; resolveLabel?: (sk: string) => string | undefined }) {
-  // 存储仍是全文；仅展示缩短 sessionKey，复制/过滤仍用原始 line
   const view = formatLogLineForUi(line, resolveLabel)
   const m = LOG_RE.exec(view)
   if (!m) {
