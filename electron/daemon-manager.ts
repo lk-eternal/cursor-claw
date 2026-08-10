@@ -954,7 +954,8 @@ async function consumePackNotify(): Promise<void> {
   try {
     const notifyPath = path.join(app.getPath("userData"), "pack-notify.json")
     if (!fs.existsSync(notifyPath)) return
-    const raw = JSON.parse(fs.readFileSync(notifyPath, "utf8")) as { version?: string; packedAt?: number }
+    const fileText = fs.readFileSync(notifyPath, "utf8").replace(/^\uFEFF/, "")
+    const raw = JSON.parse(fileText) as { version?: string; packedAt?: number }
     fs.unlinkSync(notifyPath)
     const lock = readLockFile()
     if (!lock?.port) return

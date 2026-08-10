@@ -49,12 +49,15 @@ export default function SessionRow({
       const t = e.target as Node
       if (!menuRef.current?.contains(t) && !btnRef.current?.contains(t)) close()
     }
-    // capture: 任意祖先容器滚动都要跟着关，fixed 菜单不会自己跟随
-    window.addEventListener("scroll", close, true)
+    const onScroll = (e: Event) => {
+      if (menuRef.current?.contains(e.target as Node)) return
+      close()
+    }
+    window.addEventListener("scroll", onScroll, true)
     window.addEventListener("resize", close)
     document.addEventListener("mousedown", onDoc)
     return () => {
-      window.removeEventListener("scroll", close, true)
+      window.removeEventListener("scroll", onScroll, true)
       window.removeEventListener("resize", close)
       document.removeEventListener("mousedown", onDoc)
     }
@@ -138,7 +141,9 @@ export default function SessionRow({
             <div
               ref={menuRef}
               style={{ position: "fixed", top: menuPos.top, left: menuPos.left, width: MENU_W, maxHeight: MENU_MAX_H }}
-              className="z-50 overflow-auto rounded border border-gray-700 bg-gray-950 py-1 shadow-lg"
+              className="z-50 overflow-auto overscroll-contain rounded border border-gray-700 bg-gray-950 py-1 shadow-lg"
+              onMouseDown={(e) => e.stopPropagation()}
+              onWheel={(e) => e.stopPropagation()}
             >
               {quickModels.length === 0 && (
                 <div className="px-2 py-1 text-[11px] text-gray-600">暂无常用模型</div>

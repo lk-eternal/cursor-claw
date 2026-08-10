@@ -94,7 +94,9 @@ try {
     if ($pkg.version) { $ver = [string]$pkg.version }
   } catch {}
   @{ version = $ver; packedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); log = $LogFile } |
-    ConvertTo-Json -Compress | Set-Content -Path $notify -Encoding UTF8
+    ConvertTo-Json -Compress | ForEach-Object {
+      [System.IO.File]::WriteAllText($notify, $_, [System.Text.UTF8Encoding]::new($false))
+    }
   Write-Log "  pack-notify written: $notify ver=$ver"
 
   Write-Log "=== pack-local done ==="

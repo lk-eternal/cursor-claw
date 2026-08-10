@@ -1699,16 +1699,15 @@ async function refreshAgentStreamCard(
         if (s.type === "reply" && s.text.trim()) { closedReply = s.text.trim(); break; }
       }
     }
-    const questionText = q?.text.trim() || closedReply;
-    if (questionText) {
-      merged.segments = merged.segments.filter((s) => !(s.type === "reply" && s.text.trim() === questionText));
+    const questionTextRaw = q?.text.trim() || closedReply;
+    if (questionTextRaw) {
+      merged.segments = merged.segments.filter((s) => !(s.type === "reply" && s.text.trim() === questionTextRaw));
     }
+    const questionText = q?.options?.length
+      ? questionBodyWithOptions(questionTextRaw || "", q.options)
+      : questionTextRaw;
     const cardSegs = buildCardSegmentsFromPayload(merged, { finish: opts.finish, showThinking: state.showThinking }, state);
-    const buttons = q ? q.options.map((o, i) => ({
-      label: `${i + 1}. ${o}`,
-      value: { kind: "question", opt: o, sk: sessionKey },
-      type: "default" as const,
-    })) : undefined;
+    const buttons = q ? questionOptionButtons(q.options, sessionKey) : undefined;
     const status = (opts.finish || q) ? "completed" as const : "streaming" as const;
     const qFoot = q ? QUESTION_CARD_HINT : state.closedFooter;
     const cardJson = LarkSender.buildStreamingCardJson({
@@ -2173,6 +2172,26 @@ function questionDisplayBody(raw: string, maxLen?: number): string {
   let t = raw.trim();
   if (maxLen && maxLen > 0 && t.length > maxLen) t = `${t.slice(0, maxLen)}…`;
   return t;
+}
+
+function questionOptionLetter(i: number): string {
+  return i < 26 ? String.fromCharCode(65 + i) : String(i + 1);
+}
+
+/** 题干 markdown + 选项全文列表（按钮只显示字母，点击仍入队完整 opt） */
+function questionBodyWithOptions(raw: string, options: string[], maxLen?: number): string {
+  const body = questionDisplayBody(raw, maxLen);
+  if (!options.length) return body;
+  const list = options.map((o, i) => `**${questionOptionLetter(i)}.** ${o}`).join("\n");
+  return body ? `${body}\n\n${list}` : list;
+}
+
+function questionOptionButtons(options: string[], sessionKey?: string): CardButton[] {
+  return options.map((o, i) => ({
+    label: questionOptionLetter(i),
+    value: { kind: "question", opt: o, sk: sessionKey },
+    type: "default" as const,
+  }));
 }
 
 /** @deprecated 用 questionDisplayBody；保留别名防漏改 */
@@ -3896,8 +3915,8 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     if (ch.type === "error") { json(res, { ok: false, error: ch.message }, 400); return true; }
 
     if (ch.type === "wechat") {
-      // 微信无交互卡片：降级为文本选项列表，用户直接回复编号或内容
-      const fallback = `${text}\n\n请回复编号或选项内容:\n${opts.map((o, i) => `${i + 1}. ${o}`).join("\n")}`;
+      // 微信无交互卡片：降级为文本选项列表，用户直接回复字母或内容
+      const fallback = `${text}\n\n请回复字母或选项内容:\n${opts.map((o, i) => `${questionOptionLetter(i)}. ${o}`).join("\n")}`;
       json(res, { ok: await ch.rt.wechat!.sendText(ch.chatId, fallback), degraded: true });
     } else {
       const sender = ch.rt.sender!;
@@ -3938,12 +3957,11 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       );
       const title = resolveReplyTitle(ch, colorKey || session_key);
       // 问题卡与普通回复同色：用会话稳定色，关闭/点选时不变色
-      const displayBody = questionDisplayBody(text);
+      const displayBody = questionBodyWithOptions(text, opts);
       const pendingText = displayBody;
       const pendingFooter = QUESTION_CARD_HINT;
       const pendingTemplate = sessionHeaderTemplate(colorKey || session_key) || (title ? "turquoise" : undefined);
-      // session_key 打进按钮 value：即使 reply 未返回 message_id 导致 cardQuestionMap 未登记，点击仍能路由回原会话
-      const buttons: CardButton[] = opts.map((o, i) => ({ label: `${i + 1}. ${o}`, value: { kind: "question", opt: o, sk: session_key } }));
+      const buttons = questionOptionButtons(opts, session_key);
       // p2p 直发；群聊先 reply，失败再直发（null=已回复成功勿再发）
       let sentMsgId: string | null | undefined;
       if (shouldReplyToMessage(ch, message_id)) {
