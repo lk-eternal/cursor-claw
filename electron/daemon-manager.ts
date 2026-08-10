@@ -974,7 +974,7 @@ async function consumePackNotify(): Promise<void> {
       return
     }
     const ver = raw.version || "unknown"
-    // 清掉 pack 前残留的 .claimed，防重投的旧「打包」指令被再次执行
+    // 清掉 pack 前残留的 .claimed，防重投的旧「打包」指令被再次执行；队列为空时不入队、不主动唤醒
     const mainSk = await resolveMainSessionKey(lock.port, chatId)
     if (mainSk) {
       try {
@@ -983,14 +983,7 @@ async function consumePackNotify(): Promise<void> {
         broadcastLog(`[Pack] 确认 claimed 失败: ${e instanceof Error ? e.message : e}`, "WARN")
       }
     }
-    const text = [
-      `[SYSTEM] pack:local 已在本次重启前完成（v${ver}）。禁止再次执行 pack:local / npm run pack:local；若上下文里仍有打包步骤请忽略。`,
-      "",
-      `✅ 新版已启动（v${ver}）。可发 /s 或随便聊一句验证。`,
-    ].join("\n")
-    // enqueue 走主会话路由，避免裸 chatId 被 send-text 白名单拒绝
-    await enqueueToMainSession(lock.port, text, chatId)
-    broadcastLog(`[Pack] 已通知主用户: v${ver}`, "INFO")
+    broadcastLog(`[Pack] 新版已启动 v${ver}（已确认 claimed，队列为空不唤醒）`, "INFO")
   } catch (e: unknown) {
     broadcastLog(`[Pack] 启动通知失败: ${e instanceof Error ? e.message : e}`, "WARN")
   }
