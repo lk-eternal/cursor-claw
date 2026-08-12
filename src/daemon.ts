@@ -416,6 +416,8 @@ function broadcastPollPhaseEvent(
 // ── 会话路由映射 ─────────────────────────────────────────
 
 const activeSessionMap = new Map<string, string>();
+/** active 指针由用户显式切换而来的 chat：投递时不再被主工作目录纠正覆写（区分于 daemon 重启等遗留的残留指针） */
+const explicitActiveChats = new Set<string>();
 const messageSessionMap = new Map<string, string>();
 const sessionToChatMap = new Map<string, string>();
 const MSG_SESSION_MAP_MAX = 5000;
@@ -485,6 +487,7 @@ function scrubCrossChannelRouting(): void {
     const sessionChannel = parseChatKey(chatIdFromSessionKey(sessionKey)).channelId;
     if (chatChannel && sessionChannel && chatChannel !== sessionChannel) {
       activeSessionMap.delete(chatKey);
+      explicitActiveChats.delete(chatKey);
       n++;
     }
   }
@@ -512,6 +515,7 @@ function scrubInvalidActiveSessions(): void {
     activeSessionMap.set(chatId, next);
     sessionToChatMap.delete(sk);
     sessionToChatMap.set(next, chatId);
+    explicitActiveChats.delete(chatId);
     n++;
     log("INFO", `[Routing] 纠正非法会话后缀: ${sk} → ${next}`);
   }
@@ -522,17 +526,18 @@ function loadRoutingMaps(): void {
   try {
     if (!APP_DATA_DIR || !fs.existsSync(ROUTING_FILE)) return;
     const raw = JSON.parse(fs.readFileSync(ROUTING_FILE, "utf-8")) as {
-      messageSession?: Record<string, string>; activeSession?: Record<string, string>; sessionToChat?: Record<string, string>; chatType?: Record<string, string>;
+      messageSession?: Record<string, string>; activeSession?: Record<string, string>; sessionToChat?: Record<string, string>; chatType?: Record<string, string>; explicitActive?: string[];
     };
     for (const [k, v] of Object.entries(raw.messageSession ?? {})) messageSessionMap.set(k, v);
     for (const [k, v] of Object.entries(raw.activeSession ?? {})) activeSessionMap.set(k, v);
     for (const [k, v] of Object.entries(raw.sessionToChat ?? {})) sessionToChatMap.set(k, v);
+    for (const k of raw.explicitActive ?? []) explicitActiveChats.add(k);
     for (const [k, v] of Object.entries(raw.chatType ?? {})) {
       if (v === "p2p" || v === "group") chatTypeByChatKey.set(k, v);
     }
     scrubInvalidActiveSessions();
     scrubCrossChannelRouting();
-    log("INFO", `[Routing] 路由映射已恢复: msg=${messageSessionMap.size}, active=${activeSessionMap.size}, chat=${sessionToChatMap.size}, chatType=${chatTypeByChatKey.size}`);
+    log("INFO", `[Routing] 路由映射已恢复: msg=${messageSessionMap.size}, active=${activeSessionMap.size}, chat=${sessionToChatMap.size}, chatType=${chatTypeByChatKey.size}, explicit=${explicitActiveChats.size}`);
   } catch (e: any) { log("WARN", `[Routing] 路由映射恢复失败: ${e?.message ?? e}`); }
 }
 
@@ -546,6 +551,7 @@ function scheduleRoutingSave(): void {
         activeSession: Object.fromEntries(activeSessionMap),
         sessionToChat: Object.fromEntries(sessionToChatMap),
         chatType: Object.fromEntries(chatTypeByChatKey),
+        explicitActive: [...explicitActiveChats],
       };
       fs.writeFileSync(ROUTING_FILE + ".tmp", JSON.stringify(data));
       fs.renameSync(ROUTING_FILE + ".tmp", ROUTING_FILE);
@@ -598,7 +604,7 @@ function terminateSessionsByChat(chatId: string): void {
   }
 }
 
-function setActiveSession(chatId: string, sessionKey: string): boolean {
+function setActiveSession(chatId: string, sessionKey: string, explicit = false): boolean {
   const normalized = normalizeSessionKey(sessionKey) || sessionKey;
   const chatNorm = normalizeSessionKey(chatId) || chatId;
   const chatChannel = parseChatKey(chatId).channelId;
@@ -619,8 +625,9 @@ function setActiveSession(chatId: string, sessionKey: string): boolean {
   }
   activeSessionMap.set(chatId, normalized);
   sessionToChatMap.set(normalized, chatId);
+  if (explicit) explicitActiveChats.add(chatId); else explicitActiveChats.delete(chatId);
   scheduleRoutingSave();
-  log("INFO", `会话路由更新: ${chatId} → ${normalized}`);
+  log("INFO", `会话路由更新: ${chatId} → ${normalized}${explicit ? " (显式)" : ""}`);
   return true;
 }
 
@@ -1016,13 +1023,13 @@ function pushMessage(content: string, messageId?: string, chatId?: string, chatT
   const resolved = resolveRoutingKey(chatId, replyMessageId);
   let routedId = resolved.sessionKey;
   // 非回复消息的 p2p 路由规则:一律投递到当前主工作目录会话(引用回复才跟随原会话)。
-  // 仅当 active 指向显式特殊会话(裸 temp_/task_，或 ::wf_ / ::project_)时尊重指针。
+  // 显式切换(/c 等)或特殊会话(裸 temp_/task_，或 ::wf_ / ::project_)时尊重 active 指针。
   // 注意：展示标签误写入的非路径后缀(如 cp-scheduling·workspace)必须纠正，不能当特殊会话。
   if (!resolved.viaReply && chatId && chatType === "p2p") {
     const idx = routedId ? routedId.indexOf("::") : -1;
     const suffix = routedId && idx >= 0 ? routedId.slice(idx + 2) : "";
     const isExplicitSession = !!routedId && routedId !== chatId && (
-      idx < 0 || isSpecialSessionSuffix(suffix)
+      explicitActiveChats.has(chatId) || idx < 0 || isSpecialSessionSuffix(suffix)
     );
     if (!isExplicitSession) {
       const { channelId } = parseChatKey(chatId);
@@ -1041,7 +1048,7 @@ function pushMessage(content: string, messageId?: string, chatId?: string, chatT
   if (!resolved.viaReply && chatId && chatType === "group") {
     const grp = findProjectByGroupChat(chatId);
     if (grp?.sessionKey && routedId !== grp.sessionKey) {
-      setActiveSession(chatId, grp.sessionKey);
+      setActiveSession(chatId, grp.sessionKey, true);
       routedId = grp.sessionKey;
     }
   }
@@ -1054,7 +1061,7 @@ function pushMessage(content: string, messageId?: string, chatId?: string, chatT
       return n === chatId || parseChatKey(n).chatId === rawChat;
     });
     if (owned.length === 1) {
-      setActiveSession(chatId, owned[0].sessionKey!);
+      setActiveSession(chatId, owned[0].sessionKey!, true);
       routedId = owned[0].sessionKey!;
       log("INFO", `[Routing] 群会话映射缺失，兜底路由到项目「${owned[0].name}」: ${routedId}`);
     }
@@ -4185,7 +4192,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const body = await readBody(req);
     const { chatId, sessionKey } = JSON.parse(body);
     if (chatId && sessionKey) {
-      const ok = setActiveSession(chatId, sessionKey);
+      const ok = setActiveSession(chatId, sessionKey, true);
       json(res, ok ? { ok: true } : { ok: false, error: "cross-channel active binding rejected" }, ok ? 200 : 409);
     } else {
       json(res, { ok: false, error: "chatId and sessionKey required" }, 400);
@@ -4203,7 +4210,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
   if (method === "DELETE" && pathname === "/api/active-session") {
     const qs = new URL(req.url ?? "", "http://localhost").searchParams;
     const chatId = qs.get("chatId");
-    if (chatId) { activeSessionMap.delete(chatId); scheduleRoutingSave(); }
+    if (chatId) { activeSessionMap.delete(chatId); explicitActiveChats.delete(chatId); scheduleRoutingSave(); }
     json(res, { ok: true });
     return true;
   }

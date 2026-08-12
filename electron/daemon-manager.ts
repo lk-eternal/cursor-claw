@@ -1226,7 +1226,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
             `⏰ 定时任务: 开启 ${schedEnabled} / 共 ${schedTotal} 条`,
           ].filter(Boolean).join("\n")
 
-          // 会话块首行加粗（formatSessionStatusBlock 返回的首行是 📍 当前会话 ★）
+          // 会话块首行加粗（formatSessionStatusBlock 返回的首行是 📍 当前对话）
           const sessionLines = sessionBlock.split("\n")
           if (sessionLines[0]) sessionLines[0] = `**${sessionLines[0]}**`
           const sessionMd = sessionLines.join("\n")

@@ -362,9 +362,9 @@ export function formatSessionStatusBlock(
   const type = s.chatType === "p2p" ? "私聊" : s.chatType === "group" ? "群聊" : s.chatType === "task" ? "定时" : s.chatType === "temp" ? "临时" : s.chatType === "project" ? "项目" : (s.chatType || "")
   let head: string
   if (opts?.index != null) {
-    head = `#${opts.index}${opts.current ? " ★" : ""}${opts.showType !== false && type ? ` [${type}]` : ""}`
+    head = `#${opts.index}${opts.current ? " · 当前" : ""}${opts.showType !== false && type ? ` [${type}]` : ""}`
   } else {
-    head = opts?.current === false ? "📍 当前对话" : "📍 当前对话 ★"
+    head = opts?.current === false ? "📍 对话" : "📍 当前对话"
   }
   return [
     head,
@@ -631,6 +631,66 @@ function buildSwitchableSessions(
   return out.slice(0, 8)
 }
 
+type SessionListEntry = {
+  sessionKey: string
+  running?: ReturnType<typeof getSessionAgentList>[number]
+  current: boolean
+}
+
+/** /c ls 与首页 Tab 共用的扁平会话列表：当前 + 运行中 + 可切换，去重 */
+function buildSessionListForChat(
+  chatId: string | undefined,
+  activeKey?: string,
+): SessionListEntry[] {
+  const runningAll = getSessionAgentList()
+  const running = chatId
+    ? runningAll.filter((s) => sessionBelongsToChat(s.sessionKey, chatId) || (!!activeKey && s.sessionKey === activeKey))
+    : runningAll
+  const runningByKey = new Map(running.map((s) => [s.sessionKey, s]))
+  const switchable = buildSwitchableSessions(chatId, running, activeKey)
+  const seen = new Set<string>()
+  const out: SessionListEntry[] = []
+  const push = (sessionKey: string) => {
+    if (!sessionKey || seen.has(sessionKey)) return
+    seen.add(sessionKey)
+    out.push({
+      sessionKey,
+      running: runningByKey.get(sessionKey),
+      current: !!activeKey && sessionKey === activeKey,
+    })
+  }
+  if (activeKey) push(activeKey)
+  for (const s of running.sort((a, b) => a.sessionKey.localeCompare(b.sessionKey))) push(s.sessionKey)
+  for (const sw of switchable) push(sw.sessionKey)
+  return out
+}
+
+function sessionListEntryToStatus(
+  entry: SessionListEntry,
+  index: number,
+  qAll: QueueMessageItem[],
+  now: number,
+) {
+  const channel = resolveChannelForSession(entry.sessionKey)
+  const channelModel = resolveChannelModel(channel, "primary")
+  const override = getSessionOverride(entry.sessionKey)
+  const modelFields = tabModelFor(entry.sessionKey, entry.running)
+  const s = entry.running ?? {
+    sessionKey: entry.sessionKey,
+    workspaceDir: workspaceDirFromSessionKey(entry.sessionKey),
+    model: modelFields.model || override?.model || channelModel.model,
+    modelParams: modelFields.modelParams ?? override?.modelParams ?? channelModel.modelParams,
+  }
+  return formatSessionStatusBlock(s, {
+    index,
+    current: entry.current,
+    queueMessages: qAll,
+    now,
+    agentRunning: isSessionAgentRunning(entry.sessionKey),
+    showType: false,
+  })
+}
+
 function sameDirPath(a: string, b: string): boolean {
   return a.replace(/[\\/]+$/g, "").toLowerCase() === b.replace(/[\\/]+$/g, "").toLowerCase()
 }
@@ -822,48 +882,16 @@ function tabModelFor(
 
 async function buildTabsForChat(chatId: string, port: number): Promise<{ activeKey?: string; tabs: SessionTabItem[] }> {
   const activeKey = (await getCurrentActiveSession(port, chatId)) ?? undefined
-  const running = getSessionAgentList()
-    .filter((s) => sessionBelongsToChat(s.sessionKey, chatId) || (!!activeKey && s.sessionKey === activeKey))
-    .sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0))
-  const switchable = buildSwitchableSessions(chatId, running, activeKey)
-  const tabs: SessionTabItem[] = []
-  const seen = new Set<string>()
-  for (const s of running) {
-    seen.add(s.sessionKey)
-    tabs.push({
-      sessionKey: s.sessionKey,
-      label: tabLabelForSession(s.sessionKey, s),
-      kind: sessionTabKind(s.sessionKey),
-      running: true,
-      current: !!activeKey && s.sessionKey === activeKey,
-      removable: isDeletableSession(s.sessionKey, chatId) || sessionTabKind(s.sessionKey) === "project",
-      ...tabModelFor(s.sessionKey, s),
-    })
-  }
-  if (activeKey && !seen.has(activeKey)) {
-    tabs.unshift({
-      sessionKey: activeKey,
-      label: tabLabelForSession(activeKey),
-      kind: sessionTabKind(activeKey),
-      running: false,
-      current: true,
-      removable: isDeletableSession(activeKey, chatId) || sessionTabKind(activeKey) === "project",
-      ...tabModelFor(activeKey),
-    })
-    seen.add(activeKey)
-  }
-  for (const sw of switchable) {
-    if (seen.has(sw.sessionKey)) continue
-    tabs.push({
-      sessionKey: sw.sessionKey,
-      label: tabLabelForSession(sw.sessionKey),
-      kind: sessionTabKind(sw.sessionKey),
-      running: false,
-      current: !!activeKey && sw.sessionKey === activeKey,
-      removable: isDeletableSession(sw.sessionKey, chatId) || sessionTabKind(sw.sessionKey) === "project",
-      ...tabModelFor(sw.sessionKey),
-    })
-  }
+  const list = buildSessionListForChat(chatId, activeKey)
+  const tabs: SessionTabItem[] = list.map((entry) => ({
+    sessionKey: entry.sessionKey,
+    label: tabLabelForSession(entry.sessionKey, entry.running),
+    kind: sessionTabKind(entry.sessionKey),
+    running: isSessionAgentRunning(entry.sessionKey),
+    current: entry.current,
+    removable: isDeletableSession(entry.sessionKey, chatId) || sessionTabKind(entry.sessionKey) === "project",
+    ...tabModelFor(entry.sessionKey, entry.running),
+  }))
   return { activeKey, tabs: disambiguateTabLabels(tabs) }
 }
 
@@ -1011,46 +1039,31 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
   const reply = (ok: boolean, msg: string, buttons?: { label: string; cmd: string }[]) => reportCommandResult(port, messageId, ok, msg, chatId, buttons, patchMessageId ? { patchMessageId } : undefined)
   const sub = tokens[1]?.toLowerCase()
 
-  // sessionKey 字典序：startedAt 会随重启抖动导致序号漂移，切换/停止按序号操作必须稳定
-  const sessions = getSessionAgentList().sort((a, b) => a.sessionKey.localeCompare(b.sessionKey))
   const activeKey = chatId ? await getCurrentActiveSession(port, chatId) : undefined
-  const switchable = buildSwitchableSessions(chatId, sessions, activeKey ?? undefined)
+  const list = buildSessionListForChat(chatId, activeKey)
 
   if (!sub || sub === "ls" || sub === "list") {
-    if (sessions.length === 0 && switchable.length === 0) { await reply(true, "📭 当前没有活跃会话"); return }
+    if (list.length === 0) { await reply(true, "📭 当前没有会话"); return }
     const channel = chatId ? resolveChannelForSession(chatId) : undefined
     if (channel) {
       const resource = getAgentResource(channel.agentResourceId)
       if (resource.type === "sdk") {
-        // 后台预热模型名缓存即可，不阻塞列表渲染（网络慢时卡片等待明显）
         void listSdkModels(resource.apiKey ?? "", channel.model, channel.modelParams).catch(() => undefined)
       }
     }
-    const active = activeKey
     const qAll = await getQueueMessages()
     const now = Date.now()
-    const blocks = sessions.map((s, i) => formatSessionStatusBlock(s, {
-      index: i + 1,
-      current: !!(active && s.sessionKey === active),
-      queueMessages: qAll,
-      now,
-    }))
+    const blocks = list.map((entry, i) => sessionListEntryToStatus(entry, i + 1, qAll, now))
     const chatBtns: { label: string; cmd: string }[] = [{ label: "🔄 刷新", cmd: "/c ls" }]
     if (chatId) {
       const mainKey = resolveMainSessionKey(chatId)
-      if (mainKey && mainKey !== chatId && mainKey !== active) chatBtns.push({ label: "🏠 主会话", cmd: "/c main" })
+      if (mainKey && mainKey !== chatId && mainKey !== activeKey) chatBtns.push({ label: "🏠 主会话", cmd: "/c main" })
     }
-    sessions.slice(0, 10).forEach((_s2, i) => {
+    list.slice(0, 10).forEach((_e, i) => {
       chatBtns.push({ label: `#${i + 1}`, cmd: `/c ${i + 1}` })
     })
-    const swLines = switchable.map((sw, i) => `#${sessions.length + i + 1}  ${sw.label}`)
-    for (let i = 0; i < switchable.length && chatBtns.length < 18; i++) {
-      chatBtns.push({ label: `#${sessions.length + i + 1}`, cmd: `/c ${sessions.length + i + 1}` })
-    }
     const usage = "💡 点序号切换 · /c main 回主会话 · /c stop <序号> 停止 · /c del <序号> 删除 · /c new <描述> 新临时会话"
-    const parts = [`📋 活跃会话 (${sessions.length})　★=当前`, "", blocks.join("\n\n")]
-    if (swLines.length) parts.push("", `▶ 可切换（未运行，切过去后下一条消息自动拉起）`, swLines.join("\n"))
-    parts.push("", usage)
+    const parts = [`📋 会话列表 (${list.length})`, "", blocks.join("\n\n"), "", usage]
     await reply(true, parts.filter((x, i, a) => !(x === "" && a[i - 1] === "")).join("\n"), chatBtns)
     return
   }
@@ -1119,32 +1132,31 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
 
   if (sub === "stop") {
     const idx = parseInt(tokens[2], 10)
-    if (isNaN(idx) || idx < 1 || idx > sessions.length) {
-      await reply(false, `❌ 无效序号，范围 1-${sessions.length}`)
+    if (isNaN(idx) || idx < 1 || idx > list.length) {
+      await reply(false, `❌ 无效序号，范围 1-${list.length}`)
       return
     }
-    const target = sessions[idx - 1]
-    stopSessionAgent(target.sessionKey)
+    const entry = list[idx - 1]
+    if (!isSessionAgentRunning(entry.sessionKey)) {
+      await reply(false, `❌ #${idx} 未在运行`)
+      return
+    }
+    stopSessionAgent(entry.sessionKey)
     if (patchMessageId) {
-      // 原卡刷新为最新列表（停止结果由列表状态体现）
       await handleChatCommand(["/c", "ls"], port, messageId, chatId, patchMessageId)
       return
     }
-    await reply(true, `✅ 已停止会话 #${idx}: ${target.chatName || target.sessionKey}`)
+    await reply(true, `✅ 已停止会话 #${idx}: ${entry.running?.chatName || tabLabelForSession(entry.sessionKey, entry.running)}`)
     return
   }
 
   if (sub === "del" || sub === "delete" || sub === "rm") {
     const idx = parseInt(tokens[2], 10)
-    const total = sessions.length + switchable.length
-    if (isNaN(idx) || idx < 1 || idx > total) {
-      await reply(false, `❌ 无效序号，范围 1-${total}`)
+    if (isNaN(idx) || idx < 1 || idx > list.length) {
+      await reply(false, `❌ 无效序号，范围 1-${list.length}`)
       return
     }
-    const targetKey = idx <= sessions.length
-      ? sessions[idx - 1].sessionKey
-      : switchable[idx - sessions.length - 1].sessionKey
-    const result = await deleteUserSession(targetKey, chatId)
+    const result = await deleteUserSession(list[idx - 1].sessionKey, chatId)
     if (!result.ok) {
       await reply(false, `❌ ${result.error ?? "删除失败"}`)
       return
@@ -1159,46 +1171,30 @@ export async function handleChatCommand(tokens: string[], port: number, messageI
 
   const idx = parseInt(sub, 10)
   if (!isNaN(idx)) {
-    const total = sessions.length + switchable.length
-    if (idx < 1 || idx > total) {
-      await reply(false, `❌ 无效序号，范围 1-${total}`)
+    if (idx < 1 || idx > list.length) {
+      await reply(false, `❌ 无效序号，范围 1-${list.length}`)
       return
     }
-    if (idx > sessions.length) {
-      const sw = switchable[idx - sessions.length - 1]
-      if (chatId) {
-        await syncActiveSession(port, chatId, sw.sessionKey)
-        const pid2 = projectIdFromSessionKey(sw.sessionKey)
-        if (pid2) setCurrentProjectId(pid2)
-      }
-      if (patchMessageId) {
-        await handleChatCommand(["/c", "ls"], port, messageId, chatId, patchMessageId)
-        return
-      }
-      await reply(true, `🔀 已切换到: ${sw.label}\n该会话未运行，下一条消息会自动拉起（有历史则恢复上下文）`)
-      return
-    }
-    const s = sessions[idx - 1]
-
+    const entry = list[idx - 1]
     if (chatId) {
-      await syncActiveSession(port, chatId, s.sessionKey)
+      await syncActiveSession(port, chatId, entry.sessionKey)
+      const pid = projectIdFromSessionKey(entry.sessionKey)
+      if (pid) setCurrentProjectId(pid)
     }
-    const pid = projectIdFromSessionKey(s.sessionKey)
-    if (pid) setCurrentProjectId(pid)
-
     if (patchMessageId) {
-      // 原卡刷新为最新列表（★ 已指向新会话）
       await handleChatCommand(["/c", "ls"], port, messageId, chatId, patchMessageId)
       return
     }
-    // 与 /c ls 同一份会话状态块，信息口径一致
     const qAll = await getQueueMessages()
-    const block = formatSessionStatusBlock(s, { queueMessages: qAll, now: Date.now(), current: true })
-    await reply(true, `🔀 已切换到会话 #${idx}\n\n${block}\n\n💡 后续消息将路由到此会话`)
+    const block = sessionListEntryToStatus(entry, idx, qAll, Date.now())
+    const hint = isSessionAgentRunning(entry.sessionKey)
+      ? "💡 后续消息将路由到此会话"
+      : "💡 该会话未运行，下一条消息会自动拉起（有历史则恢复上下文）"
+    await reply(true, `🔀 已切换到会话 #${idx}\n\n${block}\n\n${hint}`)
     return
   }
 
-  await reply(false, ["💡 /c 子命令（全称 /chat）","🔹 /c ls — 列出活跃与可切换会话","🔹 /c <序号> — 切换到指定会话","🔹 /c main — 一键切回主会话","🔹 /c stop <序号> — 停止指定会话","🔹 /c del <序号> — 删除指定会话","🔹 /c new <描述> — 创建新临时会话"].join("\n"))
+  await reply(false, ["💡 /c 子命令（全称 /chat）","🔹 /c ls — 列出会话","🔹 /c <序号> — 切换到指定会话","🔹 /c main — 一键切回主会话","🔹 /c stop <序号> — 停止指定会话","🔹 /c del <序号> — 删除指定会话","🔹 /c new <描述> — 创建新临时会话"].join("\n"))
 }
 
 // ── 僵尸 Agent 检测 ──────────────────────────────────────
