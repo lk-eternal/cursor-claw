@@ -520,6 +520,7 @@ function buildDaemonChannelConfigs(): DaemonChannelConfig[] {
     keepAlive: (c.keepSession ?? true) && (c.persistentPoll ?? true),
     showThinking: c.showThinking ?? true,
     streamKeepPerKind: c.streamKeepPerKind,
+    hideThinkingOnFinish: c.hideThinkingOnFinish ?? true,
   }))
 }
 
@@ -1133,13 +1134,21 @@ async function checkAndExecutePendingCommands(): Promise<void> {
       switch (head) {
         case "/x":
         case "/stop": {
-          if (isAdmin) {
+          const sessionKey = cmdSessionKey
+            ?? (routingSession && projectIdFromSessionKey(routingSession) ? routingSession : undefined)
+          const sessions = getSessionAgentList()
+          const matchedKey = (sessionKey && isSessionAgentRunning(sessionKey) ? sessionKey : undefined)
+            ?? sessions.find((s) => isSessionAgentRunning(s.sessionKey)
+              && claimed.chatId
+              && (s.sessionKey === claimed.chatId || s.sessionKey.startsWith(`${claimed.chatId}::`))
+            )?.sessionKey
+          if (matchedKey) {
+            stopSessionAgent(matchedKey)
+            await reply(true, "✅ 已停止当前对话")
+          } else if (isAdmin) {
             const wasRunning = isAgentRunning()
             await stopAgent()
             await reply(true, wasRunning ? "✅ 已停止" : "❌ 当前没有进行中的对话")
-          } else if (claimed.chatId && isSessionAgentRunning(claimed.chatId)) {
-            stopSessionAgent(claimed.chatId)
-            await reply(true, "✅ 已停止当前对话")
           } else {
             await reply(false, "❌ 当前没有进行中的对话")
           }
@@ -1551,6 +1560,7 @@ function channelRuntimeFlags(channels: MessageChannel[]) {
     keepAlive: (c.keepSession ?? true) && (c.persistentPoll ?? true),
     showThinking: c.showThinking ?? true,
     streamKeepPerKind: c.streamKeepPerKind,
+    hideThinkingOnFinish: c.hideThinkingOnFinish ?? true,
     name: c.name,
     mainUserEnabled: !!c.mainUserEnabled,
     mainUserChatId: c.mainUserEnabled ? (c.mainUserChatId?.trim() ?? "") : "",

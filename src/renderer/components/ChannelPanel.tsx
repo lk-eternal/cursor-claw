@@ -638,6 +638,7 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
               </div>
             )}
             {draft.type === "feishu" && (draft.showThinking ?? true) && (
+              <>
               <div className="flex items-center justify-between border-t border-gray-800 pt-3 pl-2">
                 <div>
                   <p className="text-xs text-gray-400">思考/工具块保留数</p>
@@ -655,6 +656,17 @@ function ChannelEditModal({ channel, isNew, resources, onClose, onSave, onSaveDr
                   className="w-16 rounded-lg border border-gray-700 bg-gray-900 px-2 py-1 text-center text-sm outline-none focus:border-blue-500"
                 />
               </div>
+              <div className="flex items-center justify-between border-t border-gray-800 pt-3 pl-2">
+                <div>
+                  <p className="text-xs text-gray-400">完整回复后隐藏思考过程</p>
+                  <p className="text-xs text-gray-600">开启：流式过程中可见思考/工具，完成后只保留正文；关闭：完成后仍保留折叠块</p>
+                </div>
+                <button onClick={() => set({ hideThinkingOnFinish: !(draft.hideThinkingOnFinish ?? true) })}
+                  className={`relative h-5 w-9 shrink-0 rounded-full transition ${(draft.hideThinkingOnFinish ?? true) ? "bg-blue-600" : "bg-gray-600"}`}>
+                  <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition ${(draft.hideThinkingOnFinish ?? true) ? "left-[18px]" : "left-0.5"}`} />
+                </button>
+              </div>
+              </>
             )}
           </div>
 

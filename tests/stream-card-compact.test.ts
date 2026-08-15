@@ -118,3 +118,17 @@ describe("流式卡压缩（各类型留最近 N，无省略占位）", () => {
     expect(json).not.toContain("已省略")
   })
 })
+
+describe("完整回复后隐藏折叠块", () => {
+  it("finish 且 hideOnFinish 默认开启时只留 reply", () => {
+    const segments: Segment[] = [mkThink("a"), mkTools(2, "T"), mkTodos("x"), mkReply("done")]
+    const stripped = LarkSender.stripFoldableSegmentsOnFinish(segments, { finish: true })
+    expect(stripped).toEqual([mkReply("done")])
+  })
+
+  it("streaming 或未 finish 时不剥", () => {
+    const segments: Segment[] = [mkThink("a"), mkReply("done")]
+    expect(LarkSender.stripFoldableSegmentsOnFinish(segments, { finish: false })).toEqual(segments)
+    expect(LarkSender.stripFoldableSegmentsOnFinish(segments, { finish: true, hideOnFinish: false })).toEqual(segments)
+  })
+})

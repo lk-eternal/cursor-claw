@@ -60,12 +60,6 @@ interface StreamAgg {
   finished: boolean
   /** false：未过首轮 poll 前不发流式卡（避免非阻塞预热单独建卡） */
   gateOpen: boolean
-  /** 正在跑 wait=false，结束后清空预热片段 */
-  pendingNonBlockingPoll: boolean
-  /** 已挂阻塞 poll：期间关门，防思考刷新卡；重复 poll 不再 endStreamRound */
-  pendingBlockingPoll: boolean
-  /** send_question 后暂停写 segments，直到用户作答/关题投递 */
-  pendingQuestionPause: boolean
   /** send_* 正文边界：下一段思考必须新开，禁止并进 send 前的思考块 */
   forceNewThinking: boolean
   /** 断线挂起：不 finish 收口，Resume 后继续同一张卡 */
@@ -107,6 +101,28 @@ interface SdkSessionAgent {
   lastStatus?: { status: string; message?: string }
   /** poll 已见 messageId：非阻塞 poll 区分新消息 vs 重投 */
   seenMessageIds: Set<string>
+  /** run 级 poll 等待态（跨换卡存活） */
+  pollPhase: SessionPollPhase
+}
+
+interface SessionPollPhase {
+  blocking: boolean
+  nonBlocking: boolean
+  questionPause: boolean
+}
+
+function newPollPhase(): SessionPollPhase {
+  return { blocking: false, nonBlocking: false, questionPause: false }
+}
+
+function isStreamSilenced(session: SdkSessionAgent): boolean {
+  const p = session.pollPhase
+  return p.blocking || p.questionPause
+}
+
+function isToolStreamSilenced(session: SdkSessionAgent): boolean {
+  const p = session.pollPhase
+  return p.blocking || p.nonBlocking || p.questionPause
 }
 
 const sdkSessions = new Map<string, SdkSessionAgent>()
@@ -550,25 +566,25 @@ function newStreamAgg(gateOpen = false): StreamAgg {
     inflight: Promise.resolve(),
     finished: false,
     gateOpen,
-    pendingNonBlockingPoll: false,
-    pendingBlockingPoll: false,
-    pendingQuestionPause: false,
     forceNewThinking: false,
     suspended: false,
     bornAt: Date.now(),
   }
 }
 
-/** 保活 poll 超时/安静退出：保持静默标记并丢弃保活回合积累的段落 */
-function enterSilentPollPhase(stream: StreamAgg): void {
-  stream.segments = []
-  stream.dirty = false
-  if (stream.timer) {
-    clearTimeout(stream.timer)
-    stream.timer = null
+/** 保活 poll 超时/断连/安静退出：保持静默并丢弃保活回合积累的段落 */
+function enterSilentPollPhase(session: SdkSessionAgent): void {
+  const stream = session.streamAgg
+  if (stream && !stream.finished) {
+    stream.segments = []
+    stream.dirty = false
+    if (stream.timer) {
+      clearTimeout(stream.timer)
+      stream.timer = null
+    }
+    stream.gateOpen = false
   }
-  stream.gateOpen = false
-  stream.pendingBlockingPoll = true
+  session.pollPhase.blocking = true
 }
 
 /** 已结束的 thinking 段写入固定 ms，避免后续 flush 继续涨表 */
@@ -915,8 +931,8 @@ async function flushStreamCard(session: SdkSessionAgent, finish: boolean): Promi
     agg.timer = null
   }
   if (!finish && !agg.dirty) return
-  // 非阻塞 poll 完成前不发卡；仍保留 dirty，开门后再刷
-  if (!finish && !agg.gateOpen) return
+  // 阻塞 poll 期间不发卡；仍保留 dirty，有新消息后开门再刷
+  if (!finish && (!agg.gateOpen || session.pollPhase.blocking)) return
 
   const payload = buildStreamPayload(agg, session.sessionKey)
   // 空 payload 不建卡（只有会话条的空白卡会闪现给用户）；保留 dirty 等真内容
@@ -1181,27 +1197,22 @@ export function handlePollPhaseEvent(
 
   if (phase === "start") {
     const blocking = payload.blocking === true
-    const stream = session.streamAgg
-    if (!stream || stream.finished) return
     if (blocking) {
-      if (stream.pendingBlockingPoll) return
-      // 不换卡：保活 poll 只是静默等待，finish 由 run 终态或下轮新消息 seal 负责
-      stream.gateOpen = false
-      stream.pendingBlockingPoll = true
+      if (session.pollPhase.blocking) return
+      session.pollPhase.blocking = true
+      const stream = session.streamAgg
+      if (stream && !stream.finished) stream.gateOpen = false
     } else {
-      stream.pendingNonBlockingPoll = true
+      session.pollPhase.nonBlocking = true
     }
     pushUiLog("SDK", "DEBUG", `[${session.sessionKey}] poll-phase start blocking=${blocking}`)
     return
   }
 
-  const stream = session.streamAgg
   const blocking = payload.blocking === true
-  const wasNonBlocking = stream?.pendingNonBlockingPoll ?? false
-  const wasBlocking = stream?.pendingBlockingPoll ?? false
-  if (stream && !stream.finished) {
-    stream.pendingNonBlockingPoll = false
-  }
+  const wasNonBlocking = session.pollPhase.nonBlocking
+  const wasBlocking = session.pollPhase.blocking
+  session.pollPhase.nonBlocking = false
 
   const deliveredIds = (payload.messageIds ?? []).filter((id): id is string => !!id)
   let hasNewUserMsgs = false
@@ -1217,11 +1228,32 @@ export function handlePollPhaseEvent(
   const directive = payload.directive ?? ""
   const isEnd = payload.reason === "end" || directive.includes(POLL_DIRECTIVE_END_MARK)
   const isTimeout = payload.reason === "timeout" || directive.includes(POLL_DIRECTIVE_TIMEOUT_MARK)
+  const isAbort = payload.reason === "abort"
 
   if (isEnd && (wasBlocking || blocking)) {
     void terminateRunAfterPollEnd(session)
   }
 
+  if (hasFreshDelivery) session.pollPhase.questionPause = false
+
+  if (wasBlocking || blocking) {
+    if (isTimeout || isEnd || isAbort) {
+      enterSilentPollPhase(session)
+      pushUiLog("SDK", "DEBUG",
+        `[${session.sessionKey}] poll-phase end blocking=${blocking} reason=${payload.reason ?? "?"} silent=1`)
+      return
+    }
+    if (hasWorkMsgs) {
+      session.pollPhase.blocking = false
+      session.streamAgg = isFeishuStreamEnabled(session.sessionKey) ? newStreamAgg(true) : null
+      pushUiLog("SDK", "DEBUG",
+        `[${session.sessionKey}] 阻塞poll换新队列 bornAt=${session.streamAgg?.bornAt ?? "null"}`)
+      if (session.streamAgg) scheduleFlushStreamCard(session, true)
+      return
+    }
+  }
+
+  const stream = session.streamAgg
   if (!stream || stream.finished) {
     pushUiLog("SDK", "DEBUG",
       `[${session.sessionKey}] poll-phase end blocking=${blocking} reason=${payload.reason ?? "?"} newUser=${hasNewUserMsgs} (no stream)`)
@@ -1230,24 +1262,6 @@ export function handlePollPhaseEvent(
 
   pushUiLog("SDK", "DEBUG",
     `[${session.sessionKey}] poll-phase end blocking=${blocking} reason=${payload.reason ?? "?"} newUser=${hasNewUserMsgs} work=${hasWorkMsgs} bornAt=${stream.bornAt}`)
-
-  if (hasFreshDelivery) stream.pendingQuestionPause = false
-
-  // 非阻塞 poll 拉到新消息：不换卡（同 run 继续刷当前卡；换回合由 blocking poll / send_* 负责）
-  if (wasBlocking || blocking) {
-    if (isTimeout || isEnd) {
-      enterSilentPollPhase(stream)
-      return
-    }
-    if (hasWorkMsgs) {
-      stream.pendingBlockingPoll = false
-      session.streamAgg = isFeishuStreamEnabled(session.sessionKey) ? newStreamAgg(true) : null
-      pushUiLog("SDK", "DEBUG",
-        `[${session.sessionKey}] 阻塞poll换新队列 bornAt=${session.streamAgg?.bornAt ?? "null"}`)
-      if (session.streamAgg) scheduleFlushStreamCard(session, true)
-      return
-    }
-  }
 
   if (wasNonBlocking && !hasNewUserMsgs && hasWorkMsgs) {
     if (!stream.ensured) {
@@ -1403,7 +1417,7 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
         if (block.type === "text" && block.text) {
           appendSdkLog(session, "text", block.text)
           // 阻塞 poll 挂起期间不刷卡（避免重复 poll 思考落成新卡）
-          if (stream?.pendingBlockingPoll || stream?.pendingQuestionPause) continue
+          if (isStreamSilenced(session)) continue
           // SDK 正文视作思考，不进用户可见正文区
           if (stream && !stream.finished && isShowThinkingEnabled(session.sessionKey)) {
             enqueueThinking(stream, block.text)
@@ -1415,7 +1429,7 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
     case "thinking":
       if (event.text) {
         appendSdkLog(session, "thinking", event.text)
-        if (stream?.pendingBlockingPoll || stream?.pendingQuestionPause) break
+        if (isStreamSilenced(session)) break
         if (stream && !stream.finished && isShowThinkingEnabled(session.sessionKey)) {
           enqueueThinking(stream, event.text)
           scheduleFlushStreamCard(session)
@@ -1428,7 +1442,7 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
       const detectSummary = summary || summarizeToolArgs(event.args) || ""
       pushUiLog("SDK", "INFO", `[${session.sessionKey}] [tool] ${event.name}: ${event.status}${summary ? ` · ${summary}` : ""}`)
       if (stream && !stream.finished) {
-        if (stream.pendingBlockingPoll || stream.pendingNonBlockingPoll || stream.pendingQuestionPause) {
+        if (isToolStreamSilenced(session)) {
           break
         }
         if (isTodoUpdateInvocation(event.name)) {
@@ -1451,7 +1465,7 @@ function handleSdkEvent(session: SdkSessionAgent, event: SDKMessage): void {
             break
           }
           if (isSendQuestionInvocation(event.name, detectSummary, event.args) && event.status === "running") {
-            stream.pendingQuestionPause = true
+            session.pollPhase.questionPause = true
             pushUiLog("SDK", "DEBUG", `[${session.sessionKey}] send_question 开始，暂停写 segments`)
           }
           // poll / send_text 等协议工具：不 gateOpen、不刷首卡，等 poll-phase 结束统一开门
@@ -1785,6 +1799,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       streamAgg: isFeishuStreamEnabled(sessionKey) ? newStreamAgg() : null,
       todoSnapshot: null,
       seenMessageIds: new Set((opts.pendingMessageIds ?? []).filter(Boolean)),
+      pollPhase: newPollPhase(),
     }
 
     sdkSessions.set(sessionKey, session)

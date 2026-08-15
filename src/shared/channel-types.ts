@@ -51,6 +51,8 @@ export interface MessageChannel {
   showThinking?: boolean;
   /** 流式卡思考/工具块各保留最近 N 个（默认 5；仅 showThinking 开启时生效） */
   streamKeepPerKind?: number;
+  /** 完整回复后隐藏思考/工具/todos 折叠块，仅保留正文（默认 true） */
+  hideThinkingOnFinish?: boolean;
 }
 
 /** 下发给 Daemon 的通道配置（含运行所需的全部字段） */
@@ -72,6 +74,8 @@ export interface DaemonChannelConfig {
   showThinking?: boolean;
   /** 流式卡思考/工具块各保留最近 N 个（默认 5） */
   streamKeepPerKind?: number;
+  /** 完整回复后隐藏思考/工具/todos 折叠块（默认 true） */
+  hideThinkingOnFinish?: boolean;
 }
 
 /** Daemon 上报的通道状态 */

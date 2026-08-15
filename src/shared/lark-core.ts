@@ -933,6 +933,15 @@ export class LarkSender {
     return -1;
   }
 
+  /** finish 关卡时剥除 thinking/tools/todos，仅保留 reply 等非折叠正文 */
+  static stripFoldableSegmentsOnFinish<T extends { type: string }>(
+    segments: T[],
+    opts?: { finish?: boolean; hideOnFinish?: boolean },
+  ): T[] {
+    if (!opts?.finish || opts.hideOnFinish === false) return segments;
+    return segments.filter((s) => s.type === "reply");
+  }
+
   /** 按类型保留最近 keep 个 thinking/tools；reply、todos 全留；不插省略占位 */
   static keepRecentStreamSegments<T extends { type: string }>(
     segments: T[],

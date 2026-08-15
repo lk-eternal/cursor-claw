@@ -127,6 +127,7 @@ interface ChannelRuntimeFlags {
   keepAlive?: boolean;
   showThinking?: boolean;
   streamKeepPerKind?: number;
+  hideThinkingOnFinish?: boolean;
   name?: string;
   mainUserEnabled?: boolean;
   mainUserChatId?: string;
@@ -142,6 +143,7 @@ function updateChannelFlags(flags: ChannelRuntimeFlags[]): void {
     if (typeof f.streamKeepPerKind === "number" && Number.isFinite(f.streamKeepPerKind)) {
       rt.cfg.streamKeepPerKind = f.streamKeepPerKind;
     }
+    if (typeof f.hideThinkingOnFinish === "boolean") rt.cfg.hideThinkingOnFinish = f.hideThinkingOnFinish;
     if (typeof f.mainUserEnabled === "boolean") rt.cfg.mainUserEnabled = f.mainUserEnabled;
     if (typeof f.mainUserChatId === "string") rt.cfg.mainUserChatId = f.mainUserChatId;
   }
@@ -1553,15 +1555,20 @@ type CardBodySegment =
   | { type: "reply"; text: string }
   | { type: "todos"; items: Array<{ content: string; status: string }> };
 
+function hideThinkingOnFinishEnabled(cfg: { hideThinkingOnFinish?: boolean }): boolean {
+  return cfg.hideThinkingOnFinish !== false;
+}
+
 function buildCardSegmentsFromPayload(
   payload: AgentStreamCardPayload,
-  opts: { finish: boolean; showThinking: boolean },
+  opts: { finish: boolean; showThinking: boolean; hideThinkingOnFinish?: boolean },
   panelState?: StreamPanelState,
 ) {
+  const stripFoldables = opts.finish && opts.hideThinkingOnFinish !== false;
   const out: CardBodySegment[] = [];
   for (const seg of payload.segments) {
     if (seg.type === "thinking") {
-      if (!opts.showThinking) continue;
+      if (!opts.showThinking || stripFoldables) continue;
       if (!seg.text?.trim()) continue;
       out.push({
         type: "thinking",
@@ -1571,6 +1578,7 @@ function buildCardSegmentsFromPayload(
         expanded: false,
       });
     } else if (seg.type === "tools") {
+      if (stripFoldables) continue;
       if (!seg.tools?.length) continue;
       const steps = buildToolSteps(seg.tools, opts.finish);
       out.push({
@@ -1581,6 +1589,7 @@ function buildCardSegmentsFromPayload(
         steps,
       });
     } else if (seg.type === "todos") {
+      if (stripFoldables) continue;
       if (!seg.items?.length) continue;
       out.push({ type: "todos", items: seg.items.map((t) => ({ content: t.content, status: t.status })) });
     } else if (seg.text.trim()) {
@@ -1721,7 +1730,11 @@ async function refreshAgentStreamCard(
     const questionText = q?.options?.length
       ? questionBodyWithOptions(questionTextRaw || "", q.options)
       : questionTextRaw;
-    const cardSegs = buildCardSegmentsFromPayload(merged, { finish: opts.finish, showThinking: state.showThinking }, state);
+    const cardSegs = buildCardSegmentsFromPayload(merged, {
+      finish: opts.finish,
+      showThinking: state.showThinking,
+      hideThinkingOnFinish: hideThinkingOnFinishEnabled(ch.rt.cfg),
+    }, state);
     const buttons = q ? questionOptionButtons(q.options, sessionKey) : undefined;
     const status = (opts.finish || q) ? "completed" as const : "streaming" as const;
     const qFoot = q ? QUESTION_CARD_HINT : state.closedFooter;
@@ -2386,7 +2399,12 @@ async function handleCardAction(rt: ChannelRuntime, evt: LarkCardActionEvent): P
         state.closedFooter = `✅ 已选择: **${opt}**`;
         const merged: AgentStreamCardPayload = { segments: overlayMcpOnPayload(state, state.lastSegments) };
         ensureSegmentPanelIds(state, merged.segments, state.lastSegments);
-        const cardSegs = buildCardSegmentsFromPayload(merged, { finish: true, showThinking: state.showThinking }, state);
+        const chCfg = channels.get(state.channelId)?.cfg;
+        const cardSegs = buildCardSegmentsFromPayload(merged, {
+          finish: true,
+          showThinking: state.showThinking,
+          hideThinkingOnFinish: chCfg ? hideThinkingOnFinishEnabled(chCfg) : true,
+        }, state);
         return LarkSender.buildStreamingCardJson({
           status: "completed",
           showThinking: state.showThinking,

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo, memo } from "react"
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, memo } from "react"
 import { createPortal } from "react-dom"
 import {
   Play,
@@ -672,19 +672,13 @@ export default function Dashboard({ onSettings, active }: Props) {
     el.scrollIntoView({ block: "center" })
   }
 
-  useEffect(() => {
+  // layout 阶段同步吸底：避免 append 后 scroll 事件先于 rAF 误判离开底部
+  useLayoutEffect(() => {
     if (!logStickRef.current) return
     const el = logRef.current
     if (!el) return
-    // rAF 合并同帧多次日志更新，减少与用户滚动的竞态。
-    // 不做 gap 猜测（新日志 append 本身就会撑大 gap，猜会把「内容增长」误判成「用户上翻」）；
-    // 用户上翻由 scroll/wheel 事件显式解除 stick。
-    const raf = requestAnimationFrame(() => {
-      if (!logStickRef.current || !logRef.current) return
-      programmaticScrollRef.current = true
-      logRef.current.scrollTop = logRef.current.scrollHeight
-    })
-    return () => cancelAnimationFrame(raf)
+    programmaticScrollRef.current = true
+    el.scrollTop = el.scrollHeight
   }, [logLines, logFilter])
 
   /** 向上滚 = 明确离开底部的用户意图；scroll 事件可能被程序化标记吞掉，wheel 兜底解除吸底 */
