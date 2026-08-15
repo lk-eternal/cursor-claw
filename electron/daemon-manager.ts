@@ -23,7 +23,7 @@ import {
   getAgentChildPid, getSessionAgentCount as _getCliSessionCount, getIndependentTaskStatuses as _getCliTaskStatuses,
   type ChatType,
 } from "./agent-launcher"
-import { stopAllSdkSessions, resetSdkSessionContext, getSdkSessionCount, getSdkSessionList, checkSdkApiKey, listSdkModels, getSdkSessionDiagnostics, getResumableSummary, switchSdkSessionModel, handlePollPhaseEvent } from "./agent-sdk"
+import { stopAllSdkSessions, resetSdkSessionContext, getSdkSessionCount, getSdkSessionList, checkSdkApiKey, listSdkModels, getSdkSessionDiagnostics, getResumableSummary, switchSdkSessionModel, handlePollPhaseEvent, clearSdkFailStreak } from "./agent-sdk"
 import { initSessionModelStore, listQuickModels, getSessionOverride, removeRecentModel } from "../src/shared/session-model-store.js"
 import { registerFeishuApp } from "./feishu-register"
 import {
@@ -77,7 +77,7 @@ import {
 export { applyProxyEnv, syncMainProcessProxyEnv, bootstrapProxyEnv, checkCliInstalled, installCli, execAgentSync, execAgentAsync, type ExecAgentOptions as ExecAgentSyncOptions } from "./agent-cli"
 export { checkAgentLoggedIn, loginCli } from "./agent-launcher"
 export { getLogBuffer } from "./ui-logger"
-export { checkSdkApiKey, listSdkModels, noteGlobalSdkError } from "./agent-sdk"
+export { checkSdkApiKey, listSdkModels, noteGlobalSdkError, clearSdkFailStreak } from "./agent-sdk"
 export { injectWorkspaceMcpAndRules, injectWorkspaceToDir, clearInjectionCache } from "./workspace-injector"
 export { getQueueMessages, clearMessageQueue, deleteQueueMessage } from "./session-dispatcher"
 
@@ -2117,6 +2117,7 @@ export function initDaemonManager(): void {
     const lock = readLockFile()
     if (!lock?.port) return { ok: false, error: "守护进程未运行" }
     if (task.independent !== false) {
+      clearSdkFailStreak(task.id)
       // 与 cron 触发同一套入队逻辑，失败由调度器按队列重拉
       return enqueueToSession(lock.port, task.id, content, "task", {
         channelId: task.channelId,

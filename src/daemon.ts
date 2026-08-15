@@ -149,7 +149,15 @@ function updateChannelFlags(flags: ChannelRuntimeFlags[]): void {
 
 /** 会话收尾模式：poll 响应随路下发（模型以最近一次响应为准，免疫长上下文衰减） */
 function resolveKeepAlive(sessionKey: string): boolean {
-  const channelId = channelIdFromSessionKey(sessionKey);
+  let channelId = channelIdFromSessionKey(sessionKey);
+  if (!channelId) {
+    const chatKey = sessionToChatMap.get(sessionKey);
+    if (chatKey) channelId = parseChatKey(chatKey).channelId;
+    if (!channelId) {
+      const task = readTasks().find((t) => t.id === sessionKey);
+      if (task?.channelId) channelId = task.channelId;
+    }
+  }
   if (channelId) return channelKeepAlive.get(channelId) ?? true;
   return channelKeepAlive.size === 1 ? [...channelKeepAlive.values()][0] : true;
 }

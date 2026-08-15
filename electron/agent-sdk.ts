@@ -277,6 +277,11 @@ export function clearSdkFailStreak(sessionKey: string): void {
   lastFailLogSignature.delete(sessionKey)
 }
 
+export function clearAllSdkFailStreaks(): void {
+  sdkFailStreak.clear()
+  lastFailLogSignature.clear()
+}
+
 // SDK socket 深处的网络错误只会抛到主进程全局兜底，无法关联到具体 run；
 // 记一份近期错误，run 报错时附到详情里还原真实原因（如代理断连）
 const recentGlobalErrors: { at: number; msg: string }[] = []
@@ -1620,7 +1625,7 @@ function startRunLifecycle(session: SdkSessionAgent, run: Run): void {
       errorDetail = `${lastStr}${detail}${netHint ? ` | net=${netHint}` : ""}`.slice(0, 500)
       networkFail = /API key exchange|exchange_user_api_key|fetch failed|unauthenticated|ECONNRESET|socket hang up|GOAWAY|疑似底层网络/i.test(errorDetail)
       // 鉴权/配额/模型不可用：重试不会自愈，必须退避（网络类优先，仍走零退避快速重连）
-      permanentFail = !networkFail && /Authentication error|invalid[_ ]api[_ ]key|api key not valid|401|403|forbidden|quota|rate limit|insufficient|model .*not (found|available)/i.test(errorDetail)
+      permanentFail = !networkFail && /invalid[_ ]api[_ ]key|api key not valid|401|403|forbidden|quota|rate limit|insufficient|model .*not (found|available)/i.test(errorDetail)
       // 不清 Resume：agentId 仍在，下次 Agent.resume 换新本地句柄，云端上下文保留
     }
 

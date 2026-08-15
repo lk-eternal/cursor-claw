@@ -108,6 +108,18 @@ export default function Dashboard({ onSettings, active }: Props) {
     return m
   }, [treeChannels])
   const [projectNameById, setProjectNameById] = useState<Map<string, string>>(() => new Map())
+  const projectNameByIdRef = useRef(projectNameById)
+  projectNameByIdRef.current = projectNameById
+
+  const projectSessionLabel = (sessionKey: string, chatName?: string, chatType?: string): string | undefined => {
+    if (chatType !== "project" && !/::project_[a-f0-9]+/i.test(sessionKey)) return undefined
+    const pid = sessionKey.match(/::project_([a-f0-9]+)/i)?.[1]
+    const name = pid ? projectNameByIdRef.current.get(pid) : undefined
+    if (name) return `📦 ${name}`
+    const legacy = chatName?.replace(/^P:\s*/, "").trim()
+    if (legacy) return legacy.startsWith("📦") ? legacy : `📦 ${legacy}`
+    return undefined
+  }
   const [taskNameById, setTaskNameById] = useState<Map<string, string>>(() => new Map())
 
   const refreshProjectNames = useCallback(() => {
@@ -270,9 +282,10 @@ export default function Dashboard({ onSettings, active }: Props) {
         sessionKey: s.sessionKey,
         chatType: s.chatType,
         channelId: (s as { channelId?: string }).channelId,
-        // 与日志同一套标签（📦/📂/⏰），chatName 只当兜底——否则专属群项目会显示成「P: 名」
+        // 与日志同一套标签（📦/📂/⏰）；项目会话不走 raw chatName（旧版为 P: 名）
         label: labelByKey.get(s.sessionKey)
           || resolveLogSessionLabelRef.current(s.sessionKey)
+          || projectSessionLabel(s.sessionKey, s.chatName, s.chatType)
           || (s.chatType === "task" && s.chatName ? `⏰ ${s.chatName}` : s.chatName)
           || s.sessionKey,
         model: s.model,
@@ -311,6 +324,11 @@ export default function Dashboard({ onSettings, active }: Props) {
       treeBusyRef.current = false
     }
   }, [])
+
+  useEffect(() => {
+    if (projectNameById.size === 0) return
+    void refreshDashboardTree()
+  }, [projectNameById.size, refreshDashboardTree])
 
   const refreshOnboard = useCallback(async () => {
     const cfg = await window.electronAPI.getConfig()

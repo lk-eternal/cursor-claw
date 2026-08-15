@@ -25,7 +25,7 @@ import {
   isSdkSessionRunning, getSdkSessionList, setSdkIdleHandler, hasResumableSdkSession,
   sdkFailCooldownRemaining,
   listSdkModels,
-  resetSdkSessionContext, clearSdkFailStreak,
+  resetSdkSessionContext, clearSdkFailStreak, clearAllSdkFailStreaks,
 } from "./agent-sdk"
 import { injectWorkspaceToDir } from "./workspace-injector"
 import { buildSessionCardTitle, readGitBranch, dirBaseName } from "../src/shared/session-label.js"
@@ -261,6 +261,7 @@ export async function clearMessageQueue(): Promise<number> {
   if (!lock?.port) return 0
   try {
     const res = await httpPost(`http://127.0.0.1:${lock.port}/clear-queue`, {}) as { cleared?: number }
+    clearAllSdkFailStreaks()
     return res?.cleared ?? 0
   } catch { return 0 }
 }
@@ -1257,10 +1258,9 @@ async function _planSessionLaunches(): Promise<Promise<void>[]> {
   const groupKeys = sessions.filter((s) => s.chatType === "group").map((s) => extractChatId(s.sessionKey))
   if (groupKeys.length > 0 && feishuOn) await fetchChatNames(groupKeys)
 
-  for (const { sessionKey, chatType, senderOpenId } of sessions) {
-    // 瞬时故障恒为 0（立即重试）；鉴权/配额类永久错误返回退避剩余时间——
-    // 此时即使有待处理消息也必须等，否则每轮不到 1s 的重拉会把日志刷爆
-    if (sdkFailCooldownRemaining(sessionKey) > 0) continue
+  for (const { sessionKey, chatType, senderOpenId, hasPending } of sessions) {
+    // 有新 .qmsg 时无视失败冷却（手动重触发/新消息应立刻拉起）；仅 .claimed 重投仍遵守退避
+    if (!hasPending && sdkFailCooldownRemaining(sessionKey) > 0) continue
     if (isSessionAgentRunning(sessionKey)) {
       if (await isZombieAgent(sessionKey)) {
         broadcastLog(`[Agent] ${sessionKey} 疑似僵尸(队列有消息且 ${ZOMBIE_REPLY_SILENCE_MS / 60_000}min 无回复消息)，强制终止并重启`, "WARN")
@@ -1340,7 +1340,7 @@ async function _planSessionLaunches(): Promise<Promise<void>[]> {
         const r = await launchAgent({
           sessionKey,
           chatType: "project",
-          chatName: `P: ${proj.name}`,
+          chatName: `📦 ${proj.name}`,
           workingDirectory: proj.worktreePath,
           meta: { chatId, chatType: "project" },
           channelId: parseChatKey(chatId).channelId,
