@@ -1,5 +1,13 @@
 [
   {
+    "version": "1.8.12",
+    "date": "2026-08-26",
+    "changes": [
+      "CLI 启动固定 Plan 模式（--mode plan）",
+      "SDK Agent.create / resume / send 固定 mode: plan"
+    ]
+  },
+  {
     "version": "1.8.11",
     "date": "2026-08-15",
     "changes": [

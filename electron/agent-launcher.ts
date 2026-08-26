@@ -184,9 +184,11 @@ export function buildPrompt(
 
 // ── 进程管理工具 ─────────────────────────────────────────
 
+/** 组装 Cursor CLI 非交互启动参数（默认 Plan 模式） */
 function buildAgentLaunchArgs(workspaceDir: string, prompt: string, resumeChatId: string | false, model?: string): string[] {
   const args = [
     "--print", "--force",
+    "--mode", "plan",
     ...(resumeChatId ? ["--resume", resumeChatId] : []),
     "--approve-mcps", "--workspace", workspaceDir, "--trust",
   ]
