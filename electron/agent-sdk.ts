@@ -41,6 +41,8 @@ interface StreamTodoItem {
   status: string
 }
 
+/** SDK 会话固定使用 Plan 模式（与 CLI --mode plan 对齐） */
+const SDK_RUN_MODE = "plan" as const
 
 /**
  * 飞书流式卡：事件队列。
@@ -1742,8 +1744,8 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     let agent: SDKAgent | undefined
     if (resumable && resumable.workspaceDir === workspaceDir) {
       try {
-        pushUiLog("SDK", "INFO", `[${sessionKey}] Resume 恢复会话 (agentId=${resumable.agentId}, model=${JSON.stringify(modelSelection)}, 新连接/上下文保留)`)
-        agent = await Agent.resume(resumable.agentId, { apiKey, model: modelSelection, local: localOptions })
+        pushUiLog("SDK", "INFO", `[${sessionKey}] Resume 恢复会话 (agentId=${resumable.agentId}, mode=${SDK_RUN_MODE}, model=${JSON.stringify(modelSelection)}, 新连接/上下文保留)`)
+        agent = await Agent.resume(resumable.agentId, { apiKey, model: modelSelection, mode: SDK_RUN_MODE, local: localOptions })
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e)
         // 只有服务端确认上下文不存在才允许回退全新会话；网络等瞬时故障直接放弃本次拉起——
@@ -1758,8 +1760,8 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     const resumed = agent !== undefined
 
     if (!agent) {
-      pushUiLog("SDK", "INFO", `[${sessionKey}] 正在创建 SDK Agent (cwd=${workspaceDir}, model=${JSON.stringify(modelSelection)})`)
-      agent = await Agent.create({ apiKey, model: modelSelection, local: localOptions })
+      pushUiLog("SDK", "INFO", `[${sessionKey}] 正在创建 SDK Agent (cwd=${workspaceDir}, mode=${SDK_RUN_MODE}, model=${JSON.stringify(modelSelection)})`)
+      agent = await Agent.create({ apiKey, model: modelSelection, mode: SDK_RUN_MODE, local: localOptions })
     }
 
     // 拉起期间被 /reset：本次 agent 可能带着旧上下文，直接丢弃（队列消息会驱动下一次全新拉起）
@@ -1847,7 +1849,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
     await notifySessionLaunched(sessionKey, resumed)
     let run: Run
     try {
-      run = await agent.send(prompt)
+      run = await agent.send(prompt, { mode: SDK_RUN_MODE })
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       if (!msg.includes("already has active run")) throw e
@@ -1856,7 +1858,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
       await cancelActiveRun(agent, workspaceDir, sessionKey)
 
       try {
-        run = await withTimeout(agent.send(prompt), FORCE_SEND_TIMEOUT_MS, "send after cancel")
+        run = await withTimeout(agent.send(prompt, { mode: SDK_RUN_MODE }), FORCE_SEND_TIMEOUT_MS, "send after cancel")
       } catch (retryErr: unknown) {
         const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr)
         if (!retryMsg.includes("already has active run")) throw retryErr
@@ -1868,7 +1870,7 @@ export async function launchSdkAgent(opts: SdkLaunchOptions): Promise<{ ok: bool
         pushUiLog("SDK", "WARN", `[${sessionKey}] cancel/挂接均失败，force 恢复重发`)
         try {
           run = await withTimeout(
-            agent.send(prompt, { local: { force: true } }),
+            agent.send(prompt, { mode: SDK_RUN_MODE, local: { force: true } }),
             FORCE_SEND_TIMEOUT_MS,
             "force send",
           )
